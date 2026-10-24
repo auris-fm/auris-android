@@ -419,6 +419,100 @@ class VoicePlaybackIntentExecutorTest {
         assertEquals(VoiceResponse.Spoken("streak"), response)
     }
 
+    // THE PRESENTATION/OUTCOME SEPARATION (spec 03c96924 + 3ed49695): identical presentation must
+    // NOT imply an identical result. These controls read the FACTS the sinks report, never the
+    // responses they render.
+    @Test
+    fun `clear reports dispatch while rendering the same CONFIRM_REQUIRED earcon`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val facts = mutableListOf<VoiceActionOutcome>()
+        executor.onActionOutcome = { facts += it }
+
+        val response = executor.execute(VoiceIntent.Queue.Clear)
+
+        // The FAKE renders SUCCESS; the production sink renders CONFIRM_REQUIRED after the same
+        // dispatch. Either way the earcon is presentation and the fact below is the outcome.
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        // ...while the reported fact says the clear was requested.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+    }
+
+    @Test
+    fun `pause reports dispatch even though its earcon says success`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val facts = mutableListOf<VoiceActionOutcome>()
+        executor.onActionOutcome = { facts += it }
+
+        val response = executor.execute(VoiceIntent.Playback.Pause)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        // A SUCCESS earcon is NOT evidence of completion: the sink call returning is dispatch only.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+    }
+
+    @Test
+    fun `resume reports dispatch although it renders Silent`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val facts = mutableListOf<VoiceActionOutcome>()
+        executor.onActionOutcome = { facts += it }
+
+        val response = executor.execute(VoiceIntent.Playback.Resume)
+
+        assertEquals(VoiceResponse.Silent, response)
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+    }
+
+    // The deprecated requestAudioFocus overload is what the sink itself calls (suppressing there is
+    // the documented smaller change); the control mirrors the production call, so it suppresses too.
+    @Suppress("DEPRECATION")
+    @Test
+    fun `identical Silent presentations from granted and denied focus report different facts`() {
+        // THE REAL BRANCHES, not injected facts: PlaybackManagerPlaybackSink.duck() returns Silent
+        // on BOTH the granted and the rejected audio-focus path. Only the reporter distinguishes
+        // them, which is exactly what a response-based classifier could never do.
+        val context = Mockito.mock(android.content.Context::class.java)
+        val audioManager = Mockito.mock(android.media.AudioManager::class.java)
+        // the sink resolves AudioManager via the androidx extension, i.e. the CLASS overload
+        Mockito.`when`(context.getSystemService(android.media.AudioManager::class.java)).thenReturn(audioManager)
+        Mockito.`when`(audioManager.mode).thenReturn(android.media.AudioManager.MODE_NORMAL)
+        val playbackManager = Mockito.mock(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager::class.java)
+        val sink = PlaybackManagerPlaybackSink(playbackManager, context)
+        val facts = mutableListOf<VoiceActionOutcome>()
+        sink.actionReporter = { facts += it }
+
+        Mockito.`when`(
+            audioManager.requestAudioFocus(
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+            ),
+        ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val granted = kotlinx.coroutines.runBlocking { sink.duck() }
+        Mockito.`when`(
+            audioManager.requestAudioFocus(
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+            ),
+        ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_FAILED)
+        val denied = kotlinx.coroutines.runBlocking { sink.duck() }
+
+        // Identical presentation...
+        assertEquals("the granted path renders Silent", VoiceResponse.Silent, granted)
+        assertEquals("the denied path renders Silent too", VoiceResponse.Silent, denied)
+        // ...different facts.
+        assertEquals(
+            listOf<VoiceActionOutcome>(
+                VoiceActionOutcome.Performed,
+                VoiceActionOutcome.PreconditionFailed("audio_focus_denied"),
+            ),
+            facts,
+        )
+    }
+
     private class FakeSinks {
         val playback = FakePlaybackSink()
         val effects = FakeEffectsSink()

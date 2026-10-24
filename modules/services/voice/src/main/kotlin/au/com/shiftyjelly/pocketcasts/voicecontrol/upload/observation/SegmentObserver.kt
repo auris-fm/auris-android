@@ -82,8 +82,14 @@ class SegmentObserver(
     fun noteExecutionOutcome(
         context: CaptureContext,
         outcome: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome,
+    ) = noteExecutionOutcome(context.captureId, outcome)
+
+    /** Capture-addressed form: the invocation token carries the captureId directly. */
+    fun noteExecutionOutcome(
+        captureId: java.util.UUID,
+        outcome: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome,
     ) {
-        (sink as? ContributionRetentionSink)?.noteExecutionOutcome(context.captureId, outcome)
+        (sink as? ContributionRetentionSink)?.noteExecutionOutcome(captureId, outcome)
     }
 
     fun speechStartedAdmitting(

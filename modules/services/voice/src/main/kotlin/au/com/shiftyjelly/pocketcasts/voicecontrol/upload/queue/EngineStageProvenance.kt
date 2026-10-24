@@ -106,7 +106,8 @@ object EngineStageProvenance {
             // dispatch with no reported result is still an honest unknown — dispatch alone does
             // not prove execution (delta736d3180).
             StageName.Execution to when (val reported = candidate.executionOutcome) {
-                null -> StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
+                null, ExecutionOutcome.NotObserved ->
+                    StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
 
                 ExecutionOutcome.Success -> StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success")))
 

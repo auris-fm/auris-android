@@ -630,4 +630,11 @@ enum class ExecutionOutcome(val wire: String) {
     Failure("failure"),
     Refused("refused"),
     Cancelled("cancelled"),
+
+    /**
+     * The call site could not observe a result (cancellation, teardown, dispatch-only action).
+     * Provenance keeps `unknown/observation_unavailable` for this: it asserts nothing about what
+     * the action did, because work may already have run before the observation was lost.
+     */
+    NotObserved("not_observed"),
 }

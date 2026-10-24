@@ -30,6 +30,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStart
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
@@ -444,7 +445,7 @@ class VoiceControlService : Service() {
                         listeningMode = mode,
                         playbackBufferProvider = playbackBufferRecorder::snapshot,
                         micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                        onIntent = { intent -> handleIntent(intent) },
+                        onIntent = { intent, token -> handleIntent(intent, token) },
                         onTerminated = {
                             serviceScope.launch(Dispatchers.Main) { onPipelineTerminated(generation) }
                         },
@@ -664,6 +665,7 @@ class VoiceControlService : Service() {
 
     private fun handleIntent(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+        invocationToken: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.InvocationToken?,
     ) {
         val now = System.currentTimeMillis()
         val intentType = intent::class.simpleName ?: intent.toString()
@@ -675,48 +677,63 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
-            // THE ACTION-RESULT CHANNEL (spec audit): the executor's OWN result is reported back to
-            // the engine, which joins it to the frozen capture. The mapping reads what the executor
-            // actually produced — an ERROR earcon, a CONFIRM_REQUIRED refusal, a throw — and the
-            // outcome stays unobserved (provenance: unknown) whenever none of them is asserted.
-            // ONE execution: the response is both rendered and read for its result.
-            val response = try {
-                voicePlaybackIntentExecutor.execute(intent)
-            } catch (t: kotlinx.coroutines.CancellationException) {
-                voiceAsrEngine.get().reportExecutionResult(intent, ExecutionOutcome.Cancelled)
-                throw t
-            } catch (t: Throwable) {
-                voiceAsrEngine.get().reportExecutionResult(intent, ExecutionOutcome.Failure)
-                throw t
+            // THE ACTION-RESULT CHANNEL (spec 03c96924 + reviewer 268d8cf0): the SINK reports what
+            // it actually did, at its own decision point, through the executor's reportAction.
+            // Presentation is rendered but NEVER read here — an earcon is a thing the user hears,
+            // not evidence of what happened (UpNextQueueSink.clear() renders CONFIRM_REQUIRED
+            // after the clear was really dispatched; duck() renders Silent on grant AND denial).
+            // Results are addressed by the INVOCATION TOKEN captured before dispatch, so identical
+            // overlapping intents stay two different dispatches bound to two different captures.
+            val engine = voiceAsrEngine.get()
+            val token = invocationToken
+            voicePlaybackIntentExecutor.onActionOutcome = { fact ->
+                if (token != null) {
+                    executionOutcomeOf(fact)?.let { engine.reportExecutionResult(token, it) }
+                }
             }
-            executionOutcomeOf(response)?.let { voiceAsrEngine.get().reportExecutionResult(intent, it) }
-            audioFeedbackRenderer.render(response)
-            gracePeriodSignal.onCommandRecognized(
-                fromGeneration = intent.windowGenerationOf(),
-                restoresAllowance = intent.restoresAllowance(),
-            )
+            try {
+                val response = try {
+                    voicePlaybackIntentExecutor.execute(intent)
+                } catch (t: kotlinx.coroutines.CancellationException) {
+                    // Cancellation is NOT "the user cancelled" and NOT "the action did not happen":
+                    // a scope teardown looks identical here, and work may already have run. The
+                    // settle boundary below leaves the outcome unobserved (provenance: unknown) —
+                    // a claim only someone who can attribute the cancellation may make.
+                    throw t
+                } catch (t: Throwable) {
+                    // The sink threw before it could report: the attempt failed, and this call
+                    // site is the only place that observed it.
+                    if (token != null) engine.reportExecutionResult(token, ExecutionOutcome.Failure)
+                    throw t
+                }
+                audioFeedbackRenderer.render(response)
+                gracePeriodSignal.onCommandRecognized(
+                    fromGeneration = intent.windowGenerationOf(),
+                    restoresAllowance = intent.restoresAllowance(),
+                )
+            } finally {
+                voicePlaybackIntentExecutor.onActionOutcome = null
+                // THE BOUNDED FINALIZATION BOUNDARY: this dispatch is over. No result can arrive
+                // later through this token, so ownership is dropped — nothing leaks, and a
+                // stopped/restarted engine cannot inherit it.
+                if (token != null) engine.settleInvocation(token)
+            }
         }
     }
 
     /**
-     * The executor's response as an OBSERVED execution result — null when the response does not
-     * assert what happened to the action. `Silent` in particular is not success: several sinks
-     * return it for actions that query state or that decline to speak.
+     * The SINK'S OWN structured fact as an execution outcome (spec 3ed49695). Presentation never
+     * appears here. Dispatched and NotObserved map to NOTHING: neither is a result — dispatch is
+     * not effect, and a lost observation asserts nothing about what the action did — so
+     * provenance keeps `unknown/observation_unavailable` for both.
      */
-    private fun executionOutcomeOf(response: VoiceResponse): ExecutionOutcome? = when (response) {
-        is VoiceResponse.Earcon ->
-            when (response.id) {
-                EarconId.SUCCESS -> ExecutionOutcome.Success
-                EarconId.ERROR -> ExecutionOutcome.Failure
-                EarconId.CONFIRM_REQUIRED -> ExecutionOutcome.Refused
-                else -> null
-            }
-
-        is VoiceResponse.Combined -> ExecutionOutcome.Success
-
-        is VoiceResponse.Spoken -> ExecutionOutcome.Success
-
-        VoiceResponse.Silent -> null
+    private fun executionOutcomeOf(fact: VoiceActionOutcome): ExecutionOutcome? = when (fact) {
+        VoiceActionOutcome.Dispatched -> null
+        VoiceActionOutcome.NotObserved -> null
+        VoiceActionOutcome.Performed -> ExecutionOutcome.Success
+        is VoiceActionOutcome.Failed -> ExecutionOutcome.Failure
+        is VoiceActionOutcome.PreconditionFailed -> ExecutionOutcome.Failure
+        is VoiceActionOutcome.Refused -> ExecutionOutcome.Refused
     }
 
     private fun updateListeningState() {

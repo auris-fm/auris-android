@@ -93,7 +93,7 @@ class VoiceAsrEngine @Inject constructor(
     private var playbackBufferProvider: (() -> FloatArray)? = null
 
     private var backend: AsrBackend? = null
-    private var onIntent: ((VoiceIntent) -> Unit)? = null
+    private var onIntent: ((VoiceIntent, InvocationToken?) -> Unit)? = null
     private var micExposureProvider: (() -> MicExposure)? = null
 
     @Volatile
@@ -111,8 +111,19 @@ class VoiceAsrEngine @Inject constructor(
     @Volatile
     private var pendingExecutionContext: CaptureContext? = null
 
-    /** Captures awaiting the executor's own result, keyed by the dispatched intent. */
-    private val executedReports = java.util.concurrent.ConcurrentHashMap<VoiceIntent, CaptureContext>()
+    /**
+     * ONE DISPATCH's identity. Reports are addressed by this token, never by the intent value:
+     * identical intents dispatched concurrently are different invocations with different captures.
+     */
+    data class InvocationToken(val id: Long, val captureId: java.util.UUID)
+
+    /** Open invocations awaiting their result. Entries are cleared on report, on settle and on stop. */
+    private val openInvocations = java.util.concurrent.ConcurrentHashMap<Long, InvocationToken>()
+
+    /** Results reported for a token, held until the capture settles (bounded finalization). */
+    private val settledResults = java.util.concurrent.ConcurrentHashMap<Long, ExecutionOutcome>()
+
+    private val nextInvocationId = java.util.concurrent.atomic.AtomicLong()
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start(
@@ -121,7 +132,9 @@ class VoiceAsrEngine @Inject constructor(
         listeningMode: ListeningMode,
         playbackBufferProvider: () -> FloatArray,
         micExposureProvider: () -> MicExposure,
-        onIntent: (VoiceIntent) -> Unit,
+        // The dispatch handler receives the INVOCATION token for this specific dispatch, or null when
+        // the intent belongs to no retained capture. Results are reported back against that token.
+        onIntent: (VoiceIntent, InvocationToken?) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
         // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
         // scopes the reaction to its start generation so only an unexpected end is acted on.
@@ -129,21 +142,13 @@ class VoiceAsrEngine @Inject constructor(
     ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
-        // Execution outcomes join by the capture's ISSUED context via the wrapped handler;
-        // success is recorded separately from intent correctness (spec: not a label).
-        val userHandler = onIntent
-        this.onIntent = { intent ->
-            val capture = pendingExecutionContext
-            pendingExecutionContext = null
-            userHandler(intent)
-            if (capture != null) {
-                joinOutcome(CollectionOutcome.Executed(capture.captureId, dispatchedWithoutThrowing = true))
-                // Bind the capture to the intent so the EXECUTOR's own result can be joined to it
-                // through [reportExecutionResult]. A caller that never reports leaves the outcome
-                // unobserved (provenance records unknown), never assumed success.
-                executedReports[intent] = capture
-            }
-        }
+        // The handler receives the invocation token for THIS dispatch; the binding lives in
+        // invokeHandler at the dispatch sites.
+        // The token binding happens INSIDE invokeHandler at the dispatch sites, NOT by wrapping
+        // here: the internal dispatch sites call invokeHandler directly, and a wrapper here would
+        // run it twice — the inner call would see pendingExecutionContext already consumed and
+        // hand the caller a null token (found by the overlapping-dispatch control).
+        this.onIntent = onIntent
         this.currentRouteClass = audioRoute::class.simpleName ?: AudioRoute.Unknown::class.simpleName!!
         captureSessionIncarnation += 1
         this.playbackBufferProvider = playbackBufferProvider
@@ -309,13 +314,59 @@ class VoiceAsrEngine @Inject constructor(
     }
 
     /**
-     * THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit). Called by whoever ran the
+     * THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit): called by whoever ran the
      * action — the service, not the engine — with what the executor really reported. Anything the
      * executor never reports stays unobserved, and provenance records it as unknown.
+     * ONE DISPATCH, addressed by its token: a result may arrive before the record is published
+     * (the usual case) or after the capture has already settled. A result for an unknown token is
+     * dropped — attributing it to anything else would corrupt another capture's provenance.
+     *
+     * A result may arrive before the record is published (the usual case) or AFTER the capture has
+     * already settled (a late asynchronous executor). Both are handled without inventing a fact:
+     * the result is recorded against its own token, and [settleInvocation] applies it to the
+     * capture only while that capture still exists. A result for an unknown token is ignored —
+     * that token's capture is gone, and attributing it to anything else would corrupt another
+     * capture's provenance.
      */
-    fun reportExecutionResult(intent: VoiceIntent, outcome: ExecutionOutcome) {
-        val capture = executedReports.remove(intent) ?: return
-        segmentObserver.noteExecutionOutcome(capture, outcome)
+    fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean {
+        // A token that is no longer open belongs to a settled or restarted lifecycle: applying its
+        // result to ANY capture would corrupt someone else's provenance, so it is dropped.
+        if (openInvocations[token.id] != token) return false
+        settledResults[token.id] = outcome
+        segmentObserver.noteExecutionOutcome(token.captureId, outcome)
+        return true
+    }
+
+    /**
+     * THE BOUNDED FINALIZATION BOUNDARY (reviewer 268d8cf0): called when a capture's invocation is
+     * known to be over, so a token can neither leak nor be applied to a later capture. Any result
+     * still unapplied is DROPPED, and provenance stays unknown — the honest reading of "no result
+     * was observed in time" (spec 3ed49695).
+     */
+    fun settleInvocation(token: InvocationToken) {
+        openInvocations.remove(token.id)
+        settledResults.remove(token.id)
+    }
+
+    /**
+     * RESTART OWNERSHIP (reviewer 268d8cf0): a stop ends every open invocation. Tokens issued under
+     * the previous lifecycle can no longer deliver results into the new one.
+     */
+    private fun clearInvocationOwnership() {
+        openInvocations.clear()
+        settledResults.clear()
+    }
+
+    /** Dispatch through the token-binding wrapper, whatever the internal entry point. */
+    private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?) -> Unit), intent: VoiceIntent) {
+        val capture = pendingExecutionContext
+        pendingExecutionContext = null
+        val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
+        if (token != null) openInvocations[token.id] = token
+        handler(intent, token)
+        if (capture != null) {
+            joinOutcome(CollectionOutcome.Executed(capture.captureId, dispatchedWithoutThrowing = true))
+        }
     }
 
     fun updateListeningMode(mode: ListeningMode) {
@@ -621,7 +672,7 @@ class VoiceAsrEngine @Inject constructor(
             // that window's identity and cannot extend a later one.
             routed(intentCategory(intent))
             pendingExecutionContext = capture
-            handler(intent.stampedForWindow(gracePeriodSignal.currentGeneration))
+            invokeHandler(handler, intent.stampedForWindow(gracePeriodSignal.currentGeneration))
             return
         }
 
@@ -678,7 +729,8 @@ class VoiceAsrEngine @Inject constructor(
                 routed("cloud_escalation")
                 pendingExecutionContext = capture
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
-                handler(
+                invokeHandler(
+                    handler,
                     VoiceIntent.CloudRoute(
                         request = input.routerTranscript,
                         tier = VoiceIntent.CloudTier.Unknown,
@@ -821,6 +873,8 @@ class VoiceAsrEngine @Inject constructor(
         // observer lifecycle (one monitor guards pipeline events and external signals alike);
         // never resume capture to complete an example. Completed contributions survive.
         segmentObserver.listeningClosed("pipeline-stopped")
+        // Every open invocation ends with the lifecycle: no result can cross a stop/restart.
+        clearInvocationOwnership()
         processingJob?.cancel()
         processingJob = null
         processingJob = null

@@ -51,13 +51,22 @@ class PlaybackManagerPlaybackSink @Inject constructor(
             AudioManager.STREAM_MUSIC,
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
         )
+        // BOTH BRANCHES RENDER Silent — identical presentation, opposite results. The distinction
+        // exists only here, at the focus result, so this is where the fact is emitted
+        // (spec 03c96924). A consumer reading the response would see one identical value.
         if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             Timber.i("[VoicePipeline] cloud audio ducked host player")
+            actionReporter?.invoke(VoiceActionOutcome.Performed)
         } else {
-            Timber.w("[VoicePipeline] cloud audio duck request rejected")
+            Timber.w("[VoicePipeline] cloud duck request rejected")
+            actionReporter?.invoke(VoiceActionOutcome.PreconditionFailed("audio_focus_denied"))
         }
         return VoiceResponse.Silent
     }
+
+    /** Where sink facts go; set by the executor that dispatches into this sink. */
+    @Volatile
+    var actionReporter: ((VoiceActionOutcome) -> Unit)? = null
 
     /** Restore by abandoning the duckable focus so the host player regains full volume. */
     @Suppress("DEPRECATION") // Same reason as duck(): see the note there.

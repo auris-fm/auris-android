@@ -30,6 +30,25 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     private val playbackManager: PlaybackManager,
 ) {
+    /**
+     * THE ACTION-RESULT CHANNEL (spec 03c96924): whoever runs the action reports what a sink REALLY
+     * did, at the sink's own decision point, with no dependency on the response it renders. Set by
+     * the composition that owns the capture; null means the result goes unobserved.
+     */
+    @Volatile
+    var onActionOutcome: ((VoiceActionOutcome) -> Unit)? = null
+
+    /** Report a sink's structured decision. Never inferred from [VoiceResponse]. */
+    fun reportAction(outcome: VoiceActionOutcome) {
+        onActionOutcome?.invoke(outcome)
+    }
+
+    init {
+        // The playback sink reports its OWN decisions (e.g. the audio-focus result, which is the
+        // only place the duck outcome exists). Everything else is reported below at the call site.
+        (playbackSink as? PlaybackManagerPlaybackSink)?.actionReporter = ::reportAction
+    }
+
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
@@ -68,9 +87,12 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     }
 
     private suspend fun executePlayback(intent: VoiceIntent.Playback): VoiceResponse = when (intent) {
-        VoiceIntent.Playback.Pause -> playbackSink.pause()
+        // DISPATCH, not effect: the suspend call returning proves the manager was asked, and these
+        // sinks render Silent either way. Reporting Dispatched (not Performed) keeps the fact to
+        // what this call site actually observes (spec 3ed49695).
+        VoiceIntent.Playback.Pause -> playbackSink.pause().also { reportAction(VoiceActionOutcome.Dispatched) }
 
-        VoiceIntent.Playback.Resume -> playbackSink.resume()
+        VoiceIntent.Playback.Resume -> playbackSink.resume().also { reportAction(VoiceActionOutcome.Dispatched) }
 
         is VoiceIntent.Playback.SeekRelative -> {
             // deltaSeconds in seconds; null means "no amount stated — sink
@@ -156,16 +178,30 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
     private suspend fun executeQueue(intent: VoiceIntent.Queue): VoiceResponse = when (intent) {
         is VoiceIntent.Queue.AddTop -> queueSink.addTop(intent.episode)
+
         is VoiceIntent.Queue.AddBottom -> queueSink.addBottom(intent.episode)
+
         is VoiceIntent.Queue.Remove -> queueSink.remove(intent.episode)
+
         is VoiceIntent.Queue.MoveToTop -> queueSink.moveToTop(intent.episode)
+
         is VoiceIntent.Queue.MoveToBottom -> queueSink.moveToBottom(intent.episode)
-        VoiceIntent.Queue.Clear -> queueSink.clear()
+
+        // DISPATCHED, not Performed: clearUpNextAsync() returning proves the clear was REQUESTED,
+        // not that the queue emptied (spec 3ed49695). The point of reporting at all is that the
+        // CONFIRM_REQUIRED earcon it renders afterwards says nothing about either.
+        VoiceIntent.Queue.Clear -> queueSink.clear().also { reportAction(VoiceActionOutcome.Dispatched) }
+
         is VoiceIntent.Queue.RemoveByPodcast -> queueSink.removeByPodcast(intent.podcast)
+
         is VoiceIntent.Queue.Sort -> queueSink.sort(intent.sortOrder)
+
         VoiceIntent.Queue.QueryContents -> queueSink.queryContents()
+
         VoiceIntent.Queue.QueryQueueNext -> queueSink.queryNext()
+
         VoiceIntent.Queue.QueryLength -> queueSink.queryLength()
+
         is VoiceIntent.Queue.QueryIsQueued -> queueSink.queryIsQueued(intent.episode)
     }
 

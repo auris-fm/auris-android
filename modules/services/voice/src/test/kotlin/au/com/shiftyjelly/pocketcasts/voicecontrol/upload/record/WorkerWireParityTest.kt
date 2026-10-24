@@ -32,11 +32,16 @@ class WorkerWireParityTest {
      *
      * A parity control that green-skips when it cannot reach the thing it compares against reports
      * success it did not earn. `AURIS_CLOUD_WORKER_ROOT` should name a worktree at the reviewed
-     * revision; the fallback path only exists so a local run without the variable is still explicit
-     * about which checkout it used.
+     * revision; there is NO moving-checkout fallback (reviewer round: the core checkout drifted to
+     * an unapproved revision) - the variable is required and names an approved pin.
      */
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
-        ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
+        ?: error(
+            "AURIS_CLOUD_WORKER_ROOT is not set. The moving core checkout is NOT a valid fallback " +
+                "(reviewer round: it drifted to an unapproved revision and failed the pin check). " +
+                "Point the variable at a pinned approved worktree, e.g. " +
+                "/tmp/auris-cloud-pinned-3dd0c91d/worker at 3dd0c91d095512e3c49108c25b726a3b66a66eef.",
+        )
 
     /**
      * Records the EXACT Worker revision and Android source head this run compared, so a result

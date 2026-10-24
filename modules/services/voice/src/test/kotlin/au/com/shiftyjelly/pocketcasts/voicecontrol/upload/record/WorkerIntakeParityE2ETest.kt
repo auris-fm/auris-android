@@ -49,7 +49,12 @@ class WorkerIntakeParityE2ETest {
      * path only saves typing a variable for a local run and is checked just as strictly.
      */
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
-        ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
+        ?: error(
+            "AURIS_CLOUD_WORKER_ROOT is not set. The moving core checkout is NOT a valid fallback " +
+                "(reviewer round: it drifted to an unapproved revision and failed the pin check). " +
+                "Point the variable at a pinned approved worktree, e.g. " +
+                "/tmp/auris-cloud-pinned-3dd0c91d/worker at 3dd0c91d095512e3c49108c25b726a3b66a66eef.",
+        )
 
     //
     // The Worker revision these controls compare against, and the SCOPE of that comparison.

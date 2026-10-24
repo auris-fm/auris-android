@@ -142,7 +142,10 @@ class VoiceControlService : Service() {
      * (reviewer 6ce4ad78) instead of reporting a normal completion.
      */
     internal var teardownFailure: TeardownFailure? = null
-        private set
+
+    // What a HELD teardown already released. A retry must skip these: repeating a media-session or
+    // renderer release is destructive, not merely redundant (spec d885d207).
+    private val releasedResources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     companion object {
         // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
@@ -800,9 +803,14 @@ class VoiceControlService : Service() {
      * can be restarted behind the join.
      */
     private fun stopVoiceControl(): Deferred<TeardownResult> {
-        // Idempotent for BOTH cases: a running teardown is joined, and a COMPLETED teardown keeps its
-        // identity, so a later stop cannot release resources a second time.
-        stopInFlightJob?.let { return it }
+        // A HELD teardown is RETRIED by its owner (spec d885d207), not joined forever: rechecking the
+        // CURRENT state is the only thing that can turn a hold into a release. A running teardown is
+        // still joined, and a RELEASED teardown keeps its identity so nothing is freed twice.
+        stopInFlightJob?.let { existing ->
+            val failure = teardownFailure
+            if (!existing.isCompleted || failure == null) return existing
+            return retryHeldTeardown(failure)
+        }
         // INVALIDATE ANY PENDING START UP FRONT (reviewer 543d284b): a start suspended inside
         // ensureReady() would otherwise commit after this teardown released the backend it needs.
         engineStart.invalidatePendingStart()
@@ -908,6 +916,77 @@ class VoiceControlService : Service() {
 
                     is TeardownResult.Held -> settled.failure
                 }
+            }
+        }
+    }
+
+    /**
+     * Retry a HELD teardown against the CURRENT state (spec d885d207).
+     *
+     * The hold is not age-based: the same owner rechecks the unfinished jobs, and only verified
+     * quiescence allows the remaining releases. Releases already recorded are skipped, and the
+     * result stays Held until every release is confirmed — it is never silently reported as Released.
+     */
+    private fun retryHeldTeardown(previous: TeardownFailure): Deferred<TeardownResult> {
+        Timber.i("[VoicePipeline] retrying held teardown (${previous.reason})")
+        return CoroutineScope(Dispatchers.IO).async {
+            when (val decision = TeardownRetry.decide(recheck = { voiceAsrEngine.get().unfinishedProcessingJobs })) {
+                is TeardownRetry.Decision.Quiescent -> {
+                    val all = listOf("backend", "session", "recognizer", "feedback", "notification", "foreground")
+                    val pending = TeardownRetry.pendingReleases(all, releasedResources)
+                    val released = runCatching {
+                        withContext(Dispatchers.Main) { releaseResources(pending) }
+                    }
+                    released.exceptionOrNull()?.let { error ->
+                        Timber.e(error, "[VoicePipeline] retry release failed")
+                        return@async TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)))
+                    }
+                    releasedResources.addAll(pending)
+                    if (TeardownRetry.fullyReleased(all, releasedResources)) {
+                        teardownFailure = null
+                        TeardownResult.Released
+                    } else {
+                        // Not every release is confirmed: stay Held rather than claim a clean stop.
+                        TeardownResult.Held(previous)
+                    }
+                }
+
+                is TeardownRetry.Decision.StillHeld -> TeardownResult.Held(previous)
+
+                is TeardownRetry.Decision.Unproven -> TeardownResult.Held(previous)
+            }.also { outcome ->
+                teardownFailure = (outcome as? TeardownResult.Held)?.failure
+            }
+        }.also { stopInFlightJob = it }
+    }
+
+    /**
+     * The releases themselves, skipping anything already recorded as released.
+     *
+     * Splitting them out is what makes a retry safe: a repeated media-session or renderer release is
+     * destructive, so only pending kinds may run (spec d885d207).
+     */
+    private fun releaseResources(pending: List<String>) {
+        pending.forEach { kind ->
+            when (kind) {
+                "backend" -> {
+                    wiredBackend?.release()
+                    wiredBackend = null
+                }
+
+                "session" -> {
+                    mediaSession?.isActive = false
+                    mediaSession?.release()
+                    mediaSession = null
+                }
+
+                "recognizer" -> voiceRecognizer.release()
+
+                "feedback" -> audioFeedbackRenderer.release()
+
+                "notification" -> notificationManager.cancelNotification()
+
+                "foreground" -> stopForeground(STOP_FOREGROUND_REMOVE)
             }
         }
     }

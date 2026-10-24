@@ -64,6 +64,54 @@ class OsDirectorySyncTest {
     private fun newDir(name: String): File = File(System.getProperty("java.io.tmpdir"), "os-sync-" + name + "-" + System.nanoTime()).apply { mkdirs() }
 
     @Test
+    fun `the production binding opens with bionic O_DIRECTORY 0x4000, never the O_DIRECT 0x10000 value`() {
+        // Bionic asm-arm/asm-arm64 fcntl.h: O_DIRECTORY = 040000 octal = 0x4000; 0x10000 is
+        // O_DIRECT there, so the earlier pin would have failed EVERY directory open on the target
+        // platform (reviewer 87e2e450). The static Os.open call itself cannot be intercepted on the
+        // JVM, so this pins the exact flags value openDirectory forwards, plus the distinctness that
+        // makes the O_DIRECT confusion impossible again.
+        assertEquals(0x4000, AndroidOsOperations.O_DIRECTORY)
+        assertEquals(0x4000, AndroidOsOperations.DIRECTORY_OPEN_FLAGS and 0x4000)
+        assertTrue(
+            "the pinned flags must not carry the O_DIRECT bit 0x10000",
+            AndroidOsOperations.DIRECTORY_OPEN_FLAGS and 0x10000 == 0,
+        )
+    }
+
+    @Test
+    fun `a close-only failure after a successful fsync PROPAGATES`() {
+        // The declared contract is "any call may fail loudly"; the previous finally swallowed a
+        // close failure entirely, reporting a sync whose outcome was partly unknown as complete.
+        val os = FakeOs(failCloseErrno = 9) // EBADF
+        try {
+            OsDirectorySync(os).sync(newDir("close-only"))
+            fail("a failed close must throw, never return normally")
+        } catch (e: IOException) {
+            assertTrue("close failure must be named: ${e.message}", e.message!!.contains("close"))
+            assertTrue("the errno cause must be preserved", e.cause is ErrnoException)
+        }
+        assertTrue("close must still have been reached: ${os.calls}", os.calls.last().startsWith("close"))
+    }
+
+    @Test
+    fun `when fsync AND close both fail the ORIGINAL fsync error is thrown with the close failure suppressed`() {
+        val os = FakeOs(failFsyncErrno = 5, failCloseErrno = 9)
+        try {
+            OsDirectorySync(os).sync(newDir("close-only"))
+            fail("the fsync failure must surface, never be replaced or swallowed")
+        } catch (e: IOException) {
+            assertTrue("the ORIGINAL fsync error must be thrown: ${e.message}", e.message!!.contains("fsync"))
+            assertTrue("the errno cause must be preserved", e.cause is ErrnoException)
+            assertEquals(
+                "the close failure must ride along as suppressed, not vanish",
+                1,
+                e.suppressed.size,
+            )
+            assertTrue(e.suppressed[0].message!!.contains("close"))
+        }
+    }
+
+    @Test
     fun `a successful sync is exactly open - fsync - close on the directory`() {
         val ops = FakeOs()
         val dir = newDir("queue")

@@ -30,7 +30,7 @@ interface OsOperations {
 class AndroidOsOperations : OsOperations {
     override val isSupported: Boolean = true // documented since API 21; the app's minSdk is 21+
 
-    override fun openDirectory(path: String): FileDescriptor = Os.open(path, O_DIRECTORY or OsConstants.O_RDONLY, 0)
+    override fun openDirectory(path: String): FileDescriptor = Os.open(path, DIRECTORY_OPEN_FLAGS, 0)
 
     override fun fsync(fd: FileDescriptor) {
         Os.fsync(fd)
@@ -40,11 +40,16 @@ class AndroidOsOperations : OsOperations {
         Os.close(fd)
     }
 
-    private companion object {
-        // O_DIRECTORY is in the Linux fcntl.h surface the docs describe, but this SDK's
-        // android.jar stub of OsConstants does not expose it, so the documented VALUE is pinned here
-        // (0200000 octal, bionic fcntl.h). If OsConstants gains it, this moves back to the constant.
-        private const val O_DIRECTORY = 0x10000
+    internal companion object {
+        // O_DIRECTORY is absent from this SDK's android.jar stub of OsConstants, so the VALUE is
+        // pinned from bionic's per-architecture kernel uapi headers (asm-arm and asm-arm64
+        // fcntl.h): O_DIRECTORY is 040000 octal = 0x4000, O_RDONLY is 0. The earlier 0x10000 pin
+        // was O_DIRECT on ARM/ARM64, which would make every directory open fail on the target
+        // platform (reviewer 87e2e450). If OsConstants gains the constant, this moves back to it.
+        // Internal so the JVM controls can pin the value the production binding opens with; the
+        // static Os.open call itself cannot be intercepted on the JVM.
+        internal const val O_DIRECTORY = 0x4000
+        internal val DIRECTORY_OPEN_FLAGS: Int = O_DIRECTORY or OsConstants.O_RDONLY
     }
 }
 
@@ -59,7 +64,9 @@ class AndroidOsOperations : OsOperations {
  * the withdrawal persistence) treat a thrown sync as "not durable", and this adapter guarantees that
  * answer is always TRUE when it returns.
  *
- * `close` runs even when `fsync` failed: an fd leaked per failed sync is its own defect.
+ * `close` runs even when `fsync` failed: an fd leaked per failed sync is its own defect. A close
+ * failure is itself propagated: close-only failure throws; fsync+close failure throws the ORIGINAL
+ * fsync error with the close failure suppressed.
  *
  * SCOPE HONESTY: the REAL binding ([AndroidOsOperations]) is compile-verified against the documented
  * surface; its behavior against real kernel calls is NOT verified by these JVM controls, which bind
@@ -88,19 +95,28 @@ class OsDirectorySync(
             // run against unmocked android.jar stubs where only fields are safe.)
             throw IOException("directory open failed (errno=${e.errno})", e)
         }
+        // close ALWAYS runs, and its failure is a REAL failure, not a detail: the declared contract
+        // is "any call may fail loudly", so a close-only failure propagates, and when fsync AND
+        // close both fail the ORIGINAL fsync error is thrown with the close failure attached as a
+        // suppressed exception (reviewer 87e2e450 - the previous finally swallowed close entirely).
+        var fsyncError: IOException? = null
         try {
             ops.fsync(fd)
         } catch (e: ErrnoException) {
-            throw IOException("directory fsync failed (errno=${e.errno})", e)
-        } finally {
-            try {
-                ops.close(fd)
-            } catch (e: ErrnoException) {
-                // A close failure after a successful fsync does not undo the flush; a close failure
-                // after a FAILED fsync is moot because the fsync already threw. Not silently
-                // swallowed into success: sync() has either thrown or completed before this.
-            }
+            fsyncError = IOException("directory fsync failed (errno=${e.errno})", e)
         }
+        try {
+            ops.close(fd)
+        } catch (e: ErrnoException) {
+            val closeError = IOException("directory close failed (errno=${e.errno})", e)
+            val original = fsyncError
+            if (original != null) {
+                original.addSuppressed(closeError)
+                throw original
+            }
+            throw closeError
+        }
+        fsyncError?.let { throw it }
     }
 
     companion object {

@@ -59,7 +59,7 @@ class ContributionStore(
      * (android.system.Os) adapter is bound at the Android construction boundary (VoiceUploadModule),
      * per spec 64ce2de6. Tests keep injecting.
      */
-    directorySync: DirectorySync = DirectorySync.REAL,
+    private val directorySync: DirectorySync = DirectorySync.REAL,
     /**
      * File-CONTENT durability, injected for the same reason as [directorySync]: a directory force
      * persists a name, not what the file contains, so sidecars written with writeText were durable in

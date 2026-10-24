@@ -117,11 +117,11 @@ class VoiceAsrEngine @Inject constructor(
      */
     data class InvocationToken(val id: Long, val captureId: java.util.UUID)
 
-    /** Open invocations awaiting their result. Entries are cleared on report, on settle and on stop. */
+    /** Open invocations awaiting finalization; guarded by [invocationLock]. */
     private val openInvocations = java.util.concurrent.ConcurrentHashMap<Long, InvocationToken>()
 
-    /** Results reported for a token, held until the capture settles (bounded finalization). */
-    private val settledResults = java.util.concurrent.ConcurrentHashMap<Long, ExecutionOutcome>()
+    /** Serializes one-shot token consumption against settle/stop. */
+    private val invocationLock = Any()
 
     private val nextInvocationId = java.util.concurrent.atomic.AtomicLong()
 
@@ -313,60 +313,66 @@ class VoiceAsrEngine @Inject constructor(
         return CaptureAttachment(attached)
     }
 
+    // THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit): called by whoever ran the
+    // action — the service, not the engine — with what the executor really reported. Anything the
+    // executor never reports stays unobserved; a token that is no longer open is refused.
+
     /**
-     * THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit): called by whoever ran the
-     * action — the service, not the engine — with what the executor really reported. Anything the
-     * executor never reports stays unobserved, and provenance records it as unknown.
-     * ONE DISPATCH, addressed by its token: a result may arrive before the record is published
-     * (the usual case) or after the capture has already settled. A result for an unknown token is
-     * dropped — attributing it to anything else would corrupt another capture's provenance.
-     *
-     * A result may arrive before the record is published (the usual case) or AFTER the capture has
-     * already settled (a late asynchronous executor). Both are handled without inventing a fact:
-     * the result is recorded against its own token, and [settleInvocation] applies it to the
-     * capture only while that capture still exists. A result for an unknown token is ignored —
-     * that token's capture is gone, and attributing it to anything else would corrupt another
-     * capture's provenance.
+     * THE EXECUTOR'S ACTUAL RESULT for ONE dispatch, addressed by its token (spec 03c96924,
+     * reviewer 268d8cf0/3fb01865). ONE-SHOT consumption under the invocation lock: the first
+     * report consumes the token, so a later report (including the service's throw-fallback) can
+     * neither duplicate nor overwrite it, and a token that is no longer open — settled, abandoned
+     * or from a restarted lifecycle — is refused rather than attributed to some other capture.
      */
-    fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean {
-        // A token that is no longer open belongs to a settled or restarted lifecycle: applying its
-        // result to ANY capture would corrupt someone else's provenance, so it is dropped.
-        if (openInvocations[token.id] != token) return false
-        settledResults[token.id] = outcome
-        segmentObserver.noteExecutionOutcome(token.captureId, outcome)
-        return true
+    fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean = synchronized(invocationLock) {
+        if (openInvocations.remove(token.id) != token) return false
+        finalizePublication(token, outcome)
+        true
     }
 
     /**
-     * THE BOUNDED FINALIZATION BOUNDARY (reviewer 268d8cf0): called when a capture's invocation is
-     * known to be over, so a token can neither leak nor be applied to a later capture. Any result
-     * still unapplied is DROPPED, and provenance stays unknown — the honest reading of "no result
-     * was observed in time" (spec 3ed49695).
+     * THE RESULT-OR-UNKNOWN FINALIZATION BOUNDARY (reviewer 268d8cf0/3fb01865): the Executed join —
+     * which arms publication and release — happens HERE, never at dispatch. A capture therefore
+     * publishes only after its invocation is over, carrying its observed result or, if none was
+     * reported, the honest schema unknown (dispatch alone is not a result; spec 3ed49695).
      */
     fun settleInvocation(token: InvocationToken) {
-        openInvocations.remove(token.id)
-        settledResults.remove(token.id)
+        val open: Boolean = synchronized(invocationLock) { openInvocations.remove(token.id) == token }
+        if (open) finalizePublication(token, null)
+    }
+
+    private fun finalizePublication(token: InvocationToken, outcome: ExecutionOutcome?) {
+        if (outcome != null) segmentObserver.noteExecutionOutcome(token.captureId, outcome)
+        joinOutcome(CollectionOutcome.Executed(token.captureId, dispatchedWithoutThrowing = true))
     }
 
     /**
-     * RESTART OWNERSHIP (reviewer 268d8cf0): a stop ends every open invocation. Tokens issued under
-     * the previous lifecycle can no longer deliver results into the new one.
+     * RESTART OWNERSHIP (reviewer 268d8cf0): a stop ends every open invocation. Each is finalized
+     * with an explicit unknown — the dispatch DID happen, only its result was never observed — so
+     * an abandoned capture still publishes instead of leaking retained.
      */
     private fun clearInvocationOwnership() {
-        openInvocations.clear()
-        settledResults.clear()
+        val abandoned: List<InvocationToken> = synchronized(invocationLock) {
+            val open = openInvocations.values.toList()
+            openInvocations.clear()
+            open
+        }
+        abandoned.forEach { finalizePublication(it, null) }
     }
 
-    /** Dispatch through the token-binding wrapper, whatever the internal entry point. */
+    /**
+     * Dispatch through the token-binding seam. The token is bound BEFORE the handler runs, so a
+     * result can never beat the binding or be attributed by intent value. The Executed join is
+     * DEFERRED to the token's finalization (settle/report/stop-time abandonment), because that
+     * join arms publication — finalizing before publication is what lets the record carry a
+     * result instead of a permanent unknown.
+     */
     private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?) -> Unit), intent: VoiceIntent) {
         val capture = pendingExecutionContext
         pendingExecutionContext = null
         val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
-        if (token != null) openInvocations[token.id] = token
+        if (token != null) synchronized(invocationLock) { openInvocations[token.id] = token }
         handler(intent, token)
-        if (capture != null) {
-            joinOutcome(CollectionOutcome.Executed(capture.captureId, dispatchedWithoutThrowing = true))
-        }
     }
 
     fun updateListeningMode(mode: ListeningMode) {

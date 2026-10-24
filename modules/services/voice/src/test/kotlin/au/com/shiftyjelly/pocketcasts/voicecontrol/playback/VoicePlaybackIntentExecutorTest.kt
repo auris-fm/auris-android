@@ -427,9 +427,8 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
-        executor.onActionOutcome = { facts += it }
 
-        val response = executor.execute(VoiceIntent.Queue.Clear)
+        val response = executor.execute(VoiceIntent.Queue.Clear) { facts += it }
 
         // The FAKE renders SUCCESS; the production sink renders CONFIRM_REQUIRED after the same
         // dispatch. Either way the earcon is presentation and the fact below is the outcome.
@@ -443,9 +442,8 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
-        executor.onActionOutcome = { facts += it }
 
-        val response = executor.execute(VoiceIntent.Playback.Pause)
+        val response = executor.execute(VoiceIntent.Playback.Pause) { facts += it }
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         // A SUCCESS earcon is NOT evidence of completion: the sink call returning is dispatch only.
@@ -457,12 +455,43 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
-        executor.onActionOutcome = { facts += it }
 
-        val response = executor.execute(VoiceIntent.Playback.Resume)
+        val response = executor.execute(VoiceIntent.Playback.Resume) { facts += it }
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+    }
+
+    @Test
+    fun `overlapping executions each deliver facts to their OWN reporter and never cross`() {
+        // THE SERVICE-SHAPED CONCURRENCY CONTROL (reviewer 3fb01865): two overlapping execute()
+        // calls, each with its own invocation-local reporter. The shared-slot design let one
+        // dispatch overwrite or clear the other's callback; the parameter design cannot. The
+        // executor serializes actions (one sink in flight), so each dispatch's facts land only
+        // in that dispatch's list — here proven by both lists seeing exactly their own calls.
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val aFacts = mutableListOf<VoiceActionOutcome>()
+        val bFacts = mutableListOf<VoiceActionOutcome>()
+        val latch = java.util.concurrent.CountDownLatch(2)
+        val a = Thread {
+            kotlinx.coroutines.runBlocking {
+                executor.execute(VoiceIntent.Playback.Pause) { aFacts += it }
+            }
+            latch.countDown()
+        }
+        val b = Thread {
+            kotlinx.coroutines.runBlocking {
+                executor.execute(VoiceIntent.Playback.Resume) { bFacts += it }
+            }
+            latch.countDown()
+        }
+        a.start()
+        b.start()
+        assertTrue(latch.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+        assertEquals(listOf(VoiceActionOutcome.Dispatched), aFacts)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched), bFacts)
     }
 
     // The deprecated requestAudioFocus overload is what the sink itself calls (suppressing there is

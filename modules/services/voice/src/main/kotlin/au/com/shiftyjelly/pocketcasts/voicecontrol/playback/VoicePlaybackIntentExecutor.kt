@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlinx.coroutines.sync.withLock
 
 class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackSink: VoicePlaybackSink,
@@ -31,32 +32,48 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackManager: PlaybackManager,
 ) {
     /**
-     * THE ACTION-RESULT CHANNEL (spec 03c96924): whoever runs the action reports what a sink REALLY
-     * did, at the sink's own decision point, with no dependency on the response it renders. Set by
-     * the composition that owns the capture; null means the result goes unobserved.
+     * THE ACTION-RESULT CHANNEL (spec 03c96924, reviewer 3fb01865): the sink's structured fact
+     * travels through an INVOCATION-LOCAL callback parameter, never a mutable singleton slot —
+     * two overlapping dispatches each carry their own reporter, and one dispatch's cleanup can
+     * never detach another's.
      */
-    @Volatile
-    var onActionOutcome: ((VoiceActionOutcome) -> Unit)? = null
-
-    /** Report a sink's structured decision. Never inferred from [VoiceResponse]. */
-    fun reportAction(outcome: VoiceActionOutcome) {
-        onActionOutcome?.invoke(outcome)
+    suspend fun execute(
+        intent: VoiceIntent,
+        onOutcome: ((VoiceActionOutcome) -> Unit)? = null,
+    ): VoiceResponse {
+        // ONE action in flight per executor: the playback sink's reporter is a per-sink slot, so
+        // serializing sink entry keeps it unambiguous while the fact itself stays invocation-local
+        // in onOutcome.
+        return actionMutex.withLock {
+            val playback = playbackSink as? PlaybackManagerPlaybackSink
+            playback?.actionReporter = onOutcome
+            try {
+                executeLocked(intent, onOutcome)
+            } finally {
+                playback?.actionReporter = null
+            }
+        }
     }
 
-    init {
-        // The playback sink reports its OWN decisions (e.g. the audio-focus result, which is the
-        // only place the duck outcome exists). Everything else is reported below at the call site.
-        (playbackSink as? PlaybackManagerPlaybackSink)?.actionReporter = ::reportAction
-    }
+    private val actionMutex = kotlinx.coroutines.sync.Mutex()
 
-    suspend fun execute(intent: VoiceIntent): VoiceResponse {
+    private suspend fun executeLocked(
+        intent: VoiceIntent,
+        onOutcome: ((VoiceActionOutcome) -> Unit)?,
+    ): VoiceResponse = executeIntent(intent, onOutcome)
+
+    private suspend fun executeIntent(
+        intent: VoiceIntent,
+        onOutcome: ((VoiceActionOutcome) -> Unit)?,
+    ): VoiceResponse {
+        fun report(outcome: VoiceActionOutcome) = onOutcome?.invoke(outcome)
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
         // the player but not this counter is exactly the window where the turn
         // would resume over them.
         if (intent.changesPlayPauseState()) playbackManager.noteUserPlaybackCommand()
         val response = when (intent) {
-            is VoiceIntent.Playback -> executePlayback(intent)
+            is VoiceIntent.Playback -> executePlayback(intent, onOutcome)
 
             is VoiceIntent.Effects -> executeEffects(intent)
 
@@ -73,7 +90,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 cloudRouteSink.routeToCloud(intent.request, intent.tier, context)
             }
 
-            is VoiceIntent.Queue -> executeQueue(intent)
+            is VoiceIntent.Queue -> executeQueue(intent, onOutcome)
 
             is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
 
@@ -86,13 +103,13 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         return response
     }
 
-    private suspend fun executePlayback(intent: VoiceIntent.Playback): VoiceResponse = when (intent) {
+    private suspend fun executePlayback(intent: VoiceIntent.Playback, onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = when (intent) {
         // DISPATCH, not effect: the suspend call returning proves the manager was asked, and these
         // sinks render Silent either way. Reporting Dispatched (not Performed) keeps the fact to
         // what this call site actually observes (spec 3ed49695).
-        VoiceIntent.Playback.Pause -> playbackSink.pause().also { reportAction(VoiceActionOutcome.Dispatched) }
+        VoiceIntent.Playback.Pause -> playbackSink.pause().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 
-        VoiceIntent.Playback.Resume -> playbackSink.resume().also { reportAction(VoiceActionOutcome.Dispatched) }
+        VoiceIntent.Playback.Resume -> playbackSink.resume().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 
         is VoiceIntent.Playback.SeekRelative -> {
             // deltaSeconds in seconds; null means "no amount stated — sink
@@ -176,7 +193,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         VoiceIntent.Bookmark.QueryNearby -> bookmarkSink.queryNearby()
     }
 
-    private suspend fun executeQueue(intent: VoiceIntent.Queue): VoiceResponse = when (intent) {
+    private suspend fun executeQueue(intent: VoiceIntent.Queue, onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = when (intent) {
         is VoiceIntent.Queue.AddTop -> queueSink.addTop(intent.episode)
 
         is VoiceIntent.Queue.AddBottom -> queueSink.addBottom(intent.episode)
@@ -190,7 +207,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         // DISPATCHED, not Performed: clearUpNextAsync() returning proves the clear was REQUESTED,
         // not that the queue emptied (spec 3ed49695). The point of reporting at all is that the
         // CONFIRM_REQUIRED earcon it renders afterwards says nothing about either.
-        VoiceIntent.Queue.Clear -> queueSink.clear().also { reportAction(VoiceActionOutcome.Dispatched) }
+        VoiceIntent.Queue.Clear -> queueSink.clear().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 
         is VoiceIntent.Queue.RemoveByPodcast -> queueSink.removeByPodcast(intent.podcast)
 

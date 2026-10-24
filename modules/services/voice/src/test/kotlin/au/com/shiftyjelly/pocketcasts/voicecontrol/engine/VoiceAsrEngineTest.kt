@@ -1999,12 +1999,21 @@ class VoiceAsrEngineTest {
         // Exactly the VAD's samples — no virtual padding, no playback reference.
         assertTrue(candidate.pcm!!.contentEquals(shortArrayOf(100, 200, 300, 400)))
         assertEquals(SegmentObservation.WakeState.NotDetected, candidate.wakeState)
+        engine.stop()
+
         // The frozen context travelled the WHOLE ASR → routing → execution chain and every
-        // stage joined by the ISSUED id; the final recorded outcome is Executed.
+        // stage joined by the ISSUED id; the final recorded outcome is Executed — joined at the
+        // invocation's FINALIZATION (settle), not at dispatch, so the persisted record carries a
+        // result-or-unknown decision rather than an unconditional dispatch (reviewer 3fb01865).
+        // This test drives the engine alone (no service settles), so the token is finalized by
+        // stop()'s abandonment path, which records the same Executed-with-unknown. The outcome
+        // assertions therefore come AFTER stop.
+        assertTrue(
+            "the capture must end Executed, was " + (candidate.outcome?.let { it::class.simpleName } ?: "null"),
+            candidate.outcome is CollectionOutcome.Executed,
+        )
         assertEquals(candidate.context.captureId, (candidate.outcome as CollectionOutcome.Executed).captureId)
         assertTrue((candidate.outcome as CollectionOutcome.Executed).dispatchedWithoutThrowing)
-
-        engine.stop()
     }
 
     @Test

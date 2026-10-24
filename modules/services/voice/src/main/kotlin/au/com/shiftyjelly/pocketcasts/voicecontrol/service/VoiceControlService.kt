@@ -671,6 +671,10 @@ class VoiceControlService : Service() {
         val intentType = intent::class.simpleName ?: intent.toString()
         if (intentType == lastIntentType && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
             Timber.i("[VoicePipeline] debounce %s", intentType)
+            // A debounced dispatch still had a token bound by the engine: settling it here is what
+            // finalizes its publication (with schema unknown — no action was attempted) instead of
+            // leaking an open invocation forever (reviewer 3fb01865).
+            invocationToken?.let { voiceAsrEngine.get().settleInvocation(it) }
             return
         }
         lastIntentType = intentType
@@ -686,14 +690,17 @@ class VoiceControlService : Service() {
             // overlapping intents stay two different dispatches bound to two different captures.
             val engine = voiceAsrEngine.get()
             val token = invocationToken
-            voicePlaybackIntentExecutor.onActionOutcome = { fact ->
+            // INVOCATION-LOCAL reporter (reviewer 3fb01865): the fact channel is a parameter of
+            // THIS execute call, not a shared executor slot — overlapping dispatches cannot
+            // overwrite each other, and one dispatch's cleanup cannot detach another's reporter.
+            val onOutcome: (au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome) -> Unit = { fact ->
                 if (token != null) {
                     executionOutcomeOf(fact)?.let { engine.reportExecutionResult(token, it) }
                 }
             }
             try {
                 val response = try {
-                    voicePlaybackIntentExecutor.execute(intent)
+                    voicePlaybackIntentExecutor.execute(intent, onOutcome)
                 } catch (t: kotlinx.coroutines.CancellationException) {
                     // Cancellation is NOT "the user cancelled" and NOT "the action did not happen":
                     // a scope teardown looks identical here, and work may already have run. The
@@ -712,10 +719,10 @@ class VoiceControlService : Service() {
                     restoresAllowance = intent.restoresAllowance(),
                 )
             } finally {
-                voicePlaybackIntentExecutor.onActionOutcome = null
                 // THE BOUNDED FINALIZATION BOUNDARY: this dispatch is over. No result can arrive
-                // later through this token, so ownership is dropped — nothing leaks, and a
-                // stopped/restarted engine cannot inherit it.
+                // later through this token; settling finalizes publication with the observed
+                // result — or schema unknown when none was reported — exactly once (one-shot
+                // consumption refuses duplicates).
                 if (token != null) engine.settleInvocation(token)
             }
         }

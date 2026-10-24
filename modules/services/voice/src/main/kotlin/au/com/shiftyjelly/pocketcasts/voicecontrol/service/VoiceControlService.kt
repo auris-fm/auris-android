@@ -763,18 +763,25 @@ class VoiceControlService : Service() {
      * can be restarted behind the join.
      */
     private fun stopVoiceControl(): Job {
-        // Idempotent for BOTH cases: a running teardown is joined, and a completed teardown keeps
-        // its identity so a later stop cannot start resource release a second time (reviewer b915daaa).
+        // Idempotent for BOTH cases: a running teardown is joined, and a COMPLETED teardown keeps its
+        // identity, so a later stop cannot release resources a second time.
         stopInFlightJob?.let { return it }
         Timber.i("Stopping voice control service")
-        // The ROOT job owns every service child, including the dispatcher's own launches, so joining
-        // it covers handler/finally/settlement that the named fields do not (reviewer b915daaa).
         val rootJob = serviceScope.coroutineContext[Job]
+
+        // ORDER (reviewer 0bba7db5): CANCEL FIRST, then teardown, then release.
+        // Releasing before children have stopped is a use-after-release: a dispatcher child could
+        // still be running its handler/finally against the recognizer, renderer or session we just
+        // released. Cancellation is requested here, before anything is torn down, and the join below
+        // completes only once every owned child has actually finished.
         modeJob?.cancel()
-        // RESTORED (reviewer b915daaa): engine + capture teardown MUST run before routing/resources
-        // are released. Cancelling the scope is not a substitute: the engine tears down the stream it
-        // owns in its own flow finally, and release() must never delete a live capture.
+        // Engine + capture teardown runs after the cancellation request and BEFORE the releases.
+        // Cancelling the scope is not a substitute: the engine tears down the stream it owns in its
+        // own flow `finally`, and the inactive-engine branch releases acquisition routing.
         stopEngine()
+        // Every user of these resources has been asked to stop; the join at the end proves they did.
+        serviceScope.cancel()
+
         wiredBackend?.release()
         wiredBackend = null
         mediaSession?.isActive = false
@@ -784,10 +791,10 @@ class VoiceControlService : Service() {
         audioFeedbackRenderer.release()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
-        serviceScope.cancel()
         stopSelf()
-        // The completion authority, dispatched OUTSIDE the cancelled scope: it joins the root job, so
-        // it completes only after every owned child's finally/settlement has run.
+
+        // The completion authority, dispatched OUTSIDE the cancelled scope: it completes only after
+        // the root job (and so every owned child's handler/finally/settlement) has finished.
         return CoroutineScope(Dispatchers.IO).launch {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }

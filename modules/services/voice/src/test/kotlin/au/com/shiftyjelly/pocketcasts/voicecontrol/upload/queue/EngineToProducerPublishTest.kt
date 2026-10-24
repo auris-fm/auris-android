@@ -579,14 +579,16 @@ class EngineToProducerPublishTest {
     // owner binding/transaction. What IS real: the trigger, producer and store, and the assertions
     // read the EXECUTION stage parsed out of the single on-disk metadata file.
     @Test
-    fun `an auxiliary duck success published with an unobserved action decodes as unknown execution`() {
+    fun `an unobserved action published to the store records unknown execution with its reason`() {
         val root = tmp.newFolder("aux-unknown-pub")
         val store = newStore(root)
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         retainCapture(sink, ctx)
 
-        // The duck succeeded, and it is NOT this turn's result; the primary action was unobserved.
+        // The primary action was unobserved. NOTE: no duck fact is reported here — this control
+        // begins at the retention sink, so the assertion is about what an unobserved action
+        // publishes, not about an auxiliary/primary pair.
         assertTrue(sink.noteExecutionOutcome(ctx.captureId, ExecutionOutcome.NotObserved))
         trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
@@ -614,6 +616,11 @@ class EngineToProducerPublishTest {
             "the published bytes must record the execution as UNKNOWN, got $onDiskExecution",
             "unknown",
             (onDiskExecution.getValue("state") as RecordNode.Str).value,
+        )
+        assertEquals(
+            "the published bytes must carry the unknown REASON, got $onDiskExecution",
+            "observation_unavailable",
+            (onDiskExecution.getValue("reason") as RecordNode.Str).value,
         )
         val execution = decoded.observations.getValue(StageName.Execution)
         return StageProvenanceExecution(execution.state, execution.fields)

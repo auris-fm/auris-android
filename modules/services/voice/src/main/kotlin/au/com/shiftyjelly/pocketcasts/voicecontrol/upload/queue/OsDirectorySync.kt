@@ -38,9 +38,14 @@ class AndroidOsOperations(
     // loudly; there is no unsupported-runtime success fallback.
     private val oDirectoryAuthority: () -> Int? = DEFAULT_O_DIRECTORY_AUTHORITY,
 ) : OsOperations {
-    override val isSupported: Boolean = oDirectoryAuthority() != null
+    // Resolved ONCE (reviewer dffa4872): isSupported and openDirectory must reason about the SAME
+    // constant, and the production authorities are stable - a per-call resolution would let the two
+    // reads disagree. The injected authority is still the seam tests use.
+    private val resolvedFlag: Int? by lazy { oDirectoryAuthority() }
 
-    override fun openDirectory(path: String): FileDescriptor = Os.open(path, oDirectoryAuthority()!! or OsConstants.O_RDONLY, 0)
+    override val isSupported: Boolean = resolvedFlag != null
+
+    override fun openDirectory(path: String): FileDescriptor = Os.open(path, resolvedFlag!! or OsConstants.O_RDONLY, 0)
 
     override fun fsync(fd: FileDescriptor) {
         Os.fsync(fd)

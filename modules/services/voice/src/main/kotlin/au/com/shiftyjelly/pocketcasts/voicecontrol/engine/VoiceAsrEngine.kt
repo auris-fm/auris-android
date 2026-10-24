@@ -96,8 +96,16 @@ class VoiceAsrEngine @Inject constructor(
      * releasing the ASR backend. It lives on this engine's independent scope, so joining the
      * service scope's root does not cover it.
      */
-    internal var stoppedProcessingJob: Job? = null
-        private set
+    // EVERY processing job stop() cancelled that has not yet finished, so service teardown can
+    // await them ALL before releasing the ASR backend. These run on this engine's OWN
+    // `SupervisorJob + IO` scope, so joining the service scope's root does not cover them
+    // (reviewer 267001c1). A single slot is also not enough: with stop/start/stop the older native
+    // call can still be running while a newer job exists, and dropping the older one would let
+    // teardown release the backend underneath it (reviewer 26883305).
+    internal val unfinishedProcessingJobs: List<Job>
+        get() = unfinished.toList()
+
+    private val unfinished = java.util.concurrent.CopyOnWriteArrayList<Job>()
     private var playbackBufferProvider: (() -> FloatArray)? = null
 
     private var backend: AsrBackend? = null
@@ -941,7 +949,13 @@ class VoiceAsrEngine @Inject constructor(
         // engine's OWN SupervisorJob+IO scope, so cancelling serviceScope's root does not wait for
         // it (reviewer 267001c1). A noncooperative ASR/native call or its `finally` can otherwise
         // outlive stop() and overlap VoiceControlService's backend release.
-        stoppedProcessingJob = processingJob
+        processingJob?.let { cancelled ->
+            // Prune finished entries so a long-lived service does not accumulate them, then track
+            // this one until it actually finishes.
+            unfinished.removeAll { it.isCompleted }
+            unfinished.add(cancelled)
+            cancelled.invokeOnCompletion { unfinished.remove(cancelled) }
+        }
         processingJob?.cancel()
         processingJob = null
         // Tear down native capture directly too: the processing job's flow `finally` only runs

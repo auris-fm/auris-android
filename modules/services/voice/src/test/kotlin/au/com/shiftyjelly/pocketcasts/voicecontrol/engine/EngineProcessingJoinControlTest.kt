@@ -26,16 +26,22 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.`when`
+import org.mockito.stubbing.Answer
 
 /**
  * ENGINE PROCESSING JOIN CONTROL.
@@ -119,7 +125,7 @@ class EngineProcessingJoinControlTest {
             )
             // Wait until the engine actually reached its processing launch (attachCapture was called).
             withTimeout(5_000) {
-                while (engine.stoppedProcessingJob == null && processingFlow.subscriptionCount.value == 0) {
+                while (engine.unfinishedProcessingJobs.firstOrNull() == null && processingFlow.subscriptionCount.value == 0) {
                     kotlinx.coroutines.delay(10)
                 }
             }
@@ -127,9 +133,118 @@ class EngineProcessingJoinControlTest {
             assertNotNull(
                 "stop() must expose the cancelled processing job; without it service teardown " +
                     "cannot wait for work that is NOT a child of the service scope",
-                engine.stoppedProcessingJob,
+                engine.unfinishedProcessingJobs.firstOrNull(),
             )
         } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `stop after a restart keeps the OLDER unfinished job as well as the newer one`() = runBlocking {
+        // Reviewer 26883305: stop/start/stop. The older job's native work can still be running when
+        // the newer job exists; a single slot would DROP it and teardown would release the backend
+        // underneath it. Both must stay awaitable until each actually finishes.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val holdFirst = CompletableDeferred<Unit>()
+        val firstRunning = CompletableDeferred<Unit>()
+        var starts = 0
+        val flows = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
+        `when`(processor.startProcessing()).thenAnswer { invocation ->
+            val n = ++starts
+            flows.onStart { if (n == 1) firstRunning.complete(Unit) }
+                .onCompletion { if (n == 1) withContext(NonCancellable) { holdFirst.await() } }
+        }
+        val engine = engine(scope)
+        try {
+            engine.start(
+                backend = readyBackend(),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.NoMic },
+                onIntent = { _, _ -> },
+            )
+            withTimeout(5_000) { flows.subscriptionCount.first { it > 0 } }
+            engine.stop() // cancels job #1, which is held in its completion
+            withTimeout(5_000) { firstRunning.await() }
+            val firstJob = engine.unfinishedProcessingJobs.firstOrNull()
+            assertNotNull("the first job must be retained", firstJob)
+
+            engine.start(
+                backend = readyBackend(),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.NoMic },
+                onIntent = { _, _ -> },
+            )
+            withTimeout(5_000) { flows.subscriptionCount.first { it > 1 || starts >= 2 } }
+            engine.stop() // cancels job #2 while #1 may still be finishing
+
+            val jobs = engine.unfinishedProcessingJobs
+            assertTrue(
+                "the older unfinished job must survive a later stop; a single slot drops it and " +
+                    "teardown would then release the backend under it (found ${jobs.size} job(s))",
+                jobs.size >= 2 || jobs.contains(firstJob),
+            )
+        } finally {
+            holdFirst.complete(Unit)
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a join of the engine processing jobs waits for the real processing flow to finish`() = runBlocking {
+        // Reviewer 26883305: the previous version held a SIBLING job in the test scope and joined it
+        // in the test, so it proved nothing about production. This version holds the REAL processing
+        // flow — the one the engine's own launch collects — so the join under test is over the
+        // production job, and the barrier is that job's actual finalization.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val heldFlow = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
+        val flowStarted = CompletableDeferred<Unit>()
+        val releaseFlow = CompletableDeferred<Unit>()
+        `when`(processor.startProcessing()).thenReturn(
+            heldFlow.onEach { flowStarted.complete(Unit) }
+                .onCompletion {
+                    // The engine's processing job reaches here only when the flow ends. Hold it, the
+                    // way a noncooperative native call would, and make it observable.
+                    withContext(NonCancellable) { releaseFlow.await() }
+                },
+        )
+        val engine = engine(scope)
+        try {
+            engine.start(
+                backend = readyBackend(),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.NoMic },
+                onIntent = { _, _ -> },
+            )
+            withTimeout(5_000) { heldFlow.subscriptionCount.first { it > 0 } }
+            engine.stop()
+            val jobs = engine.unfinishedProcessingJobs
+            assertTrue("stop must expose the processing job(s) it cancelled", jobs.isNotEmpty())
+
+            // THE SUBJECT: the same joins the service teardown performs before releasing.
+            val joinerStarted = CompletableDeferred<Unit>()
+            val joiner = CoroutineScope(Dispatchers.IO).launch {
+                withContext(NonCancellable) {
+                    joinerStarted.complete(Unit)
+                    jobs.forEach { it.join() }
+                }
+            }
+            withTimeout(5_000) { joinerStarted.await() }
+            assertFalse(
+                "teardown must not proceed to release while the real processing flow is held",
+                joiner.isCompleted,
+            )
+            releaseFlow.complete(Unit)
+            withTimeout(5_000) { joiner.join() }
+            assertTrue("the join completes once the real processing flow finished", joiner.isCompleted)
+        } finally {
+            releaseFlow.complete(Unit)
             scope.cancel()
         }
     }
@@ -167,7 +282,7 @@ class EngineProcessingJoinControlTest {
                 val joiner = CoroutineScope(Dispatchers.IO).launch {
                     withContext(NonCancellable) {
                         joinerStarted.complete(Unit)
-                        engine.stoppedProcessingJob?.join()
+                        engine.unfinishedProcessingJobs.firstOrNull()?.join()
                         held.join()
                     }
                 }

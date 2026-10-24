@@ -780,7 +780,7 @@ class VoiceControlService : Service() {
         // SupervisorJob+IO scope and is only CANCELLED here, not joined (reviewers 267001c1). That
         // job is captured below and awaited alongside the service children before any release.
         stopEngine()
-        val engineProcessingJob = voiceAsrEngine.get().stoppedProcessingJob
+        val engineProcessingJobs = voiceAsrEngine.get().unfinishedProcessingJobs
         serviceScope.cancel()
         stopSelf()
 
@@ -794,8 +794,12 @@ class VoiceControlService : Service() {
                 // The engine's processing job is NOT a child of the service scope, so it needs its
                 // own join: a noncooperative ASR/native call or its finally must finish before we
                 // release the backend it may still be using.
-                runCatching { engineProcessingJob?.join() }
-                    .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
+                // EVERY unfinished engine job, not just the newest: a stop/start/stop sequence can
+                // leave an older native call running (reviewer 26883305).
+                engineProcessingJobs.forEach { job ->
+                    runCatching { job.join() }
+                        .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
+                }
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so
                 // touching them from this IO job would be an off-thread release.

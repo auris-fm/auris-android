@@ -105,11 +105,19 @@ class VoiceIntentDispatcher @Inject constructor() {
      * and a lost observation asserts nothing — so provenance keeps schema unknown for both.
      */
     internal fun executionOutcomeOf(fact: VoiceActionOutcome): ExecutionOutcome? = when (fact) {
+        // Dispatch alone is still nothing (dispatch is not effect). NotObserved IS delivered:
+        // it is the explicit unobserved observation the aggregation needs alongside an auxiliary
+        // fact, so duck-success plus unobserved primary actions cannot aggregate to success.
         VoiceActionOutcome.Dispatched -> null
-        VoiceActionOutcome.NotObserved -> null
+
+        VoiceActionOutcome.NotObserved -> ExecutionOutcome.NotObserved
+
         VoiceActionOutcome.Performed -> ExecutionOutcome.Success
+
         is VoiceActionOutcome.Failed -> ExecutionOutcome.Failure
+
         is VoiceActionOutcome.PreconditionFailed -> ExecutionOutcome.Failure
+
         is VoiceActionOutcome.Refused -> ExecutionOutcome.Refused
     }
 

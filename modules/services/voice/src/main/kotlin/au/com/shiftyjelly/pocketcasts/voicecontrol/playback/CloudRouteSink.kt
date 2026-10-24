@@ -256,15 +256,10 @@ class CloudRouteSink internal constructor(
                         if (!audioPlayed) {
                             audioPlayed = true
                             // The duck outcome exists ONLY at the focus-result branch; deliver
-                            // this turn's channel there (narrow window; supersession keeps one
-                            // live turn, so the per-sink slot is single-flight here).
-                            val playback = playbackSink as? PlaybackManagerPlaybackSink
-                            playback?.actionReporter = onDuck
-                            try {
-                                playbackSink.duck()
-                            } finally {
-                                playback?.actionReporter = null
-                            }
+                            // this turn's own channel there — no shared mutable callback: the
+                            // reporter travels with THIS focus request (reviewer c15bf037).
+                            (playbackSink as? PlaybackManagerPlaybackSink)?.duckReporting(onDuck)
+                                ?: playbackSink.duck()
                             ducked = true
                         }
                         audioPlayer?.submitFrame(event.bytes)

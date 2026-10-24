@@ -73,6 +73,7 @@ class VoiceIntentDispatcherLifecycleTest {
         )
         job?.join()
         verify(engine, times(1)).settleInvocation(any())
+        Unit
     }
 
     @Test
@@ -109,6 +110,7 @@ class VoiceIntentDispatcherLifecycleTest {
         )
         job?.join()
         verify(engine, times(1)).settleInvocation(any())
+        Unit
     }
 
     @Test

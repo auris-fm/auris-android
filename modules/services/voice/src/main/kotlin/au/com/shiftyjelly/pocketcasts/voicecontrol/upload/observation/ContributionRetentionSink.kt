@@ -89,7 +89,7 @@ class RetainedCandidate internal constructor(val context: CaptureContext) {
  * The three loss categories stay distinct: revocation purges all charges; listening closure ends
  * only the open prefix; deferral changes nothing.
  */
-class ContributionRetentionSink(
+open class ContributionRetentionSink(
     private val budget: CollectionBudget,
     private val maxBytesPerClip: Long = SegmentObserver.DEFAULT_MAX_RETAINED_BYTES,
 ) : SegmentSink,
@@ -557,10 +557,18 @@ class ContributionRetentionSink(
      * is stored beside the candidate rather than mutating the issued context. Refused for an
      * unknown/evicted capture, and a terminal outcome is NOT overwritten.
      */
-    fun noteExecutionOutcome(captureId: UUID, outcome: ExecutionOutcome): Boolean = synchronized(lock) {
+    open fun noteExecutionOutcome(captureId: UUID, outcome: ExecutionOutcome): Boolean = synchronized(lock) {
         val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
         if (candidate.executionOutcome != null) return false
         candidate.executionOutcome = outcome
+        true
+    }
+
+    /** Test visibility: retains a candidate directly so outcome recording can be exercised. */
+    fun retainCandidateForTest(captureId: UUID): Boolean = synchronized(lock) {
+        candidates += RetainedCandidate(
+            context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset"),
+        )
         true
     }
 

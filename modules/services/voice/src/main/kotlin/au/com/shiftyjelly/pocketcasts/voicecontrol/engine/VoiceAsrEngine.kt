@@ -334,7 +334,15 @@ class VoiceAsrEngine @Inject constructor(
      * neither duplicate nor overwrite it, and a token that is no longer open — settled, abandoned
      * or from a restarted lifecycle — is refused rather than attributed to some other capture.
      */
-    fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean = synchronized(invocationLock) {
+    // Test/diagnostic seam: opens the same invocation record a real dispatch would, so a control
+    // can drive report/settle against the engine's ACTUAL structures. Never used in production.
+    internal fun openInvocationForTest(captureId: java.util.UUID, id: Long): InvocationToken {
+        val token = InvocationToken(id = id, captureId = captureId)
+        synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
+        return token
+    }
+
+    internal fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean = synchronized(invocationLock) {
         // The FACT is recorded; the invocation stays OPEN. Publication happens once, at explicit
         // settlement — a first fact no longer pre-empts a later observed failure, and the
         // finalize boundary remains the single publication point (reviewer dab802ec).
@@ -350,14 +358,25 @@ class VoiceAsrEngine @Inject constructor(
      * publishes only after its invocation is over, carrying its observed result or, if none was
      * reported, the honest schema unknown (dispatch alone is not a result; spec 3ed49695).
      */
-    fun settleInvocation(token: InvocationToken) {
-        val record = synchronized(invocationLock) { openInvocations.remove(token.id) }
-        if (record != null && record.token != token) {
-            // A mismatched token must not consume the legitimate invocation: restore it.
-            synchronized(invocationLock) { openInvocations[record.token.id] = record }
-            return
+    fun settleInvocation(token: InvocationToken): Boolean = settleAndReport(token)
+
+    /**
+     * Returns true when THIS call consumed the invocation (mismatched or already-settled tokens
+     * return false and change nothing).
+     */
+    private fun settleAndReport(token: InvocationToken): Boolean {
+        // VALIDATE AND CONSUME IN ONE LOCK INTERVAL (reviewer c15bf037): a remove-then-restore
+        // two-step window let a concurrent report/settle lose a fact or resurrect a stopped
+        // invocation. Here the stored record must match the FULL token before it is consumed.
+        val record: InvocationRecord? = synchronized(invocationLock) {
+            val candidate = openInvocations[token.id]
+            if (candidate != null && candidate.token == token) openInvocations.remove(token.id) else null
         }
-        record?.let { finalizePublication(it.token, aggregateObservations(it.observations)) }
+        record?.let {
+            finalizePublication(it.token, aggregateObservations(it.observations))
+            return true
+        }
+        return false
     }
 
     private fun finalizePublication(token: InvocationToken, outcome: ExecutionOutcome?) {

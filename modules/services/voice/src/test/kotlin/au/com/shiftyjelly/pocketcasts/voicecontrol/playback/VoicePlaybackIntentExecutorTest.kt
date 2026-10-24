@@ -551,7 +551,6 @@ class VoicePlaybackIntentExecutorTest {
         val playbackManager = Mockito.mock(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager::class.java)
         val sink = PlaybackManagerPlaybackSink(playbackManager, context)
         val facts = mutableListOf<VoiceActionOutcome>()
-        sink.actionReporter = { facts += it }
 
         Mockito.`when`(
             audioManager.requestAudioFocus(
@@ -560,7 +559,8 @@ class VoicePlaybackIntentExecutorTest {
                 org.mockito.kotlin.any(),
             ),
         ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
-        val granted = kotlinx.coroutines.runBlocking { sink.duck() }
+        // The per-call channel: the reporter travels with THIS focus request, never a shared slot.
+        val granted = kotlinx.coroutines.runBlocking { sink.duckReporting { facts += it } }
         Mockito.`when`(
             audioManager.requestAudioFocus(
                 org.mockito.kotlin.any(),
@@ -568,7 +568,7 @@ class VoicePlaybackIntentExecutorTest {
                 org.mockito.kotlin.any(),
             ),
         ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_FAILED)
-        val denied = kotlinx.coroutines.runBlocking { sink.duck() }
+        val denied = kotlinx.coroutines.runBlocking { sink.duckReporting { facts += it } }
 
         // Identical presentation...
         assertEquals("the granted path renders Silent", VoiceResponse.Silent, granted)

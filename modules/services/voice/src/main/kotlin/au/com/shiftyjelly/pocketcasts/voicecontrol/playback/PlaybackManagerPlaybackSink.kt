@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 
 @Singleton
@@ -33,7 +34,25 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     // androidx.media — a dependency this module does not carry (FocusManager in :repositories uses it).
     // Migrating means adding that dependency; suppressing is the smaller change until then.
     @Suppress("DEPRECATION")
-    override suspend fun duck(): VoiceResponse {
+    override suspend fun duck(): VoiceResponse = duckReporting(null)
+
+    /**
+     * The duck with its OWN result channel (reviewer c15bf037): no shared mutable callback. The
+     * reporter travels with THIS focus request, serialized by [duckMutex] so concurrent entries
+     * cannot cross facts. The duck is a quick operation; the stream it may precede is never held.
+     */
+    suspend fun duckReporting(onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = duckMutex.withLock {
+        val previous = actionReporter
+        actionReporter = onOutcome
+        try {
+            duckInternal()
+        } finally {
+            actionReporter = previous
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private suspend fun duckInternal(): VoiceResponse {
         val result = audioManager.requestAudioFocus(
             { focusChange ->
                 when (focusChange) {
@@ -64,7 +83,13 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Silent
     }
 
-    /** Where sink facts go; set by the executor that dispatches into this sink. */
+    /**
+     * Where sink facts go, set by the caller that drives THIS duck. The focus request is
+     * serialized by [duckMutex] so the slot is never shared across concurrent entries (reviewer
+     * c15bf037) — a quick operation, unlike the stream it may precede.
+     */
+    private val duckMutex = kotlinx.coroutines.sync.Mutex()
+
     @Volatile
     var actionReporter: ((VoiceActionOutcome) -> Unit)? = null
 

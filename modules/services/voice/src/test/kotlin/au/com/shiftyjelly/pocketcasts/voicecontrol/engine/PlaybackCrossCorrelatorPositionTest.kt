@@ -346,11 +346,24 @@ class PlaybackCrossCorrelatorPositionTest {
 
         @Test
         fun `a minimum-length VAD segment is still checked for bleed against a full 2 s reference`() {
-            val reference = tone(32_000, 300.0)
-            // The mic hears the reference's playback delayed by 100 ms: segment[i] = 0.3 * ref[i + 1600],
-            // i.e. the matching window starts at reference offset 1_600 -- inside the searched
-            // 50..500 ms window for the bounded 24 000-sample analysis window.
-            val segment = FloatArray(41_984) { i -> if (i + 1_600 < reference.size) 0.3f * reference[i + 1_600] else 0f }
+            // DISTINCTIVE, NONPERIODIC echo INSIDE the searched offsets, and placed entirely in the
+            // segment's LAST 6 000 samples so the PREFIX window (first 24 000) contains NONE of it
+            // (Claude 4366645238): a pure tone self-correlates (~0.72) at any aligned offset, and an
+            // echo overlapping the prefix window lets a prefix-revert mutant still find it. The
+            // unpositioned bounded search covers offsets 0..7 200 (24 000-sample analysis tail in a
+            // 32 000 reference); the echo sits at reference offset 0 (the 500 ms delay edge,
+            // admissible). A prefix-revert mutant analyzes pure silence and must fail.
+            val burst = FloatArray(6_000) { i ->
+                var x = (i * 2_654_435_761L + 1_234_567_891L) % 4_294_967_296L
+                x = x xor (x shr 13)
+                (((x shr 16) and 0xFF) - 128) / 128f
+            }
+            // Reference offset 18 000 = analysis-tail index 18 000, i.e. the echo aligns at search
+            // offset 0 (implied delay 500 ms, the admissible edge): analysis[j] = 0.3f * ref[j].
+            val reference = FloatArray(32_000)
+            burst.copyInto(reference, 18_000)
+            val segment = FloatArray(41_984)
+            for (j in 0 until 6_000) segment[35_984 + j] = 0.3f * burst[j]
             assertTrue(
                 "segment longer than the reference must still be bleed-checked",
                 PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),

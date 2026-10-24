@@ -679,19 +679,29 @@ class CloudRouteSink internal constructor(
                         // Binary audio on the turn socket: submit to the player for buffered
                         // playback (the assistant's reply is delivered as audio, not tokens).
                         // Duck the host player on the first frame; restore on Done.
-                        if (!audioPlayed) {
-                            audioPlayed = true
-                            playbackSink.duck()
-                            ducked = true
-                            // The obligation outlives this invocation: a successor inherits it.
-                            duckReserved = true
-                        }
-                        audioPlayer?.submitFrame(event.bytes)
-                        audioPlayer?.play()
-                        // Audio submission boundary: play() called on the cloud audio player.
-                        // This is a submission/request, not confirmed audible output.
-                        if (audioPlayer != null) {
-                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
+                        //
+                        // OWNERSHIP-SERIALIZED MUTATION (reviewer faeb2546): the ownership check
+                        // AND the duck/submit/play mutation run inside the same turnMutex block
+                        // the successor's transfer uses, so a predecessor already processing a
+                        // frame cannot submit or play AFTER the successor's transfer stop and
+                        // restart stale buffered audio. Holding the lock for a standalone check
+                        // alone could still race the transfer; the mutation itself must be inside.
+                        turnMutex.withLock {
+                            if (activeTurnId != myId) return@collect
+                            if (!audioPlayed) {
+                                audioPlayed = true
+                                playbackSink.duck()
+                                ducked = true
+                                // The obligation outlives this invocation: a successor inherits it.
+                                duckReserved = true
+                            }
+                            audioPlayer?.submitFrame(event.bytes)
+                            audioPlayer?.play()
+                            // Audio submission boundary: play() called on the cloud audio player.
+                            // This is a submission/request, not confirmed audible output.
+                            if (audioPlayer != null) {
+                                Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
+                            }
                         }
                     }
 

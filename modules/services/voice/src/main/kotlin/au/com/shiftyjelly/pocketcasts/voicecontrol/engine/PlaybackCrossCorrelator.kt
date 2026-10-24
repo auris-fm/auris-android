@@ -25,10 +25,8 @@ class PlaybackCrossCorrelator @Inject constructor() {
         // BOUND, don't bail (reviewer 4356625095): the recorder's reference is 2 s = 32 000 samples
         // while a minimum VAD segment is 41 x 1024 = 41 984, so declining on length would skip
         // correlation for EVERY real segment and let the device's own answer audio be transcribed
-        // and executed. Bound the analysis window to the longest prefix that still leaves the
-        // reference room for the acoustic-delay search (ref minus maxDelay): the segment's PREFIX
-        // keeps `micPositionMs` valid for the analyzed samples, and the bounded window re-enters
-        // the ordinary window policies below instead of a special case.
+        // and executed. Bound the analysis window to what still overlaps the reference in player
+        // time (see TAIL below) instead of a special-case bail-out.
         val maxDelaySamples = (MAX_DELAY_SECONDS * reference.sampleRateHz).toInt()
         val analysis: FloatArray
         val analysisPositionMs: Long?

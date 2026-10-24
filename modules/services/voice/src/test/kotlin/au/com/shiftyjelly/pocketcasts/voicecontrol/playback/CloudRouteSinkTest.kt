@@ -1442,6 +1442,98 @@ class CloudRouteSinkTest {
         org.mockito.kotlin.verify(player, org.mockito.kotlin.atLeastOnce()).stop()
     }
 
+    // REVIEWER faeb2546: the AudioFrame mutation (duck/submitFrame/play) must be serialized with
+    // ownership transfer. The predecessor is paused INSIDE its frame's duck - actively executing,
+    // not at a suspension point, so a cancellation cannot shield the race - while the successor
+    // registers and stops the chain player. When the mutation is serialized under the turn mutex,
+    // the successor's transfer waits and the stop necessarily lands after the mutation; when it is
+    // not, the predecessor resumes submit/play AFTER the stop and restarts stale audio.
+    @Test
+    fun `an in-flight frame mutation completes before the successor's transfer stop, never after`() = runTest {
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        val order = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        whenever(player.play()).thenAnswer {
+            order.add("play")
+            Unit
+        }
+        whenever(player.stop()).thenAnswer {
+            order.add("stop")
+            Unit
+        }
+        val firstTurnConnected = CompletableDeferred<Unit>()
+        val duckPaused = java.util.concurrent.CountDownLatch(1)
+        val frame = CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2))
+        val events = { list: List<CloudRouteEvent> -> kotlinx.coroutines.flow.flow { list.forEach { emit(it) } } }
+        var routeCall = 0
+        val deps = TestDeps(
+            audioPlayer = player,
+            routeInvoker = { _ ->
+                if (routeCall++ == 0) {
+                    kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        firstTurnConnected.complete(Unit)
+                        kotlinx.coroutines.yield()
+                        emit(frame)
+                        awaitCancellation()
+                    }
+                } else {
+                    events(
+                        listOf(
+                            CloudRouteEvent.Connected("pcm_s16le@24k"),
+                            CloudRouteEvent.Done(1, 1),
+                        ),
+                    )
+                }
+            },
+        )
+        deps.playback.duckBlocker = duckPaused
+        val sink = deps.sink()
+
+        val aError = CompletableDeferred<Throwable?>()
+        val turnA = launch(kotlinx.coroutines.Dispatchers.Default) {
+            aError.complete(
+                runCatching {
+                    sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+                }.exceptionOrNull(),
+            )
+        }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(5_000) { firstTurnConnected.await() }
+                kotlinx.coroutines.withTimeout(5_000) { deps.playback.duckStarted.await() }
+            }
+        }
+
+        // The successor transfers while the predecessor is paused inside its frame mutation.
+        val turnB = launch(kotlinx.coroutines.Dispatchers.Default) {
+            runCatching {
+                sink.routeToCloud("second question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+            }
+        }
+        // Give the unsynchronized race a real-time window to manifest before releasing the frame.
+        val deadline = System.nanoTime() + 1_000_000_000L
+        while (!order.contains("stop") && System.nanoTime() < deadline) Thread.sleep(1)
+
+        duckPaused.countDown()
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeout(10_000) {
+                    turnB.join()
+                    turnA.cancel()
+                    turnA.join()
+                }
+            }
+        }
+        aError.await()?.let { if (it !is kotlinx.coroutines.CancellationException) throw it }
+
+        val mutationOrder = order.toList()
+        assertTrue(
+            "expected submit/play to complete BEFORE the successor's stop, got: " + mutationOrder,
+            mutationOrder.indexOf("play") != -1 && mutationOrder.indexOf("play") < mutationOrder.lastIndexOf("stop"),
+        )
+    }
+
     // REVIEWER 4357641034: the predecessor's buffered answer must be stopped when OWNERSHIP
     // TRANSFERS, not when the successor exits. A successor whose server stream stalls keeps the
     // predecessor's answer playing through the successor's whole turn and ahead of its own answer.
@@ -3404,8 +3496,14 @@ class CloudRouteSinkTest {
 
         override suspend fun duck(): VoiceResponse {
             calls += "duck"
+            duckStarted.complete(Unit)
+            duckBlocker?.await()
             return VoiceResponse.Silent
         }
+
+        /** When set, duck() blocks (non-suspending) until released: models a mid-mutation pause. */
+        var duckBlocker: java.util.concurrent.CountDownLatch? = null
+        val duckStarted = CompletableDeferred<Unit>()
 
         override suspend fun restore(): VoiceResponse {
             calls += "restore"

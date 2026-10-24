@@ -13,9 +13,11 @@ import org.junit.Test
  * DETERMINISTIC DISCRIMINATOR for the intermittent `cancel during the body` failure.
  *
  * Purpose: force each ordering of (dispatch registration, coroutine start, cancel) with an explicit
- * barrier, and record whether the retention charge is released. This is a PROBE, not a control:
- * it asserts nothing about production correctness yet. It exists to turn a hypothesis into either a
- * failing trace or a disproof.
+ * barrier and RECORD THE COROUTINE DIAGNOSTICS. This is a PROBE, not a control (reviewer 5184236b):
+ * it touches no retention charge, no job binding and no trigger, and it asserts no production
+ * property — its green count establishes nothing about the pipeline. Its only output is the printed
+ * cause/completion ordering, which is what disproved the earlier "registration race" hypothesis.
+ * Delete it when the real cause of the intermittent failure is found.
  */
 class CancelOrderingReproTest {
 

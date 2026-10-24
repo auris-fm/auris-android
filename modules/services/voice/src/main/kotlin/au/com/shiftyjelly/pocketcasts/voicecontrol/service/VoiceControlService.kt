@@ -141,6 +141,30 @@ class VoiceControlService : Service() {
         return START_NOT_STICKY
     }
 
+    /**
+     * THE LIFECYCLE SEAM over this service's REAL state: the engine's start flag, the service scope,
+     * and the existing start/stop entry points. No lift-and-shift of behaviour — the adapter calls
+     * straight through, so what it reports is what the service does.
+     */
+    internal val lifecycle: VoiceServiceLifecycle by lazy {
+        VoiceServiceLifecycle.FromServiceState(
+            started = { engineStart.isStarted },
+            scope = object : VoiceServiceLifecycle.LifetimeScope {
+                override val isActive get() = serviceScope.coroutineContext[kotlinx.coroutines.Job]?.isActive == true
+            },
+            startPipeline = {
+                startVoiceControl()
+                engineStart.isStarted
+            },
+            stopPipeline = {
+                stopVoiceControl()
+                // Teardown is synchronous up to and including the scope cancel, so completion is
+                // already reachable when stop returns; callers may still await this job.
+                Job().apply { complete() }
+            },
+        )
+    }
+
     private fun startVoiceControl() {
         if (engineStart.isStarted) {
             Timber.i("Voice control already started")

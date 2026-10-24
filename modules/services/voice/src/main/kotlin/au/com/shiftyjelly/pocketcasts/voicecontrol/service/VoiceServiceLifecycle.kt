@@ -16,6 +16,32 @@ import kotlinx.coroutines.Job
  * to this interface, the production service and every control must both adopt it.
  */
 interface VoiceServiceLifecycle {
+    /**
+     * A lifetime over the REAL service state: [isStarted] reads the engine's own start state and
+     * [lifetime] wraps the service's own scope, so the seam cannot disagree with production.
+     * [start] and [stop] are the service's existing private methods handed in as callbacks — this
+     * adapter holds NO policy of its own, which is what keeps start/stop behaviour unchanged.
+     */
+    class FromServiceState(
+        private val started: () -> Boolean,
+        private val scope: LifetimeScope,
+        private val startPipeline: () -> Boolean,
+        private val stopPipeline: () -> Job,
+    ) : VoiceServiceLifecycle {
+        override val isStarted: Boolean get() = started()
+        override val lifetime: LifetimeScope get() = scope
+
+        override fun start(): Boolean {
+            if (started()) return false
+            return startPipeline()
+        }
+
+        override fun stop(): Job {
+            val job = stopPipeline()
+            return job
+        }
+    }
+
     /** True while the capture pipeline is running under this lifetime. */
     val isStarted: Boolean
 

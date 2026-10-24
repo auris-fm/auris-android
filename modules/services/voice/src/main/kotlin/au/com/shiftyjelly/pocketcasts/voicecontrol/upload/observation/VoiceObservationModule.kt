@@ -26,7 +26,10 @@ object VoiceObservationModule {
     @Provides
     @Singleton
     fun provideLocalWithdrawalIntent(
-        persistence: FileWithdrawalIntentPersistence,
+        // The INTERFACE: the concrete class lost its @Inject constructor when production binding
+        // moved to provideWithdrawalIntentPersistence below; requesting the concrete type here made
+        // the app-level Hilt graph unresolvable (caught by :app:packageDebug).
+        persistence: WithdrawalIntentPersistence,
     ): LocalWithdrawalIntentStore = LocalWithdrawalIntentStore(persistence)
 
     @Provides

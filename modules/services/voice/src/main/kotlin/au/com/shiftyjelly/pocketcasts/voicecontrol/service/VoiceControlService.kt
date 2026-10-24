@@ -153,8 +153,11 @@ class VoiceControlService : Service() {
     // renderer release is destructive, not merely redundant (spec d885d207).
     private val releasedResources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    // The single settled record for the LAST teardown (reviewer 9f873b94): see recordTeardownOutcome.
-    private val teardownOutcome = java.util.concurrent.atomic.AtomicReference<TeardownOutcome?>(null)
+    // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
+    // Volatile rather than CAS: the newest attempt is authoritative, and every read sees a whole
+    // record instead of a partially applied one.
+    @Volatile
+    private var teardownOutcome: TeardownOutcome? = null
 
     companion object {
         // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
@@ -163,6 +166,17 @@ class VoiceControlService : Service() {
         // A barrier-owned job that never finishes must not hang the teardown; the engine quiescence
         // check below still decides whether resources may be released.
         private const val BARRIER_JOIN_TIMEOUT_MS = 5_000L
+
+        // Every kind of resource this service releases, in release order. Shared by the initial
+        // teardown and the retry so both track progress identically (reviewer a9271b39).
+        private val ALL_RELEASES = listOf(
+            "backend",
+            "session",
+            "recognizer",
+            "feedback",
+            "notification",
+            "foreground",
+        )
 
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
@@ -258,7 +272,18 @@ class VoiceControlService : Service() {
         // created at all: the teardown already owns the shutdown and will not wait for a job that
         // did not exist when it closed. The foreground notification started above is undone the
         // same way every other early refusal in this method undoes it.
+        // ADMIT AN OWNERSHIP TICKET BEFORE ANY WORK RUNS (reviewer a9271b39). The previous version
+        // launched first and admitted afterwards, which had two holes: the body could already be
+        // running (and spawning children) before `beginStart` had a chance to refuse, and a start that
+        // completed very fast could release its own registration before it was ever inserted,
+        // leaving a stale job registered in a barrier that would later "join" it.
+        //
+        // The ticket is admitted FIRST. Only an admitted ticket gets its gate completed, and the
+        // coroutine cannot proceed past that gate, so no work exists before ownership does.
+        val startGate = kotlinx.coroutines.CompletableDeferred<Unit>()
         val startJob = serviceScope.launch(Dispatchers.IO) {
+            // Nothing below runs until admission has been decided.
+            startGate.await()
             ensureModelsReady()
             launch(Dispatchers.Main) {
                 modeJob = kotlinx.coroutines.flow.combine(
@@ -380,10 +405,10 @@ class VoiceControlService : Service() {
                 }.launchIn(serviceScope)
             }
         }
-        // ADMIT THE STARTED JOB (round 35). Done AFTER the launch so the barrier holds the real Job,
-        // and undone via invokeOnCompletion so a finished start does not accumulate in the set. If
-        // admission is refused, a shutdown already closed the barrier between the checks above and
-        // here; the start must not proceed, because that teardown will not wait for this job.
+        // ADMIT FIRST, THEN UNBLOCK. Registration and release are both installed BEFORE the gate
+        // opens, so there is no window in which the work runs unowned or releases itself before it
+        // was ever registered. If a shutdown closed the barrier meanwhile, the work is never
+        // unblocked at all: the coroutine is cancelled while still suspended on the gate.
         startJob.invokeOnCompletion { shutdownBarrier.release(listOf(startJob)) }
         if (!shutdownBarrier.beginStart(listOf(startJob))) {
             Timber.i("Voice control is stopping; refusing a new start")
@@ -393,6 +418,7 @@ class VoiceControlService : Service() {
             return false
         }
         startInFlightJob = startJob
+        startGate.complete(Unit)
 
         Timber.i("Voice control service started, observing listening mode")
         return true
@@ -905,6 +931,10 @@ class VoiceControlService : Service() {
                     stop = { voiceAsrEngine.get().stop() },
                     unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },
                     join = { job -> job.join() },
+                    // JUDGE OWNERSHIP, NOT JUST WHAT COULD BE JOINED (reviewer a9271b39): a job
+                    // that failed before this snapshot was never in `join`'s path and never judged,
+                    // so a pre-snapshot failure could still release as a clean stop.
+                    owned = { voiceAsrEngine.get().ownedJobs },
                     // EXPECTED CANCELLATION IS NOT FAILURE (reviewer 47a3a267): this teardown
                     // cancels these very jobs, so blanket-treating isCancelled as abnormal marked a
                     // normal shutdown as Held. Job exposes no public failure-cause accessor in this
@@ -929,17 +959,13 @@ class VoiceControlService : Service() {
                 // evidence the verdict depends on.
                 runCatching { voiceAsrEngine.get().pruneConsumedBookkeeping(onlyKeep = emptySet()) }
                     .onFailure { Timber.w(it, "[VoicePipeline] bookkeeping prune failed") }
+                // THE INITIAL RELEASE USES THE SAME PER-KIND TRACKER AS THE RETRY (reviewer
+                // a9271b39). It used to release inline, recording nothing, so a retry could not tell
+                // which kinds had already completed and repeated them — a second media-session or
+                // renderer release is destructive. One enforcement point, one record.
                 runCatching {
                     withContext(Dispatchers.Main) {
-                        wiredBackend?.release()
-                        wiredBackend = null
-                        mediaSession?.isActive = false
-                        mediaSession?.release()
-                        mediaSession = null
-                        voiceRecognizer.release()
-                        audioFeedbackRenderer.release()
-                        notificationManager.cancelNotification()
-                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES, releasedResources))
                     }
                 }.fold(
                     onSuccess = { TeardownResult.Released },
@@ -981,7 +1007,7 @@ class VoiceControlService : Service() {
                 )
             ) {
                 is TeardownRetry.Decision.Quiescent -> {
-                    val all = listOf("backend", "session", "recognizer", "feedback", "notification", "foreground")
+                    val all = ALL_RELEASES
                     val pending = TeardownRetry.pendingReleases(all, releasedResources)
                     val released = runCatching {
                         withContext(Dispatchers.Main) { releaseResources(pending) }
@@ -1092,8 +1118,13 @@ class VoiceControlService : Service() {
      */
     private fun recordTeardownOutcome(teardown: Deferred<TeardownResult>) {
         teardown.invokeOnCompletion {
-            teardownOutcome.compareAndSet(null, settleRecord(teardown))
-            teardownFailure = teardownOutcome.get()?.failure
+            // KEYED BY ATTEMPT, NOT BY "FIRST EVER" (reviewer a9271b39). A compareAndSet(null, ...)
+            // recorded the FIRST teardown forever, so a Held->Released retry could never replace it
+            // and `teardownFailure` stayed stale: the retry would succeed and the service would go on
+            // reporting a hold. Each attempt now owns its own record, and the CURRENT attempt is the
+            // one the caller consults.
+            teardownOutcome = settleRecord(teardown)
+            teardownFailure = teardownOutcome?.failure
         }
     }
 

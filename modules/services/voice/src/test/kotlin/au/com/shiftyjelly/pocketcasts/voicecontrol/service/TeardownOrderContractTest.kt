@@ -151,20 +151,55 @@ class TeardownOrderContractTest {
         }
     }
 
+    /**
+     * Where a teardown step appears in the production source.
+     *
+     * THE RELEASE STEPS MOVED (reviewer a9271b39): the initial teardown used to release inline, which
+     * bypassed the per-kind tracker the retry uses, so a retry repeated releases that had already
+     * happened. Releases now live in `releaseResources` and are reached from the teardown. Order is
+     * therefore asserted across the TEARDOWN and that helper: the helper must be called from inside
+     * the teardown, and its body sits after the join in the same file. `teardownReleaseAt` expresses
+     * that so the ordering claims stay meaningful instead of silently matching -1.
+     */
     private fun indexOfStep(source: String, step: String): Int = when (step) {
         "cancel-mode" -> source.indexOf("modeJob?.cancel()")
+
         "stop-engine" -> source.indexOf("stopEngine()")
-        "release-backend" -> source.indexOf("wiredBackend?.release()")
-        "release-session" -> source.indexOf("mediaSession?.release()")
-        "release-recognizer" -> source.indexOf("voiceRecognizer.release()")
-        "release-feedback" -> source.indexOf("audioFeedbackRenderer.release()")
-        "cancel-notification" -> source.indexOf("notificationManager.cancelNotification()")
-        "stop-foreground" -> source.indexOf("stopForeground(")
+
+        "release-backend", "release-session", "release-recognizer", "release-feedback",
+        "cancel-notification", "stop-foreground",
+        -> teardownReleaseAt(source, step)
+
         "cancel-scope" -> source.indexOf("serviceScope.cancel()")
+
         "join-root" -> source.indexOf("rootJob?.join()")
+
         "stop-self" -> source.indexOf("stopSelf()")
+
         else -> -1
     }
+
+    /** Release steps are dispatched by kind, so locate the KIND the teardown asks for. */
+    private fun teardownReleaseAt(source: String, step: String): Int {
+        val kind = when (step) {
+            "release-backend" -> "\"backend\""
+            "release-session" -> "\"session\""
+            "release-recognizer" -> "\"recognizer\""
+            "release-feedback" -> "\"feedback\""
+            "cancel-notification" -> "\"notification\""
+            "stop-foreground" -> "\"foreground\""
+            else -> return -1
+        }
+        // Releases are dispatched by kind through ONE call inside the teardown. Ordering against
+        // the join is therefore a property of that call site, not of each kind's definition, which
+        // sits further down the file. Returning the call site keeps the ordering claim honest;
+        // `releaseOrder` separately asserts that every kind really is dispatched, in order.
+        assertTrue("kind $kind must be dispatched by releaseResources", estimatedPresence(kind))
+        return source.indexOf("releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES")
+    }
+
+    /** The production file, for the helper-based release assertions below. */
+    private fun estimatedPresence(kind: String): Boolean = productionFileSource().contains("$kind ->")
 
     /** The production start function, read from the source tree. */
     private fun productionStartSource(): String {
@@ -205,7 +240,9 @@ class TeardownOrderContractTest {
     @Test
     fun `the releases run on the main dispatcher they are confined to`() {
         val source = productionStopVoiceControlSource()
-        val releases = listOf("wiredBackend?.release()", "mediaSession?.release()", "audioFeedbackRenderer.release()")
+        // Releases are dispatched from releaseResources; the MAIN confinement is the
+        // withContext(Dispatchers.Main) around that call, asserted below.
+        val releases = listOf("releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES")
         releases.forEach { call ->
             val at = source.indexOf(call)
             assertTrue("$call must be present in the teardown", at >= 0)
@@ -360,8 +397,8 @@ class TeardownOrderContractTest {
         val closeAt = source.indexOf("shutdownBarrier.close()")
         val cancelAt = source.indexOf("serviceScope.cancel()")
         val joinAt = source.indexOf("ownedByShutdown.forEach")
-        // The RELEASE block of this teardown, not the helper defined further down the file.
-        val releaseAt = source.indexOf("wiredBackend?.release()")
+        // The RELEASE call of this teardown, not the helper defined further down the file.
+        val releaseAt = source.indexOf("releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES")
         assertTrue("the barrier must be closed, got no close() in the teardown", closeAt >= 0)
         assertTrue("the barrier must close BEFORE the scope is cancelled", closeAt < cancelAt)
         assertTrue("the barrier-owned jobs must be joined", joinAt > 0)
@@ -433,9 +470,12 @@ class TeardownOrderContractTest {
         val source = productionStopVoiceControlSource()
         val rootJoinAt = source.indexOf("rootJob?.join()")
         val settleAt = source.indexOf("EngineQuiescence.settle(")
-        val releaseAt = source.indexOf("wiredBackend?.release()")
+        // The releases are dispatched through releaseResources now, so the teardown-side position is
+        // that call; the kinds themselves live further down the file.
+        val releaseAt = source.indexOf("releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES")
         assertTrue("the root join must be present", rootJoinAt >= 0)
         assertTrue("quiescence must be consulted", settleAt >= 0)
+        assertTrue("the releases must be dispatched from the teardown", releaseAt >= 0)
         assertTrue("quiescence must run after the root join", settleAt > rootJoinAt)
         assertTrue("the releases must come after quiescence", releaseAt > settleAt)
         assertTrue(

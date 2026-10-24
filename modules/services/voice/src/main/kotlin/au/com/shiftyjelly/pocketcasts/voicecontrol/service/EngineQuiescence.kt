@@ -46,7 +46,19 @@ internal object EngineQuiescence {
         recordedCause?.let { cause ->
             // A cancellation WRAPPING a real cause is not an exemption: report the real cause, so a
             // failure thrown during cleanup is visible as itself rather than as "cancelled".
-            if (cause is kotlinx.coroutines.CancellationException) return cause.cause
+            if (cause is kotlinx.coroutines.CancellationException) {
+                // A BARE CANCELLATION IS ONLY EXPECTED IF WE CAUSED IT (reviewer a9271b39). Returning
+                // null for every CancellationException accepted cancellation by ANYONE as success —
+                // exactly the external-cancellation case this function exists to catch. When the
+                // engine did not cancel this job, an unexplained cancellation is [ABANDONED_CANCELLATION].
+                return if (cause.cause != null) {
+                    cause.cause
+                } else if (job in cancelledByEngine) {
+                    null
+                } else {
+                    ABANDONED_CANCELLATION
+                }
+            }
             return cause
         }
         if (!job.isCancelled) return null
@@ -100,6 +112,11 @@ internal object EngineQuiescence {
         stop: () -> Unit,
         unfinished: () -> List<Job>,
         join: suspend (Job) -> Unit,
+        // EVERY job the engine ever created (reviewer a9271b39). `unfinished` alone cannot see a
+        // job that finished — cancelled, or failed — BEFORE the first snapshot, so a pre-snapshot
+        // failure was never judged and the shutdown could still report Settled. Ownership is the
+        // set that outlives completion; it is what the verdict must scan for abnormal finishes.
+        owned: () -> Set<Job> = { emptySet() },
         maxRounds: Int = MAX_ROUNDS,
         completionCause: (Job) -> Throwable? = { null },
     ): Verdict {
@@ -126,7 +143,13 @@ internal object EngineQuiescence {
                 // outcomes are inspected. Judge from the CAPTURED jobs, never by re-reading the live
                 // list — pruning means the same shutdown could otherwise be classified Held or
                 // Settled purely on prune timing.
-                val abnormal = joined.firstNotNullOfOrNull { job -> abnormalCause(job, completionCause) }
+                //
+                // JUDGE OWNERSHIP TOO, NOT ONLY WHAT WE JOINED (reviewer a9271b39): a job that had
+                // already finished before the first snapshot never appears in `joined`, so scanning
+                // it alone let a pre-snapshot failure through as Settled. `owned` is sampled ONCE
+                // here, at verdict time, and judged together with the joined set.
+                val judged = joined + owned()
+                val abnormal = judged.firstNotNullOfOrNull { job -> abnormalCause(job, completionCause) }
                 return if (abnormal == null) Verdict.Settled else Verdict.AbnormallyFinished(abnormal)
             }
             round += 1

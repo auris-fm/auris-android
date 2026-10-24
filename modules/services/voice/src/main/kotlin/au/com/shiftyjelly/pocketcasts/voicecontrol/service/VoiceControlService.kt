@@ -763,12 +763,18 @@ class VoiceControlService : Service() {
      * can be restarted behind the join.
      */
     private fun stopVoiceControl(): Job {
-        // Idempotent: a second stop joins the teardown already running instead of starting another.
-        stopInFlightJob?.let { if (it.isActive) return it }
+        // Idempotent for BOTH cases: a running teardown is joined, and a completed teardown keeps
+        // its identity so a later stop cannot start resource release a second time (reviewer b915daaa).
+        stopInFlightJob?.let { return it }
         Timber.i("Stopping voice control service")
-        val children = listOfNotNull(modeJob, acquisitionJob, startInFlightJob)
-        startInFlightJob = null
+        // The ROOT job owns every service child, including the dispatcher's own launches, so joining
+        // it covers handler/finally/settlement that the named fields do not (reviewer b915daaa).
+        val rootJob = serviceScope.coroutineContext[Job]
         modeJob?.cancel()
+        // RESTORED (reviewer b915daaa): engine + capture teardown MUST run before routing/resources
+        // are released. Cancelling the scope is not a substitute: the engine tears down the stream it
+        // owns in its own flow finally, and release() must never delete a live capture.
+        stopEngine()
         wiredBackend?.release()
         wiredBackend = null
         mediaSession?.isActive = false
@@ -780,13 +786,12 @@ class VoiceControlService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
         stopSelf()
-        // The completion authority: awaits the cancelled children's own finally/settlement.
+        // The completion authority, dispatched OUTSIDE the cancelled scope: it joins the root job, so
+        // it completes only after every owned child's finally/settlement has run.
         return CoroutineScope(Dispatchers.IO).launch {
             withContext(NonCancellable) {
-                children.forEach { child ->
-                    runCatching { child.join() }
-                        .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
-                }
+                runCatching { rootJob?.join() }
+                    .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
             }
         }.also { stopInFlightJob = it }
     }

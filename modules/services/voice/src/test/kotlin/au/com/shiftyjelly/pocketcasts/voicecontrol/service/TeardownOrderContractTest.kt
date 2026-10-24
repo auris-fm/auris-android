@@ -289,6 +289,22 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `the platform stop path observes the teardown outcome instead of discarding it`() {
+        // Reviewer 47a3a267: the seam is the ONE stop authority. Calling lifecycle.stop() and
+        // dropping the Deferred leaves a Held teardown invisible at the only place that can act on
+        // it. (A mutant that discards it survived every other control, which is why this exists.)
+        val source = productionFileSource()
+        assertTrue(
+            "the platform stop path must observe the teardown result",
+            source.contains("observeTeardown(lifecycle.stop())"),
+        )
+        assertTrue(
+            "the observation must distinguish Held from Released",
+            source.contains("is TeardownResult.Held -> {") && source.contains("teardownFailure = outcome.failure"),
+        )
+    }
+
+    @Test
     fun `a teardown that holds resources reports a Held result and never throws`() {
         // Reviewers 6ce4ad78 + 3104ba44: a resources-held teardown must not look like a clean one,
         // but throwing from this unrouted launch would be an UNCAUGHT exception and could take the

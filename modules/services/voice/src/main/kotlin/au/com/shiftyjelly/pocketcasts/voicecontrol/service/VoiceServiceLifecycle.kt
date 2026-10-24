@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 
 /**
@@ -17,7 +18,7 @@ import kotlinx.coroutines.Job
  *   engine's `isStarted` alone is false across the whole model-readiness window, which would let a
  *   second start slip in.
  */
-interface VoiceServiceLifecycle {
+internal interface VoiceServiceLifecycle {
     /** True once a start has been accepted, including while it is still waiting for readiness. */
     val isStarted: Boolean
 
@@ -27,8 +28,14 @@ interface VoiceServiceLifecycle {
     /** Start the pipeline unless one is already running or in flight. Returns false if it did not. */
     fun start(): Boolean
 
-    /** Stop the pipeline; the returned job completes when teardown has really finished. */
-    fun stop(): Job
+    /**
+     * Stop the pipeline; the returned job completes when teardown has really finished.
+     *
+     * The result is NOT discarded (reviewer 47a3a267): [TeardownResult] distinguishes a clean
+     * release from a teardown that deliberately HELD resources because the engine could not be
+     * proven settled. A caller that awaits only the Job cannot tell those apart.
+     */
+    fun stop(): Deferred<TeardownResult>
 
     interface LifetimeScope {
         val isActive: Boolean
@@ -47,7 +54,7 @@ interface VoiceServiceLifecycle {
         private val startedOrStarting: () -> Boolean,
         private val scope: LifetimeScope,
         private val startPipeline: () -> Boolean,
-        private val stopPipeline: () -> Job,
+        private val stopPipeline: () -> Deferred<TeardownResult>,
     ) : VoiceServiceLifecycle {
         override val isStarted: Boolean get() = startedOrStarting()
         override val lifetime: LifetimeScope get() = scope
@@ -59,6 +66,6 @@ interface VoiceServiceLifecycle {
             return startPipeline()
         }
 
-        override fun stop(): Job = stopPipeline()
+        override fun stop(): Deferred<TeardownResult> = stopPipeline()
     }
 }

@@ -165,7 +165,7 @@ class VoiceControlService : Service() {
             // back on the next foreground, or the button would silently do nothing.
             voiceControlServiceController.onServiceStoppedByUser()
             // ONE STOP AUTHORITY: the platform path stops through the seam, exactly like onDestroy.
-            lifecycle.stop()
+            observeTeardown(lifecycle.stop())
             return START_NOT_STICKY
         }
         // ONE START AUTHORITY: this platform path starts through the seam, not around it.
@@ -910,6 +910,28 @@ class VoiceControlService : Service() {
 
                     is TeardownResult.Held -> settled.failure
                 }
+            }
+        }
+    }
+
+    /**
+     * Observe a teardown result the platform path receives (reviewer 47a3a267).
+     *
+     * The seam is the ONE stop authority, so its result must not be dropped here: a Held teardown
+     * means the audio stack may still be owned, and that has to stay visible instead of the caller
+     * assuming the stop succeeded.
+     */
+    private fun observeTeardown(teardown: Deferred<TeardownResult>) {
+        CoroutineScope(Dispatchers.IO).launch {
+            when (val outcome = runCatching { teardown.await() }.getOrNull()) {
+                is TeardownResult.Released -> teardownFailure = null
+
+                is TeardownResult.Held -> {
+                    teardownFailure = outcome.failure
+                    Timber.w("[VoicePipeline] teardown held resources: ${outcome.failure.reason}")
+                }
+
+                null -> Timber.e("[VoicePipeline] teardown did not report an outcome")
             }
         }
     }

@@ -2,9 +2,11 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -36,7 +38,7 @@ class VoiceServiceLifecycleContractTest {
         var scopeActive = true
         var startCalls = 0
         var stopCalls = 0
-        var stopJob: Job? = null
+        var stopResult: Deferred<TeardownResult>? = null
 
         val lifetime: VoiceServiceLifecycle = VoiceServiceLifecycle.FromServiceState(
             // The service's authority: capture up OR an accepted start still in readiness.
@@ -51,7 +53,7 @@ class VoiceServiceLifecycleContractTest {
             },
             stopPipeline = {
                 stopCalls++
-                checkNotNull(stopJob) { "stop requires a teardown job" }
+                checkNotNull(stopResult) { "stop requires a teardown result" }
             },
         )
     }
@@ -81,8 +83,9 @@ class VoiceServiceLifecycleContractTest {
         val h = Harness()
         // Teardown is gated so the assertion observes a genuinely incomplete job.
         val gate = CompletableDeferred<Unit>()
-        h.stopJob = CoroutineScope(Dispatchers.IO).launch {
+        h.stopResult = CoroutineScope(Dispatchers.IO).async {
             withContext(NonCancellable) { gate.await() }
+            TeardownResult.Released
         }
         val returned = h.lifetime.stop()
         assertNotNull(returned)
@@ -90,6 +93,19 @@ class VoiceServiceLifecycleContractTest {
         gate.complete(Unit)
         returned.join()
         assertTrue("stop completes once teardown is really done", returned.isCompleted)
+    }
+
+    @Test
+    fun `a held teardown result survives the seam`() = runBlocking {
+        // Reviewer 47a3a267: the seam is the ONE stop authority. If it returned a bare Job, a
+        // teardown that deliberately HELD resources would be indistinguishable from a clean release
+        // at every caller. The result must cross the seam intact.
+        val h = Harness()
+        h.stopResult = CoroutineScope(Dispatchers.IO).async {
+            TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 2)))
+        }
+        val outcome = h.lifetime.stop().await()
+        assertTrue("a held teardown must not reach the caller as a clean release", outcome is TeardownResult.Held)
     }
 
     @Test

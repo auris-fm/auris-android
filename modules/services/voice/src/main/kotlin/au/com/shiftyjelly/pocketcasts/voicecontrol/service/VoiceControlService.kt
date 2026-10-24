@@ -148,8 +148,6 @@ class VoiceControlService : Service() {
         // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
         private const val MAX_ENGINE_JOIN_ROUNDS = 8
 
-        /** Placeholder cause: an engine job ended cancelled, which this build cannot tell apart from a failure. */
-        private val ABNORMAL_ENGINE_FINISH: Throwable = IllegalStateException("engine job finished cancelled")
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
 
@@ -852,13 +850,13 @@ class VoiceControlService : Service() {
                     stop = { voiceAsrEngine.get().stop() },
                     unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },
                     join = { job -> job.join() },
-                    // HONEST LIMIT: Job exposes no public failure-cause accessor in this coroutines
-                    // version (getCompletionExceptionOrNull/getCancellationException are internal),
-                    // so the service cannot distinguish a FAILED engine job from a cleanly cancelled
-                    // one. The verdict therefore stays conservative: cancellation is treated as an
-                    // abnormal finish and the teardown reports a held failure rather than claiming a
-                    // clean release it cannot prove (reviewer 28b32255).
-                    completionCause = { job -> if (job.isCancelled) ABNORMAL_ENGINE_FINISH else null },
+                    // EXPECTED CANCELLATION IS NOT FAILURE (reviewer 47a3a267): this teardown
+                    // cancels these very jobs, so blanket-treating isCancelled as abnormal marked a
+                    // normal shutdown as Held. Job exposes no public failure-cause accessor in this
+                    // coroutines version, so the service reports abnormal ONLY when the job can be
+                    // shown to have failed: an engine job cancelled WITH a non-cancellation cause.
+                    // Anything unobservable stays conservative (Held) rather than claiming success.
+                    completionCause = { job -> abnormalEngineFinish(job) },
                 )
                 if (verdict != EngineQuiescence.Verdict.Settled) {
                     // REPORT THE OUTCOME TRUTHFULLY, WITHOUT THROWING (reviewers 6ce4ad78 + 3104ba44):
@@ -921,6 +919,11 @@ class VoiceControlService : Service() {
      * means the audio stack may still be owned, and that has to stay visible instead of the caller
      * assuming the stop succeeded.
      */
+    // Judge an engine job's finish. The POLICY lives in EngineQuiescence so it is executable in a
+    // control: a cancellation the engine initiated is expected shutdown, and a job that completed
+    // without cancellation is clean (reviewer 47a3a267).
+    private fun abnormalEngineFinish(job: Job): Throwable? = EngineQuiescence.abnormalEngineFinish(job, voiceAsrEngine.get().cancelledProcessingJobs)
+
     private fun observeTeardown(teardown: Deferred<TeardownResult>) {
         CoroutineScope(Dispatchers.IO).launch {
             when (val outcome = runCatching { teardown.await() }.getOrNull()) {

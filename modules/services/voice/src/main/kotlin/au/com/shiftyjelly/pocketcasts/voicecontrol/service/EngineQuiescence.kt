@@ -13,11 +13,28 @@ internal object EngineQuiescence {
     /**
      * The cause of an abnormal finish, or null for a clean one.
      *
-     * `Job.join()` returns normally even when the job FAILED (verified by a one-off probe: 1.11.0), so completion alone is not proof of a healthy finish. The caller supplies the cause
-     * because `getCompletionExceptionOrNull` is not public API in this coroutines version; a
-     * cancelled job is not abnormal, since the teardown itself cancels these jobs.
+     * `Job.join()` returns normally even when the job FAILED (verified by a one-off probe on
+     * coroutines 1.11.0), so completion alone is not proof of a healthy finish. The caller supplies
+     * the cause because Job exposes no public failure-cause accessor in this version.
      */
     private fun abnormalCause(job: Job, completionCause: (Job) -> Throwable?): Throwable? = if (!job.isCompleted) null else completionCause(job)
+
+    /**
+     * The cause when an engine job FAILED, or null when its end was expected.
+     *
+     * The teardown cancels these jobs deliberately, so a cancellation the ENGINE initiated is
+     * expected shutdown and must not be reported as a held failure (reviewer 47a3a267). A job that
+     * finished without cancellation is clean. Because Job exposes no public failure-cause accessor
+     * in this coroutines version, a cancellation the engine did not initiate stays conservative:
+     * it is treated as a failure rather than claimed as success.
+     */
+    fun abnormalEngineFinish(job: Job, cancelledByEngine: Set<Job>): Throwable? {
+        if (!job.isCancelled) return null
+        return if (job in cancelledByEngine) null else ABANDONED_CANCELLATION
+    }
+
+    /** Cause reported for a cancellation the engine did not initiate. */
+    val ABANDONED_CANCELLATION: Throwable = IllegalStateException("engine job finished cancelled by someone else")
 
     /** Bounded re-sampling rounds; exhaustion is a failure, never a licence to release. */
     const val MAX_ROUNDS = 8
@@ -77,10 +94,11 @@ internal object EngineQuiescence {
             // Quiescence is "nothing UNFINISHED remains", not "the list is empty": the engine keeps
             // completed jobs listed until their completion callback prunes them.
             if (unfinished().none { !it.isCompleted }) {
-                // COMPLETION IS NOT SUCCESS: a failed job joins cleanly. Inspect the cause before
-                // calling the engine settled.
-                val abnormal = unfinished()
-                    .firstNotNullOfOrNull { job -> abnormalCause(job, completionCause) }
+                // COMPLETION IS NOT SUCCESS (reviewer 47a3a267): a failed job joins cleanly, so the
+                // outcomes are inspected. Judge from the CAPTURED jobs, never by re-reading the live
+                // list — pruning means the same shutdown could otherwise be classified Held or
+                // Settled purely on prune timing.
+                val abnormal = joined.firstNotNullOfOrNull { job -> abnormalCause(job, completionCause) }
                 return if (abnormal == null) Verdict.Settled else Verdict.AbnormallyFinished(abnormal)
             }
             round += 1

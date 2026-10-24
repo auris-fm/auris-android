@@ -6,11 +6,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -115,6 +118,87 @@ class EngineQuiescenceControlTest {
             assertTrue("no release may happen when work never settled", !released)
         } finally {
             gates.forEach { it.complete(Unit) }
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a job the engine cancelled is expected shutdown, not a held failure`() = runBlocking {
+        // Reviewer 47a3a267: the teardown cancels these very jobs. Treating every cancelled job as
+        // abnormal marked an ordinary shutdown as Held.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
+            job.cancel()
+            job.join()
+            assertTrue("the job must be settled before judging", job.isCompleted)
+            val verdict = EngineQuiescence.settle(
+                stop = {},
+                unfinished = { listOf(job) },
+                join = { it.join() },
+                // Our own cancellation: no failure cause.
+                completionCause = { null },
+            )
+            assertEquals("expected cancellation must settle, got $verdict", Verdict.Settled, verdict)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an already pruned job is judged from the captured set, not the live list`() = runBlocking {
+        // Reviewer 47a3a267: judging from the LIVE list means the same shutdown is classified Held
+        // or Settled purely on prune timing. The captured jobs must be the evidence.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val failedJob = scope.launch(Dispatchers.IO) { runCatching { throw IllegalStateException("engine died") } }
+            failedJob.join()
+            // The job is JOINED first (so it is captured), then pruned from the live list — exactly
+            // what the engine's completion callback does. Only the captured set can still see it.
+            var live: List<kotlinx.coroutines.Job> = listOf(failedJob)
+            val verdict = EngineQuiescence.settle(
+                stop = {},
+                unfinished = { live },
+                join = {
+                    it.join()
+                    // After joining, the engine prunes the finished entry.
+                    live = emptyList()
+                },
+                completionCause = { IllegalStateException("engine died") },
+            )
+            // The live list is now EMPTY, so a live-list scan would settle. The captured set still
+            // holds the failed job, so the failure must be seen even though it was pruned.
+            assertTrue(
+                "a pruned failed job must still be judged, got $verdict",
+                verdict is Verdict.AbnormallyFinished,
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `only a cancellation the engine did not initiate counts as a failure`() = runBlocking {
+        // Reviewer 47a3a267: the teardown cancels these jobs itself, so blanket-treating every
+        // cancelled job as abnormal reported a normal shutdown as Held.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val engineCancelled = scope.launch(Dispatchers.IO) { awaitCancellation() }
+            engineCancelled.cancel()
+            engineCancelled.join()
+            val strangerCancelled = scope.launch(Dispatchers.IO) { awaitCancellation() }
+            strangerCancelled.cancel()
+            strangerCancelled.join()
+
+            assertNull(
+                "a cancellation the engine initiated is expected shutdown",
+                EngineQuiescence.abnormalEngineFinish(engineCancelled, setOf(engineCancelled)),
+            )
+            assertNotNull(
+                "a cancellation nobody accounted for must NOT be reported as clean",
+                EngineQuiescence.abnormalEngineFinish(strangerCancelled, setOf(engineCancelled)),
+            )
+        } finally {
             scope.cancel()
         }
     }

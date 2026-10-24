@@ -97,6 +97,16 @@ class VoiceAsrEngine @Inject constructor(
     // (reviewer 267001c1). A single slot is also not enough: with stop/start/stop the older native
     // call can still be running while a newer job exists, and dropping the older one would let
     // teardown release the backend underneath it (reviewer 26883305).
+
+    /**
+     * The processing jobs THIS ENGINE cancelled, so a caller can tell an expected cancellation from
+     * a genuine failure: the service's teardown cancels them deliberately, and treating every
+     * cancelled job as abnormal would report a normal shutdown as a held failure.
+     */
+    internal val cancelledProcessingJobs: Set<Job> get() = cancelledJobs.toSet()
+
+    private val cancelledJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
+
     internal val unfinishedProcessingJobs: List<Job>
         get() = unfinished.toList()
 
@@ -949,6 +959,7 @@ class VoiceAsrEngine @Inject constructor(
             // this one until it actually finishes.
             unfinished.removeAll { it.isCompleted }
             unfinished.add(cancelled)
+            cancelledJobs.add(cancelled)
             cancelled.invokeOnCompletion { unfinished.remove(cancelled) }
         }
         processingJob?.cancel()

@@ -16,8 +16,9 @@ import kotlinx.coroutines.Job
  * a retained WAV was written through the producer's validated path — no ad-hoc assembly.
  *
  * GUARDS, in order:
- *  1. Fires only on the TERMINAL [CollectionOutcome.Executed] join (the sink only invokes the
- *     hook for that outcome with retained PCM) — routing/recognition alone never publish.
+ *  1. Fires only on a TERMINAL join the sink forwards with retained PCM: Executed, and (spec +
+ *     reviewer 1e4295a1) the terminal bleed rejection — a provenance record is the only durable
+ *     witness that the correlator decided. Routing/recognition alone never publish.
  *  2. Requires the authority FROZEN at capture start (account + session + epoch) AND the ONE
  *     COHERENT live identity read ([coherentLiveIdentity], taken under the owner transaction)
  *     to match the frozen tuple on ALL THREE fields. Logout, A→B account move, session-only
@@ -90,8 +91,11 @@ class RetentionPublishTrigger(
         try {
             val issued = candidate.context.issuedAuthority
             val pcm = candidate.pcm
-            // GUARD 1: terminal executed outcome with retained audio.
-            if (candidate.outcome !is CollectionOutcome.Executed || pcm == null) return
+            // GUARD 1: a publishable terminal outcome (Executed, or the terminal bleed rejection)
+            // with retained audio. Same consent/eligibility guards as every publication.
+            val publishable = candidate.outcome is CollectionOutcome.Executed ||
+                (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
+            if (!publishable || pcm == null) return
             // GUARD 2: the frozen tuple IS the publication owner; validation and the producer's
             // live reads happen inside ONE owner transaction (no check-then-use window).
             if (issued == null || issued.enrollmentEpoch == null) return

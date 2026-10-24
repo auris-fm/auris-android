@@ -443,24 +443,6 @@ class EngineToProducerPublishTest {
 
     // ---- STAGE PROVENANCE from the JOIN HISTORY (reviewer 54635caa) ----
 
-    /**
-     * A THROWN DETECTOR REACHES THE PRODUCED RECORD AS A KNOWN FAILURE (reviewer 0ee062be, spec 15:46Z).
-     *
-     * The mapping control alone would only prove an in-memory decision. This drives the path — an
-     * INJECTED engine observation with WakeState.DetectorFailed, join, engine provenance, real
-     * producer — and then RE-DECODES the persisted record.
-     *
-     * SCOPE, stated so nobody reads more into it: this control injects the engine OBSERVATION. It does
-     * not exercise the detector's own throw site, i.e. it does not prove the real detector actually
-     * emits DetectorFailed when speech detection fails. It proves that the state, once observed,
-     * survives into the record a recovery would read.
-     *
-     * The assertion reads the DECODED record, never the in-memory candidate (reviewer b5ed5d2c):
-     * recomputing provenance from the candidate would re-read the same input the mapping came from, so
-     * a producer that persisted `wake=unknown` would still pass. Verified by mutation — making the
-     * producer persist the wrong pair fails this assertion with
-     * "the PERSISTED wake state must be a known failure" (receipt: detector-error-mutant.log).
-     */
     // PROVENANCE WIRING (spec audit): production DOES observe bleed rejections —
     // VoiceAsrEngine.transcribeSegment joins CollectionOutcome.NotCollected(captureId, "bleed")
     // when UtteranceFilter's correlator rejects the segment — but the provenance mapping ignored
@@ -520,6 +502,24 @@ class EngineToProducerPublishTest {
         assertEquals("overlap", (decodedBleed.fields.getValue("decision") as RecordNode.Str).value)
     }
 
+    /**
+     * A THROWN DETECTOR REACHES THE PRODUCED RECORD AS A KNOWN FAILURE (reviewer 0ee062be, spec 15:46Z).
+     *
+     * The mapping control alone would only prove an in-memory decision. This drives the path — an
+     * INJECTED engine observation with WakeState.DetectorFailed, join, engine provenance, real
+     * producer — and then RE-DECODES the persisted record.
+     *
+     * SCOPE, stated so nobody reads more into it: this control injects the engine OBSERVATION. It does
+     * not exercise the detector's own throw site, i.e. it does not prove the real detector actually
+     * emits DetectorFailed when speech detection fails. It proves that the state, once observed,
+     * survives into the record a recovery would read.
+     *
+     * The assertion reads the DECODED record, never the in-memory candidate (reviewer b5ed5d2c):
+     * recomputing provenance from the candidate would re-read the same input the mapping came from, so
+     * a producer that persisted `wake=unknown` would still pass. Verified by mutation — making the
+     * producer persist the wrong pair fails this assertion with
+     * "the PERSISTED wake state must be a known failure" (receipt: detector-error-mutant.log).
+     */
     @Test
     fun `a failed wake detector is persisted as wake failed with detector_error`() {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))

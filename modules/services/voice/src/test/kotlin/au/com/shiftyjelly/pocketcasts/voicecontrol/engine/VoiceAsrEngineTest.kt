@@ -43,9 +43,20 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Contributi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionCaptureProducer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineStageProvenance
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.QueueLimits
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -61,6 +72,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.times
@@ -73,6 +85,9 @@ class VoiceAsrEngineTest {
 
     @get:Rule
     val mainCoroutineRule = MainCoroutineRule()
+
+    @get:Rule
+    val tmp = TemporaryFolder()
 
     private val context = mock<Context>()
     private val audioManager = mock<AudioManager>()
@@ -356,7 +371,6 @@ class VoiceAsrEngineTest {
         )
         engine.scope = this
         val handledIntents = mutableListOf<VoiceIntent>()
-
         engine.start(
             backend = FakeAsrBackend("pause"),
             audioRoute = AudioRoute.Speaker,
@@ -1520,6 +1534,151 @@ class VoiceAsrEngineTest {
         )
 
         override fun release() = Unit
+    }
+
+    // TERMINAL BLEED DELIVERY, END TO END (spec + reviewer 1e4295a1): the ACTUAL engine path —
+    // SpeechStarted admission freezes the capture, the segmenter closes it, the REAL
+    // UtteranceFilter decision rejects the segment as playback bleed, VoiceAsrEngine joins
+    // NotCollected("bleed"), the attached RetentionPublishTrigger fires through its unmodified
+    // consent/eligibility guards, and the PRODUCER's persisted bytes decode with bleed
+    // completed/overlap. No manual stagesFor/publish staging: the only test-authored pieces are
+    // the mocks the engine already takes (segmenter flow, filter, backend) and the store/producer
+    // every publish control uses.
+    @Test
+    fun `a bleed-rejected segment is delivered to the producer by the publish trigger`() = runTest {
+        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        // The real admission path: the settings-stop collection gate must be OPEN for the
+        // capture to be admitted and retained at all.
+        val admittingObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retentionSink,
+            authority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+        )
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
+        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
+        // THE PRODUCTION DECISION UNDER TEST: the filter rejects the segment as bleed.
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(false)
+        // Grace open: a wake-negative segment in Continuous still flows to the transcriber,
+        // which is where the bleed filter decision lives.
+        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val root = tmp.newFolder("bleed-delivery")
+        val store = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
+            clock = { 61_000_000L },
+            jitter = { it - 1 },
+        )
+        val producer = ContributionCaptureProducer(
+            store,
+            appVersion = { "8.20" },
+            appBuild = { "12345" },
+            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
+            enrollmentAccount = { "a@b.c" },
+            enrollmentSession = { 1L },
+        )
+        val trigger = RetentionPublishTrigger(
+            retentionSink,
+            producer,
+            // SAME KEYS AS PRODUCTION (VoiceUploadModule.ENGINE_FIXED_MODEL_PROVENANCE): the trigger
+            // appends `asr` and `translation` itself, so fixed models cover vad/wakeword/router only.
+            fixedModels = listOf(
+                "vad" to ModelRef.None,
+                "wakeword" to ModelRef.None,
+                "router" to ModelRef.None,
+            ),
+            stagesProvider = { EngineStageProvenance.stagesFor(it) },
+            publishUnderOwner = { frozen, commit ->
+                // The frozen tuple IS the test authority issued at capture start.
+                if (frozen.account == "a@b.c" && frozen.session == 1L && frozen.enrollmentEpoch == "epoch-1") commit() else false
+            },
+            dispatch = { body ->
+                body()
+                null
+            },
+        )
+        trigger.attach()
+
+        // The bleed branch fires BEFORE ASR, but the capture's frozen model provenance must be
+        // a real Named manifest id for the producer's schema to accept the record.
+        val bleedBackend = object : AsrBackend {
+            override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+            override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult("pause")
+
+            override val requiredModel = ModelSpec(
+                files = listOf(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile(
+                        url = "u",
+                        filename = "f",
+                        manifestId = "asr-1",
+                    ),
+                ),
+                targetDir = "manifest-version-1",
+            )
+
+            override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
+
+            override fun release() = Unit
+        }
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = intentRecognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
+            segmentObserver = admittingObserver,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = bleedBackend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+        engine.stop()
+
+        // The trigger DELIVERED: exactly one record beside the retained WAV, written by the
+        // producer's validated path, and retention fully released.
+        val ready = store.readyEntries()
+        assertEquals("the bleed rejection must be delivered by the trigger, not staged by the test", 1, ready.size)
+        assertEquals(0, retentionSink.retainedCount())
+        assertEquals(0L, retentionSink.retainedBytes())
+        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ready.single().captureId)).record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val bleed = decoded.observations.getValue(StageName.Bleed)
+        assertEquals("the PERSISTED bleed state must be a completed check", StageState.Completed, bleed.state)
+        assertEquals("overlap", (bleed.fields.getValue("decision") as RecordNode.Str).value)
     }
 
     private class RecordingRecognizer(

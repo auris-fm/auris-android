@@ -38,8 +38,12 @@ object EngineStageProvenance {
                 SegmentObservation.WakeState.Detected ->
                     StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected")))
 
+                // SCHEMA VOCABULARY (found by the bleed delivery control): a wake DECISION is
+                // `detected` or `rejected`; `no_wake_detected` is a REASON, not a decision, and the
+                // recovery validator refused the pair. A detector that ran and did not fire is a
+                // completed check with decision `rejected` — the same shape bleed uses.
                 SegmentObservation.WakeState.NotDetected ->
-                    StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("no_wake_detected")))
+                    StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("rejected")))
 
                 // The observer KNOWS the detector threw, so this is a known failure — never unknown.
                 // Recording it as observation_unavailable would launder a known outcome into an

@@ -493,8 +493,24 @@ class ContributionRetentionSink(
             }
             candidate.outcome = outcome
             candidate.stageOutcomes.add(outcome)
+            // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1): a bleed rejection is a publishable
+            // observation like Executed — the provenance record is the only durable witness that the
+            // correlator made a real decision. Other NotCollected reasons stay unpublished: the
+            // directed change covers the bleed lifecycle only, not a general re-scope of terminal
+            // outcomes. Publication still passes every trigger guard (frozen identity, consent,
+            // eligibility) unchanged.
             fired =
-                if (outcome is CollectionOutcome.Executed && candidate.pcm != null) candidate else null
+                if (
+                    (
+                        outcome is CollectionOutcome.Executed ||
+                            (outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
+                        ) &&
+                    candidate.pcm != null
+                ) {
+                    candidate
+                } else {
+                    null
+                }
         }
         // HOOK OUTSIDE THE LOCK (dispatched, never re-entrant): receiver re-validates state.
         if (fired != null) onReadyForPublication?.invoke(fired)

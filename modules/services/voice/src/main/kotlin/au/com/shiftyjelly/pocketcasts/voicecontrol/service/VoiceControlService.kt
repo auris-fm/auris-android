@@ -59,6 +59,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import timber.log.Timber
 
 @AndroidEntryPoint
@@ -117,6 +118,11 @@ class VoiceControlService : Service() {
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
+
+    // ONE atomic shutdown barrier: closing it refuses every later start AND returns every job owned
+    // at that instant, which is what a snapshot-then-cancel cannot do (reviewers 902e0c1a1,
+    // cce1f100, 9045dd43).
+    private val shutdownBarrier = ShutdownBarrier()
     private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
@@ -150,6 +156,10 @@ class VoiceControlService : Service() {
     companion object {
         // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
         private const val MAX_ENGINE_JOIN_ROUNDS = 8
+
+        // A barrier-owned job that never finishes must not hang the teardown; the engine quiescence
+        // check below still decides whether resources may be released.
+        private const val BARRIER_JOIN_TIMEOUT_MS = 5_000L
 
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
@@ -814,6 +824,10 @@ class VoiceControlService : Service() {
         // INVALIDATE ANY PENDING START UP FRONT (reviewer 543d284b): a start suspended inside
         // ensureReady() would otherwise commit after this teardown released the backend it needs.
         engineStart.invalidatePendingStart()
+        // CLOSE THE BARRIER FIRST: from here on no start is admitted, and the returned set is exactly
+        // the work this teardown owns. Taking a snapshot and then cancelling would leave a start that
+        // landed in between owned by nobody.
+        val ownedByShutdown = shutdownBarrier.close()
         Timber.i("Stopping voice control service")
         // CAPTURE THE ROOT NOW, before the cancel below. A child that outlives this call (a job
         // created just before cancellation, or a child of a child) must not be able to make the
@@ -842,6 +856,14 @@ class VoiceControlService : Service() {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
+                // JOIN EVERYTHING THE BARRIER RETURNED. The root join covers service children; a job
+                // the barrier owned but that is NOT a child of this scope (a start admitted just
+                // before the close, work it spawned) would otherwise be left running while the
+                // backend is released underneath it — precisely what the barrier exists to prevent.
+                ownedByShutdown.forEach { owned ->
+                    runCatching { withTimeout(BARRIER_JOIN_TIMEOUT_MS) { owned.join() } }
+                        .onFailure { Timber.w(it, "[VoicePipeline] barrier-owned job did not finish") }
+                }
                 // The engine's processing jobs are NOT children of the service scope, so they need
                 // their own join. SNAPSHOT THEM ONLY NOW, AFTER the service children have finished
                 // (reviewer e1b11171): the engine's stop() is called from several service children,

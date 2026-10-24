@@ -289,6 +289,24 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `the teardown closes the barrier before cancelling and joins what it owned`() {
+        // Reviewers 902e0c1a1/cce1f100/9045dd43: a snapshot-then-cancel leaves a start that lands in
+        // between owned by nobody. The barrier must be CLOSED (not sampled) and its returned set
+        // joined before any release. Source-order because the barrier's behaviour is controlled
+        // separately in ShutdownBarrierControlTest.
+        val source = productionStopVoiceControlSource()
+        val closeAt = source.indexOf("shutdownBarrier.close()")
+        val cancelAt = source.indexOf("serviceScope.cancel()")
+        val joinAt = source.indexOf("ownedByShutdown.forEach")
+        // The RELEASE block of this teardown, not the helper defined further down the file.
+        val releaseAt = source.indexOf("wiredBackend?.release()")
+        assertTrue("the barrier must be closed, got no close() in the teardown", closeAt >= 0)
+        assertTrue("the barrier must close BEFORE the scope is cancelled", closeAt < cancelAt)
+        assertTrue("the barrier-owned jobs must be joined", joinAt > 0)
+        assertTrue("barrier-owned jobs must be joined BEFORE releases run", joinAt < releaseAt)
+    }
+
+    @Test
     fun `the platform stop path observes the teardown outcome instead of discarding it`() {
         // Reviewer 47a3a267: the seam is the ONE stop authority. Calling lifecycle.stop() and
         // dropping the Deferred leaves a Held teardown invisible at the only place that can act on

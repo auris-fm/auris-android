@@ -39,6 +39,50 @@ internal object OboeNative {
     external fun nativeCloseInputCapture()
 
     external fun nativeIsCapturing(): Boolean
+
+    /**
+     * The device the live capture stream is routed to, or [NO_ROUTED_DEVICE] when none is observed.
+     *
+     * Read from the opened stream, which is the only source of the ACTUAL capture device. Enumeration
+     * reports what is available, not what capture uses, so an enumerated device must never stand in
+     * for this value when it is unknown.
+     */
+    external fun nativeRoutedCaptureDeviceId(): Int
+
+    /** No capture device is observed: the platform does not report one for the live stream. */
+    const val NO_ROUTED_DEVICE = 0
+
+    /**
+     * The live stream's frame/time observation, as
+     * `[framePosition, timestampNs, sampleRate, observable]`.
+     *
+     * `framePosition` and `timestampNs` describe ONE instant on the platform's monotonic clock, and
+     * `sampleRate` converts between them, so a sample at stream position `p` is at
+     * `timestampNs + (p - framePosition) * 1e9 / sampleRate`. `observable == 0` means the platform
+     * reports no timestamp for this stream; callers must treat the alignment as unknown rather than
+     * substituting the frame counter for a time.
+     *
+     * Read on the polling thread, never from the audio callback -- the platform documents that calling
+     * the timestamp API there is unreliable before Android R.
+     */
+    external fun nativeCaptureClock(): LongArray
+
+    /**
+     * Whether libonnxruntime.so is already loaded in this process. Lets a test assert that capture
+     * succeeds without wake/embedding/transcriber setup having run first.
+     */
+    external fun nativeIsOrtLoaded(): Boolean
+
+    /** Frames the VAD has consumed from capture since start, for reachability diagnostics. */
+    external fun nativeGetFramesConsumed(): Long
+
+    /**
+     * Aggregate detector diagnosis, or null when diagnostics are off. Order matches the native
+     * contract: rms x1000, score x1000, speechFrames, silentFrames, drainRemaining, then gatePassed,
+     * isSpeech and speechActive as 0/1. Aggregates only; no audio crosses this boundary.
+     */
+    external fun nativeGetVadDiagnostics(): LongArray
+    external fun nativeSetVadDiagnosticsEnabled(enabled: Boolean)
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechPcmSize(): Int
@@ -113,6 +157,13 @@ internal object OboeConfig {
  * it. That scoping is what makes a stale collector's `finally` unable to stop a capture opened
  * for a replacement session.
  */
+// The native capture reported a fault rather than an ordinary end.
+//
+// Distinct from a normal completion on purpose: the detector discards its frames when it faults, so a
+// turn that treats this as a clean end would drop the user's session with no error, no result and no
+// recovery once the noise stops. Thrown so the collector owns restarting.
+internal class VoiceCaptureFaultException(message: String) : Exception(message)
+
 internal class OboeCaptureEngine(
     private val hardware: CaptureHardware,
     private val assetManager: AssetManager,
@@ -166,11 +217,19 @@ internal class OboeCaptureEngine(
                                     frames.add(PcmAudioFrame(frameSamples, OboeConfig.SAMPLE_RATE_HZ))
                                     offset += frameSize
                                 }
+                                // The segment's own instant on the capture clock, read HERE rather
+                                // than where the frames are judged: this is the moment the stream
+                                // reports the segment as complete, and the drain loop is the thread
+                                // the platform documents as safe for the timestamp call. Reading it
+                                // later would fold in the queueing between the two points and place
+                                // the segment at a time it was already delivered, not captured.
+                                val clock = OboeNative.nativeCaptureClock()
                                 emit(
                                     VoiceSegmenterResult.SpeechEnded(
                                         frames = frames,
                                         speechOnsetSample = speechOnsetSample,
                                         speechEndSample = speechEndSample,
+                                        captureClock = clock,
                                     ),
                                 )
                             }
@@ -179,7 +238,17 @@ internal class OboeCaptureEngine(
 
                     0 -> { /* timeout */ }
 
+                    // An ordinary end: the stream was stopped.
                     -1 -> break
+
+                    // A FAULT, reported on its own value so it cannot be mistaken for the clean end
+                    // above. The native detector emits this when it is stuck speech-classified past
+                    // its ceiling; the frames are discarded upstream, so completing the flow here
+                    // would end the session with no error, no result and no recovery. Throwing makes
+                    // it observable to the collector, which owns restarting.
+                    -2 -> throw VoiceCaptureFaultException(
+                        "Native VAD fault: detector stuck speech-classified past its ceiling",
+                    )
                 }
             }
         } finally {
@@ -195,6 +264,11 @@ internal class OboeCaptureEngine(
      */
     fun dispose() {
         disposed = true
+        // Teardown is DELEGATED, not performed here. `onFinished` hands the event to the owner, whose
+        // generation check decides whether this engine still owns the stream: a stale engine whose
+        // stream was replaced or released must not stop the replacement capture. An unconditional stop
+        // here would double-stop the live path and let a stale teardown silence the successor -- which
+        // is exactly what the owner's MicrophoneCapture controls pin.
         onFinished(this)
     }
 

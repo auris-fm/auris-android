@@ -113,6 +113,7 @@ class EmbeddingIntentMatcher @Inject constructor(
     override suspend fun recognize(
         input: IntentRoutingInput,
         context: VoiceRecognitionContext,
+        logicalRequestId: String,
     ): VoiceRecognizeResult = withContext(Dispatchers.IO) {
         val transcript = input.routerTranscript
         if (transcript.isBlank()) return@withContext VoiceRecognizeResult(intent = null)

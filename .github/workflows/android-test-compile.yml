@@ -6,7 +6,9 @@ name: "Compile the Android test source set"
 # job is deliberately just a compilation — it needs no emulator and no secrets.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   compile:

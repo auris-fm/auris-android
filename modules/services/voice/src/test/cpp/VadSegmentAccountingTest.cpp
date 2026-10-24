@@ -40,17 +40,10 @@ float sileroVadPredict(const int16_t* samples, int32_t count) {
 
 void sileroVadResetState() {}
 
-// OboeAudioCapture holds a RingBuffer member, so constructing the stub above runs its constructor.
-// The host test never touches it — the VAD loop reads through readRingBuffer, which the fake
-// overrides — so trivial definitions are all that is needed.
-RingBuffer::RingBuffer() {}
-RingBuffer::~RingBuffer() {}
-
-// The vtable references the base implementation even though the fake overrides it; never called.
-int32_t OboeAudioCapture::readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) {
-    (void)outData; (void)maxSamples; (void)timeoutMs;
-    return 0;
-}
+// None of these are defined here any more: RingBuffer's members, OboeAudioCapture's members and the
+// base `readRingBuffer` all come from the real OboeAudioCapture.cpp compiled into this target. The
+// fake below overrides `readRingBuffer` through the vtable, which is why the base still has to exist
+// -- and it does, from the real translation unit.
 
 // --- A capture that serves a scripted sequence of VAD frames -----------------
 
@@ -66,16 +59,24 @@ class FakeCapture : public OboeAudioCapture {
 public:
     // loud = speech; quiet = silence. Consumed in order, one frame per readRingBuffer.
     std::deque<bool> script;
-    // A close starts a wall-clock cooldown (kCooldownMs = 1500) during which frames are discarded,
-    // and this loop only burns real time on its waits — so a scripted burst would land inside the
-    // cooldown. The test parks here to let it elapse.
+    // Optional per-read wall-clock delay. The processor no longer discards frames after a
+    // segment (the blind 1500ms cooldown is removed), so no test needs this to pass; it is kept
+    // only as a lever for timing-sensitive scripts.
     int pauseAfterFrames = -1;
     std::chrono::milliseconds pauseFor{0};
     int served = 0;
 
+    bool exitOnEmpty = false;
+
     int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
         (void)timeoutMs;
-        if (maxSamples < kFrame || script.empty()) return 0;  // stream inactive, like a timeout
+        if (maxSamples < kFrame || script.empty()) {
+            // OPT-IN real stream-inactive: NEGATIVE makes the runLoop break and EXIT (the stuck
+            // case joins on worker completion). Default 0 keeps the retry-timeout semantics the
+            // other scripted cases were written against.
+            if (exitOnEmpty) return -1;
+            return 0;
+        }
         // Sleep on every read from pauseAfterFrames onward, so the wall-clock cooldown elapses no
         // matter where the segment happens to close. The cost is wall time — the pause stretches
         // the whole script — which is why waitForEvent's timeout has to be generous above.
@@ -143,24 +144,67 @@ std::deque<bool> frames(int count, bool loud) {
 }  // namespace
 
 // Defined at file scope: a member definition must sit in a namespace that encloses the class, and
-// the class is in the global namespace. The real ones live in OboeAudioCapture.cpp, which calls the
-// Oboe API — the host test never links that, so it supplies its own.
-OboeAudioCapture::OboeAudioCapture() {}
-OboeAudioCapture::~OboeAudioCapture() {}
-
-// The vtable needs every virtual, including the Oboe callbacks this class overrides. They are
-// never invoked here — the VAD loop only calls readRingBuffer — so they are no-ops.
-oboe::DataCallbackResult OboeAudioCapture::onAudioReady(oboe::AudioStream* stream, void* audioData,
-                                                       int32_t numFrames) {
-    (void)stream; (void)audioData; (void)numFrames;
-    return oboe::DataCallbackResult::Continue;
-}
-void OboeAudioCapture::onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) {
-    (void)stream; (void)error;
-}
+// OboeAudioCapture.cpp is COMPILED into this target (see CMakeLists), so its constructor,
+// destructor and callbacks -- including the late-callback guard and the device clear in
+// `onErrorAfterClose` -- are the code under test rather than stubs supplied here. Only
+// `readRingBuffer` is overridden below, because it is virtual and the cases script its frames; and
+// the Oboe LIBRARY entry points are stubbed in OboeLibraryStubs.cpp, since the host links no Oboe.
 
 int main() {
     std::printf("native VAD segment accounting\n");
+
+    // (0) UNTHREAD-U1 (4d1e5946/2d8d5c4a): the stuck-detector branch. A detector stuck
+    // speech-classified past kStuckDetectorFrameLimit must surface the FAULT sentinel (kFaultEvent,
+    // not the stop sentinel) and must NOT emit a completed segment. The script is 4000 loud frames
+    // (limit 3750): the frames are served as fast as the loop reads them, so the script runs in
+    // wall-fast time despite the 240s equivalent length.
+    {
+        std::deque<bool> script = frames(4000, true);
+        FakeCapture capture;
+        capture.script = script;  // 4000 > 3750: a finite script already exceeds the ceiling.
+        capture.exitOnEmpty = true;  // the loop EXITS at script end, so worker completion is joinable
+        NativeVadProcessor processor(&capture);
+        check(processor.start(), "stuck-case capture starts");
+        bool sawFault = false;
+        bool timedOut = false;
+        int segmentsEmitted = 0;
+        // DELAYED-CONSUMER BARRIER: hold EVERY consumer wait until the worker has exited (the fake
+        // signals runLoop completion), so the fault is read after the exit block has run -- the
+        // notification race is excluded by construction, not by repeated passes.
+        int lastEvent = 0;
+        bool synced = false;
+        while (true) {
+            // WORKER-COMPLETION BOUNDARY (U1): before reading any event, block until the runLoop
+            // thread has exited by itself -- no stop(), no touching the pending event. The terminal
+            // cause is only read AFTER that synchronization succeeds, so the notification race is
+            // excluded by construction.
+            if (!synced) {
+                // HOLD ALL CONSUMER DELIVERY until the worker has completed on its own.
+                synced = processor.awaitRunLoopExitForTest(30000);
+                check(synced, "synchronization: the worker must complete before the terminal read");
+            }
+            const int event = processor.waitForEvent(60000);
+            lastEvent = event;
+            if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; break; }  // TERMINAL
+            if (event == 2) { segmentsEmitted++; continue; }
+            if (event == 1) { continue; }  // ordinary mid-run event (reviewer 1b0b712b)
+            if (event == 0) { timedOut = true; break; }
+            if (event == -1) { break; }
+            std::printf("      stuck-case unexpected event=%d\n", event);
+            break;
+        }
+        check(!timedOut, "the stuck run must terminate on the fault, never on a timeout");
+        std::printf("      stuck-case last event=%d timedOut=%d\n", lastEvent, (int)timedOut);
+        processor.stop();
+        // SYNCHRONIZED observation after worker shutdown: how many frames did the loop actually
+        // consume? (Reviewer 92d80009: establish the premise before asserting the terminal cause.)
+        std::printf("      stuck-case served=%d after join\n", capture.served);
+        check(!timedOut, "the stuck case must terminate on events, never on the wait timeout");
+        check(capture.served >= NativeVadProcessor::stuckFrameLimitForTest(),
+            "premise: the script must reach the stuck ceiling before the fault assertion");
+        check(sawFault, "a stuck detector surfaces the FAULT sentinel, not the stop sentinel");
+        check(segmentsEmitted == 0, "a stuck detector emits NO completed segment");
+    }
 
     // (1) A single timed utterance: the end sample is the end of the last *speech* frame, in the
     // segment's coordinates — which is also what makes it fit inside the emitted PCM.
@@ -197,10 +241,10 @@ int main() {
         const std::deque<bool> trailing = frames(80, false);
         script.insert(script.end(), trailing.begin(), trailing.end());
 
-        // ~50ms per read from after the burst: enough for the 1500ms cooldown to elapse while the
-        // gap plays out, without encoding where the segment closes.
-        const std::vector<Segment> segs = run(script, /*pauseAfter=*/5,
-                                             std::chrono::milliseconds(50));
+        // No wall-clock pause: the blind 1500ms discard cooldown is gone, so a second utterance
+        // after a long silent gap must close on framing alone. (This case previously needed a
+        // ~50ms-per-read pause purely to let the cooldown elapse, which also hid its removal.)
+        const std::vector<Segment> segs = run(script);
         check(segs.size() >= 2, "a second utterance after a long gap produces a second segment");
         if (segs.size() >= 2) {
             const Segment& s = segs[1];
@@ -208,6 +252,132 @@ int main() {
             check(s.end <= s.pcmSize, "second segment's end sample is inside its own segment");
             check(s.end > 0, "second segment's end sample is set");
         }
+    }
+
+    // (3) RETENTION: unbroken speech longer than the old ~5s forced endpoint (kMaxSpeechFrames = 78)
+    // must be retained whole. The bound used to finalise here as an ORDINARY speech-end, so the
+    // remainder was silently dropped and the truncated audio reached ASR indistinguishable from a
+    // natural end. Internal framing retains and joins until the natural endpoint instead.
+    {
+        std::deque<bool> script = frames(3, false);            // small pre-roll
+        const std::deque<bool> speech = frames(150, true);     // 150 * 64ms = 9.6s, far past 5s
+        script.insert(script.end(), speech.begin(), speech.end());
+        const std::deque<bool> trailing = frames(80, false);   // drain + close
+        script.insert(script.end(), trailing.begin(), trailing.end());
+
+        const std::vector<Segment> segs = run(script);
+        check(segs.size() == 1, "long unbroken speech closes exactly once");
+        if (!segs.empty()) {
+            const Segment& s = segs[0];
+            std::printf("      long: onset=%d end=%d pcmSize=%d frames=%d\n",
+                        s.onset, s.end, s.pcmSize, s.pcmSize / kFrame);
+            // Every one of the 150 speech frames must survive inside the emitted PCM: 3 pre-roll
+            // + 150 speech + drain, and nothing may be dropped at the 5s mark.
+            check(s.pcmSize >= 153 * kFrame,
+                  "all speech frames are retained (no truncation at the ~5s bound)");
+            check(s.end == s.onset + 150 * kFrame,
+                  "end sample is the last speech frame, not the old bound");
+        }
+    }
+
+    // (4) RETENTION: speech that resumes during the drain window is part of the SAME utterance.
+    // The old path accumulated drain silence but a resumed utterance must join, not become a
+    // second segment or be lost to the cooldown.
+    {
+        std::deque<bool> script;
+        const std::deque<bool> first = frames(5, true);
+        script.insert(script.end(), first.begin(), first.end());
+        const std::deque<bool> pause = frames(8, false);       // < full drain, a mid-utterance pause
+        script.insert(script.end(), pause.begin(), pause.end());
+        const std::deque<bool> resumed = frames(5, true);
+        script.insert(script.end(), resumed.begin(), resumed.end());
+        const std::deque<bool> trailing = frames(80, false);   // now drain and close for real
+        script.insert(script.end(), trailing.begin(), trailing.end());
+
+        const std::vector<Segment> segs = run(script);
+        check(segs.size() == 1, "a pause then resumed speech is one utterance, not two");
+        if (!segs.empty()) {
+            const Segment& s = segs[0];
+            std::printf("      resumed: onset=%d end=%d pcmSize=%d frames=%d\n",
+                        s.onset, s.end, s.pcmSize, s.pcmSize / kFrame);
+            // The resumed run joins the same utterance. Its end sample is the position of the
+            // last speech frame in the retained buffer — the 8 bridged pause frames sit between
+            // the two runs, so the end is past the first run's 5 frames, not equal to it.
+            check(s.pcmSize >= 18 * kFrame,
+                  "resumed speech is retained in the same segment");
+            check(s.end >= s.onset + 5 * kFrame,
+                  "end sample advances past the first speech run into the resumed one");
+        }
+    }
+
+    // (6) `onErrorAfterClose` is the REAL compiled callback, not a stub: its late-callback guard and
+    // its device clear were covered by nothing that executes, because the host target did not compile
+    // OboeAudioCapture.cpp at all.
+    //
+    // 6a -- a REPLACED stream's late callback must not act on state that is no longer its own.
+    {   OboeAudioCapture capture;
+        auto* live = reinterpret_cast<oboe::AudioStream*>(0x1000);
+        auto* replaced = reinterpret_cast<oboe::AudioStream*>(0x2000);
+        capture.installStreamForTest(live, /*deviceId=*/42);
+        check(capture.getRoutedDeviceId() == 42, "the live stream's device is observable");
+
+        // The delayed callback from a stream that was already replaced.
+        capture.onErrorAfterClose(replaced, oboe::Result::ErrorDisconnected);
+        check(capture.getRoutedDeviceId() == 42,
+              "a replaced stream's late callback must not clear the live observation");
+        check(capture.isActive(), "a replaced stream's late callback must not stop the live capture");
+    }
+
+    // 6b -- the CURRENT stream's failure DOES clear it: the observation must not outlive its stream,
+    // or a dead stream's routing reads as the live capture route.
+    {   OboeAudioCapture capture;
+        auto* live = reinterpret_cast<oboe::AudioStream*>(0x3000);
+        capture.installStreamForTest(live, /*deviceId=*/43);
+        check(capture.getRoutedDeviceId() == 43, "the live stream's device is observable");
+
+        capture.onErrorAfterClose(live, oboe::Result::ErrorDisconnected);
+        check(capture.getRoutedDeviceId() == oboe::kUnspecified,
+              "the current stream's failure must clear the device observation");
+        check(!capture.isActive(), "the current stream's failure must stop capture");
+    }
+
+    // (7) The capture-frame/time observation. It must report the producer's own counter as a position
+    // even when no timestamp is available, and it must NOT invent a timestamp: an unavailable
+    // observation has to stay unavailable, because a substituted value aligns confidently against the
+    // wrong instant.
+    {   OboeAudioCapture capture;
+        OboeAudioCapture::CaptureClock idle = capture.captureClock();
+        check(!idle.observable, "with no stream the timestamp is unavailable, not invented");
+        check(idle.framePosition == 0, "and the position is the producer's own counter");
+        check(idle.sampleRate == kSampleRate, "the clock carries the rate that converts position to time");
+
+        // With a stream installed the counter still stands in: a test stream cannot report a timestamp,
+        // so the observation must remain unavailable rather than reading through the placeholder.
+        auto* live = reinterpret_cast<oboe::AudioStream*>(0x4000);
+        capture.installStreamForTest(live, /*deviceId=*/7);
+
+        // A stream that CANNOT report: the observation must stay unavailable rather than substitute
+        // the counter for a timestamp.
+        OboeAudioCapture::CaptureClock unavailable = capture.captureClock();
+        check(!unavailable.observable,
+              "a stream that cannot report keeps the observation unavailable");
+
+        // A stream that CAN report: the observation is the stream's own frame/time pair, and the
+        // conversion it implies must place a later sample correctly in time.
+        capture.setStreamTimestampForTest(/*available=*/true, /*framePosition=*/48'000,
+                                          /*timestampNs=*/2'000'000'000);
+        OboeAudioCapture::CaptureClock observed = capture.captureClock();
+        check(observed.observable, "a stream that reports gives an observable clock");
+        check(observed.framePosition == 48'000, "the frame position is the stream's");
+        check(observed.timestampNs == 2'000'000'000, "the timestamp is the stream's");
+        // One second later is 16000 frames further on, so it must be 1e9 ns further in time. This is
+        // the conversion the alignment depends on, checked as arithmetic rather than asserted.
+        const int64_t oneSecondLaterFrames = observed.framePosition + observed.sampleRate;
+        const int64_t laterNs = observed.timestampNs +
+            ((oneSecondLaterFrames - observed.framePosition) * 1'000'000'000LL) / observed.sampleRate;
+        check(laterNs == observed.timestampNs + 1'000'000'000LL,
+              "a sample one second later maps to one second later on the shared clock");
+        capture.clearStreamForTest();
     }
 
     std::printf(gFailures == 0 ? "all checks passed\n" : "%d CHECK(S) FAILED\n", gFailures);

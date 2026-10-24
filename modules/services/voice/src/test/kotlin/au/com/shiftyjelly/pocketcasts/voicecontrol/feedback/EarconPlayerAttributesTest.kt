@@ -14,7 +14,7 @@ import org.robolectric.annotation.Config
  * system and being refused (`usage:13 muted`).
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class EarconPlayerAttributesTest {
 
     @Test

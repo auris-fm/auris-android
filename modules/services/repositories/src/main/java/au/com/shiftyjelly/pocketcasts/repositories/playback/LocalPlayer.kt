@@ -189,8 +189,51 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
         }
     }
 
+    /**
+     * Guards the episode against the bound seek's read.
+     *
+     * BEING "ADJACENT ON MAIN" IS NOT EXCLUSION. The bound seek decides on `Dispatchers.Main`, but
+     * `setEpisode` is a SYNCHRONOUS SETTER that any thread can call, so it can still land between the
+     * check and the mutation -- the read and the write are ordered only if they share something. A plain
+     * monitor is that something: a lock cannot span a suspension, so the seek reads and decides while
+     * holding it, and the setter waits rather than interleaving.
+     */
+    private val episodeLock = Any()
+
+    override val enforcesEpisodeBoundSeek: Boolean get() = true
+
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Player.EpisodeSeekOutcome {
+        return withContext(Dispatchers.Main) {
+            if (positionMs < 0) return@withContext Player.EpisodeSeekOutcome.Refused
+            // THE CHECK, THE PRE-ACTION SNAPSHOT AND THE MUTATION ARE ONE STEP, under the lock
+            // `setEpisode` writes under. The position is read HERE, so it describes what the player was
+            // at the moment it decided -- not what a caller read around the call.
+            synchronized(episodeLock) {
+                if (episodeLocation?.episode?.uuid != expectedEpisodeUuid) {
+                    LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer refused a seek: episode changed")
+                    return@synchronized Player.EpisodeSeekOutcome.Refused
+                }
+                // The NON-SUSPENDING inner form: the public one wraps in withContext, which a monitor cannot hold.
+                val before = handleCurrentPositionMs().toLong()
+                LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
+                this@LocalPlayer.positionMs = positionMs
+                if (handleIsPrepared()) {
+                    onSeekStart(positionMs)
+                    handleSeekToTimeMs(positionMs)
+                }
+                // ACCEPTED WITH ITS POSITION: the seek happened and the pre-action value is known.
+                Player.EpisodeSeekOutcome.accepted(before)
+            }
+        }
+    }
+
     override fun setEpisode(episode: BaseEpisode, preferStream: Boolean) {
-        episodeLocation = EpisodeLocation.create(episode, preferStream)
+        // WRITTEN UNDER THE SAME LOCK THE BOUND SEEK READS AND DECIDES UNDER, and SYNCHRONOUSLY so a
+        // caller that relies on the new episode sees it when this returns.
+        val prepared = EpisodeLocation.create(episode, preferStream)
+        synchronized(episodeLock) {
+            episodeLocation = prepared
+        }
     }
 
     override suspend fun setPlaybackEffects(playbackEffects: PlaybackEffects) {}

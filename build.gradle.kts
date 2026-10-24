@@ -368,6 +368,11 @@ subprojects {
                     buildConfigField("String", "SERVER_LIST_HOST", "\"lists.pocketcasts.net\"")
                     buildConfigField("String", "SERVER_SHOW_NOTES_URLS", "\"https://shownotes.pocketcasts.net\"")
                     buildConfigField("String", "WEB_FEEDS_API_URL", "\"https://web-feeds-api.pocketcasts.net\"")
+                    // DEBUG-ONLY staging gateway for the authorized multi-turn test: points the debug
+                    // build's cloud-route default at api-staging.auris.fm so the installed build is
+                    // pre-pointed and the owner only needs to log in. Production configuration is
+                    // unchanged — release builds carry no AURIS_GATEWAY_URL default.
+                    buildConfigField("String", "AURIS_GATEWAY_URL", "\"https://api-staging.auris.fm\"")
                 }
 
                 maybeCreate("debugProd").apply {

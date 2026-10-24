@@ -27,6 +27,14 @@ internal class FingerprintTapAudioSink(
         return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
     }
 
+    override fun pause() {
+        // THE PAUSE EVENT: media3 pauses WITHOUT any flush (DecoderAudioRenderer.onStopped). The tap's
+        // subscribers end the current audible-reference admission here; stream identity is retained
+        // for resume, which renews the admission for future playback only.
+        tap.onSinkPaused()
+        super.pause()
+    }
+
     override fun flush() {
         tap.onSinkFlush()
         super.flush()

@@ -30,15 +30,27 @@ class PlaybackCrossCorrelator @Inject constructor() {
         // keeps `micPositionMs` valid for the analyzed samples, and the bounded window re-enters
         // the ordinary window policies below instead of a special case.
         val maxDelaySamples = (MAX_DELAY_SECONDS * reference.sampleRateHz).toInt()
-        val analysis = if (micAudio.size > playbackBuffer.size) {
+        val analysis: FloatArray
+        val analysisPositionMs: Long?
+        if (micAudio.size > playbackBuffer.size) {
             // Only a segment LONGER than the reference needs bounding, and the bounded window must
             // stay long enough to correlate meaningfully (>= 100 ms); a tiny reference declines
             // exactly as the length bail-out did, without silently masking every real segment.
             val windowBound = playbackBuffer.size - maxDelaySamples
             if (windowBound < MIN_ANALYSIS_SAMPLES) return false
-            micAudio.copyOf(windowBound)
+            // TAIL, not PREFIX (reviewer 6381507658): the recorder's reference holds the NEWEST 2 s,
+            // so only the segment's NEWEST windowBound samples can overlap it in player time. The
+            // prefix is older than the whole reference - its position window lies before offset 0
+            // and the correlation is inert for every real VAD segment, leaving the device's own
+            // answer transcribable and executable. Shifting the anchor to the tail's first sample
+            // keeps the position truthful for the analyzed samples.
+            analysis = micAudio.copyOfRange(micAudio.size - windowBound, micAudio.size)
+            analysisPositionMs = micPositionMs?.plus(
+                (micAudio.size - windowBound) * 1_000L / reference.sampleRateHz,
+            )
         } else {
-            micAudio
+            analysis = micAudio
+            analysisPositionMs = micPositionMs
         }
 
         val sampleRate = reference.sampleRateHz
@@ -56,7 +68,7 @@ class PlaybackCrossCorrelator @Inject constructor() {
         //                admissible candidate; NO BLEED without correlating a fabricated offset.
         //                Matching an old waveform is not evidence of a temporally possible echo.
         //   Available    candidates exist -> correlate them.
-        val candidate = candidateOffsets(analysis, reference, micPositionMs, sampleRate)
+        val candidate = candidateOffsets(analysis, reference, analysisPositionMs, sampleRate)
         val offsetRange = when (candidate) {
             is CandidateRange.Unavailable -> {
                 // 50..500 ms window is offsets [maxOffset - maxDelay, maxOffset - minDelay],

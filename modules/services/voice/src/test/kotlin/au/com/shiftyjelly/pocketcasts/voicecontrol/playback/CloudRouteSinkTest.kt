@@ -1442,6 +1442,71 @@ class CloudRouteSinkTest {
         org.mockito.kotlin.verify(player, org.mockito.kotlin.atLeastOnce()).stop()
     }
 
+    // REVIEWER 4357641034: the predecessor's buffered answer must be stopped when OWNERSHIP
+    // TRANSFERS, not when the successor exits. A successor whose server stream stalls keeps the
+    // predecessor's answer playing through the successor's whole turn and ahead of its own answer.
+    // Observation point: while the successor's route flow is mid-flight (before its exit and
+    // before any successor audio), the player must already have been stopped.
+    @Test
+    fun `a superseding turn stops the predecessor's buffered audio AT TRANSFER, not at its own exit`() = runTest {
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        val firstTurnReachedFrame = CompletableDeferred<Unit>()
+        val successorMidFlight = CompletableDeferred<Unit>()
+        var routeCall = 0
+        val deps = TestDeps(
+            audioPlayer = player,
+            routeInvoker = { _ ->
+                if (routeCall++ == 0) {
+                    kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)))
+                        firstTurnReachedFrame.complete(Unit)
+                        awaitCancellation()
+                    }
+                } else {
+                    kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // The successor is now mid-turn with a stalled stream: no successor audio
+                        // has played and the successor has not exited. The predecessor's buffered
+                        // answer must already be stopped.
+                        successorMidFlight.complete(Unit)
+                        awaitCancellation()
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val turnA = launch {
+            runCatching {
+                sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+            }
+        }
+        withTimeout(5_000) { firstTurnReachedFrame.await() }
+        val turnB = launch {
+            runCatching {
+                sink.routeToCloud("second question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+            }
+        }
+        withTimeout(5_000) { successorMidFlight.await() }
+
+        org.mockito.kotlin.verify(
+            player,
+            org.mockito.kotlin.times(1)
+                .description(
+                    "the predecessor's buffered answer must be stopped at transfer, before the successor's own turn progresses (calls=${'$'}{deps.playback.calls})",
+                ),
+        ).stop()
+
+        turnB.cancel()
+        turnA.cancel()
+        withTimeout(5_000) {
+            turnB.join()
+            turnA.join()
+        }
+    }
+
     @Test
     fun `upstream throw during collect still restores auto pause`() = runTest {
         val deps = TestDeps(

@@ -332,38 +332,71 @@ class PlaybackCrossCorrelatorPositionTest {
             correlator.isPlaybackBleed(mic, farRef, micPositionMs = 10_401L),
         )
     }
-}
 
 // REVIEWER 4356625095 BOUNDARY: a real VAD segment is at least 41 x 1024 = 41 984 samples while
 // the recorder's reference buffer is 2 s = 32 000 samples, so a reference-shorter-than-segment
 // bail-out would skip correlation for EVERY real segment and let the device's own answer audio
 // be transcribed and executed. The analysis window must be BOUNDED to the reference length, not
 // used to decline the comparison.
-class PlaybackCrossCorrelatorLongSegmentTest {
+    class PlaybackCrossCorrelatorLongSegmentTest {
 
-    private val rate = 16_000
+        private val rate = 16_000
 
-    private fun tone(n: Int, freq: Double) = FloatArray(n) { i -> (0.6 * sin(2 * PI * freq * i / rate)).toFloat() }
+        private fun tone(n: Int, freq: Double) = FloatArray(n) { i -> (0.6 * sin(2 * PI * freq * i / rate)).toFloat() }
 
-    @Test
-    fun `a minimum-length VAD segment is still checked for bleed against a full 2 s reference`() {
-        val reference = tone(32_000, 300.0)
-        // The mic hears the reference's playback delayed by 100 ms: segment[i] = 0.3 * ref[i + 1600],
-        // i.e. the matching window starts at reference offset 1_600 -- inside the searched
-        // 50..500 ms window for the bounded 24 000-sample analysis window.
-        val segment = FloatArray(41_984) { i -> if (i + 1_600 < reference.size) 0.3f * reference[i + 1_600] else 0f }
-        assertTrue(
-            "segment longer than the reference must still be bleed-checked",
-            PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),
-        )
+        @Test
+        fun `a minimum-length VAD segment is still checked for bleed against a full 2 s reference`() {
+            val reference = tone(32_000, 300.0)
+            // The mic hears the reference's playback delayed by 100 ms: segment[i] = 0.3 * ref[i + 1600],
+            // i.e. the matching window starts at reference offset 1_600 -- inside the searched
+            // 50..500 ms window for the bounded 24 000-sample analysis window.
+            val segment = FloatArray(41_984) { i -> if (i + 1_600 < reference.size) 0.3f * reference[i + 1_600] else 0f }
+            assertTrue(
+                "segment longer than the reference must still be bleed-checked",
+                PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),
+            )
+        }
+
+        @Test
+        fun `a long segment of pure speech with no bleed is still accepted`() {
+            val reference = tone(32_000, 300.0)
+            val segment = tone(41_984, 97.0)
+            assertFalse(
+                PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),
+            )
+        }
     }
 
+// REVIEW 6381507658 BLOCKING: a real VAD segment is LONGER than the 2 s reference, and the
+// recorder's reference holds the NEWEST 2 s. The bounded window must therefore be the segment's
+// TAIL with the position anchor SHIFTED to the tail's first sample - the old prefix analysis
+// correlated the segment's OLDEST samples, whose position window lies BEFORE the reference
+// entirely, so echo rejection was inert for every real segment and the device's own answer
+// could be transcribed and executed.
+//
+// Discrimination: the segment starts at player position -900 ms (before the reference's window);
+// its tail starts at 600 ms. The correct tail+shift analysis searches delays 50..500 ms from the
+// tail anchor and finds the burst; the prefix analysis anchors at -900 ms, whose ENTIRE delay
+// window lies before offset zero, so it must return not-bleed - a prefix mutant cannot pass by
+// content alone.
     @Test
-    fun `a long segment of pure speech with no bleed is still accepted`() {
-        val reference = tone(32_000, 300.0)
-        val segment = tone(41_984, 97.0)
-        assertFalse(
-            PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),
+    fun `long segment - bleed in the NEWEST window is found via the tail with a shifted anchor`() {
+        val segLen = 48_000 // 3 s - longer than the 2 s reference, like a real VAD segment
+        val refLen = 32_000 // 2 s
+        val samples = FloatArray(refLen)
+        tone(24_000, 300.0).copyInto(samples, 5_600)
+
+        // Segment first sample at player -900 ms; tail (last 24 000 samples) first sample at
+        // -900 + 1500 = 600 ms. A 250 ms acoustic delay puts the tail's match at reference
+        // offset (600 - 250) * 16 = 5 600.
+        val mic = FloatArray(segLen) { i -> 0.01f * sin(i * 0.0007f) }
+        val tailStart = segLen - 24_000 // 24 000
+        for (i in 0 until 24_000) mic[tailStart + i] = 0.3f * samples[5_600 + i]
+
+        val reference = PlaybackReference(samples = samples, sampleRateHz = rate, startPositionMs = 0L)
+        assertTrue(
+            "the device's own answer bleeding into the segment's newest window must be rejected as bleed",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, reference, -900L),
         )
     }
 }

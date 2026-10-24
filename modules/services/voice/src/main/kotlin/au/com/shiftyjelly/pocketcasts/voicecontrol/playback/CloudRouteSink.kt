@@ -205,6 +205,7 @@ class CloudRouteSink internal constructor(
      * The chain obligation transfers with ownership: whoever is the active turn at its finally
      * restores it, even when that turn never played audio itself.
      */
+    @Volatile
     private var duckReserved = false
 
     /** The command revision in force when this turn chain took the pause. */
@@ -509,6 +510,15 @@ class CloudRouteSink internal constructor(
                 val previousTurn = activeTurn
                 activeTurn = myJob
                 activeTurnId = myId
+                // STOP AT TRANSFER (reviewer 4357641034): the predecessor's buffered answer must
+                // stop the moment ownership moves, not when the successor exits. A successor whose
+                // server stream stalls otherwise keeps the predecessor's answer playing through the
+                // successor's whole turn and ahead of its own reply. Stopping under the same mutex
+                // that publishes the new owner means the stop cannot interleave with a
+                // predecessor's suspending restore or a later registration.
+                if (previousTurn != null && previousTurn !== myJob) {
+                    audioPlayer?.stop()
+                }
                 previousTurn
             }
             // The live origin is declared here ONLY when the caller supplied no captured window. With

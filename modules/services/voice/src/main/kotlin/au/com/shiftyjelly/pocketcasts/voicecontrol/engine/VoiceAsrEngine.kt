@@ -90,6 +90,14 @@ class VoiceAsrEngine @Inject constructor(
 ) {
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
+
+    /**
+     * The processing job left behind by [stop], exposed so service teardown can AWAIT it before
+     * releasing the ASR backend. It lives on this engine's independent scope, so joining the
+     * service scope's root does not cover it.
+     */
+    internal var stoppedProcessingJob: Job? = null
+        private set
     private var playbackBufferProvider: (() -> FloatArray)? = null
 
     private var backend: AsrBackend? = null
@@ -929,8 +937,12 @@ class VoiceAsrEngine @Inject constructor(
         segmentObserver.listeningClosed("pipeline-stopped")
         // Every open invocation ends with the lifecycle: no result can cross a stop/restart.
         clearInvocationOwnership()
+        // Keep the processing job so the SERVICE teardown can await it: this job runs on the
+        // engine's OWN SupervisorJob+IO scope, so cancelling serviceScope's root does not wait for
+        // it (reviewer 267001c1). A noncooperative ASR/native call or its `finally` can otherwise
+        // outlive stop() and overlap VoiceControlService's backend release.
+        stoppedProcessingJob = processingJob
         processingJob?.cancel()
-        processingJob = null
         processingJob = null
         // Tear down native capture directly too: the processing job's flow `finally` only runs
         // when the event loop was collected, and a capture attached but never collected must

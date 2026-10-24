@@ -775,10 +775,12 @@ class VoiceControlService : Service() {
         // recognizer, session or backend before those children have actually finished is
         // use-after-release, so the releases happen only AFTER the join below.
         modeJob?.cancel()
-        // Engine + capture teardown runs after the cancellation request. It is SYNCHRONOUS for the
-        // engine's own resources (segment lifecycle, invocation ownership, native capture), so no
-        // engine work outlives this call; only the scope's children remain to be joined.
+        // Engine + capture teardown runs after the cancellation request. It stops the engine's
+        // capture synchronously, but the engine's PROCESSING job lives on the engine's own
+        // SupervisorJob+IO scope and is only CANCELLED here, not joined (reviewers 267001c1). That
+        // job is captured below and awaited alongside the service children before any release.
         stopEngine()
+        val engineProcessingJob = voiceAsrEngine.get().stoppedProcessingJob
         serviceScope.cancel()
         stopSelf()
 
@@ -789,15 +791,25 @@ class VoiceControlService : Service() {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
-                wiredBackend?.release()
-                wiredBackend = null
-                mediaSession?.isActive = false
-                mediaSession?.release()
-                mediaSession = null
-                voiceRecognizer.release()
-                audioFeedbackRenderer.release()
-                notificationManager.cancelNotification()
-                stopForeground(STOP_FOREGROUND_REMOVE)
+                // The engine's processing job is NOT a child of the service scope, so it needs its
+                // own join: a noncooperative ASR/native call or its finally must finish before we
+                // release the backend it may still be using.
+                runCatching { engineProcessingJob?.join() }
+                    .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
+                // The releases themselves run on MAIN: the media session and the feedback renderer
+                // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so
+                // touching them from this IO job would be an off-thread release.
+                withContext(Dispatchers.Main) {
+                    wiredBackend?.release()
+                    wiredBackend = null
+                    mediaSession?.isActive = false
+                    mediaSession?.release()
+                    mediaSession = null
+                    voiceRecognizer.release()
+                    audioFeedbackRenderer.release()
+                    notificationManager.cancelNotification()
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                }
             }
         }.also { stopInFlightJob = it }
     }

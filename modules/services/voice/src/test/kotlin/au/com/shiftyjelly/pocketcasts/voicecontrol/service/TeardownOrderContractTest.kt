@@ -190,6 +190,27 @@ class TeardownOrderContractTest {
     // is described as such rather than padded with model tests.
 
     @Test
+    fun `the releases run on the main dispatcher they are confined to`() {
+        val source = productionStopVoiceControlSource()
+        val releases = listOf("wiredBackend?.release()", "mediaSession?.release()", "audioFeedbackRenderer.release()")
+        releases.forEach { call ->
+            val at = source.indexOf(call)
+            assertTrue("$call must be present in the teardown", at >= 0)
+            // The enclosing call is withContext(Dispatchers.Main): the nearest Main dispatch must
+            // appear before the release and no other release may sit outside it.
+            val mainAt = source.lastIndexOf("withContext(Dispatchers.Main)", at)
+            assertTrue(
+                "$call releases Main-confined state; it must run inside withContext(Dispatchers.Main)",
+                mainAt >= 0,
+            )
+            assertTrue(
+                "the Main block must enclose $call, not merely precede the whole teardown",
+                at > mainAt && at - mainAt < 600,
+            )
+        }
+    }
+
+    @Test
     fun `stopEngine is structurally present in the production teardown`() {
         val source = productionStopVoiceControlSource()
         assertTrue(

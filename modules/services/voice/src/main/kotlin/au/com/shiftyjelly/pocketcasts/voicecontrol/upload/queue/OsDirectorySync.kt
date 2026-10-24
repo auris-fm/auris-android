@@ -28,9 +28,12 @@ interface OsOperations {
 
 /** Production binding to the real `android.system.Os`. */
 class AndroidOsOperations : OsOperations {
-    override val isSupported: Boolean = true // documented since API 21; the app's minSdk is 21+
+    // Supported ONLY when the running ABI's O_DIRECTORY value is known: an unknown ABI must fail,
+    // never open with a guessed flag (a wrong flag is O_DIRECT, not O_DIRECTORY, and the open fails
+    // or - worse - is simply not a directory handle).
+    override val isSupported: Boolean = directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.toList()) != null
 
-    override fun openDirectory(path: String): FileDescriptor = Os.open(path, DIRECTORY_OPEN_FLAGS, 0)
+    override fun openDirectory(path: String): FileDescriptor = Os.open(path, directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.toList())!! or OsConstants.O_RDONLY, 0)
 
     override fun fsync(fd: FileDescriptor) {
         Os.fsync(fd)
@@ -41,15 +44,24 @@ class AndroidOsOperations : OsOperations {
     }
 
     internal companion object {
-        // O_DIRECTORY is absent from this SDK's android.jar stub of OsConstants, so the VALUE is
-        // pinned from bionic's per-architecture kernel uapi headers (asm-arm and asm-arm64
-        // fcntl.h): O_DIRECTORY is 040000 octal = 0x4000, O_RDONLY is 0. The earlier 0x10000 pin
-        // was O_DIRECT on ARM/ARM64, which would make every directory open fail on the target
-        // platform (reviewer 87e2e450). If OsConstants gains the constant, this moves back to it.
-        // Internal so the JVM controls can pin the value the production binding opens with; the
-        // static Os.open call itself cannot be intercepted on the JVM.
-        internal const val O_DIRECTORY = 0x4000
-        internal val DIRECTORY_OPEN_FLAGS: Int = O_DIRECTORY or OsConstants.O_RDONLY
+        // O_DIRECTORY is absent from this SDK's android.jar stub of OsConstants AND its value is
+        // architecture-dependent in bionic's kernel uapi headers, so the value is selected per
+        // RUNNING ABI (reviewer 87e2e450, second round):
+        //   - asm-arm / asm-arm64 fcntl.h: O_DIRECTORY = 040000 octal = 0x4000 (O_DIRECT = 0x10000)
+        //   - asm-generic fcntl.h (x86, x86_64): O_DIRECTORY = 0200000 octal = 0x10000 (O_DIRECT = 0x4000)
+        // A universal literal is wrong on one family whichever value it picks - the first pin
+        // (0x10000) broke ARM, a flat 0x4000 breaks x86_64, which voice/build.gradle.kts also
+        // builds. An UNKNOWN ABI returns null, which makes the platform report unsupported and
+        // fail loudly instead of opening with a guessed flag. Internal so the JVM controls can pin
+        // BOTH architectures; the static Os.open call itself cannot be intercepted on the JVM.
+        internal const val O_DIRECTORY_ARM = 0x4000
+        internal const val O_DIRECTORY_X86 = 0x10000
+
+        internal fun directoryOpenFlags(abis: List<String>): Int? = when {
+            abis.any { it.startsWith("arm") || it.startsWith("aarch64") } -> O_DIRECTORY_ARM
+            abis.any { it.startsWith("x86") } -> O_DIRECTORY_X86
+            else -> null
+        }
     }
 }
 

@@ -5,6 +5,7 @@ import java.io.File
 import java.io.FileDescriptor
 import java.io.IOException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -64,17 +65,24 @@ class OsDirectorySyncTest {
     private fun newDir(name: String): File = File(System.getProperty("java.io.tmpdir"), "os-sync-" + name + "-" + System.nanoTime()).apply { mkdirs() }
 
     @Test
-    fun `the production binding opens with bionic O_DIRECTORY 0x4000, never the O_DIRECT 0x10000 value`() {
-        // Bionic asm-arm/asm-arm64 fcntl.h: O_DIRECTORY = 040000 octal = 0x4000; 0x10000 is
-        // O_DIRECT there, so the earlier pin would have failed EVERY directory open on the target
-        // platform (reviewer 87e2e450). The static Os.open call itself cannot be intercepted on the
-        // JVM, so this pins the exact flags value openDirectory forwards, plus the distinctness that
-        // makes the O_DIRECT confusion impossible again.
-        assertEquals(0x4000, AndroidOsOperations.O_DIRECTORY)
-        assertEquals(0x4000, AndroidOsOperations.DIRECTORY_OPEN_FLAGS and 0x4000)
+    fun `the open flags are selected per RUNNING ABI - arm64 gets 0x4000, x86_64 gets 0x10000, unknown is unsupported`() {
+        // Bionic per-arch kernel uapi headers, and the values SWAP between families:
+        //   asm-arm/asm-arm64: O_DIRECTORY = 040000 = 0x4000 (O_DIRECT = 0200000 = 0x10000)
+        //   asm-generic (x86, x86_64): O_DIRECTORY = 0200000 = 0x10000 (O_DIRECT = 0040000 = 0x4000)
+        // voice/build.gradle.kts builds arm64-v8a AND x86_64, so a universal literal is wrong on one
+        // family whichever value it picks (reviewer 87e2e450, both rounds). An unknown ABI must make
+        // the platform report UNSUPPORTED rather than open with a guessed flag.
+        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags(listOf("arm64-v8a")))
+        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags(listOf("armeabi-v7a", "arm64-v8a")))
+        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags(listOf("x86_64")))
+        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags(listOf("x86", "x86_64")))
+        assertNull("an unknown ABI must not yield a guessed flag", AndroidOsOperations.directoryOpenFlags(listOf("riscv64")))
+        assertNull(AndroidOsOperations.directoryOpenFlags(emptyList()))
+        // The flags actually forwarded carry O_RDONLY and never mix families.
+        assertEquals(0x4000 or android.system.OsConstants.O_RDONLY, AndroidOsOperations.directoryOpenFlags(listOf("arm64-v8a"))!! or android.system.OsConstants.O_RDONLY)
         assertTrue(
-            "the pinned flags must not carry the O_DIRECT bit 0x10000",
-            AndroidOsOperations.DIRECTORY_OPEN_FLAGS and 0x10000 == 0,
+            "arm value must not carry the x86-only O_DIRECT bit 0x4000-as-O_DIRECT confusion: arm O_DIRECT is 0x10000",
+            AndroidOsOperations.O_DIRECTORY_ARM != AndroidOsOperations.O_DIRECTORY_X86,
         )
     }
 

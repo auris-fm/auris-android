@@ -20,6 +20,9 @@ internal object EngineQuiescence {
         /** The final stop threw, so the owned set is unknown: release nothing. */
         data class StopFailed(val error: Throwable) : Verdict
 
+        /** Waiting for owned work threw: it has not been proven finished, so release nothing. */
+        data class JoinFailed(val error: Throwable) : Verdict
+
         /** Work kept appearing past the round bound: release nothing. */
         data class Residual(val remaining: Int) : Verdict
     }
@@ -46,7 +49,11 @@ internal object EngineQuiescence {
             // Re-sample each round: joining is not atomic with the snapshot, and the engine may
             // register work faster than we drain it.
             unfinished().filterNot { it in joined }.forEach { job ->
-                join(job)
+                // A THROWING JOIN IS NOT PROOF OF COMPLETION (reviewer bdb914a6): it must become a
+                // verdict, not an exception escaping into whatever handles the caller. Only a
+                // returned join proves the job finished.
+                val wait = runCatching { join(job) }
+                wait.exceptionOrNull()?.let { return Verdict.JoinFailed(it) }
                 joined.add(job)
             }
             // Quiescence is "nothing UNFINISHED remains", not "the list is empty": the engine keeps

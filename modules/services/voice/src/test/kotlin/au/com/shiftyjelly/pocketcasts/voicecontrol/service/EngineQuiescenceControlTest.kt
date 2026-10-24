@@ -66,6 +66,27 @@ class EngineQuiescenceControlTest {
     }
 
     @Test
+    fun `a throwing join fails closed instead of escaping as an exception`() = runBlocking {
+        // Reviewer bdb914a6: a join that throws has NOT proven the job finished. It must become a
+        // verdict, not an exception thrown at the caller.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        var released = false
+        try {
+            val job = scope.launch(Dispatchers.IO) { CompletableDeferred<Unit>().await() }
+            val verdict = EngineQuiescence.settle(
+                stop = {},
+                unfinished = { listOf(job) },
+                join = { throw IllegalStateException("join blew up") },
+            )
+            if (verdict == Verdict.Settled) released = true
+            assertTrue("a throwing join must yield JoinFailed, got $verdict", verdict is Verdict.JoinFailed)
+            assertTrue("no release may happen when a join failed", !released)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `round exhaustion fails closed even though every join succeeded`() = runBlocking {
         // The set keeps growing: each round joins the known jobs but a new one appears. This is the
         // exact shape the reviewer described — joins succeed, work never settles.

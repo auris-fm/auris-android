@@ -571,6 +571,57 @@ class EngineToProducerPublishTest {
         assertEquals("observation_unavailable", (execution.fields.getValue("reason") as RecordNode.Str).value)
     }
 
+    // DISPATCH → SETTLEMENT → PUBLICATION (spec db897b24, reviewer 6775fc58). Unlike the
+    // decode control, these drive the REAL trigger/producer/store: the candidate is published, the
+    // persisted record is read back from disk through the durable store, and the EXECUTION stage is
+    // decoded from those bytes. The boundary that remains synthetic is the invocation itself (opened
+    // through the engine test seam) and the duck (reported as a fact, not granted by a real sink).
+    @Test
+    fun `an auxiliary duck success published with an unobserved action decodes as unknown execution`() {
+        val root = tmp.newFolder("aux-unknown-pub")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+
+        // The duck succeeded, and it is NOT this turn's result; the primary action was unobserved.
+        assertTrue(sink.noteExecutionOutcome(ctx.captureId, ExecutionOutcome.NotObserved))
+        trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
+
+        val execution = publishedExecution(root, store, ctx.captureId)
+        assertEquals("an auxiliary success must publish UNKNOWN execution", StageState.Unknown, execution.state)
+        assertEquals("observation_unavailable", (execution.fields.getValue("reason") as RecordNode.Str).value)
+    }
+
+    /** Reads the EXECUTION stage back out of the bytes the store durably persisted. */
+    private fun publishedExecution(
+        root: java.io.File,
+        store: ContributionStore,
+        captureId: UUID,
+    ): StageProvenanceExecution {
+        val stored = checkNotNull(store.durableCapture(captureId.toString())) { "the capture must be published" }
+        val decoded = when (val v = RecordValidator.validate(stored.record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        // The bytes ON DISK must carry the honest unknown — not merely the in-memory model.
+        val onDisk = publishedRecordText(root, captureId)
+        assertTrue(
+            "the published bytes must record the execution as unknown, got $onDisk",
+            onDisk.contains("observation_unavailable"),
+        )
+        val execution = decoded.observations.getValue(StageName.Execution)
+        return StageProvenanceExecution(execution.state, execution.fields)
+    }
+
+    /** The record file exactly as the store wrote it (the producer's serialized bytes). */
+    private fun publishedRecordText(root: java.io.File, captureId: UUID): String = root.walkTopDown()
+        .filter { it.isFile && it.name.startsWith(captureId.toString()) && it.name.endsWith(".metadata.json") }
+        .joinToString("\n") { it.readText() }
+
+    private data class StageProvenanceExecution(val state: StageState, val fields: Map<String, RecordNode>)
+
     @Test
     fun `a failed wake detector is persisted as wake failed with detector_error`() {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))

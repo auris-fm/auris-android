@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
@@ -100,9 +101,22 @@ object EngineStageProvenance {
             } else {
                 StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates")))
             },
-            // UNVERIFIED by design: dispatch observed, execution result never asserted here.
-            // delta736d3180: honest unknown with the enumerated reason the schema requires.
-            StageName.Execution to StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+            // THE EXECUTOR'S OWN RESULT when it actually reported one (spec audit, action-result
+            // channel): the outcome is what the executor returned/threw, never an inference. A
+            // dispatch with no reported result is still an honest unknown — dispatch alone does
+            // not prove execution (delta736d3180).
+            StageName.Execution to when (val reported = candidate.executionOutcome) {
+                null -> StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
+
+                ExecutionOutcome.Success -> StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success")))
+
+                // Schema vocabulary (StageReasons.Execution): action_failed / client_refused.
+                ExecutionOutcome.Failure -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("action_failed")))
+
+                ExecutionOutcome.Refused -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("client_refused")))
+
+                ExecutionOutcome.Cancelled -> StageEntry(StageState.Cancelled, mapOf("reason" to RecordNode.Str("cancelled_by_user")))
+            },
         )
     }
 }

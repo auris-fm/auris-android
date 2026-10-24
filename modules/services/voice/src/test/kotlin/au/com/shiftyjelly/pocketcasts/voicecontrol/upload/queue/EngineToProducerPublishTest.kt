@@ -4,7 +4,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureCon
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
@@ -167,11 +169,13 @@ class EngineToProducerPublishTest {
         dispatch: (() -> Unit) -> Job? = directDispatch(),
         producerAccount: () -> String = { "a@x" },
         producerSession: () -> Long = { 7L },
+        /** Override the engine's stage provenance (default is the fixed fixture list). */
+        stagesForTest: ((RetainedCandidate) -> List<Pair<StageName, StageEntry>>)? = null,
     ) = RetentionPublishTrigger(
         sink,
         producer(store, account = producerAccount, session = producerSession),
         fixedModels = fixedModels,
-        stagesProvider = { stages },
+        stagesProvider = stagesForTest ?: { stages },
         publishUnderOwner = { frozen, commit ->
             val now = live()
             // ATOMIC: validate the frozen tuple and commit in ONE section; the barrier below
@@ -520,6 +524,53 @@ class EngineToProducerPublishTest {
      * producer persist the wrong pair fails this assertion with
      * "the PERSISTED wake state must be a known failure" (receipt: detector-error-mutant.log).
      */
+    // THE ACTION-RESULT CHANNEL (spec audit): production reports what the EXECUTOR returned, not
+    // an inference. This control drives the real sink/trigger/producer with a reported outcome and
+    // asserts the DECODED record. It does not exercise the service's response mapping (that is a
+    // separate source-level surface) — it proves the reported value reaches the owning schema.
+    @Test
+    fun `a reported execution success is persisted as execution completed success`() {
+        val root = tmp.newFolder("exec-success")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+
+        // The executor's own report, delivered through the sink's ownership rule.
+        assertTrue(sink.noteExecutionOutcome(ctx.captureId, ExecutionOutcome.Success))
+        // The ENGINE's provenance, not the shared stage fixture: the fixture is a fixed list that
+        // bypasses stagesFor entirely, which is what let the execution branch go unexercised.
+        trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
+
+        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val execution = decoded.observations.getValue(StageName.Execution)
+        assertEquals("an observed successful execution is COMPLETED, not unknown", StageState.Completed, execution.state)
+        assertEquals("success", (execution.fields.getValue("outcome") as RecordNode.Str).value)
+    }
+
+    @Test
+    fun `a dispatch with no reported execution result stays unknown`() {
+        val root = tmp.newFolder("exec-unobserved")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+        trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
+
+        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val execution = decoded.observations.getValue(StageName.Execution)
+        assertEquals("dispatch alone must NOT be recorded as execution", StageState.Unknown, execution.state)
+        assertEquals("observation_unavailable", (execution.fields.getValue("reason") as RecordNode.Str).value)
+    }
+
     @Test
     fun `a failed wake detector is persisted as wake failed with detector_error`() {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))

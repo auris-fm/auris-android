@@ -71,6 +71,12 @@ class RetainedCandidate internal constructor(val context: CaptureContext) {
 
     /** The ACTUAL translation observed for this capture (null = none ran / not observed). */
     var translation: TranslationProvenance? = null
+
+    /**
+     * The ACTUAL execution result the executor reported for this capture's dispatch
+     * (null = the executor never reported one; never invented).
+     */
+    var executionOutcome: ExecutionOutcome? = null
     var incrementalSamplesAccounted: Long = 0L
     var bytesCharged: Long = 0L
 }
@@ -545,6 +551,19 @@ class ContributionRetentionSink(
         true
     }
 
+    /**
+     * Records the ACTUAL execution result reported by the executor for a capture (spec audit).
+     * Same ownership rule as [noteTranslation]: the sink owns retained state, so the observation
+     * is stored beside the candidate rather than mutating the issued context. Refused for an
+     * unknown/evicted capture, and a terminal outcome is NOT overwritten.
+     */
+    fun noteExecutionOutcome(captureId: UUID, outcome: ExecutionOutcome): Boolean = synchronized(lock) {
+        val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        if (candidate.executionOutcome != null) return false
+        candidate.executionOutcome = outcome
+        true
+    }
+
     /** Test visibility: the live candidate for a retained capture, WITHOUT copying its PCM. */
     fun retainedCandidateForTest(captureId: UUID): RetainedCandidate? = synchronized(lock) { candidates.firstOrNull { it.context.captureId == captureId } }
 
@@ -598,4 +617,17 @@ class ContributionRetentionSink(
         private const val BYTES_PER_SAMPLE = 2L
         private const val FIRST_CHUNK_BYTES = 4096L
     }
+}
+
+/**
+ * THE EXECUTOR'S ACTUAL RESULT (spec audit): what the intent executor reported when it ran the
+ * action for a capture. This is the production action-result channel — the value comes from the
+ * executor's own response (an ERROR earcon, a CONFIRM_REQUIRED refusal) or from its throw, never
+ * from an inference about what "probably" happened.
+ */
+enum class ExecutionOutcome(val wire: String) {
+    Success("success"),
+    Failure("failure"),
+    Refused("refused"),
+    Cancelled("cancelled"),
 }

@@ -23,6 +23,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
@@ -39,6 +40,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.keepsPendingAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -673,13 +675,48 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
-            val response = voicePlaybackIntentExecutor.execute(intent)
+            // THE ACTION-RESULT CHANNEL (spec audit): the executor's OWN result is reported back to
+            // the engine, which joins it to the frozen capture. The mapping reads what the executor
+            // actually produced — an ERROR earcon, a CONFIRM_REQUIRED refusal, a throw — and the
+            // outcome stays unobserved (provenance: unknown) whenever none of them is asserted.
+            // ONE execution: the response is both rendered and read for its result.
+            val response = try {
+                voicePlaybackIntentExecutor.execute(intent)
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                voiceAsrEngine.get().reportExecutionResult(intent, ExecutionOutcome.Cancelled)
+                throw t
+            } catch (t: Throwable) {
+                voiceAsrEngine.get().reportExecutionResult(intent, ExecutionOutcome.Failure)
+                throw t
+            }
+            executionOutcomeOf(response)?.let { voiceAsrEngine.get().reportExecutionResult(intent, it) }
             audioFeedbackRenderer.render(response)
             gracePeriodSignal.onCommandRecognized(
                 fromGeneration = intent.windowGenerationOf(),
                 restoresAllowance = intent.restoresAllowance(),
             )
         }
+    }
+
+    /**
+     * The executor's response as an OBSERVED execution result — null when the response does not
+     * assert what happened to the action. `Silent` in particular is not success: several sinks
+     * return it for actions that query state or that decline to speak.
+     */
+    private fun executionOutcomeOf(response: VoiceResponse): ExecutionOutcome? = when (response) {
+        is VoiceResponse.Earcon ->
+            when (response.id) {
+                EarconId.SUCCESS -> ExecutionOutcome.Success
+                EarconId.ERROR -> ExecutionOutcome.Failure
+                EarconId.CONFIRM_REQUIRED -> ExecutionOutcome.Refused
+                else -> null
+            }
+
+        is VoiceResponse.Combined -> ExecutionOutcome.Success
+
+        is VoiceResponse.Spoken -> ExecutionOutcome.Success
+
+        VoiceResponse.Silent -> null
     }
 
     private fun updateListeningState() {

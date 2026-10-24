@@ -75,6 +75,17 @@ class SegmentObserver(
         (sink as? ContributionRetentionSink)?.noteTranslation(context.captureId, provenance)
     }
 
+    /**
+     * Reports the EXECUTOR's actual result for a capture (spec audit). Same ownership rule as
+     * [noteTranslation]: the sink owns retained state.
+     */
+    fun noteExecutionOutcome(
+        context: CaptureContext,
+        outcome: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome,
+    ) {
+        (sink as? ContributionRetentionSink)?.noteExecutionOutcome(context.captureId, outcome)
+    }
+
     fun speechStartedAdmitting(
         captureSession: Long,
         routeClass: String,

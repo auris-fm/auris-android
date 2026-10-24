@@ -31,6 +31,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureCon
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
@@ -110,6 +111,9 @@ class VoiceAsrEngine @Inject constructor(
     @Volatile
     private var pendingExecutionContext: CaptureContext? = null
 
+    /** Captures awaiting the executor's own result, keyed by the dispatched intent. */
+    private val executedReports = java.util.concurrent.ConcurrentHashMap<VoiceIntent, CaptureContext>()
+
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start(
         backend: AsrBackend,
@@ -134,6 +138,10 @@ class VoiceAsrEngine @Inject constructor(
             userHandler(intent)
             if (capture != null) {
                 joinOutcome(CollectionOutcome.Executed(capture.captureId, dispatchedWithoutThrowing = true))
+                // Bind the capture to the intent so the EXECUTOR's own result can be joined to it
+                // through [reportExecutionResult]. A caller that never reports leaves the outcome
+                // unobserved (provenance records unknown), never assumed success.
+                executedReports[intent] = capture
             }
         }
         this.currentRouteClass = audioRoute::class.simpleName ?: AudioRoute.Unknown::class.simpleName!!
@@ -298,6 +306,16 @@ class VoiceAsrEngine @Inject constructor(
         }
         Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
         return CaptureAttachment(attached)
+    }
+
+    /**
+     * THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit). Called by whoever ran the
+     * action — the service, not the engine — with what the executor really reported. Anything the
+     * executor never reports stays unobserved, and provenance records it as unknown.
+     */
+    fun reportExecutionResult(intent: VoiceIntent, outcome: ExecutionOutcome) {
+        val capture = executedReports.remove(intent) ?: return
+        segmentObserver.noteExecutionOutcome(capture, outcome)
     }
 
     fun updateListeningMode(mode: ListeningMode) {

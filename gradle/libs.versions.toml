@@ -119,6 +119,7 @@ coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", ve
 dagger-hilt-android = { module = "com.google.dagger:hilt-android", version.ref = "hilt" }
 dagger-hilt-compiler = { module = "com.google.dagger:hilt-compiler", version.ref = "hilt" }
 dagger-hilt-core = { module = "com.google.dagger:hilt-core", version.ref = "hilt" }
+dagger-hilt-android-testing = { module = "com.google.dagger:hilt-android-testing", version.ref = "hilt" }
 hilt-compiler = { module = "androidx.hilt:hilt-compiler", version.ref = "hilt-compiler" }
 hilt-navigation-compose = "androidx.hilt:hilt-navigation-compose:1.4.0"
 hilt-work = "androidx.hilt:hilt-work:1.4.0"

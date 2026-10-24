@@ -136,9 +136,27 @@ class CanaryFlashBackend @Inject constructor(
 
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_ENCODER_FILENAME", filename = CANARY_ENCODER_FILENAME),
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_DECODER_FILENAME", filename = CANARY_DECODER_FILENAME),
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_TOKENS_FILENAME", filename = CANARY_TOKENS_FILENAME),
+            // sha256s = LFS oids at the pinned commit; existing caches are re-verified before
+            // they can be labeled with the pinned manifest identity.
+            ModelFile(
+                url = "$CANARY_BASE_URL/$CANARY_ENCODER_FILENAME",
+                filename = CANARY_ENCODER_FILENAME,
+                sha256 = "7a75b4e2a5857a6dcc0819503bbe3fad66943db4a3ccf21d3f27c633667d303f",
+                manifestId = CANARY_MANIFEST_ID,
+            ),
+            ModelFile(
+                url = "$CANARY_BASE_URL/$CANARY_DECODER_FILENAME",
+                filename = CANARY_DECODER_FILENAME,
+                sha256 = "e41a2ab9c0c2fe81a1e8ade5a45fb02a74bc4db7d1f91b89a54a25e2cf79cba2",
+                manifestId = CANARY_MANIFEST_ID,
+            ),
+            ModelFile(
+                url = "$CANARY_BASE_URL/$CANARY_TOKENS_FILENAME",
+                filename = CANARY_TOKENS_FILENAME,
+                // Raw (non-LFS) file; digest pinned from the bytes fetched at the pinned commit.
+                sha256 = "2dae6fc7815f9640645e0c765522b278ee0cef49b482d91f6913e334628d3e77",
+                manifestId = CANARY_MANIFEST_ID,
+            ),
         ),
         targetDir = CANARY_TARGET_DIR,
     )
@@ -174,12 +192,23 @@ class CanaryFlashBackend @Inject constructor(
     companion object {
         // INT8 export of NVIDIA canary-180m-flash (en/de/es/fr), confirmed on HuggingFace:
         // csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8
+        // PINNED REVISION (reviewer 704ef15a): resolve/main is mutable and the upstream export has
+        // no version tags, so the base URL names the exact repo commit the artifacts were verified
+        // at (9077164e0d3dd1d5353743e89ceaa1d3a770838c) — the LFS oids below pin file content.
         private const val CANARY_BASE_URL =
-            "https://hf-mirror.com/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/main"
+            "https://hf-mirror.com/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/9077164e0d3dd1d5353743e89ceaa1d3a770838c"
         private const val CANARY_ENCODER_FILENAME = "encoder.int8.onnx"
         private const val CANARY_DECODER_FILENAME = "decoder.int8.onnx"
         private const val CANARY_TOKENS_FILENAME = "tokens.txt"
         private const val CANARY_TARGET_DIR = "canary-flash-model"
+
+        /**
+         * Manifest identity source (reviewer 57719ad2, 704ef15a): the upstream INT8 export has no
+         * version tags, so immutability comes from the PINNED REPO COMMIT (content pinned by the
+         * LFS sha256s on the weight files), not from the repo name. The manifest names that commit.
+         */
+        private const val CANARY_MANIFEST_ID =
+            "sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8@9077164e0d3dd1d5353743e89ceaa1d3a770838c"
 
         private val SUPPORTED_SOURCE_LANGUAGES = setOf("en", "de", "es", "fr")
 

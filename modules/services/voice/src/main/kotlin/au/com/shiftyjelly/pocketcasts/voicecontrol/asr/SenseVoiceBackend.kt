@@ -111,14 +111,20 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
             ModelFile(
+                // sha256 = LFS oid of model.int8.onnx at the pinned commit: an existing cache is
+                // re-verified before it can be labeled with the pinned manifest identity.
                 url = "$SENSEVOICE_BASE_URL/$SENSEVOICE_MODEL_FILENAME",
                 filename = SENSEVOICE_MODEL_FILENAME,
-                sha256 = "",
+                sha256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+                manifestId = SENSEVOICE_MANIFEST_ID,
             ),
             ModelFile(
+                // tokens.txt is a raw (non-LFS) file; its digest is pinned from the bytes
+                // fetched at the pinned commit, so EVERY manifest artifact is content-verified.
                 url = "$SENSEVOICE_BASE_URL/$SENSEVOICE_TOKENS_FILENAME",
                 filename = SENSEVOICE_TOKENS_FILENAME,
-                sha256 = "",
+                sha256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+                manifestId = SENSEVOICE_MANIFEST_ID,
             ),
         ),
         targetDir = "sensevoice-model",
@@ -137,8 +143,18 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     }
 
     companion object {
+        // PINNED REVISION (reviewer 704ef15a): resolve/main is mutable, so the base URL names the
+        // exact repo commit the artifacts were verified at (2365baeacb507f821a0c8120fcee3d484dba7a07).
         private const val SENSEVOICE_BASE_URL =
-            "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
+            "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07"
+
+        /**
+         * Manifest identity source (reviewer 57719ad2): the dated upstream release tag (2024-07-17)
+         * PLUS the pinned repo commit — the record names the commit so the artifact set the weights
+         * were verified at is unambiguous, not just the mutable repo head.
+         */
+        private const val SENSEVOICE_MANIFEST_ID =
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17@2365baeacb507f821a0c8120fcee3d484dba7a07"
         private const val SENSEVOICE_MODEL_FILENAME = "model.int8.onnx"
         private const val SENSEVOICE_TOKENS_FILENAME = "tokens.txt"
 

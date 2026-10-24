@@ -7,6 +7,7 @@ import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -25,6 +26,14 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
@@ -68,6 +77,15 @@ class VoiceAsrEngine @Inject constructor(
     // comes from VoiceControlModule.provideSpokenTemplateResolver.
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
+    // Upload observation of the ACTUAL segment path (plan Task 3). Optional only for Kotlin
+    // test call sites; Dagger supplies the production pair. The live [collectionAuthority] is
+    // consulted at EVERY retention decision — start admission, revalidation before handoff —
+    // so a START-time YES can never authorize retention after withdrawal/expiry/account change.
+    private val collectionAuthority: () -> AuthorityDecision,
+    private val retentionSink: ContributionRetentionSink,
+    private val segmentObserver: SegmentObserver,
+    // Upload observation is OFF unless a composition module binds all three collaborators;
+    // Dagger never applies Kotlin defaults, so an unbound constructor fails at build time.
     @ApplicationContext private val context: Context,
 ) {
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -75,11 +93,47 @@ class VoiceAsrEngine @Inject constructor(
     private var playbackBufferProvider: (() -> FloatArray)? = null
 
     private var backend: AsrBackend? = null
-    private var onIntent: ((VoiceIntent) -> Unit)? = null
+    private var onIntent: ((VoiceIntent, InvocationToken?) -> Unit)? = null
     private var micExposureProvider: (() -> MicExposure)? = null
 
     @Volatile
     private var currentMode: ListeningMode = ListeningMode.Off
+
+    /** Route CLASS frozen into each capture context; set synchronously at start()/stop(). */
+    @Volatile
+    private var currentRouteClass: String = AudioRoute.Unknown::class.simpleName!!
+
+    /** Capture-session incarnation: bumped synchronously at every pipeline start. */
+    @Volatile
+    private var captureSessionIncarnation: Long = 0L
+
+    /** Context whose dispatched intent is about to execute; consumed by the wrapped handler. */
+    @Volatile
+    private var pendingExecutionContext: CaptureContext? = null
+
+    /**
+     * ONE DISPATCH's identity. Reports are addressed by this token, never by the intent value:
+     * identical intents dispatched concurrently are different invocations with different captures.
+     */
+    data class InvocationToken(val id: Long, val captureId: java.util.UUID)
+
+    /**
+     * One dispatch's identity plus its PER-ACTION observations, append-only (spec 250ddcc3):
+     * every reported fact is preserved in arrival order. Settlement aggregates — the supported
+     * schema can carry one outcome, so full agreement publishes it and disagreement publishes the
+     * explicit unknown rather than an invented single outcome.
+     */
+    internal class InvocationRecord(val token: InvocationToken) {
+        val observations = mutableListOf<ExecutionOutcome>()
+    }
+
+    /** Open invocations awaiting finalization; guarded by [invocationLock]. */
+    private val openInvocations = java.util.concurrent.ConcurrentHashMap<Long, InvocationRecord>()
+
+    /** Serializes one-shot token consumption against settle/stop. */
+    private val invocationLock = Any()
+
+    private val nextInvocationId = java.util.concurrent.atomic.AtomicLong()
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start(
@@ -88,7 +142,9 @@ class VoiceAsrEngine @Inject constructor(
         listeningMode: ListeningMode,
         playbackBufferProvider: () -> FloatArray,
         micExposureProvider: () -> MicExposure,
-        onIntent: (VoiceIntent) -> Unit,
+        // The dispatch handler receives the INVOCATION token for this specific dispatch, or null when
+        // the intent belongs to no retained capture. Results are reported back against that token.
+        onIntent: (VoiceIntent, InvocationToken?) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
         // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
         // scopes the reaction to its start generation so only an unexpected end is acted on.
@@ -96,9 +152,17 @@ class VoiceAsrEngine @Inject constructor(
     ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
+        // The handler receives the invocation token for THIS dispatch; the binding lives in
+        // invokeHandler at the dispatch sites.
+        // The token binding happens INSIDE invokeHandler at the dispatch sites, NOT by wrapping
+        // here: the internal dispatch sites call invokeHandler directly, and a wrapper here would
+        // run it twice — the inner call would see pendingExecutionContext already consumed and
+        // hand the caller a null token (found by the overlapping-dispatch control).
+        this.onIntent = onIntent
+        this.currentRouteClass = audioRoute::class.simpleName ?: AudioRoute.Unknown::class.simpleName!!
+        captureSessionIncarnation += 1
         this.playbackBufferProvider = playbackBufferProvider
         this.micExposureProvider = micExposureProvider
-        this.onIntent = onIntent
         utteranceFilter.reset()
 
         val attached = CompletableDeferred<Boolean>()
@@ -128,25 +192,118 @@ class VoiceAsrEngine @Inject constructor(
             // deadlock under the isolated-microphone rule (voice-control-core.md > Route
             // acquisition).
             try {
+                var openContext: CaptureContext? = null
+                var accountedSamples = 0
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
-                        is VoiceSegmenterResult.SpeechStarted -> { /* utterance started */ }
+                        is VoiceSegmenterResult.SpeechStarted -> {
+                            // Freeze the capture context SYNCHRONOUSLY here — before any await
+                            // boundary — and keep the ISSUED value for every later stage of THIS
+                            // capture. Refused captures yield null and are excluded downstream.
+                            // ADMISSION BEFORE ALLOCATION: read only the native SIZE counter, let
+                            // the observer reserve exact bytes; drain into an admitted array whose
+                            // ownership then transfers to the sink. Refusal allocates NOTHING and
+                            // leaves the recognition buffer untouched.
+                            val initialSize = voiceAudioProcessor.speechPcmSize()
+                            // PER-CAPTURE MODEL PROVENANCE (reviewers 54635caa/8288ac15): the
+                            // ACTUAL selected backend's model identity, frozen with the context.
+                            // The VERSION is the model's own manifest identity, never a filename.
+                            val spec = backend.requiredModel
+                            val asrRef = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+                                spec.targetDir,
+                                spec.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
+                            )
+                            // Translation provenance is NOT knowable at capture start (the stage may
+                            // or may not run for this utterance); it is recorded when observed.
+                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                            openContext = admission?.context
+                            if (admission != null) {
+                                // Lease-protected initial allocation (reviewers 23cae70e b4 /
+                                // 79b2b5c9 b2): release is addressed by the IMMUTABLE HANDLE —
+                                // valid even if revocation closes this capture or a successor
+                                // opens mid-copy. The admit token's charge leaves EXACTLY ONCE:
+                                // transferred into the prefix on success, or returned here.
+                                var transferred = false
+                                try {
+                                    val firstChunk = ShortArray(initialSize)
+                                    val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
+                                    // ACTUAL sink transfer result; drained VALID count passed
+                                    // separately from array capacity (reviewer 79b2b5c9 b3).
+                                    transferred = segmentObserver.adoptFirstChunk(admission, firstChunk, copied)
+                                    if (transferred) accountedSamples = copied
+                                } finally {
+                                    if (!transferred) segmentObserver.releaseInitialChunk(admission)
+                                }
+                            }
+                        }
 
-                        is VoiceSegmenterResult.SpeechContinuing -> { /* accumulating frames */ }
+                        is VoiceSegmenterResult.SpeechContinuing -> {
+                            // RESERVE-BEFORE-COPY (blocker b3): read only the native SIZE counter;
+                            // admit the delta into collection ownership FIRST; allocate + drain the
+                            // tail ONLY for an admitted delta; any failure releases the reservation.
+                            // Not retaining (gate off / cap-ended / refused capture): ZERO collection
+                            // work — no peek array, no copy — recognition continues untouched.
+                            if (openContext != null && segmentObserver.isRetaining(openContext!!.captureId)) {
+                                val producedSize = voiceAudioProcessor.speechPcmSize()
+                                val deltaSamples = (producedSize - accountedSamples).coerceAtLeast(0)
+                                val token = if (deltaSamples > 0) segmentObserver.reserveDelta(openContext!!, deltaSamples) else null
+                                if (token != null) {
+                                    var transferred = false
+                                    try {
+                                        val delta = ShortArray(deltaSamples)
+                                        val copied = voiceAudioProcessor.drainSpeechTail(delta, accountedSamples, producedSize)
+                                        if (copied > 0) {
+                                            // Advance accounting ONLY when the sink ACCEPTED the
+                                            // commit (Boolean honored — reviewer 23cae70e b2).
+                                            transferred = segmentObserver.commitDelta(openContext!!, delta, copied, token)
+                                            if (transferred) accountedSamples += copied
+                                        }
+                                    } finally {
+                                        // Every refusal/throw path returns THIS token exactly once.
+                                        if (!transferred) segmentObserver.releaseDelta(openContext!!, token)
+                                    }
+                                } else if (deltaSamples > 0) {
+                                    // Refused growth: retention ended by the observer with its own terminal.
+                                }
+                                accountedSamples = producedSize.coerceAtMost(accountedSamples) // never regress past drained
+                            }
+                        }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
                             val totalSamples = result.frames.sumOf { it.samples.size }
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
+                            // Reserve-before-copy for the final tail too (blocker b3): the frames
+                            // already exist (recognition owns them); collection copies ONLY after
+                            // admitting the exact tail size, and releases on refusal/failure.
+                            if (openContext != null && totalSamples > accountedSamples &&
+                                segmentObserver.isRetaining(openContext!!.captureId)
+                            ) {
+                                val finalToken = segmentObserver.reserveDelta(openContext!!, totalSamples - accountedSamples)
+                                if (finalToken != null) {
+                                    var transferred = false
+                                    try {
+                                        val tail = shortTailOf(result.frames, accountedSamples)
+                                        transferred = segmentObserver.commitDelta(openContext!!, tail, tail.size, finalToken)
+                                        if (transferred) accountedSamples = totalSamples
+                                    } finally {
+                                        if (!transferred) segmentObserver.releaseDelta(openContext!!, finalToken)
+                                    }
+                                }
+                            }
 
-                            val request = shouldTranscribe(result)
+                            val request = shouldTranscribe(result, openContext)
                             if (request != null) {
                                 transcribeSegment(result, request)
                             }
+                            openContext = null
                         }
 
-                        is VoiceSegmenterResult.Rejected ->
+                        is VoiceSegmenterResult.Rejected -> {
                             Timber.w("[VoicePipeline] vad rejected - %s", result.reason)
+                            segmentObserver.cancelled(openContext, result.reason.name)
+                            openContext = null
+                        }
 
                         VoiceSegmenterResult.Silence -> { /* no speech */ }
                     }
@@ -164,6 +321,106 @@ class VoiceAsrEngine @Inject constructor(
         }
         Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
         return CaptureAttachment(attached)
+    }
+
+    // THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit): called by whoever ran the
+    // action — the service, not the engine — with what the executor really reported. Anything the
+    // executor never reports stays unobserved; a token that is no longer open is refused.
+
+    /**
+     * THE EXECUTOR'S ACTUAL RESULT for ONE dispatch, addressed by its token (spec 03c96924,
+     * reviewer 268d8cf0/3fb01865). ONE-SHOT consumption under the invocation lock: the first
+     * report consumes the token, so a later report (including the service's throw-fallback) can
+     * neither duplicate nor overwrite it, and a token that is no longer open — settled, abandoned
+     * or from a restarted lifecycle — is refused rather than attributed to some other capture.
+     */
+    // Test/diagnostic seam: opens the same invocation record a real dispatch would, so a control
+    // can drive report/settle against the engine's ACTUAL structures. Never used in production.
+    internal fun openInvocationForTest(captureId: java.util.UUID, id: Long): InvocationToken {
+        val token = InvocationToken(id = id, captureId = captureId)
+        synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
+        return token
+    }
+
+    internal fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean = synchronized(invocationLock) {
+        // The FACT is recorded; the invocation stays OPEN. Publication happens once, at explicit
+        // settlement — a first fact no longer pre-empts a later observed failure, and the
+        // finalize boundary remains the single publication point (reviewer dab802ec).
+        val record = openInvocations[token.id] ?: return false
+        if (record.token != token) return false
+        record.observations += outcome
+        true
+    }
+
+    /**
+     * THE RESULT-OR-UNKNOWN FINALIZATION BOUNDARY (reviewer 268d8cf0/3fb01865): the Executed join —
+     * which arms publication and release — happens HERE, never at dispatch. A capture therefore
+     * publishes only after its invocation is over, carrying its observed result or, if none was
+     * reported, the honest schema unknown (dispatch alone is not a result; spec 3ed49695).
+     */
+    fun settleInvocation(token: InvocationToken): Boolean = settleAndReport(token)
+
+    /**
+     * Returns true when THIS call consumed the invocation (mismatched or already-settled tokens
+     * return false and change nothing).
+     */
+    private fun settleAndReport(token: InvocationToken): Boolean {
+        // VALIDATE AND CONSUME IN ONE LOCK INTERVAL (reviewer c15bf037): a remove-then-restore
+        // two-step window let a concurrent report/settle lose a fact or resurrect a stopped
+        // invocation. Here the stored record must match the FULL token before it is consumed.
+        val record: InvocationRecord? = synchronized(invocationLock) {
+            val candidate = openInvocations[token.id]
+            if (candidate != null && candidate.token == token) openInvocations.remove(token.id) else null
+        }
+        record?.let {
+            finalizePublication(it.token, aggregateObservations(it.observations))
+            return true
+        }
+        return false
+    }
+
+    private fun finalizePublication(token: InvocationToken, outcome: ExecutionOutcome?) {
+        if (outcome != null) segmentObserver.noteExecutionOutcome(token.captureId, outcome)
+        joinOutcome(CollectionOutcome.Executed(token.captureId, dispatchedWithoutThrowing = true))
+    }
+
+    /**
+     * RESTART OWNERSHIP (reviewer 268d8cf0): a stop ends every open invocation. Each is finalized
+     * with an explicit unknown — the dispatch DID happen, only its result was never observed — so
+     * an abandoned capture still publishes instead of leaking retained.
+     */
+    private fun clearInvocationOwnership() {
+        val abandoned: List<InvocationRecord> = synchronized(invocationLock) {
+            val open = openInvocations.values.toList()
+            openInvocations.clear()
+            open
+        }
+        // An abandoned invocation publishes its supported aggregate — the agreed fact, or the
+        // explicit unknown when observations disagree — never an invented claim over known facts
+        // (spec e62305a2), never silence over a loss.
+        abandoned.forEach { finalizePublication(it.token, aggregateObservations(it.observations)) }
+    }
+
+    /**
+     * Dispatch through the token-binding seam. The token is bound BEFORE the handler runs, so a
+     * result can never beat the binding or be attributed by intent value. The Executed join is
+     * DEFERRED to the token's finalization (settle/report/stop-time abandonment), because that
+     * join arms publication — finalizing before publication is what lets the record carry a
+     * result instead of a permanent unknown.
+     */
+    private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?) -> Unit), intent: VoiceIntent) {
+        val capture = pendingExecutionContext
+        pendingExecutionContext = null
+        val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
+        if (token != null) synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
+        try {
+            handler(intent, token)
+        } catch (t: Throwable) {
+            // A SYNCHRONOUS handler throw must not strand the token: settle it here so the
+            // invocation finalizes (recorded fact or explicit unknown) exactly once.
+            if (token != null) settleInvocation(token)
+            throw t
+        }
     }
 
     fun updateListeningMode(mode: ListeningMode) {
@@ -184,6 +441,9 @@ class VoiceAsrEngine @Inject constructor(
      *   routing, so it stays silent rather than spending the grace window.
      */
     private data class TranscribeRequest(
+        val capture: CaptureContext?,
+        /** Records the ACTUAL translation provenance when the stage runs for this capture. */
+        val noteTranslation: (au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance) -> Unit = {},
         val samples: FloatArray,
         val wakePositive: Boolean,
         val completionSample: Int = 0,
@@ -201,7 +461,10 @@ class VoiceAsrEngine @Inject constructor(
         request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
         request.speechEndSample
 
-    private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): TranscribeRequest? {
+    private suspend fun shouldTranscribe(
+        segment: VoiceSegmenterResult.SpeechEnded,
+        capture: CaptureContext?,
+    ): TranscribeRequest? {
         // Build float samples from the segment
         val totalSamples = segment.frames.sumOf { it.samples.size }
         val floatSamples = FloatArray(totalSamples)
@@ -224,8 +487,26 @@ class VoiceAsrEngine @Inject constructor(
             )
         }.getOrElse { e ->
             Timber.w(e, "[VoicePipeline] wake detection failed, dropping segment")
+            // Exactly ONE terminal before exit: the capture COMPLETES with DetectorFailed —
+            // not cancelled — so the wake observation state is recorded for this capture.
+            segmentObserver.wakeCompleted(
+                context = capture,
+                speechOnsetSample = segment.speechOnsetSample,
+                speechEndSample = segment.speechEndSample,
+                wakeState = SegmentObservation.WakeState.DetectorFailed,
+                framesProvider = { segment.frames.map { it.samples } to (segment.frames.firstOrNull()?.sampleRateHz ?: 16000) },
+            )
             return null
         }
+
+        // Handover WITHOUT an upload-side copy: the provider runs only if revalidation passes.
+        segmentObserver.wakeCompleted(
+            context = capture,
+            speechOnsetSample = segment.speechOnsetSample,
+            speechEndSample = segment.speechEndSample,
+            wakeState = if (wwResult.detected) SegmentObservation.WakeState.Detected else SegmentObservation.WakeState.NotDetected,
+            framesProvider = { segment.frames.map { it.samples } to (segment.frames.firstOrNull()?.sampleRateHz ?: 16000) },
+        )
 
         // Debug instrumentation: behind WAKE_WORD_DEBUG_CAPTURE, dump every
         // VAD segment (raw WAV + log-Mel PNG) named by timestamp + score.
@@ -253,6 +534,8 @@ class VoiceAsrEngine @Inject constructor(
 
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
+                capture = capture,
+                noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
                 samples = floatSamples,
                 speechEndSample = segment.speechEndSample,
                 sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
@@ -265,7 +548,12 @@ class VoiceAsrEngine @Inject constructor(
         return when (mode) {
             ListeningMode.Continuous -> {
                 Timber.i("[VoicePipeline] wake %s → ASR (grace/continuous)", wakeCmp)
-                TranscribeRequest(samples = floatSamples, wakePositive = false)
+                TranscribeRequest(
+                    capture = capture,
+                    noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
+                    samples = floatSamples,
+                    wakePositive = false,
+                )
             }
 
             ListeningMode.WakeWord -> {
@@ -290,6 +578,7 @@ class VoiceAsrEngine @Inject constructor(
         val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
         if (!utteranceFilter.shouldProcess(floatSamples, false, 0, playbackBuffer)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
+            joinOutcome(CollectionOutcome.NotCollected(request.capture?.captureId ?: return, "bleed"))
             return
         }
 
@@ -323,13 +612,20 @@ class VoiceAsrEngine @Inject constructor(
             // No leftover command after the wake: the session started and
             // nothing was asked, so nothing is reported. (The WAKE_WORD earcon
             // already acknowledged detection.)
+            joinOutcome(
+                CollectionOutcome.NotCollected(request.capture?.captureId ?: return, if (request.wakePositive) "wake-only" else "empty"),
+            )
             return
         }
+        // Recognized: the ACTUAL trimmed transcript + detected language of THIS capture.
+        request.capture?.let { joinOutcome(CollectionOutcome.Recognized(it.captureId, transcript, asrResult.detectedLanguage)) }
         // Translate to English when the ASR backend did not already translate and
         // the detected language is not English (the SenseVoice CJK path).
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
         val trimmedResult = asrResult.copy(text = transcript)
         val routePrep = prepareRoutingInput(trimmedResult, b)
+        // OBSERVED translation provenance travels with the capture (never claimed when absent).
+        routePrep.translation?.let(request.noteTranslation)
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         // Printing post-translate fields first made lines like
         //   lang=en 'Play.' translate=yue→en '播放。'
@@ -352,12 +648,50 @@ class VoiceAsrEngine @Inject constructor(
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
-        processUtterance(routePrep.input!!, addressed = request.wakePositive)
+        processUtterance(routePrep.input!!, addressed = request.wakePositive, capture = request.capture)
     }
 
-    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {
+    /** Samples of [frames] beyond the first [skip] — the exact delta the producer added. */
+    private fun shortTailOf(frames: List<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame>, skip: Int): ShortArray {
+        var seen = 0
+        val out = ShortArray((frames.sumOf { it.samples.size } - skip).coerceAtLeast(0))
+        var offset = 0
+        for (frame in frames) {
+            if (seen + frame.samples.size <= skip) {
+                seen += frame.samples.size
+                continue
+            }
+            val from = (skip - seen).coerceIn(0, frame.samples.size)
+            val len = frame.samples.size - from
+            System.arraycopy(frame.samples, from, out, offset, len)
+            offset += len
+            seen += frame.samples.size
+        }
+        return out
+    }
+
+    /** Join an outcome for the capture that produced it; refused silently when uncollected. */
+    private fun joinOutcome(outcome: CollectionOutcome) {
+        retentionSink.joinOutcome(outcome)
+    }
+
+    /** Allowlisted intent category (plan Task 4): coarse family only, never raw payloads. */
+    private fun intentCategory(intent: VoiceIntent): String = when (intent) {
+        is VoiceIntent.Playback -> "playback"
+        is VoiceIntent.Effects -> "effects"
+        is VoiceIntent.Volume -> "volume"
+        is VoiceIntent.Sleep -> "sleep"
+        is VoiceIntent.Chapter -> "chapter"
+        is VoiceIntent.CloudRoute -> "cloud"
+        else -> "other"
+    }
+
+    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, capture: CaptureContext?) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
+        fun routed(category: String, fields: Map<String, String> = emptyMap()) {
+            if (capture != null) joinOutcome(CollectionOutcome.Routed(capture.captureId, category, fields))
+        }
 
         val ready = recognizer.ensureReady()
         if (ready.isFailure) {
@@ -390,7 +724,9 @@ class VoiceAsrEngine @Inject constructor(
             )
             // A cloud turn outlives the window it was issued in, so it carries
             // that window's identity and cannot extend a later one.
-            handler(intent.stampedForWindow(gracePeriodSignal.currentGeneration))
+            routed(intentCategory(intent))
+            pendingExecutionContext = capture
+            invokeHandler(handler, intent.stampedForWindow(gracePeriodSignal.currentGeneration))
             return
         }
 
@@ -444,8 +780,11 @@ class VoiceAsrEngine @Inject constructor(
                     audioFeedbackRenderer.playEarcon(EarconId.ERROR)
                     return
                 }
+                routed("cloud_escalation")
+                pendingExecutionContext = capture
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
-                handler(
+                invokeHandler(
+                    handler,
                     VoiceIntent.CloudRoute(
                         request = input.routerTranscript,
                         tier = VoiceIntent.CloudTier.Unknown,
@@ -490,6 +829,9 @@ class VoiceAsrEngine @Inject constructor(
                 ),
                 translateNote = "translate=skip(backend)",
                 dropWithError = false,
+                // The BACKEND itself produced English: its model identity IS the translation
+                // provenance, and a result was produced by definition of this path.
+                translation = requestTranslationProvenance(backend, translatedText = trimmed.text),
             )
         }
         if (detected == "en") {
@@ -544,17 +886,51 @@ class VoiceAsrEngine @Inject constructor(
             ),
             translateNote = "translate=$detected→en '$translated'",
             dropWithError = false,
+            // A translated RESULT was observed; the on-device model's own identity/version is not
+            // observable here, so the model is honest absence rather than a fixed label.
+            translation = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+                model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                producedResult = true,
+                // The OBSERVED result text and the target language travel as SEPARATE fields
+                // (reviewer 57719ad2): the record schema has translated_text AND target_language.
+                translatedText = translated,
+                targetLanguage = "en",
+            ),
         )
     }
+
+    /** The selected backend's manifest identity, when it is the component translating. */
+    private fun requestTranslationProvenance(
+        backend: AsrBackend,
+        translatedText: String,
+    ) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+            backend.requiredModel.targetDir,
+            backend.requiredModel.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
+        ),
+        producedResult = true,
+        // The backend's English output IS the translated text: observed, not assumed.
+        translatedText = translatedText,
+        targetLanguage = "en",
+    )
 
     private data class RoutePrep(
         val input: IntentRoutingInput?,
         val translateNote: String?,
         val dropWithError: Boolean,
+        /** OBSERVED translation provenance for this capture (reviewer 8288ac15); null = none ran. */
+        val translation: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance? = null,
     )
 
     fun stop() {
+        // Listening closure: discard ONLY the current partial through the same serialized
+        // observer lifecycle (one monitor guards pipeline events and external signals alike);
+        // never resume capture to complete an example. Completed contributions survive.
+        segmentObserver.listeningClosed("pipeline-stopped")
+        // Every open invocation ends with the lifecycle: no result can cross a stop/restart.
+        clearInvocationOwnership()
         processingJob?.cancel()
+        processingJob = null
         processingJob = null
         // Tear down native capture directly too: the processing job's flow `finally` only runs
         // when the event loop was collected, and a capture attached but never collected must
@@ -577,5 +953,20 @@ class VoiceAsrEngine @Inject constructor(
     companion object {
         /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
         private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
+
+        /**
+         * THE SUPPORTED AGGREGATE over one invocation's per-action observations (spec 250ddcc3):
+         * full agreement publishes that outcome; ANY disagreement publishes null — the explicit
+         * schema unknown (observation_unavailable) — because the schema carries one outcome and
+         * inventing a single one over conflicting facts is the defect this channel exists to
+         * prevent. Empty observations (nothing observed) also aggregate to null.
+         */
+        internal fun aggregateObservations(observations: List<ExecutionOutcome>): ExecutionOutcome? {
+            val distinct = observations.toSet()
+            if (distinct.size > 1) {
+                Timber.w("[VoicePipeline] execution observations disagree (%s); recording unknown", distinct)
+            }
+            return if (distinct.size == 1) distinct.single() else null
+        }
     }
 }

@@ -144,20 +144,22 @@ class CloudRouteSink internal constructor(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = null)
+        onDuck: ((VoiceActionOutcome) -> Unit)?,
+    ): VoiceResponse = routeTurn(request, tier, context, hint = null, onDuck = onDuck)
 
     override suspend fun routeToCloudWithHint(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = hint)
+    ): VoiceResponse = routeTurn(request, tier, context, hint = hint, onDuck = null)
 
     private suspend fun routeTurn(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint?,
+        onDuck: ((VoiceActionOutcome) -> Unit)? = null,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
@@ -253,7 +255,11 @@ class CloudRouteSink internal constructor(
                         // Duck the host player on the first frame; restore on Done.
                         if (!audioPlayed) {
                             audioPlayed = true
-                            playbackSink.duck()
+                            // The duck outcome exists ONLY at the focus-result branch; deliver
+                            // this turn's own channel there — no shared mutable callback: the
+                            // reporter travels with THIS focus request (reviewer c15bf037).
+                            (playbackSink as? PlaybackManagerPlaybackSink)?.duckReporting(onDuck)
+                                ?: playbackSink.duck()
                             ducked = true
                         }
                         audioPlayer?.submitFrame(event.bytes)

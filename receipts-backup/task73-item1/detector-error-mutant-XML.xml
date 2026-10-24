@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" tests="19" skipped="0" failures="1" errors="0" timestamp="2026-10-23T17:24:42.310Z" hostname="MacBook-Pro.local" time="0.745">
+  <properties/>
+  <testcase name="a capture without a frozen issued authority is discarded and never published" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.022"/>
+  <testcase name="recognized then routed then executed records the real stages - not overwritten by the terminal join" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="a failed wake detector is persisted as wake failed with detector_error" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.084">
+    <failure message="java.lang.AssertionError: the PERSISTED wake state must be a known failure expected:&lt;Failed&gt; but was:&lt;Unknown&gt;" type="java.lang.AssertionError">java.lang.AssertionError: the PERSISTED wake state must be a known failure expected:&lt;Failed&gt; but was:&lt;Unknown&gt;
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotEquals(Assert.java:835)
+	at org.junit.Assert.assertEquals(Assert.java:120)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest.a failed wake detector is persisted as wake failed with detector_error(EngineToProducerPublishTest.kt:517)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)
+	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+	at org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)
+	at org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)
+	at org.junit.rules.ExternalResource$1.evaluate(ExternalResource.java:54)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)
+	at org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:63)
+	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
+	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
+	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
+	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
+	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
+	at org.junit.runner.JUnitCore.run(JUnitCore.java:137)
+	at org.junit.runner.JUnitCore.run(JUnitCore.java:115)
+	at org.gradle.api.internal.tasks.testing.junit.JUnitTestExecutor.runRequest(JUnitTestExecutor.java:174)
+	at org.gradle.api.internal.tasks.testing.junit.JUnitTestExecutor.accept(JUnitTestExecutor.java:84)
+	at org.gradle.api.internal.tasks.testing.junit.JUnitTestExecutor.accept(JUnitTestExecutor.java:47)
+	at org.gradle.api.internal.tasks.testing.junit.AbstractJUnitTestDefinitionProcessor.processTestDefinition(AbstractJUnitTestDefinitionProcessor.java:65)
+	at org.gradle.api.internal.tasks.testing.SuiteTestDefinitionProcessor.processTestDefinition(SuiteTestDefinitionProcessor.java:53)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.gradle.internal.dispatch.MethodInvocation.invokeOn(MethodInvocation.java:77)
+	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:28)
+	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:19)
+	at org.gradle.internal.dispatch.ContextClassLoaderDispatch.dispatch(ContextClassLoaderDispatch.java:33)
+	at org.gradle.internal.dispatch.ProxyDispatchAdapter$DispatchingInvocationHandler.invoke(ProxyDispatchAdapter.java:88)
+	at jdk.proxy1/jdk.proxy1.$Proxy4.processTestDefinition(Unknown Source)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker$2.run(TestWorker.java:178)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker.executeAndMaintainThreadName(TestWorker.java:126)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker.execute(TestWorker.java:103)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker.execute(TestWorker.java:63)
+	at org.gradle.process.internal.worker.child.ActionExecutionWorker.execute(ActionExecutionWorker.java:56)
+	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:122)
+	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
+	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
+	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
+</failure>
+  </testcase>
+  <testcase name="identity transition between trigger entry and the atomic section cannot publish the old capture under a new owner" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.003"/>
+  <testcase name="an A-to-B account move after capture refuses the record record-less" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="the hook runs outside the sink lock - proven across threads with a barrier" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.022"/>
+  <testcase name="observed translation provenance is recorded - backend-native, platform and absent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="a synchronously rejected dispatch releases the retained charge and surfaces the failure" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="cancel-before-start via a cancelled scope releases the charge exactly once" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.019"/>
+  <testcase name="a capture with no observed asr model is not publishable" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="uploadTrigger start attaches the trigger - a second start is idempotent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.501"/>
+  <testcase name="a refused publish leaves no record and releases the retained charge" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="an epoch rotation after capture refuses the record record-less" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.0"/>
+  <testcase name="a session-only move after capture refuses the record record-less" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.0"/>
+  <testcase name="an executed capture is published into the store with its frozen identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.026"/>
+  <testcase name="only an Executed outcome triggers publication" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="a produced translation missing either observed half is not a completed record" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.001"/>
+  <testcase name="an owner transition attempted between validation and prepare cannot interleave - real owner transaction" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.029"/>
+  <testcase name="cancel during the body releases the charge via the job binding" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineToProducerPublishTest" time="0.026"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (/Users/dev/.gradle/caches/modules-2/files-2.1/net.bytebuddy/byte-buddy-agent/1.17.7/fbf3d6d649ed37fc9e9c59480a05be0a26e3c2da/byte-buddy-agent-1.17.7.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+]]></system-err>
+</testsuite>

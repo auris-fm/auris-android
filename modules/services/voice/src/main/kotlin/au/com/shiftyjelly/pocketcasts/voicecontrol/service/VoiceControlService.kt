@@ -23,12 +23,14 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
@@ -39,12 +41,14 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.keepsPendingAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -52,6 +56,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 @AndroidEntryPoint
@@ -64,6 +69,8 @@ class VoiceControlService : Service() {
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
 
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
+
+    @Inject lateinit var intentDispatcher: VoiceIntentDispatcher
 
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
 
@@ -94,6 +101,17 @@ class VoiceControlService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
     private var acquisitionJob: Job? = null
+
+    /**
+     * The start that has been ACCEPTED but may still be waiting for model readiness. `engineStart`
+     * only flips true once capture is really up, so without this a second start would slip into the
+     * readiness window (reviewer a85cf8fe). Cleared when the start coroutine finishes, so a failed
+     * start can be retried.
+     */
+    private var startInFlightJob: Job? = null
+
+    /** The teardown currently running, so a stop can return a job that really completes. */
+    private var stopInFlightJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
@@ -129,17 +147,36 @@ class VoiceControlService : Service() {
             // Stop came from the user, not from Android: the controller must not bring the service
             // back on the next foreground, or the button would silently do nothing.
             voiceControlServiceController.onServiceStoppedByUser()
-            stopVoiceControl()
+            // ONE STOP AUTHORITY: the platform path stops through the seam, exactly like onDestroy.
+            lifecycle.stop()
             return START_NOT_STICKY
         }
-        startVoiceControl()
+        // ONE START AUTHORITY: this platform path starts through the seam, not around it.
+        lifecycle.start()
         return START_NOT_STICKY
     }
 
-    private fun startVoiceControl() {
-        if (engineStart.isStarted) {
+    /**
+     * THE LIFECYCLE SEAM, reporting THIS service's own authority (reviewer a85cf8fe):
+     * `startedOrStarting` covers the readiness window, and `stopPipeline` returns a job that
+     * completes only after the pipeline has finished tearing down.
+     */
+    internal val lifecycle: VoiceServiceLifecycle by lazy {
+        VoiceServiceLifecycle.FromServiceState(
+            startedOrStarting = { engineStart.isStarted || startInFlightJob?.isActive == true },
+            scope = object : VoiceServiceLifecycle.LifetimeScope {
+                override val isActive get() = serviceScope.coroutineContext[Job]?.isActive == true
+            },
+            startPipeline = { startVoiceControl() },
+            stopPipeline = { stopVoiceControl() },
+        )
+    }
+
+    /** Returns true when a start was accepted; false when one is already running or in flight. */
+    private fun startVoiceControl(): Boolean {
+        if (engineStart.isStarted || startInFlightJob?.isActive == true) {
             Timber.i("Voice control already started")
-            return
+            return false
         }
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
@@ -147,7 +184,7 @@ class VoiceControlService : Service() {
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
             stopSelf()
-            return
+            return false
         }
 
         try {
@@ -159,7 +196,7 @@ class VoiceControlService : Service() {
         } catch (e: SecurityException) {
             Timber.e(e, "Cannot start foreground — mic permission not granted")
             stopSelf()
-            return
+            return false
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
@@ -170,7 +207,11 @@ class VoiceControlService : Service() {
         // Handle models first: defer mode observation until readiness completes.
         // This avoids lazy init on first utterance — both whisper and the
         // LFM inference runtime are fully prepared before audio capture.
-        serviceScope.launch(Dispatchers.IO) {
+        // ALL-EXIT OWNERSHIP CLEANUP (reviewer dab802ec): invokeOnCompletion runs even when the
+        // coroutine is cancelled BEFORE its body first runs (a launch finally does not), and the
+        // try/catch below covers a launch that fails before the Job exists. Settlement is one-shot
+        // in the engine, so every exit path converges on exactly one publication.
+        startInFlightJob = serviceScope.launch(Dispatchers.IO) {
             ensureModelsReady()
             launch(Dispatchers.Main) {
                 modeJob = kotlinx.coroutines.flow.combine(
@@ -294,6 +335,7 @@ class VoiceControlService : Service() {
         }
 
         Timber.i("Voice control service started, observing listening mode")
+        return true
     }
 
     private suspend fun ensureModelsReady() {
@@ -310,7 +352,9 @@ class VoiceControlService : Service() {
         }
         Timber.i("Selected ASR backend: %s", backend::class.simpleName)
 
-        val needDownload = !modelManager.isModelReady(backend.requiredModel) ||
+        // Digest verification runs on IO (reviewer ff30b294): hashing a cached model never
+        // blocks the main/audio path.
+        val needDownload = !modelManager.isModelReadyVerified(backend.requiredModel) ||
             !modelManager.isLfmModelReady()
 
         if (needDownload) {
@@ -440,7 +484,7 @@ class VoiceControlService : Service() {
                         listeningMode = mode,
                         playbackBufferProvider = playbackBufferRecorder::snapshot,
                         micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                        onIntent = { intent -> handleIntent(intent) },
+                        onIntent = { intent, token -> handleIntent(intent, token) },
                         onTerminated = {
                             serviceScope.launch(Dispatchers.Main) { onPipelineTerminated(generation) }
                         },
@@ -660,24 +704,25 @@ class VoiceControlService : Service() {
 
     private fun handleIntent(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+        invocationToken: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.InvocationToken?,
     ) {
-        val now = System.currentTimeMillis()
-        val intentType = intent::class.simpleName ?: intent.toString()
-        if (intentType == lastIntentType && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
-            Timber.i("[VoicePipeline] debounce %s", intentType)
-            return
-        }
-        lastIntentType = intentType
-        lastCommandTime = now
-
-        serviceScope.launch(Dispatchers.IO) {
-            val response = voicePlaybackIntentExecutor.execute(intent)
-            audioFeedbackRenderer.render(response)
-            gracePeriodSignal.onCommandRecognized(
-                fromGeneration = intent.windowGenerationOf(),
-                restoresAllowance = intent.restoresAllowance(),
-            )
-        }
+        // THE OBSERVABLE SEAM: the dispatch lifecycle (debounce settle, invocation-local fact
+        // channel, all-exit one-shot settlement) lives in VoiceIntentDispatcher so REAL controls
+        // can drive it — overlap→persist, pre-body cancellation, handler throw (spec 250ddcc3).
+        intentDispatcher.dispatch(
+            scope = serviceScope,
+            engine = voiceAsrEngine.get(),
+            executor = voicePlaybackIntentExecutor,
+            render = { _, response -> audioFeedbackRenderer.render(response) },
+            onCommandRecognized = { recognized ->
+                gracePeriodSignal.onCommandRecognized(
+                    fromGeneration = recognized.windowGenerationOf(),
+                    restoresAllowance = recognized.restoresAllowance(),
+                )
+            },
+            intent = intent,
+            invocationToken = invocationToken,
+        )
     }
 
     private fun updateListeningState() {
@@ -709,21 +754,52 @@ class VoiceControlService : Service() {
         }
     }
 
-    private fun stopVoiceControl() {
+    /**
+     * Stops the pipeline and returns a job that completes when teardown has REALLY finished
+     * (reviewer a85cf8fe). The previous version returned an already-completed job, which told an
+     * awaiting caller that children had settled when they had not. This awaits the cancelled
+     * children — `modeJob`, the acquisition job and the in-flight start — under `NonCancellable`, so
+     * the returned job is a truthful completion signal. `serviceScope` is cancelled first so nothing
+     * can be restarted behind the join.
+     */
+    private fun stopVoiceControl(): Job {
+        // Idempotent for BOTH cases: a running teardown is joined, and a COMPLETED teardown keeps its
+        // identity, so a later stop cannot release resources a second time.
+        stopInFlightJob?.let { return it }
         Timber.i("Stopping voice control service")
+        val rootJob = serviceScope.coroutineContext[Job]
+
+        // CANCEL, STOP, JOIN, THEN RELEASE (reviewers 0bba7db5 + dbde4427).
+        // A cancellation REQUEST is not "the users have finished": dispatcher children call
+        // render()/onCommandRecognized and can still be inside them. Releasing the renderer,
+        // recognizer, session or backend before those children have actually finished is
+        // use-after-release, so the releases happen only AFTER the join below.
         modeJob?.cancel()
+        // Engine + capture teardown runs after the cancellation request. It is SYNCHRONOUS for the
+        // engine's own resources (segment lifecycle, invocation ownership, native capture), so no
+        // engine work outlives this call; only the scope's children remain to be joined.
         stopEngine()
-        wiredBackend?.release()
-        wiredBackend = null
-        mediaSession?.isActive = false
-        mediaSession?.release()
-        mediaSession = null
-        voiceRecognizer.release()
-        audioFeedbackRenderer.release()
-        notificationManager.cancelNotification()
-        stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
         stopSelf()
+
+        // The completion authority, dispatched OUTSIDE the cancelled scope. It joins the root (so
+        // every owned child has really finished) and THEN releases the resources those children
+        // were using. Its completion therefore means: users finished AND resources released.
+        return CoroutineScope(Dispatchers.IO).launch {
+            withContext(NonCancellable) {
+                runCatching { rootJob?.join() }
+                    .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
+                wiredBackend?.release()
+                wiredBackend = null
+                mediaSession?.isActive = false
+                mediaSession?.release()
+                mediaSession = null
+                voiceRecognizer.release()
+                audioFeedbackRenderer.release()
+                notificationManager.cancelNotification()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            }
+        }.also { stopInFlightJob = it }
     }
 
     private fun hasRequiredPermissions(): Boolean {

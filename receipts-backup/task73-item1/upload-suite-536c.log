@@ -1,0 +1,262 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.7.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+Reusing configuration cache.
+> Task :modules:services:protobuf:protobufDummy UP-TO-DATE
+> Task :modules:services:localization:preBuild UP-TO-DATE
+> Task :modules:services:coroutines:preBuild UP-TO-DATE
+> Task :modules:services:utils:preBuild UP-TO-DATE
+> Task :modules:services:model:preBuild UP-TO-DATE
+> Task :modules:services:protobuf:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :modules:services:payment:preBuild UP-TO-DATE
+> Task :modules:services:coroutines:preDebugBuild UP-TO-DATE
+> Task :modules:services:payment:preDebugBuild UP-TO-DATE
+> Task :modules:services:analytics:preBuild UP-TO-DATE
+> Task :modules:services:localization:preDebugBuild UP-TO-DATE
+> Task :modules:services:analytics:preDebugBuild UP-TO-DATE
+> Task :modules:services:protobuf:extractProto
+> Task :modules:services:protobuf:processProtoResources
+> Task :modules:services:protobuf:processResources
+> Task :modules:services:coroutines:generateDebugBuildConfig
+> Task :modules:services:analytics:processDebugNavigationResources
+> Task :modules:services:analytics:generateDebugResources
+> Task :modules:services:coroutines:generateDebugResources
+> Task :modules:services:coroutines:processDebugNavigationResources
+> Task :modules:services:analytics:generateDebugBuildConfig
+> Task :modules:services:localization:generateDebugBuildConfig
+> Task :modules:services:localization:generateDebugResources
+> Task :modules:services:localization:processDebugNavigationResources
+> Task :modules:services:model:preDebugBuild UP-TO-DATE
+> Task :modules:services:protobuf:extractIncludeProto
+> Task :modules:services:model:generateDebugBuildConfig
+> Task :modules:services:model:generateDebugResources
+> Task :modules:services:localization:javaPreCompileDebug
+> Task :modules:services:coroutines:javaPreCompileDebug
+> Task :modules:services:model:processDebugNavigationResources
+> Task :modules:services:payment:generateDebugResources
+> Task :modules:services:payment:processDebugNavigationResources
+> Task :modules:services:payment:generateDebugBuildConfig
+> Task :modules:services:model:packageDebugResources
+> Task :modules:services:payment:packageDebugResources
+> Task :modules:services:analytics:packageDebugResources
+> Task :modules:services:coroutines:packageDebugResources
+> Task :modules:services:payment:parseDebugLocalResources
+> Task :modules:services:coroutines:parseDebugLocalResources
+> Task :modules:services:model:parseDebugLocalResources
+> Task :modules:services:analytics:parseDebugLocalResources
+> Task :modules:services:payment:generateDebugRFile
+> Task :modules:services:analytics:generateDebugRFile
+> Task :modules:services:utils:preDebugBuild UP-TO-DATE
+> Task :modules:services:model:generateDebugRFile
+> Task :modules:services:coroutines:generateDebugRFile
+> Task :modules:services:utils:processDebugNavigationResources
+> Task :modules:services:utils:generateDebugBuildConfig
+> Task :modules:services:utils:generateDebugResources
+> Task :modules:services:payment:javaPreCompileDebug
+> Task :modules:services:preferences:preBuild UP-TO-DATE
+> Task :modules:services:preferences:preDebugBuild UP-TO-DATE
+> Task :modules:services:utils:javaPreCompileDebug
+> Task :modules:services:preferences:processDebugNavigationResources
+> Task :modules:services:images:preBuild UP-TO-DATE
+> Task :modules:services:images:preDebugBuild UP-TO-DATE
+> Task :modules:services:preferences:generateDebugResources
+> Task :modules:services:utils:packageDebugResources
+> Task :modules:services:images:generateDebugBuildConfig
+> Task :modules:services:model:javaPreCompileDebug
+> Task :modules:services:utils:parseDebugLocalResources
+> Task :modules:services:utils:generateDebugRFile
+> Task :modules:services:images:javaPreCompileDebug
+> Task :modules:services:preferences:packageDebugResources
+> Task :modules:services:preferences:generateDebugBuildConfig
+> Task :modules:services:preferences:javaPreCompileDebug
+> Task :modules:services:servers:preBuild UP-TO-DATE
+> Task :modules:services:servers:preDebugBuild UP-TO-DATE
+> Task :modules:services:protobuf:generateProto
+> Task :modules:services:preferences:parseDebugLocalResources
+> Task :modules:services:preferences:generateDebugRFile
+> Task :modules:services:servers:processDebugNavigationResources
+> Task :modules:services:images:processDebugNavigationResources
+> Task :modules:services:servers:generateDebugResources
+> Task :modules:services:images:generateDebugResources
+> Task :modules:services:servers:generateDebugBuildConfig
+> Task :modules:services:servers:javaPreCompileDebug
+> Task :modules:services:crashlogging:preBuild UP-TO-DATE
+> Task :modules:services:crashlogging:preDebugBuild UP-TO-DATE
+> Task :modules:services:analytics:javaPreCompileDebug
+> Task :modules:services:servers:packageDebugResources
+> Task :modules:services:crashlogging:generateDebugResources
+> Task :modules:services:crashlogging:generateDebugBuildConfig
+> Task :modules:services:crashlogging:processDebugNavigationResources
+> Task :modules:services:servers:parseDebugLocalResources
+> Task :modules:services:crashlogging:packageDebugResources
+> Task :modules:services:crashlogging:javaPreCompileDebug
+> Task :modules:services:deeplink:preBuild UP-TO-DATE
+> Task :modules:services:deeplink:preDebugBuild UP-TO-DATE
+> Task :modules:services:crashlogging:parseDebugLocalResources
+> Task :modules:services:servers:generateDebugRFile
+> Task :modules:services:deeplink:generateDebugResources
+> Task :modules:services:deeplink:generateDebugBuildConfig
+> Task :modules:services:crashlogging:generateDebugRFile
+> Task :modules:services:deeplink:processDebugNavigationResources
+> Task :modules:services:fingerprint:preBuild UP-TO-DATE
+> Task :modules:services:fingerprint:preDebugBuild UP-TO-DATE
+> Task :modules:services:deeplink:javaPreCompileDebug
+> Task :modules:services:deeplink:packageDebugResources
+> Task :modules:services:fingerprint:generateDebugResources
+> Task :modules:services:fingerprint:generateDebugBuildConfig
+> Task :modules:services:fingerprint:processDebugNavigationResources
+> Task :modules:services:deeplink:parseDebugLocalResources
+> Task :modules:services:fingerprint:packageDebugResources
+> Task :modules:services:fingerprint:javaPreCompileDebug
+> Task :modules:services:repositories:preBuild UP-TO-DATE
+> Task :modules:services:repositories:preDebugBuild UP-TO-DATE
+> Task :modules:services:deeplink:generateDebugRFile
+> Task :modules:services:repositories:generateDebugBuildConfig
+> Task :modules:services:fingerprint:parseDebugLocalResources
+> Task :modules:services:repositories:generateDebugResources
+> Task :modules:services:fingerprint:generateDebugRFile
+> Task :modules:services:repositories:packageDebugResources
+> Task :modules:services:repositories:processDebugNavigationResources
+> Task :modules:services:repositories:parseDebugLocalResources
+> Task :modules:services:repositories:generateDebugRFile
+> Task :modules:services:repositories:javaPreCompileDebug
+> Task :modules:services:sharedtest:preBuild UP-TO-DATE
+> Task :modules:services:sharedtest:preDebugBuild UP-TO-DATE
+> Task :modules:services:sharedtest:generateDebugBuildConfig
+> Task :modules:services:sharedtest:generateDebugResources
+> Task :modules:services:sharedtest:packageDebugResources
+> Task :modules:services:sharedtest:processDebugNavigationResources
+> Task :modules:services:sharedtest:parseDebugLocalResources
+> Task :modules:services:sharedtest:generateDebugRFile
+> Task :modules:services:sharedtest:javaPreCompileDebug
+> Task :modules:services:voice:preBuild UP-TO-DATE
+> Task :modules:services:voice:preDebugBuild UP-TO-DATE
+> Task :modules:services:voice:generateDebugBuildConfig
+> Task :modules:services:voice:generateDebugResources
+> Task :modules:services:voice:packageDebugResources
+> Task :modules:services:voice:processDebugNavigationResources
+> Task :modules:services:voice:parseDebugLocalResources
+> Task :modules:services:voice:generateDebugRFile
+> Task :modules:services:voice:javaPreCompileDebug
+> Task :modules:services:voice:preDebugUnitTestBuild UP-TO-DATE
+> Task :modules:services:voice:javaPreCompileDebugUnitTest
+> Task :modules:services:localization:packageDebugResources
+> Task :modules:services:localization:parseDebugLocalResources
+> Task :modules:services:localization:generateDebugRFile
+> Task :modules:services:images:packageDebugResources
+> Task :modules:services:images:parseDebugLocalResources
+> Task :modules:services:images:generateDebugRFile
+> Task :modules:services:voice:generateDebugUnitTestStubRFile
+> Task :modules:services:coroutines:kspDebugKotlin
+> Task :modules:services:payment:kspDebugKotlin
+> Task :modules:services:images:compileDebugKotlin
+> Task :modules:services:images:processDebugJavaRes
+> Task :modules:services:coroutines:compileDebugKotlin
+> Task :modules:services:coroutines:processDebugJavaRes
+> Task :modules:services:localization:compileDebugKotlin
+> Task :modules:services:localization:processDebugJavaRes
+> Task :modules:services:deeplink:compileDebugKotlin
+> Task :modules:services:deeplink:processDebugJavaRes
+> Task :modules:services:payment:compileDebugKotlin
+> Task :modules:services:payment:processDebugJavaRes
+> Task :modules:services:fingerprint:compileDebugKotlin
+> Task :modules:services:fingerprint:processDebugJavaRes
+> Task :modules:services:fingerprint:compileDebugJavaWithJavac
+> Task :modules:services:localization:compileDebugJavaWithJavac
+> Task :modules:services:deeplink:compileDebugJavaWithJavac
+> Task :modules:services:images:compileDebugJavaWithJavac
+> Task :modules:services:coroutines:compileDebugJavaWithJavac
+> Task :modules:services:localization:bundleLibRuntimeToJarDebug
+> Task :modules:services:localization:bundleLibCompileToJarDebug
+> Task :modules:services:images:bundleLibCompileToJarDebug
+> Task :modules:services:images:bundleLibRuntimeToJarDebug
+> Task :modules:services:deeplink:bundleLibRuntimeToJarDebug
+> Task :modules:services:fingerprint:bundleLibRuntimeToJarDebug
+> Task :modules:services:deeplink:bundleLibCompileToJarDebug
+> Task :modules:services:fingerprint:bundleLibCompileToJarDebug
+> Task :modules:services:payment:compileDebugJavaWithJavac
+> Task :modules:services:coroutines:transformDebugClassesWithAsm
+> Task :modules:services:coroutines:bundleLibCompileToJarDebug
+> Task :modules:services:coroutines:bundleLibRuntimeToJarDebug
+> Task :modules:services:payment:transformDebugClassesWithAsm
+> Task :modules:services:payment:bundleLibCompileToJarDebug
+> Task :modules:services:payment:bundleLibRuntimeToJarDebug
+> Task :modules:services:protobuf:compileKotlin
+> Task :modules:services:utils:kspDebugKotlin
+> Task :modules:services:protobuf:compileJava
+> Task :modules:services:protobuf:classes
+> Task :modules:services:protobuf:jar
+> Task :modules:services:utils:compileDebugKotlin
+> Task :modules:services:utils:processDebugJavaRes
+> Task :modules:services:utils:compileDebugJavaWithJavac
+> Task :modules:services:utils:transformDebugClassesWithAsm
+> Task :modules:services:utils:bundleLibRuntimeToJarDebug
+> Task :modules:services:utils:bundleLibCompileToJarDebug
+> Task :modules:services:sharedtest:compileDebugKotlin
+> Task :modules:services:sharedtest:processDebugJavaRes
+> Task :modules:services:sharedtest:compileDebugJavaWithJavac
+> Task :modules:services:sharedtest:bundleLibRuntimeToJarDebug
+> Task :modules:services:sharedtest:bundleLibCompileToJarDebug
+> Task :modules:services:crashlogging:kspDebugKotlin
+> Task :modules:services:crashlogging:compileDebugKotlin
+> Task :modules:services:crashlogging:processDebugJavaRes
+> Task :modules:services:crashlogging:compileDebugJavaWithJavac
+> Task :modules:services:crashlogging:transformDebugClassesWithAsm
+> Task :modules:services:crashlogging:bundleLibRuntimeToJarDebug
+> Task :modules:services:crashlogging:bundleLibCompileToJarDebug
+> Task :modules:services:model:kspDebugKotlin
+> Task :modules:services:model:compileDebugKotlin
+> Task :modules:services:model:processDebugJavaRes
+> Task :modules:services:model:compileDebugJavaWithJavac
+> Task :modules:services:model:copyRoomSchemas NO-SOURCE
+> Task :modules:services:model:bundleLibCompileToJarDebug
+> Task :modules:services:model:bundleLibRuntimeToJarDebug
+> Task :modules:services:preferences:kspDebugKotlin
+> Task :modules:services:preferences:compileDebugKotlin
+> Task :modules:services:preferences:processDebugJavaRes
+> Task :modules:services:preferences:compileDebugJavaWithJavac
+> Task :modules:services:preferences:transformDebugClassesWithAsm
+> Task :modules:services:preferences:bundleLibRuntimeToJarDebug
+> Task :modules:services:preferences:bundleLibCompileToJarDebug
+> Task :modules:services:servers:kspDebugKotlin
+> Task :modules:services:servers:compileDebugKotlin
+> Task :modules:services:servers:processDebugJavaRes
+> Task :modules:services:servers:compileDebugJavaWithJavac
+> Task :modules:services:servers:transformDebugClassesWithAsm
+> Task :modules:services:servers:bundleLibRuntimeToJarDebug
+> Task :modules:services:servers:bundleLibCompileToJarDebug
+> Task :modules:services:analytics:kspDebugKotlin
+> Task :modules:services:analytics:compileDebugKotlin
+> Task :modules:services:analytics:processDebugJavaRes
+> Task :modules:services:analytics:compileDebugJavaWithJavac
+> Task :modules:services:analytics:transformDebugClassesWithAsm
+> Task :modules:services:analytics:bundleLibRuntimeToJarDebug
+> Task :modules:services:analytics:bundleLibCompileToJarDebug
+> Task :modules:services:repositories:kspDebugKotlin
+> Task :modules:services:repositories:compileDebugKotlin
+> Task :modules:services:repositories:processDebugJavaRes
+> Task :modules:services:repositories:compileDebugJavaWithJavac
+> Task :modules:services:repositories:transformDebugClassesWithAsm
+> Task :modules:services:repositories:bundleLibRuntimeToJarDebug
+> Task :modules:services:repositories:bundleLibCompileToJarDebug
+> Task :modules:services:voice:kspDebugKotlin
+> Task :modules:services:voice:compileDebugKotlin
+> Task :modules:services:voice:processDebugJavaRes
+> Task :modules:services:voice:compileDebugJavaWithJavac
+> Task :modules:services:voice:transformDebugClassesWithAsm
+> Task :modules:services:voice:bundleLibCompileToJarDebug
+> Task :modules:services:voice:bundleLibRuntimeToJarDebug
+> Task :modules:services:voice:kspDebugUnitTestKotlin
+> Task :modules:services:voice:compileDebugUnitTestKotlin
+> Task :modules:services:voice:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :modules:services:voice:hiltCollectClassesDebugUnitTest
+> Task :modules:services:voice:processDebugUnitTestJavaRes
+> Task :modules:services:voice:hiltAggregateDepsDebugUnitTest
+> Task :modules:services:voice:hiltJavaCompileDebugUnitTest NO-SOURCE
+> Task :modules:services:voice:transformDebugUnitTestClassesWithAsm
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+> Task :modules:services:voice:testDebugUnitTest
+
+BUILD SUCCESSFUL in 3m 41s
+215 actionable tasks: 215 executed
+Configuration cache entry reused.

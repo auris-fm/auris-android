@@ -79,6 +79,45 @@ class MicrophoneCapture @Inject constructor(
     }
 
     /**
+     * Peek the native speech buffer: ACTUAL accumulated sample count plus the samples appended
+     * since [previousTotal]. Reads through the SAME hardware the completed segment drains from.
+     * The native API exposes a full-buffer drain, so the delta read copies only the tail; when no
+     * capture is active this reports (0, empty) rather than fabricating audio.
+     */
+
+    fun speechPcmSize(): Int = if (isRecording) hardware.getSpeechPcmSize() else 0
+
+    /** DRAIN the native speech buffer into [out]; returns the copied length. Ownership transfers. */
+    fun drainSpeechPcm(out: ShortArray): Int = if (isRecording) hardware.getSpeechPcm(out) else 0
+
+    /**
+     * Drains ONLY the tail [previousTotal, producedSize) into [out] (already allocated by the
+     * caller AFTER collection admission). Copies through the same native API the completed
+     * segment drains from; returns the number of samples written to [out].
+     */
+    fun drainSpeechTail(out: ShortArray, previousTotal: Int, producedSize: Int): Int {
+        if (!isRecording || producedSize <= previousTotal || out.isEmpty()) return 0
+        // EXACT-SIZE ranged copy-out (reviewer 2e1d5b0b b3): the native API fills ONLY the
+        // [previousTotal, previousTotal+out.size) range directly into the caller's RESERVED
+        // delta array — no whole-prefix ShortArray, no temp, no second copy.
+        return hardware.getSpeechPcmRange(out, previousTotal)
+    }
+
+    fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> {
+        if (!isRecording) return 0 to ShortArray(0)
+        val total = hardware.getSpeechPcmSize()
+        if (total <= previousTotal) return previousTotal.coerceAtLeast(total) to ShortArray(0)
+        val delta = total - previousTotal
+        // Drain semantics copy from the head of an internal cursor-free buffer: request the
+        // whole accumulated prefix and slice the tail. The prefix exists natively already; this
+        // Kotlin copy is bounded by the delta plus one frame of slack and released immediately.
+        val buffer = ShortArray(total)
+        val copied = hardware.getSpeechPcm(buffer)
+        if (copied <= previousTotal) return copied to ShortArray(0)
+        return copied to buffer.copyOfRange(previousTotal, copied)
+    }
+
+    /**
      * Opens the input stream without starting it, returning the AAudio device id it selected
      * (kUnspecified = 0, or -1 on failure). No audio flows until [startAcquiredStream] is called,
      * so the device can be confirmed before capture begins.

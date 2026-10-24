@@ -32,6 +32,9 @@ public:
 
     int32_t getSpeechPcmSize();
     int32_t getSpeechPcm(int16_t* outBuffer, int32_t maxSamples);
+
+    /** Copies min(outMax, size-offset) samples from snapshot [offset, ...) into outBuffer. */
+    int32_t getSpeechPcmRange(int16_t* outBuffer, int32_t offset, int32_t outMax);
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
 

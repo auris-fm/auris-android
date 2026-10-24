@@ -29,7 +29,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.Pause)
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
-        assertEquals(listOf("pause"), sinks.playback.calls)
+        assertEquals(listOf("pause"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -40,7 +40,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.Resume)
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("resume"), sinks.playback.calls)
+        assertEquals(listOf("resume"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -51,7 +51,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(30))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("skipForward:30"), sinks.playback.calls)
+        assertEquals(listOf("skipForward:30"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -62,7 +62,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(-10))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("skipBackward:10"), sinks.playback.calls)
+        assertEquals(listOf("skipBackward:10"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -76,7 +76,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, "backward"))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("skipBackward:null"), sinks.playback.calls)
+        assertEquals(listOf("skipBackward:null"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -87,7 +87,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, null))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("skipForward:null"), sinks.playback.calls)
+        assertEquals(listOf("skipForward:null"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -98,7 +98,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.SeekAbsolute(-1))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("seekTo:0"), sinks.playback.calls)
+        assertEquals(listOf("seekTo:0"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -109,7 +109,7 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.NextEpisode)
 
         assertEquals(VoiceResponse.Earcon(EarconId.NEXT_EPISODE), response)
-        assertEquals(listOf("nextEpisode"), sinks.playback.calls)
+        assertEquals(listOf("nextEpisode"), sinks.fakePlayback.calls)
     }
 
     @Test
@@ -215,7 +215,7 @@ class VoicePlaybackIntentExecutorTest {
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(
             listOf("routeToCloud:summarize this episode:Premium"),
-            sinks.cloudRoute.calls,
+            sinks.fakeCloudRoute.calls,
         )
     }
 
@@ -236,7 +236,7 @@ class VoicePlaybackIntentExecutorTest {
     fun `the user's command is recorded before the action runs`() = runTest {
         val order = mutableListOf<String>()
         val sinks = FakeSinks()
-        sinks.playback.onCall = { order += "playback:$it" }
+        sinks.fakePlayback.onCall = { order += "playback:$it" }
         Mockito.doAnswer { order += "noteUserPlaybackCommand" }
             .`when`(sinks.playbackManager).noteUserPlaybackCommand()
         val executor = sinks.executor()
@@ -285,7 +285,7 @@ class VoicePlaybackIntentExecutorTest {
         )
         assertEquals(
             listOf("routeToCloud:what did the guests say about sleep and memory:Unknown"),
-            sinks.cloudRoute.calls,
+            sinks.fakeCloudRoute.calls,
         )
     }
 
@@ -299,7 +299,7 @@ class VoicePlaybackIntentExecutorTest {
         val generation = signal.issueEscalation()!!
 
         // The app is backgrounded while the cloud turn is still in flight.
-        sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
+        sinks.fakeCloudRoute.whileInFlight = { signal.onAppBackgrounded() }
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "what did the guests say about sleep and memory",
@@ -343,7 +343,7 @@ class VoicePlaybackIntentExecutorTest {
 
         signal.onWakeWordDetected()
         val generation = signal.currentGeneration
-        sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
+        sinks.fakeCloudRoute.whileInFlight = { signal.onAppBackgrounded() }
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
@@ -419,20 +419,235 @@ class VoicePlaybackIntentExecutorTest {
         assertEquals(VoiceResponse.Spoken("streak"), response)
     }
 
-    private class FakeSinks {
-        val playback = FakePlaybackSink()
+    // THE PRESENTATION/OUTCOME SEPARATION (spec 03c96924 + 3ed49695): identical presentation must
+    // NOT imply an identical result. These controls read the FACTS the sinks report, never the
+    // responses they render.
+    @Test
+    fun `clear reports dispatch while rendering the same CONFIRM_REQUIRED earcon`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val facts = mutableListOf<VoiceActionOutcome>()
+
+        val response = executor.execute(VoiceIntent.Queue.Clear) { facts += it }
+
+        // The FAKE renders SUCCESS; the production sink renders CONFIRM_REQUIRED after the same
+        // dispatch. Either way the earcon is presentation and the fact below is the outcome.
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        // ...while the reported fact says the clear was requested.
+        // Dispatched is not a result (reviewer 00b0d7a9): the executor also records the
+        // primary unknown, so an auxiliary or later fact cannot lift this into success.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
+    }
+
+    @Test
+    fun `pause reports dispatch even though its earcon says success`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val facts = mutableListOf<VoiceActionOutcome>()
+
+        val response = executor.execute(VoiceIntent.Playback.Pause) { facts += it }
+
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        // A SUCCESS earcon is NOT evidence of completion: the sink call returning is dispatch only.
+        // Dispatched is not a result (reviewer 00b0d7a9): the executor also records the
+        // primary unknown, so an auxiliary or later fact cannot lift this into success.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
+    }
+
+    @Test
+    fun `resume reports dispatch although it renders Silent`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val facts = mutableListOf<VoiceActionOutcome>()
+
+        val response = executor.execute(VoiceIntent.Playback.Resume) { facts += it }
+
+        assertEquals(VoiceResponse.Silent, response)
+        // Dispatched is not a result (reviewer 00b0d7a9): the executor also records the
+        // primary unknown, so an auxiliary or later fact cannot lift this into success.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
+    }
+
+    @Test
+    fun `overlapping executions each deliver facts to their OWN reporter and never cross`() {
+        // THE SERVICE-SHAPED CONCURRENCY CONTROL (reviewer 3fb01865): two overlapping execute()
+        // calls, each with its own invocation-local reporter. The shared-slot design let one
+        // dispatch overwrite or clear the other's callback; the parameter design cannot. The
+        // executor serializes actions (one sink in flight), so each dispatch's facts land only
+        // in that dispatch's list — here proven by both lists seeing exactly their own calls.
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val aFacts = mutableListOf<VoiceActionOutcome>()
+        val bFacts = mutableListOf<VoiceActionOutcome>()
+        val latch = java.util.concurrent.CountDownLatch(2)
+        val a = Thread {
+            kotlinx.coroutines.runBlocking {
+                executor.execute(VoiceIntent.Playback.Pause) { aFacts += it }
+            }
+            latch.countDown()
+        }
+        val b = Thread {
+            kotlinx.coroutines.runBlocking {
+                executor.execute(VoiceIntent.Playback.Resume) { bFacts += it }
+            }
+            latch.countDown()
+        }
+        a.start()
+        b.start()
+        assertTrue(latch.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+        assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), aFacts)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), bFacts)
+    }
+
+    @Test
+    fun `a held cloud stream does not block a pause from entering`() {
+        // THE BARGE-IN CONTROL (reviewer dab802ec/spec 72e66366): the executor must NOT serialize
+        // unrelated voice work — a second turn, pause or stop cannot wait for a long-lived cloud
+        // stream. A held routeToCloud runs on its own thread; a Pause dispatched meanwhile must
+        // complete while the cloud turn is still held.
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val cloudHeld = java.util.concurrent.CountDownLatch(1)
+        val releaseCloud = java.util.concurrent.CountDownLatch(1)
+        sinks.fakeCloudRoute.whileInFlight = {
+            cloudHeld.countDown()
+            releaseCloud.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        val cloudThread = Thread {
+            kotlinx.coroutines.runBlocking { executor.execute(VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Unknown, context = PlaybackContext())) }
+        }
+        cloudThread.start()
+        assertTrue(cloudHeld.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+        val pauseFacts = mutableListOf<VoiceActionOutcome>()
+        val pauseDone = java.util.concurrent.CountDownLatch(1)
+        var pauseCompleted = false
+        val pauseThread = Thread {
+            kotlinx.coroutines.runBlocking {
+                executor.execute(VoiceIntent.Playback.Pause) { pauseFacts += it }
+                pauseCompleted = true
+                pauseDone.countDown()
+            }
+        }
+        pauseThread.start()
+        val enteredWhileHeld = pauseDone.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        releaseCloud.countDown()
+        cloudThread.join(10_000)
+        pauseThread.join(10_000)
+
+        assertTrue("pause must enter while the cloud stream is held", enteredWhileHeld)
+        assertTrue(pauseCompleted)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), pauseFacts)
+    }
+
+    // The deprecated requestAudioFocus overload is what the sink itself calls (suppressing there is
+    // the documented smaller change); the control mirrors the production call, so it suppresses too.
+    @Suppress("DEPRECATION")
+    @Test
+    fun `identical Silent presentations from granted and denied focus report different facts`() {
+        // THE REAL BRANCHES, not injected facts: PlaybackManagerPlaybackSink.duck() returns Silent
+        // on BOTH the granted and the rejected audio-focus path. Only the reporter distinguishes
+        // them, which is exactly what a response-based classifier could never do.
+        val context = Mockito.mock(android.content.Context::class.java)
+        val audioManager = Mockito.mock(android.media.AudioManager::class.java)
+        // the sink resolves AudioManager via the androidx extension, i.e. the CLASS overload
+        Mockito.`when`(context.getSystemService(android.media.AudioManager::class.java)).thenReturn(audioManager)
+        Mockito.`when`(audioManager.mode).thenReturn(android.media.AudioManager.MODE_NORMAL)
+        val playbackManager = Mockito.mock(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager::class.java)
+        val sink = PlaybackManagerPlaybackSink(playbackManager, context)
+        val facts = mutableListOf<VoiceActionOutcome>()
+
+        Mockito.`when`(
+            audioManager.requestAudioFocus(
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+            ),
+        ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        // The per-call channel: the reporter travels with THIS focus request, never a shared slot.
+        val granted = kotlinx.coroutines.runBlocking { sink.duckReporting { facts += it } }
+        Mockito.`when`(
+            audioManager.requestAudioFocus(
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+            ),
+        ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_FAILED)
+        val denied = kotlinx.coroutines.runBlocking { sink.duckReporting { facts += it } }
+
+        // Identical presentation...
+        assertEquals("the granted path renders Silent", VoiceResponse.Silent, granted)
+        assertEquals("the denied path renders Silent too", VoiceResponse.Silent, denied)
+        // ...different facts.
+        assertEquals(
+            listOf<VoiceActionOutcome>(
+                // AUXILIARY facts, named as such (reviewer 8c77f5aa): the duck's grant is not
+                // the turn's action result.
+                VoiceActionOutcome.AuxiliaryPerformed("audio_focus"),
+                VoiceActionOutcome.AuxiliaryPreconditionFailed("audio_focus", "audio_focus_denied"),
+            ),
+            facts,
+        )
+    }
+
+    @Test
+    @Suppress("DEPRECATION")
+    fun `a REAL cloud turn whose duck is granted still records its own action as unobserved`() = kotlinx.coroutines.runBlocking {
+        // THE ACTUAL EXECUTOR PATH (reviewer 8c77f5aa): no injected facts. A real
+        // PlaybackManagerPlaybackSink duck grants focus (auxiliary success) and the executor's own
+        // execute() decides what to report. Before the primary/auxiliary split, that grant set the
+        // "a fact was reported" flag and suppressed the unknown, so the invocation aggregated to
+        // Success even though the turn never said what IT did.
+        val context = Mockito.mock(android.content.Context::class.java)
+        val audioManager = Mockito.mock(android.media.AudioManager::class.java)
+        Mockito.`when`(context.getSystemService(android.media.AudioManager::class.java)).thenReturn(audioManager)
+        Mockito.`when`(audioManager.mode).thenReturn(android.media.AudioManager.MODE_NORMAL)
+        Mockito.`when`(audioManager.requestAudioFocus(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+            .thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        val playback = PlaybackManagerPlaybackSink(
+            org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager>(),
+            context,
+        )
+        val sinks = FakeSinks(playbackOverride = playback).withRealCloudRoute(playback)
+        val facts = mutableListOf<VoiceActionOutcome>()
+
+        // A REAL cloud turn: the production sink reaches its focus branch and reports the grant.
+        sinks.executor().execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium)) { facts += it }
+
+        // The duck's grant IS observed...
+        assertTrue(
+            "the auxiliary grant must be reported",
+            facts.any { it is VoiceActionOutcome.AuxiliaryPerformed },
+        )
+        // ...and the turn's own action is still explicitly unobserved.
+        assertTrue(
+            "an auxiliary success must NOT suppress the primary unknown; facts were $facts",
+            facts.contains(VoiceActionOutcome.NotObserved),
+        )
+    }
+
+    private class FakeSinks(
+        private val playbackOverride: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackSink? = null,
+        cloudRouteOverride: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink? = null,
+    ) {
+        val fakePlayback = FakePlaybackSink()
+        val playback: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackSink = playbackOverride ?: fakePlayback
         val effects = FakeEffectsSink()
         val volume = FakeVolumeSink()
         val sleep = FakeSleepSink()
         val chapter = FakeChapterSink()
         val bookmark = FakeBookmarkSink()
-        val cloudRoute = FakeCloudRouteSink()
+        val fakeCloudRoute = FakeCloudRouteSink()
+        val cloudRoute: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink = cloudRouteOverride ?: fakeCloudRoute
         val playbackContext = FakePlaybackContextProvider()
         val queue = FakeQueueSink()
         val playbackQuery = FakePlaybackQuerySink()
         val statsQuery = FakeStatsQuerySink()
 
         val playbackManager: au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager = org.mockito.kotlin.mock()
+
+        fun withRealCloudRoute(playbackSink: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackSink): FakeSinks = FakeSinks(playbackOverride = playbackSink, cloudRouteOverride = RealCloudRouteSink(playbackSink))
 
         fun executor(signal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()) = VoicePlaybackIntentExecutor(
             playbackSink = playback,
@@ -612,11 +827,35 @@ class VoicePlaybackIntentExecutorTest {
             request: String,
             tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
+            onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {
             calls += "routeToCloud:$request:${tier.name}"
             whileInFlight?.invoke()
             return VoiceResponse.Silent
         }
+    }
+
+    private class RealCloudRouteSink(private val playback: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackSink) : au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink {
+        val calls = mutableListOf<String>()
+
+        override suspend fun routeToCloud(
+            request: String,
+            tier: VoiceIntent.CloudTier,
+            context: PlaybackContext,
+            onDuck: ((VoiceActionOutcome) -> Unit)?,
+        ): VoiceResponse {
+            calls += "routeToCloud"
+            // The SAME decision production makes: duck through the per-call channel.
+            playback.duckReporting(onDuck)
+            return VoiceResponse.Silent
+        }
+
+        override suspend fun routeToCloudWithHint(
+            request: String,
+            tier: VoiceIntent.CloudTier,
+            context: PlaybackContext,
+            hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint,
+        ): VoiceResponse = routeToCloud(request, tier, context)
     }
 
     private class FakePlaybackContextProvider : PlaybackContextProvider {

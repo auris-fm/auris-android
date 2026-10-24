@@ -75,11 +75,10 @@ class LoopbackRefusalSettlementTest {
      * The FIVE bodies the client actually treats as retryable.
      *
      * `capture_conflict` is NOT among them, and that is a deliberate divergence from Cloud's fixture
-     * title ("retryable upload responses"), not an oversight: the backend emits it for a REJECTED
-     * reservation (`{kind: "rejected", code: "capture_conflict"}` -> 409), the same capture is already
-     * in flight, and re-sending it would double-upload audio the server is already processing. The
-     * Android transport therefore maps it to TERMINAL. A retryable classification here would be a bug;
-     * the control below pins the terminal behaviour instead.
+     * title ("retryable upload responses"), which was WRONG (spec ruling 681704d4): 409
+     * capture_conflict means the SAME capture identity arrived with a DIFFERENT digest - a genuine
+     * refusal, not a wait. An identical concurrent reservation still finalizing is 503 upload_pending
+     * and IS retryable. Cloud is correcting the fixture classification; the client keeps 409 terminal.
      */
     private val retryableFixtures = listOf(
         "rate_limited" to (429 to """{"schema_version":1,"code":"rate_limited","retry_after_s":30}"""),
@@ -219,9 +218,10 @@ class LoopbackRefusalSettlementTest {
 
     @Test
     fun `capture_conflict is TERMINAL over the real socket, not retried`() {
-        // Pins the divergence from Cloud's fixture title so it cannot drift back into a retry. A
-        // capture conflict means the server already holds this capture in flight; re-uploading would
-        // duplicate audio, so the client must NOT schedule a retry for it.
+        // Pins the spec ruling (681704d4) so it cannot drift back into a retry. 409 capture_conflict
+        // means the same capture identity came in with a DIFFERENT digest - a genuine refusal. An
+        // identical in-flight reservation finalizing is 503 upload_pending, which IS retryable; the
+        // retryable control above covers that path.
         responseStatus = 409
         responseBody = """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}"""
         receivedBodies.clear()

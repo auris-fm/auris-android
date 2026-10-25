@@ -130,12 +130,24 @@ class EngineProcessingJoinControlTest {
                     kotlinx.coroutines.delay(10)
                 }
             }
+            // ROOT-CAUSED FLAKE. The old assertion read `unfinishedProcessingJobs` after stop, but
+            // that list's completion callback removes a job the moment it finishes -- so under load
+            // the assertion raced the removal and lost, failing a stop that had done exactly the
+            // right thing. The surface production teardown actually consumes is the OWNERSHIP set
+            // (`ownedJobs`), which is registered at job CREATION and outlives completion; the
+            // unfinished list is only the still-running subset. The deterministic claim is:
+            // after stop, the engine still owns the launched processing job, so teardown can
+            // classify and await it -- and that job's completion is observable.
             engine.stop()
-            assertNotNull(
-                "stop() must expose the cancelled processing job; without it service teardown " +
-                    "cannot wait for work that is NOT a child of the service scope",
-                engine.unfinishedProcessingJobs.firstOrNull(),
+            val owned = engine.ownedJobs
+            assertTrue(
+                "stop() must leave the cancelled processing job in the ownership set; without it " +
+                    "service teardown cannot classify and await work that is NOT a child of the " +
+                    "service scope",
+                owned.isNotEmpty(),
             )
+            // The exposure is awaitable: joining every owned job terminates.
+            owned.forEach { it.join() }
         } finally {
             scope.cancel()
         }

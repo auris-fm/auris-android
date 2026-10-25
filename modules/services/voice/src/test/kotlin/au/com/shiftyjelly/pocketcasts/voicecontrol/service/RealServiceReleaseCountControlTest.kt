@@ -30,11 +30,13 @@ import org.robolectric.annotation.Config
  * `WakeWordNative` and `LfmInference`. Everything downstream of those seams is production: the
  * settlement classification, the Settled gate, the per-kind release record, the retry decision.
  *
- * Claim: two consecutive production stops release every kind in `ALL_RELEASES` exactly ONCE. The
- * first stop records each kind as it confirms and settles to `Released`; the second stop's retry
- * finds nothing pending, releases nothing, and still settles to `Released` — so a repeated
- * media-session or renderer release (destructive, not redundant) cannot happen through the real
- * code path.
+ * MEASURED claim: the recognizer release is COUNTED at the injected seam — one stop makes exactly
+ * one call and later stops make none. The OTHER kinds are asserted as RECORDED (the per-kind
+ * durable record), which is a weaker fact than a call count: the release-count control does not
+ * have counters on session/feedback/notification/foreground, so "every kind exactly once" is NOT
+ * claimed for them — only that each kind is recorded released after stop one and never re-recorded.
+ * A repeated media-session or renderer release therefore remains guarded by the pendingReleases
+ * filter logic (unit-controlled), not counted here.
  *
  * What set-membership cannot show: a mutant that re-released the SAME kinds a second time would not
  * change `releasedKinds`. That protection is `TeardownRetry.pendingReleases` filtering by the record,
@@ -79,6 +81,7 @@ class RealServiceReleaseCountControlTest {
         controller.destroy()
         val service = controller.get()
         val teardown = service.currentTeardown ?: return
+        val callsBefore = RecognizerReleaseProbe.calls.get()
         val deadline = System.currentTimeMillis() + 30_000
         while (!teardown.isCompleted) {
             shadowOf(Looper.getMainLooper()).idle()
@@ -86,6 +89,11 @@ class RealServiceReleaseCountControlTest {
             Thread.sleep(20)
         }
         runBlocking { withTimeout(5_000) { teardown.await() } }
+        assertEquals(
+            "cleanup destroy must not release the recognizer again",
+            callsBefore,
+            RecognizerReleaseProbe.calls.get(),
+        )
     }
 
     private fun stopViaPlatform(): TeardownResult {
@@ -104,7 +112,9 @@ class RealServiceReleaseCountControlTest {
             if (System.currentTimeMillis() > deadline) break
             Thread.sleep(20)
         }
-        return runBlocking { teardown.await() }
+        // Same bounded-await failure behavior as cleanup: a teardown that cannot settle FAILS
+        // here instead of hanging on the test thread.
+        return runBlocking { withTimeout(5_000) { teardown.await() } }
     }
 
     /**
@@ -115,7 +125,7 @@ class RealServiceReleaseCountControlTest {
      * proves that, which a set could not.
      */
     @Test(timeout = 60_000)
-    fun `two platform stops release every kind exactly once`() = runBlocking {
+    fun `two platform stops - one recognizer release call and every kind recorded`() = runBlocking {
         val first = stopViaPlatform()
         val service = controller.get()
 

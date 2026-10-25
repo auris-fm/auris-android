@@ -8,6 +8,7 @@ import dagger.hilt.android.testing.HiltAndroidTest
 import dagger.hilt.android.testing.HiltTestApplication
 import javax.inject.Inject
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -59,6 +60,7 @@ class RealServiceReleaseCountControlTest {
 
     @Before
     fun setUp() {
+        RecognizerReleaseProbe.reset()
         Settings.Secure.putString(
             RuntimeEnvironment.getApplication().contentResolver,
             Settings.System.ANDROID_ID,
@@ -70,7 +72,20 @@ class RealServiceReleaseCountControlTest {
 
     @After
     fun dispose() {
+        // Destroy STARTS teardown; the deferred can still be running. Leaving it running is what
+        // the reviewer flagged: an asynchronous teardown from this test could land in the next
+        // test's assertions. Await it here, pumping the Main looper (the releases run there), with
+        // the bound on the COROUTINE, not the test thread.
         controller.destroy()
+        val service = controller.get()
+        val teardown = service.currentTeardown ?: return
+        val deadline = System.currentTimeMillis() + 30_000
+        while (!teardown.isCompleted) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (System.currentTimeMillis() > deadline) break
+            Thread.sleep(20)
+        }
+        runBlocking { withTimeout(5_000) { teardown.await() } }
     }
 
     private fun stopViaPlatform(): TeardownResult {
@@ -92,6 +107,13 @@ class RealServiceReleaseCountControlTest {
         return runBlocking { teardown.await() }
     }
 
+    /**
+     * CLEAN-SETTLEMENT COMPLEMENT. The recognizer release is COUNTED through the injected seam, so
+     * "exactly once" is a call count, not set membership: one stop -> exactly one release call, and
+     * every later stop (and the @After destroy) leaves the counter unchanged. The second stop
+     * returns the already-Released deferred without entering the release path at all -- the counter
+     * proves that, which a set could not.
+     */
     @Test(timeout = 60_000)
     fun `two platform stops release every kind exactly once`() = runBlocking {
         val first = stopViaPlatform()
@@ -107,6 +129,11 @@ class RealServiceReleaseCountControlTest {
             service.allReleaseKinds.toSet(),
             service.releasedKinds,
         )
+        assertEquals(
+            "exactly ONE recognizer release call for one stop (counted at the native seam)",
+            1,
+            RecognizerReleaseProbe.calls.get(),
+        )
 
         val second = stopViaPlatform()
 
@@ -116,13 +143,48 @@ class RealServiceReleaseCountControlTest {
             second,
         )
         assertEquals(
-            "a second stop must not release anything again",
-            service.allReleaseKinds.toSet(),
-            service.releasedKinds,
+            "a second stop must not release anything again: the counter is the proof a set cannot give",
+            1,
+            RecognizerReleaseProbe.calls.get(),
         )
         assertTrue(
             "the retry decision must find nothing pending",
             TeardownRetry.pendingReleases(service.allReleaseKinds, service.releasedKinds).isEmpty(),
+        )
+    }
+
+    /**
+     * THROW-AFTER-EFFECT on the real path. The first stop's recognizer release records its effect
+     * (the counter increments, and the router has already cleared its loaded state) and THEN
+     * throws, so the teardown reports AmbiguousRelease. Round 40's policy says an ambiguous release
+     * is NEVER replayed -- no recheck can prove the throw did not take effect. The counter proves
+     * the policy on the real service: every later stop leaves the release count exactly 1.
+     */
+    @Test(timeout = 60_000)
+    fun `a release that records its effect then throws is never re-run by a later stop`() = runBlocking {
+        RecognizerReleaseProbe.throwAfterEffect = true
+
+        val first = stopViaPlatform()
+        val service = controller.get()
+
+        assertTrue("the ambiguous release must hold the teardown, got $first", first is TeardownResult.Held)
+        assertTrue(
+            "the hold must be AmbiguousRelease specifically",
+            (first as TeardownResult.Held).failure.verdict is EngineQuiescence.Verdict.AmbiguousRelease,
+        )
+        assertEquals(
+            "the effect was recorded exactly once despite the throw",
+            1,
+            RecognizerReleaseProbe.calls.get(),
+        )
+
+        val second = stopViaPlatform()
+
+        assertTrue("the retried stop must still hold, got $second", second is TeardownResult.Held)
+        assertEquals(
+            "AN AMBIGUOUS RELEASE IS NEVER REPLAYED: later stops must not re-run the release",
+            1,
+            RecognizerReleaseProbe.calls.get(),
         )
     }
 }

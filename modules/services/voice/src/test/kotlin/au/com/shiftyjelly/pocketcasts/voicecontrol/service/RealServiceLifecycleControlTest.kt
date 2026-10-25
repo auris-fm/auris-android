@@ -1,11 +1,14 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
 import android.content.Intent
+import android.os.Looper
 import android.provider.Settings
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import dagger.hilt.android.testing.HiltTestApplication
 import javax.inject.Inject
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -16,6 +19,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -72,10 +76,18 @@ class RealServiceLifecycleControlTest {
     @After
     fun disposeEveryController() {
         controllers.forEach { controller ->
-            // destroy() IS the teardown: it runs the service's own onDestroy, which owns scope
-            // cancellation and the teardown result. Disposing the controller is what makes cleanup
-            // unconditional and stops a service running into the next test.
+            // destroy() STARTS teardown; AWAIT IT (reviewer 57bf1be9): an asynchronous teardown
+            // left running from this test could land in the next test's assertions. The bound is
+            // on the coroutine, not the test thread.
             controller.destroy()
+            val teardown = controller.get().currentTeardown ?: return@forEach
+            val deadline = System.currentTimeMillis() + 30_000
+            while (!teardown.isCompleted) {
+                shadowOf(Looper.getMainLooper()).idle()
+                if (System.currentTimeMillis() > deadline) break
+                Thread.sleep(20)
+            }
+            runBlocking { withTimeout(5_000) { teardown.await() } }
         }
         controllers.clear()
     }

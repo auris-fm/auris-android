@@ -158,7 +158,32 @@ object InertLfmInferenceReplacements {
 
         override fun reset() = Unit
 
-        override fun release() = Unit
+        override fun release() {
+            // RECORD THE EFFECT FIRST, then optionally throw: exactly the "ambiguous release"
+            // shape -- the effect may have taken effect, the caller cannot know.
+            RecognizerReleaseProbe.calls.incrementAndGet()
+            if (RecognizerReleaseProbe.throwAfterEffect) {
+                throw IllegalStateException("release threw after recording its effect")
+            }
+        }
+    }
+}
+
+/**
+ * Test-only COUNTING of the recognizer release path. The service's "recognizer" release goes
+ * `voiceRecognizer.release()` -> `LfmIntentRouter.release()` -> `inference.release()`, so the
+ * injected seam sees every real release. This is what lets a control assert CALL COUNTS rather than
+ * set membership: a set cannot reveal that the same kind was released twice, a counter can.
+ */
+object RecognizerReleaseProbe {
+    val calls = java.util.concurrent.atomic.AtomicInteger()
+
+    /** When true, release() records its effect (the increment) and THEN throws. */
+    @Volatile var throwAfterEffect: Boolean = false
+
+    fun reset() {
+        calls.set(0)
+        throwAfterEffect = false
     }
 }
 

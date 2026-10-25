@@ -47,6 +47,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -56,6 +57,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
     @Inject lateinit var settings: Settings
 
     @Inject lateinit var modelManager: ModelManager
+
+    @Inject lateinit var wakeWordDetector: WakeWordDetector
 
     @Inject lateinit var gate: VoiceControlGate
 
@@ -82,6 +85,23 @@ class VoiceControlSettingsFragment : BaseFragment() {
             val modelState by modelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
             val modelReady = modelManager.isMoonshineModelReady()
+            // The wake word is a different component from the recognition backend: its model is
+            // bundled with the app and its readiness is the detector's own load result. Reading the
+            // recognition model's absence as wake readiness contradicted the status row directly
+            // above it (owner-observed: "Not downloaded" next to "Active (wake word required)").
+            val wakeWordReady = wakeWordDetector.isReady
+            // Recomputed on resume so a detector that initialized after first composition is shown
+            // as it actually is, rather than as it looked once.
+            var detectorReady by remember { mutableStateOf(wakeWordReady) }
+            DisposableEffect(this) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        detectorReady = wakeWordDetector.isReady
+                    }
+                }
+                lifecycle.addObserver(observer)
+                onDispose { lifecycle.removeObserver(observer) }
+            }
             val gateState by gate.state
                 .collectAsStateWithLifecycle()
             val route by audioRouteMonitor.route
@@ -110,6 +130,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 enabled = !enabled,
                 modelReady = modelReady,
                 modelState = modelState,
+                wakeWordReady = detectorReady,
                 statusText = voiceControlStatus(
                     mode = mode,
                     gate = gateState,
@@ -132,6 +153,7 @@ private fun VoiceControlSettingsPage(
     enabled: Boolean,
     modelReady: Boolean,
     modelState: ModelDownloadState,
+    wakeWordReady: Boolean,
     statusText: String,
     onEnabledChange: (Boolean) -> Unit,
     onBackPress: () -> Unit,
@@ -156,15 +178,17 @@ private fun VoiceControlSettingsPage(
                 )
             }
             item {
-                val modelText = when (modelState) {
-                    is ModelDownloadState.NotStarted -> if (modelReady) "Ready" else "Not downloaded"
-                    is ModelDownloadState.Downloading -> "Downloading: ${modelState.progressPercent}%"
-                    is ModelDownloadState.Ready -> "Ready"
-                    is ModelDownloadState.Failed -> "Download failed"
-                }
                 SettingRow(
-                    primaryText = "Speech Model",
-                    secondaryText = modelText,
+                    primaryText = WAKE_WORD_MODEL_LABEL,
+                    secondaryText = wakeWordModelText(wakeWordReady),
+                    toggle = SettingRowToggle.None,
+                    indent = false,
+                )
+            }
+            item {
+                SettingRow(
+                    primaryText = RECOGNITION_MODEL_LABEL,
+                    secondaryText = recognitionModelText(modelState, modelReady),
                     toggle = SettingRowToggle.None,
                     indent = false,
                 )
@@ -191,10 +215,29 @@ private fun VoiceControlSettingsPagePreview(
             enabled = true,
             modelReady = true,
             modelState = ModelDownloadState.Ready,
+            wakeWordReady = true,
             statusText = "Active (wake word required)",
             onEnabledChange = {},
             onBackPress = {},
             bottomInset = 0.dp,
         )
     }
+}
+
+/** Each row names the component it measures; Moonshine's absence is never presented as wake readiness. */
+internal const val WAKE_WORD_MODEL_LABEL = "Wake Word Model"
+internal const val RECOGNITION_MODEL_LABEL = "Speech Recognition Model"
+
+/**
+ * The wake word model's row. Readiness is the detector's own load result -- not an assumption that
+ * bundled assets mean Ready, which would hide a detector that failed to initialize.
+ */
+internal fun wakeWordModelText(detectorReady: Boolean): String = if (detectorReady) "Ready" else "Unavailable"
+
+/** The recognition backend's row: its own download state, named as such. */
+internal fun recognitionModelText(modelState: ModelDownloadState, modelReady: Boolean): String = when (modelState) {
+    is ModelDownloadState.NotStarted -> if (modelReady) "Ready" else "Not downloaded"
+    is ModelDownloadState.Downloading -> "Downloading: ${modelState.progressPercent}%"
+    is ModelDownloadState.Ready -> "Ready"
+    is ModelDownloadState.Failed -> "Download failed"
 }

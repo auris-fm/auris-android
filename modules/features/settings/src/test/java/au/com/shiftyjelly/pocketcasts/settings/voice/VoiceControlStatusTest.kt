@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCon
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -292,4 +293,40 @@ class VoiceControlStatusTest {
     private fun blocked() = VoiceControlRuleState.Blocked("blocked")
 
     private fun unknown() = VoiceControlRuleState.Unknown("unknown")
+}
+
+/**
+ * The Speech Model rows must name the component they measure. The wake word runs from a bundled
+ * detector model; Moonshine is the separately-downloaded recognition backend. Reporting Moonshine's
+ * absence as "Not downloaded" next to "Active (wake word required)" told the reader the wake word
+ * was unready when it was working (owner-observed on the Pixel 8).
+ */
+class VoiceControlModelRowsTest {
+
+    @Test
+    fun `wake word readiness comes from the detector, not from a bundled-asset assumption`() {
+        assertEquals(
+            "Ready",
+            wakeWordModelText(detectorReady = true),
+        )
+        assertEquals(
+            "Unavailable",
+            wakeWordModelText(detectorReady = false),
+        )
+    }
+
+    @Test
+    fun `the recognition model row reports its own download state and never says wake`() {
+        assertEquals("Not downloaded", recognitionModelText(ModelDownloadState.NotStarted, modelReady = false))
+        assertEquals("Ready", recognitionModelText(ModelDownloadState.NotStarted, modelReady = true))
+        assertEquals("Downloading: 42%", recognitionModelText(ModelDownloadState.Downloading(42), modelReady = false))
+        assertEquals("Ready", recognitionModelText(ModelDownloadState.Ready, modelReady = false))
+        assertEquals("Download failed", recognitionModelText(ModelDownloadState.Failed("http 500"), modelReady = false))
+    }
+
+    @Test
+    fun `the labels separate the wake word model from the recognition model`() {
+        assertEquals("Wake Word Model", WAKE_WORD_MODEL_LABEL)
+        assertEquals("Speech Recognition Model", RECOGNITION_MODEL_LABEL)
+    }
 }

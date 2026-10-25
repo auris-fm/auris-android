@@ -28,7 +28,7 @@ import org.robolectric.RobolectricTestRunner
  * compiled-off claim: the module's trigger starts, polls, and puts NOTHING on the network.
  */
 @RunWith(RobolectricTestRunner::class)
-@org.robolectric.annotation.Config(sdk = [34])
+@org.robolectric.annotation.Config(sdk = [35])
 class VoiceUploadCompositionPathTest {
     private fun moduleStartup(): VoiceSharingAccountStartup = VoiceUploadCompositionFixtures.startup(androidx.test.core.app.ApplicationProvider.getApplicationContext())
     private fun authenticatedProjection(epoch: String): String = VoiceUploadCompositionFixtures.authenticatedProjection(epoch)

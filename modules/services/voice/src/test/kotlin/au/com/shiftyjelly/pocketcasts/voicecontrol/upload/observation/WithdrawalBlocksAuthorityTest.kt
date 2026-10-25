@@ -27,7 +27,7 @@ import org.robolectric.RobolectricTestRunner
  * live session, so the ONLY thing standing between a capture and retention is the local stop.
  */
 @RunWith(RobolectricTestRunner::class)
-@org.robolectric.annotation.Config(sdk = [34])
+@org.robolectric.annotation.Config(sdk = [35])
 class WithdrawalBlocksAuthorityTest {
 
     private fun startup(): VoiceSharingAccountStartup = VoiceUploadCompositionFixtures.startup(ApplicationProvider.getApplicationContext())

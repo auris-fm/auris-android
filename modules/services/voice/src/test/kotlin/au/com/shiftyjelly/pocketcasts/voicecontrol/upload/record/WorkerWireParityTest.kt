@@ -24,7 +24,7 @@ import org.junit.Test
  * `artifacts/receipts/wire-parity-worker-intake.txt` records a real run against that revision.
  */
 @org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
-@org.robolectric.annotation.Config(sdk = [34])
+@org.robolectric.annotation.Config(sdk = [35])
 class WorkerWireParityTest {
 
     /**

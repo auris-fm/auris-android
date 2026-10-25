@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
  * [OsOperations] seam; kernel behaviour stays unverified.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class OsDirectorySyncWiringTest {
 
     private class RecordingOs(private val refuseFsync: Boolean = false) : OsOperations {

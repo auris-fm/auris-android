@@ -38,7 +38,7 @@ import retrofit2.Retrofit
  * back); plus synchronous signOut revocation and external-removal reconciliation.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceSharingAccountRealOwnerTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()

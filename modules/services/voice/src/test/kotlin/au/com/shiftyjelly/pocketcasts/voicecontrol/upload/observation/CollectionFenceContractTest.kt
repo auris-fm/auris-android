@@ -28,7 +28,7 @@ import org.robolectric.RobolectricTestRunner
  * lock order, held-copy-vs-expiry determinism, refusal termination, and coherent policy reads.
  */
 @RunWith(RobolectricTestRunner::class)
-@org.robolectric.annotation.Config(sdk = [34])
+@org.robolectric.annotation.Config(sdk = [35])
 class CollectionFenceContractTest {
 
     private class FakeOwner : CredentialOwnershipOwner {

@@ -21,7 +21,7 @@ import org.robolectric.annotation.Config
  * extra opt-in. So every unreadable, truncated or unrecognised file must read as STOPPED.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class FileWithdrawalIntentPersistenceTest {
 
     private lateinit var context: Context

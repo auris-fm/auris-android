@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
  * constraint carried verbatim, and no unconditional charging/unmetered rule.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceUploadSchedulerTest {
 
     private lateinit var workManager: WorkManager

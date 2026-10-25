@@ -88,6 +88,15 @@ internal object OboeNative {
     external fun nativeGetSpeechPcmSize(): Int
     external fun nativeGetSpeechOnsetSample(): Int
     external fun nativeGetSpeechEndSample(): Int
+
+    /**
+     * The absolute consumed-stream sample position of the LAST completed segment's end, recorded by
+     * the VAD when it finalized the segment -- not read afterwards. Positions count samples consumed
+     * from capture since start, the same space the ring buffer's write cursor and the stream's frame
+     * position live in (mono). Valid only immediately after a speech-ended event, alongside the
+     * other segment getters.
+     */
+    external fun nativeGetSpeechEndStreamPosition(): Long
 }
 
 /**
@@ -116,6 +125,9 @@ interface CaptureHardware {
     fun getSpeechOnsetSample(): Int
 
     fun getSpeechEndSample(): Int
+
+    /** See [OboeNative.nativeGetSpeechEndStreamPosition]. */
+    fun getSpeechEndStreamPosition(): Long
 }
 
 /** The production [CaptureHardware], delegating to the JNI bridge. */
@@ -132,6 +144,7 @@ class OboeCaptureHardware : CaptureHardware {
     override fun getSpeechPcmSize(): Int = OboeNative.nativeGetSpeechPcmSize()
     override fun getSpeechOnsetSample(): Int = OboeNative.nativeGetSpeechOnsetSample()
     override fun getSpeechEndSample(): Int = OboeNative.nativeGetSpeechEndSample()
+    override fun getSpeechEndStreamPosition(): Long = OboeNative.nativeGetSpeechEndStreamPosition()
 }
 
 /** Configuration constants shared between Kotlin capture loop and native code. */
@@ -224,12 +237,19 @@ internal class OboeCaptureEngine(
                                 // later would fold in the queueing between the two points and place
                                 // the segment at a time it was already delivered, not captured.
                                 val clock = OboeNative.nativeCaptureClock()
+                                // The segment's end as the VAD accounted it when it finalized the
+                                // segment: absolute consumed-stream samples, immune to the drain
+                                // delay between that moment and this timestamp read. This is the
+                                // anchor the onset time is derived from; the clock only supplies
+                                // the instant it is converted against.
+                                val segmentEnd = OboeNative.nativeGetSpeechEndStreamPosition()
                                 emit(
                                     VoiceSegmenterResult.SpeechEnded(
                                         frames = frames,
                                         speechOnsetSample = speechOnsetSample,
                                         speechEndSample = speechEndSample,
                                         captureClock = clock,
+                                        segmentEndStreamPosition = segmentEnd,
                                     ),
                                 )
                             }

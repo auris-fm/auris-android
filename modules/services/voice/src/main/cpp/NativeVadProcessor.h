@@ -36,6 +36,15 @@ public:
     int32_t getSpeechEndSample();
 
     /**
+     * The absolute consumed-stream sample position of the last completed segment's end, recorded by
+     * the VAD thread at the moment it finalized the segment. Recorded, not read afterwards: the
+     * callback and ring can advance between finalization and Kotlin's drain, so any later clock or
+     * cursor read would fold that lag into the segment's position. Counts samples consumed from
+     * capture since start (mono), the same space the ring cursor and stream frame position use.
+     */
+    int64_t getSpeechEndStreamPosition();
+
+    /**
      * Frames this processor has consumed from the capture ring buffer since start(), whether or not
      * they produced an event. Distinguishes "capture is running" from "captured audio is actually
      * reaching the VAD", which a liveness check alone cannot tell apart in silence.
@@ -144,6 +153,7 @@ private:
     std::vector<int16_t> mSnapshotBuffer;
     int32_t mSnapshotSpeechOnsetSample = 0;
     int32_t mSnapshotSpeechEndSample = 0;
+    int64_t mSnapshotSpeechEndStreamPosition = 0;
     std::mutex mSpeechMutex;
 
     int32_t mConsecutiveSilentFrames = 0;

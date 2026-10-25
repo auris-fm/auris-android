@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
@@ -69,21 +70,42 @@ class AndroidPlatformTtsEngineTest {
 
         val scope = CoroutineScope(Dispatchers.Default)
         val start = android.os.SystemClock.elapsedRealtime()
-        val job = scope.launch { assertFalse(wired.speak("hello", "en")) }
-        // PRECONDITION, asserted not assumed: the request must actually reach synthesis and be
-        // accepted -- otherwise the false return below proves nothing about the bounded wait.
-        val queued = (0 until 50).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            fake.synthesizeCount > 0
+        // The result is brought BACK to the test thread and checked HERE (reviewer, 04:43 round):
+        // asserting inside the coroutine would let a failed assertion be swallowed by the Job,
+        // and job.join() would still complete normally -- the timing assertions would then pass
+        // without ever proving a false result.
+        val result = scope.async(Dispatchers.Default) { runCatching { wired.speak("hello", "en") } }
+        var delivered: Result<Boolean>? = null
+        try {
+            // PRECONDITION, asserted not assumed: the request must actually reach synthesis and be
+            // accepted -- otherwise the false return below proves nothing about the bounded wait.
+            val queued = (0 until 50).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                fake.synthesizeCount > 0
+            }
+            assertTrue("precondition: the synthesis must actually be queued", queued)
+            // The fake never delivers a callback for this utterance: hold silence past the bound.
+            val joined = runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    delivered = result.await()
+                    true
+                }
+            }
+            val elapsed = android.os.SystemClock.elapsedRealtime() - start
+            assertNotNull("speak must return within the bound instead of suspending forever", joined)
+            assertTrue("the wait must be bounded (took $elapsed ms)", elapsed < 5_000)
+            val outcome = delivered!!
+            assertNotNull("the speak coroutine must have completed", outcome)
+            outcome.getOrThrow().let { spoke ->
+                assertFalse("a callback-less synthesis must not count as delivered", spoke)
+            }
+        } finally {
+            // Unconditional cleanup: a failed assertion above must still release the engine and the
+            // scope rather than leak a TTS instance into the next test.
+            runCatching { wired.release() }
+            scope.cancel()
         }
-        assertTrue("precondition: the synthesis must actually be queued", queued)
-        // The fake never delivers a callback for this utterance: hold silence past the bound.
-        val joined = runBlocking { kotlinx.coroutines.withTimeoutOrNull(5_000) { job.join() } }
-        val elapsed = android.os.SystemClock.elapsedRealtime() - start
-        scope.cancel()
-        assertNotNull("speak must return within the bound instead of suspending forever", joined)
-        assertTrue("the wait must be bounded (took $elapsed ms)", elapsed < 5_000)
     }
 
     @Test

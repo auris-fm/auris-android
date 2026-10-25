@@ -76,6 +76,7 @@ void NativeVadProcessor::stop() {
         std::lock_guard<std::mutex> lock(mSpeechMutex);
         mSnapshotBuffer.clear();
         mSnapshotSpeechOnsetSample = 0;
+        mSnapshotSpeechEndStreamPosition = 0;
     }
 
     LOGI("VAD processor thread stopped");
@@ -152,6 +153,11 @@ int32_t NativeVadProcessor::getSpeechEndSample() {
 int32_t NativeVadProcessor::getSpeechOnsetSample() {
     std::lock_guard<std::mutex> lock(mSpeechMutex);
     return mSnapshotSpeechOnsetSample;
+}
+
+int64_t NativeVadProcessor::getSpeechEndStreamPosition() {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    return mSnapshotSpeechEndStreamPosition;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +267,7 @@ void NativeVadProcessor::runLoop() {
                 mSnapshotBuffer.clear();
                 mSnapshotSpeechOnsetSample = 0;
                 mSnapshotSpeechEndSample = 0;
+                mSnapshotSpeechEndStreamPosition = 0;
                 mSpeechBuffer.clear();
             }
             mSpeechFrames = 0;
@@ -379,11 +386,19 @@ void NativeVadProcessor::runLoop() {
                 if (mDrainRemaining <= 0) {
                     // Drain complete — finalize the utterance.
 
+                    // The finalize point IS the sample-accounting anchor: this thread has just
+                    // consumed the frame containing the segment's last sample, so the absolute
+                    // position of that end is the running consumed-sample count. Recorded HERE,
+                    // under the same lock as the snapshot, because the callback keeps advancing the
+                    // ring afterwards -- a position read later would include that lag.
+                    const int64_t consumedSamples =
+                        mFramesConsumed.load(std::memory_order_relaxed) * kVadFrameSize;
                     {
                         std::lock_guard<std::mutex> lock(mSpeechMutex);
                         mSnapshotBuffer = std::move(mSpeechBuffer);
                         mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
                         mSnapshotSpeechEndSample = mSpeechEndSample;
+                        mSnapshotSpeechEndStreamPosition = consumedSamples;
                         mSpeechBuffer.clear();
                     }
 

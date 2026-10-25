@@ -291,6 +291,7 @@ class VoiceControlCaptureRestartTest {
         override fun getSpeechPcmSize() = 0
         override fun getSpeechOnsetSample() = 0
         override fun getSpeechEndSample() = 0
+        override fun getSpeechEndStreamPosition(): Long = 0L
     }
 
     private class FakeRule(

@@ -28,6 +28,15 @@ sealed interface VoiceSegmenterResult {
          * user actually spoke rather than to a buffer offset.
          */
         val captureClock: LongArray? = null,
+        /**
+         * The segment's END as an absolute sample position in the VAD's own consumed-stream
+         * accounting (samples consumed from capture since start), snapshotted by the native VAD at
+         * the moment the segment was finalized -- NOT read afterwards from the hardware observation,
+         * which can lag the segment while the callback and ring advance. Null when the accounting is
+         * unavailable; consumers must treat the onset time as unknown then, never substitute the
+         * observation's frame position.
+         */
+        val segmentEndStreamPosition: Long? = null,
     ) : VoiceSegmenterResult
     data class Rejected(val reason: RejectionReason) : VoiceSegmenterResult
 }
@@ -57,21 +66,25 @@ fun captureTimeNsForPosition(captureClock: LongArray?, streamPositionInSegment: 
 }
 
 /**
- * The monotonic instant the segment's speech onset was CAPTURED, or null when the stream reported no
- * timestamp.
+ * The monotonic instant the segment's speech onset was CAPTURED, or null when the alignment is
+ * unavailable.
  *
- * The clock observation is taken at segment COMPLETION (OboeCaptureEngine reads it in the drain loop
- * after the whole segment has been copied), so the observation's frame position names the sample just
- * past the segment's end -- not the onset. The onset's stream position is therefore
- * `framePosition - (segmentSamples - speechOnsetSample)`, and that is the position converted here.
- * Anchoring at the observation's own position instead would place the segment at the instant it was
- * DELIVERED, up to a whole segment late, and the bleed filter's delay window would miss the device's
- * own answer on long utterances.
+ * The anchor is SAMPLE-ACCOUNTED, not read from the clock: the native VAD records the absolute
+ * position of the segment's end (in consumed-stream samples) when it finalizes the segment, so
+ * delivery lag -- the callback and ring advancing between the segment's last sample and the drain
+ * loop's timestamp read -- cannot move the anchor. The onset's stream position is
+ * `segmentEndStreamPosition - (segmentSamples - speechOnsetSample)`, and the clock observation only
+ * supplies the instant that position is converted against. Anchoring at the observation's own frame
+ * position instead would fold the queue lag into every delayed segment's position.
+ *
+ * Null when either the accounted end position or a timestamp observation is missing: an absent
+ * binding must stay absent (the engine falls back to offset matching), never approximate.
  */
 fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSpeechOnsetMs(): Long? {
+    val endPosition = segmentEndStreamPosition ?: return null
     val observation = captureClock ?: return null
     val segmentSamples = frames.sumOf { it.samples.size.toLong() }
-    val onsetStreamPosition = observation[0] - (segmentSamples - speechOnsetSample)
+    val onsetStreamPosition = endPosition - (segmentSamples - speechOnsetSample)
     return captureTimeNsForPosition(observation, onsetStreamPosition)?.div(1_000_000L)
 }
 

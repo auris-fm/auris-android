@@ -58,6 +58,7 @@ class MicrophoneCaptureTest {
         override fun getSpeechOnsetSample(): Int = 0
 
         override fun getSpeechEndSample(): Int = 0
+        override fun getSpeechEndStreamPosition(): Long = 0L
 
         companion object {
             const val DEVICE_ID = 42

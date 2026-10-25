@@ -253,12 +253,13 @@ class AndroidPlatformTtsEngineTest {
                     failure = t
                 }
             }
-            val queued = (0 until 50).any {
-                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                Thread.sleep(20)
-                fake.synthesizeCount > attempt
-            }
-            assertTrue("utterance ${attempt + 1} must reach synthesis", queued)
+            // Shared 2 s budget: this test was the only synthesis await with a 1 s inline loop,
+            // and a cold JVM (first-test Robolectric init) once exceeded it -- the observed cold
+            // flake. Same semantics as the helper everywhere else.
+            assertTrue(
+                "utterance ${attempt + 1} must reach synthesis",
+                awaitSynthesize(fake, attempt + 1),
+            )
             // Complete it the way the platform does, so the call resumes normally.
             fake.listener?.onDone(fake.lastUtteranceId)
             runBlocking { job.join() }

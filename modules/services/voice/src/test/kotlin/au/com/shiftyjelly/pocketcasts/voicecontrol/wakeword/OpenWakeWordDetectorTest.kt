@@ -34,11 +34,20 @@ class OpenWakeWordDetectorTest {
         `when`(context.assets).thenReturn(assets)
         `when`(assets.open(any())).thenThrow(RuntimeException("no assets in unit test"))
 
-        val detector = OpenWakeWordDetector(context)
+        val detector = OpenWakeWordDetector(context, failingNative())
         assertFalse(detector.isReady)
 
         val result = detector.detect(FloatArray(16000), 16000)
         assertFalse(result.detected)
         assertTrue(result.error)
+    }
+
+    /** Native boundary whose init fails the way an absent runtime does: init false, no throw. */
+    private fun failingNative(): WakeWordNative = object : WakeWordNative {
+        override fun nativeInit(melModel: ByteArray, embedModel: ByteArray, classifierModel: ByteArray, threshold: Float): Boolean = false
+
+        override fun nativeDetect(samples: FloatArray, sampleRateHz: Int, outOffset: FloatArray): Float = -1f
+
+        override fun nativeRelease() = Unit
     }
 }

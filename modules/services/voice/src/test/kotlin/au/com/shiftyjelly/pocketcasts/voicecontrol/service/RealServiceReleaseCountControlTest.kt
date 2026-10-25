@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
 import android.content.Intent
+import android.os.Looper
 import android.provider.Settings
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
@@ -18,26 +19,31 @@ import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 
 /**
- * Release-count control on the REAL service, through the REAL platform stop path.
+ * The RELEASE-COUNT control the reviewer asked for, on the REAL service, through the REAL platform
+ * stop path — now reachable because the two EXTERNAL-NATIVE seams are replaced test-only:
+ * `WakeWordNative` and `LfmInference`. Everything downstream of those seams is production: the
+ * settlement classification, the Settled gate, the per-kind release record, the retry decision.
  *
- * BOUNDARY, stated precisely. On the JVM the engine's ASR backend cannot stop cleanly: its native
- * runtime (onnxruntime) is absent from `java.library.path`, so the production `EngineQuiescence.settle`
- * returns `StopFailed`. This control therefore pins the two things that are genuinely reachable and
- * true here — and they are load-bearing:
+ * Claim: two consecutive production stops release every kind in `ALL_RELEASES` exactly ONCE. The
+ * first stop records each kind as it confirms and settles to `Released`; the second stop's retry
+ * finds nothing pending, releases nothing, and still settles to `Released` — so a repeated
+ * media-session or renderer release (destructive, not redundant) cannot happen through the real
+ * code path.
  *
- * 1. FAIL-CLOSED THROUGH THE REAL PATH. A failed engine stop holds EVERY release kind: not one
- *    entry of `ALL_RELEASES` is released when the verdict is not `Settled`. This is the policy that
- *    prevents use-after-release, exercised end to end rather than through a stubbed collaborator.
- * 2. THE HOLD IS STABLE ACROSS A SECOND STOP. A retry of a held teardown re-runs the decision,
- *    releases nothing, and does not turn the hold into a release.
+ * What set-membership cannot show: a mutant that re-released the SAME kinds a second time would not
+ * change `releasedKinds`. That protection is `TeardownRetry.pendingReleases` filtering by the record,
+ * controlled at unit level in `TeardownRetryControlTest`; this control proves the REAL service wires
+ * that filter into the real stop path (second stop Released, nothing pending), not the filter's logic.
  *
- * What is NOT claimed: the every-kind-released-once happy path. Its counting logic is controlled at
- * `TeardownRetryControlTest` and `AmbiguousReleaseRefusalTest`; standing it up on the real service
- * requires the engine's native runtime and is instrumented-device territory, not JVM.
+ * Boundary, stated precisely: the ASR backend seam is NOT replaced and this service never started a
+ * pipeline, so `wiredBackend` is null and the "backend" release is a null-safe no-op, as it is in
+ * production for an idle service. A mid-release throw with the retry that follows is controlled at
+ * `AmbiguousReleaseRefusalTest` and `TeardownRetryControlTest`; this control owns the settled count.
  */
 @HiltAndroidTest
 @RunWith(RobolectricTestRunner::class)
@@ -71,45 +77,52 @@ class RealServiceReleaseCountControlTest {
         val service = controller.get()
         controller
             .withIntent(Intent(VoiceControlService.STOP_ACTION))
-            // startCommand(flags, startId) -- Robolectric's two-arg form.
             .startCommand(0, 1)
         // The in-flight stop is the SAME deferred the platform path receives.
         val teardown = service.currentTeardown
         assertNotNull("a platform stop must start a teardown", teardown)
-        return runBlocking { teardown!!.await() }
+        // The releases run on Dispatchers.Main; on Robolectric that is the instrumented looper,
+        // which nothing pumps while this test blocks. Pump it until the teardown settles.
+        val deadline = System.currentTimeMillis() + 30_000
+        while (!teardown!!.isCompleted) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (System.currentTimeMillis() > deadline) break
+            Thread.sleep(20)
+        }
+        return runBlocking { teardown.await() }
     }
 
-    // A timeout, not patience: if a mutant releases while the engine is unsettled, this test must
-    // FAIL, not hang the build (M27 verification).
     @Test(timeout = 60_000)
-    fun `a failed engine stop holds every release kind on the real path`() = runBlocking {
+    fun `two platform stops release every kind exactly once`() = runBlocking {
         val first = stopViaPlatform()
         val service = controller.get()
 
-        assertTrue(
-            "the JVM cannot settle the engine, so the stop must be Held, got $first",
-            first is TeardownResult.Held,
+        assertEquals(
+            "the first stop must settle to Released through the real path",
+            TeardownResult.Released,
+            first,
         )
-        assertTrue(
-            "the hold must come from the stop itself, not a later ambiguity",
-            (first as TeardownResult.Held).failure.verdict is EngineQuiescence.Verdict.StopFailed,
-        )
-        assertTrue(
-            "FAIL-CLOSED: with a non-Settled verdict not one release kind may run",
-            service.releasedKinds.isEmpty(),
+        assertEquals(
+            "an idle service's settled teardown must release every kind in ALL_RELEASES",
+            service.allReleaseKinds.toSet(),
+            service.releasedKinds,
         )
 
         val second = stopViaPlatform()
 
-        assertTrue("the retried stop must still be Held, got $second", second is TeardownResult.Held)
-        assertTrue(
-            "a retry of a held teardown must not release anything either",
-            service.releasedKinds.isEmpty(),
+        assertEquals(
+            "the second stop must also settle to Released, not replay a release",
+            TeardownResult.Released,
+            second,
+        )
+        assertEquals(
+            "a second stop must not release anything again",
+            service.allReleaseKinds.toSet(),
+            service.releasedKinds,
         )
         assertTrue(
-            "the retry decision must find nothing released, so nothing can be double-released",
-            TeardownRetry.pendingReleases(service.allReleaseKinds, service.releasedKinds)
-                .size == service.allReleaseKinds.size,
+            "the retry decision must find nothing pending",
+            TeardownRetry.pendingReleases(service.allReleaseKinds, service.releasedKinds).isEmpty(),
         )
     }
 }

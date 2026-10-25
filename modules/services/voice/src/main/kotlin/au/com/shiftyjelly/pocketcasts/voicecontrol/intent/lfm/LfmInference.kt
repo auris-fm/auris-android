@@ -1,6 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm
 
-internal interface LfmInference {
+interface LfmInference {
     fun lastError(): String
 
     fun load(

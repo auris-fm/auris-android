@@ -52,7 +52,37 @@ object RealServiceReplacements {
     /** Remote Config reads a project config that cannot exist in a JVM test. */
     @Provides
     @Singleton
-    fun provideFirebaseRemoteConfig(): com.google.firebase.remoteconfig.FirebaseRemoteConfig = org.mockito.Mockito.mock(com.google.firebase.remoteconfig.FirebaseRemoteConfig::class.java)
+    fun provideFirebaseRemoteConfig(): com.google.firebase.remoteconfig.FirebaseRemoteConfig = // EVERY method gets a type-appropriate default: Task -> completed, primitives -> zero,
+        // interfaces -> mock. A bare mock returns null from any unstubbed async method, and
+        // production calls `.addOnCompleteListener` on the result -- an NPE that escapes on a
+        // Dispatchers.IO worker and is then attributed by `runTest` to whichever test class runs
+        // next (the suite-level "uncaught exceptions before the test started" failure). Measured,
+        // not hypothetical: bare-mock nulls reproduced as VoiceSharingAccountAuthBindingTest
+        // failing only in full-suite runs, one method at a time (fetch, activate,
+        // addOnConfigUpdateListener).
+        org.mockito.Mockito.mock(
+            com.google.firebase.remoteconfig.FirebaseRemoteConfig::class.java,
+            org.mockito.Mockito.withSettings().defaultAnswer { invocation ->
+                val type = invocation.method.returnType
+                when {
+                    com.google.android.gms.tasks.Task::class.java.isAssignableFrom(type) ->
+                        @Suppress("UNCHECKED_CAST")
+                        com.google.android.gms.tasks.Tasks.forResult(null as Any?) as com.google.android.gms.tasks.Task<Any>
+
+                    type == java.lang.Boolean.TYPE -> false
+
+                    type == java.lang.Long.TYPE -> 0L
+
+                    type == java.lang.Integer.TYPE -> 0
+
+                    type.isInterface -> org.mockito.Mockito.mock(type)
+
+                    !java.lang.reflect.Modifier.isFinal(type.modifiers) -> org.mockito.Mockito.mock(type)
+
+                    else -> null
+                }
+            },
+        )
 
     /**
      * Encrypted logging, replaced at its production module.
@@ -70,6 +100,66 @@ object RealServiceReplacements {
     @Provides
     @Singleton
     fun provideCrashLogging(): com.automattic.android.tracks.crashlogging.CrashLogging = org.mockito.Mockito.mock(com.automattic.android.tracks.crashlogging.CrashLogging::class.java)
+}
+
+/**
+ * The EXTERNAL-NATIVE seam replacement (spec 3b9d5053). Replaces ONLY
+ * [au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordNativeModule], whose binding is the
+ * single JNI-touching adapter in the graph. The inert implementation fails init the way an absent
+ * runtime does — `nativeInit` returns false, no throw — so the detector is honestly UNREADY, which
+ * is its own production behaviour for a failed model load. Detection policy is untouched; every
+ * service decision that follows (settlement, release ownership, teardown ordering) is production
+ * code, and the ASR backend seam is NOT replaced: this does not make the engine able to transcribe.
+ */
+@Module
+@TestInstallIn(
+    components = [SingletonComponent::class],
+    replaces = [au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordNativeModule::class],
+)
+object InertWakeWordNativeReplacements {
+    @Provides
+    @Singleton
+    fun provideWakeWordNative(): au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordNative = object : au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordNative {
+        override fun nativeInit(melModel: ByteArray, embedModel: ByteArray, classifierModel: ByteArray, threshold: Float): Boolean = false
+
+        override fun nativeDetect(samples: FloatArray, sampleRateHz: Int, outOffset: FloatArray): Float = -1f
+
+        override fun nativeRelease() = Unit
+    }
+}
+
+/**
+ * The recognizer's EXTERNAL-NATIVE seam replacement (spec 3b9d5053). Replaces ONLY
+ * [au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmInferenceModule], whose sole purpose is
+ * binding the JNI engine. The inert implementation behaves like a runtime that loads nothing:
+ * `load` returns false, `classify`/`generate`/`tokenize` report failure the way the native methods do
+ * on an unloaded engine, and `release` is a no-op that CANNOT throw — which is what lets the real
+ * service's settled release-count control observe the full release sequence on the JVM. Router policy
+ * (mutex, model gating, format checks) is untouched production code.
+ */
+@Module
+@TestInstallIn(
+    components = [SingletonComponent::class],
+    replaces = [au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmInferenceModule::class],
+)
+object InertLfmInferenceReplacements {
+    @Provides
+    @Singleton
+    fun provideLfmInference(): au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmInference = object : au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmInference {
+        override fun lastError(): String = "inert test inference: no native runtime"
+
+        override fun load(modelPath: String, classifierPath: String, labelMapPath: String, nCtx: Int): Boolean = false
+
+        override fun classify(promptTokenIds: IntArray, poolStart: Int, poolEnd: Int): String? = null
+
+        override fun generate(prefill: String, nPredict: Int): String? = null
+
+        override fun tokenize(text: String, addBos: Boolean): IntArray? = null
+
+        override fun reset() = Unit
+
+        override fun release() = Unit
+    }
 }
 
 /** Types with no existing provider on this module's classpath. */

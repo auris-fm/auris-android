@@ -29,10 +29,15 @@ class LfmIntentRouter internal constructor(
     private val inference: LfmInference,
     private val monoMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) : VoiceRecognizer {
+    // THE EXTERNAL-NATIVE BOUNDARY: injected rather than hardwired, so constructing the router no
+    // longer decides WHEN libpocketcasts_voice_llm loads. Production binding is [LfmInferenceModule].
     @Inject constructor(
         dialogManager: VoiceDialogManager,
         modelManager: ModelManager,
-    ) : this(dialogManager, modelManager, LfmNativeInference)
+        nativeInference: LfmInference,
+        // monoMs passed explicitly: with it defaulted, the 3-arg call would resolve to this very
+        // constructor and recurse.
+    ) : this(dialogManager, modelManager, nativeInference, { SystemClock.elapsedRealtime() })
 
     private val mutex = Mutex()
     private var loadedRelease: String? = null

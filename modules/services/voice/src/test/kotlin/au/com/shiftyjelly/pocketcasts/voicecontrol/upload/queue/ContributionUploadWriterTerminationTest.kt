@@ -133,9 +133,10 @@ class ContributionUploadWriterTerminationTest {
             }
         }
 
+        val watchedTransport = transport(port, budgetMs = 60_000, progress = writes)
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
             try {
-                transport(port, budgetMs = 60_000, progress = writes).upload(
+                watchedTransport.upload(
                     id,
                     record(id),
                     file,
@@ -160,7 +161,12 @@ class ContributionUploadWriterTerminationTest {
         val callerMs = (System.nanoTime() - withdrawnAt) / 1_000_000
         assertTrue("the writer EXITED, not merely the caller returned", writerExited.await(5, TimeUnit.SECONDS))
         assertTrue("and it exited promptly (took ${callerMs}ms)", callerMs < 15_000)
-        assertEquals("the withdrawal is reported as such", ContributionUploadTransport.Response.Cancelled, response)
+        assertEquals(
+            "the withdrawal is reported as such" +
+                (watchedTransport.unexpectedExitForTest?.let { " (unexpected exit: $it)" } ?: ""),
+            ContributionUploadTransport.Response.Cancelled,
+            response,
+        )
         // No writer may outlive its attempt.
         assertEquals("no call is left outstanding", 0, transport(port, 60_000).inFlightForTest())
     }

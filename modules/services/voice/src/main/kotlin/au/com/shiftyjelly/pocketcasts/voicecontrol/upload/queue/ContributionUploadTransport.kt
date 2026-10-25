@@ -166,6 +166,10 @@ class ContributionUploadTransport(
                 release(handle)
             }
         } catch (io: Throwable) {
+            // DIAGNOSABILITY (flake WriterTermination): Ambiguous(null) without a cause made a
+            // full-suite-only failure undiagnosable -- the evidence was discarded exactly where it
+            // was produced. The reason is retained read-only; policy is unchanged (still Ambiguous).
+            unexpectedExitForTest = io
             return Response.Ambiguous(null)
         } finally {
             inFlight.release()
@@ -377,6 +381,9 @@ class ContributionUploadTransport(
     private val registered = java.util.concurrent.ConcurrentHashMap<Long, Call>()
     private val handleSeq = java.util.concurrent.atomic.AtomicLong(0)
     private val inFlight = CountingSemaphore(maxConcurrentCalls)
+
+    /** Read-only observation of the LAST unexpected exit cause (see outer catch below). */
+    @Volatile internal var unexpectedExitForTest: Throwable? = null
 
     /** A bounded gate: at most [permits] calls outstanding, no queue of waiting attempts. */
     private class CountingSemaphore(private val permits: Int) {

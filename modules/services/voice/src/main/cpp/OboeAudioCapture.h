@@ -248,6 +248,12 @@ public:
      * behaviour. The test clears the pointer here before destruction, which is the same state a real
      * close leaves behind.
      */
+    /** Host-test read of the consumer cursor, for epoch-reset assertions. */
+    int64_t readCursorForTest() const { return mRingBuffer.readCursor(); }
+
+    /** Host-test read of the producer cursor, for continuity/epoch assertions. */
+    int64_t writeCursorForTest() const { return mRingBuffer.writeCursor(); }
+
     void clearStreamForTest() {
         std::lock_guard<std::mutex> lock(mStreamMutex);
         mStream = nullptr;

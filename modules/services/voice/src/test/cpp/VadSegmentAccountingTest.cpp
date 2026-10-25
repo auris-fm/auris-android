@@ -380,6 +380,138 @@ int main() {
         capture.clearStreamForTest();
     }
 
+    // (8) READ-CURSOR BINDING (reviewer round 3): the segment's accounted end position must be the
+    // ring's actual READ cursor at the chunk that completed the segment -- bound to what the
+    // consumer has read, not to how much the producer has written. Driven through the REAL ring:
+    // onAudioReady (the compiled producer callback) writes it, the real readRingBuffer consumes it.
+    {
+        OboeAudioCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x5000);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+
+        int16_t quiet[kFrame] = {0};
+        std::vector<int16_t> loud(kFrame, 4000);
+        auto push = [&](const int16_t* data) {
+            return capture.onAudioReady(stream, const_cast<int16_t*>(data), kFrame);
+        };
+        // Pre-roll 3 quiet + 5 loud, written before the consumer starts.
+        for (int i = 0; i < 3; i++) push(quiet);
+        for (int i = 0; i < 5; i++) push(loud.data());
+        NativeVadProcessor processor(&capture);
+        check(processor.start(), "ring-path capture starts");
+        bool closed = false;
+        // Feed the drain silence frame by frame, polling for the close, so the consumer stays
+        // behind the writer -- exactly the delivery lag the binding must be immune to. The script
+        // must reach kTargetTotalFrames (55) for the endpoint to close.
+        for (int i = 0; i < 60 && !closed; i++) {
+            push(quiet);
+            if (processor.waitForEvent(5) == 2) closed = true;
+        }
+        while (!closed) {
+            if (processor.waitForEvent(30000) == 2) closed = true;
+            else break;
+        }
+        check(closed, "the ring-path script produces a segment");
+        if (closed) {
+            const int64_t endPos = processor.getSpeechEndStreamPosition();
+            std::printf("      ring-path: endPos=%lld writeCursor=%lld\n",
+                (long long)endPos, (long long)capture.writeCursorForTest());
+            // The anchor is a CHUNK position: the read cursor after a whole 1024-sample read.
+            check(endPos % kFrame == 0, "the anchor is chunk-aligned (a read-cursor position)");
+            check(endPos >= 8 * kFrame,
+                "the anchor is at least the speech's own end (3 pre-roll + 5 speech frames)");
+            check(endPos <= capture.writeCursorForTest(),
+                "the anchor cannot exceed what the producer actually wrote");
+            // DELAYED DELIVERY: advance the writer past the anchor; the recorded anchor is a
+            // snapshot of the finalizing read and must not move.
+            const int64_t anchorBefore = endPos;
+            for (int i = 0; i < 4; i++) push(quiet);
+            check(processor.getSpeechEndStreamPosition() == anchorBefore,
+                "later producer progress does not move the recorded anchor");
+        }
+        processor.stop();
+        capture.clearStreamForTest();
+    }
+
+    // (9) PARTIAL DROP -> UNAVAILABLE ANCHOR (reviewer round 3): when a write cannot fit, the ring
+    // drops the remainder and the cursors' continuity with real stream positions is broken. Every
+    // segment finalized after that must report the position as UNAVAILABLE (0), never a value that
+    // only looks right. 8 frames fit; a 30-frame write drops 6 -> the flag must latch.
+    {
+        OboeAudioCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6000);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+        int16_t quiet[kFrame] = {0};
+        std::vector<int16_t> loud(kFrame, 4000);
+        auto push = [&](const int16_t* data, int32_t frames) {
+            return capture.onAudioReady(stream, const_cast<int16_t*>(data), frames);
+        };
+        for (int i = 0; i < 3; i++) push(quiet, kFrame);
+        for (int i = 0; i < 5; i++) push(loud.data(), kFrame);
+        check(capture.sampleAccountingContinuous(),
+            "premise: continuity holds before any drop");
+        // 32768 - 8192 = 24576 samples free; a 30720-sample (30-frame) write must drop 6144.
+        std::vector<int16_t> big(30 * kFrame, 0);
+        push(big.data(), 30 * kFrame);
+        check(capture.sampleAccountingContinuous() == false,
+            "a partial write latches the continuity break");
+
+        NativeVadProcessor processor(&capture);
+        check(processor.start(), "the post-drop capture starts");
+        bool closed = false;
+        // The ring already holds 32 frames (8 + the 24 the partial write kept); feed enough
+        // additional silence for the endpoint (kTargetTotalFrames 55) while polling for the close.
+        for (int i = 0; i < 30 && !closed; i++) {
+            push(quiet, kFrame);
+            if (processor.waitForEvent(5) == 2) closed = true;
+        }
+        while (!closed) {
+            if (processor.waitForEvent(30000) == 2) closed = true;
+            else break;
+        }
+        check(closed, "audio still forms a segment after a drop");
+        if (closed) {
+            std::printf("      post-drop endPos=%lld\n",
+                (long long)processor.getSpeechEndStreamPosition());
+            check(processor.getSpeechEndStreamPosition() == 0,
+                "a segment finalized after a drop reports its position UNAVAILABLE, not wrong");
+        }
+        processor.stop();
+        capture.clearStreamForTest();
+    }
+
+    // (10) FULL DROP latches the same way, and CLOSE/RESTART resets the epoch: cursors and
+    // continuity restart together, matching the fresh stream's fresh timestamp epoch -- the
+    // correspondence that lets a new session's positions mean its own stream again.
+    {
+        OboeAudioCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x7000);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+        std::vector<int16_t> loud(kFrame, 4000);
+        for (int i = 0; i < 32; i++) {
+            capture.onAudioReady(stream, loud.data(), kFrame);  // exactly fills the ring
+        }
+        check(!capture.sampleAccountingContinuous() == false,
+            "a full ring without drops keeps continuity");
+        capture.onAudioReady(stream, loud.data(), kFrame);  // nothing free: a full drop
+        check(capture.sampleAccountingContinuous() == false,
+            "a write with no free space latches the continuity break");
+        check(capture.writeCursorForTest() == 32 * (int64_t)kFrame,
+            "the write cursor still counts only what the ring actually accepted");
+
+        capture.close();
+        check(capture.writeCursorForTest() == 0 && capture.readCursorForTest() == 0,
+            "close resets the position epoch to zero");
+        check(capture.sampleAccountingContinuous(),
+            "close restores continuity for the next session");
+
+        // A FRESH capture (what a capture restart builds) starts its own epoch: position 0,
+        // continuous -- so a new session's anchor means ITS stream, not the previous one.
+        OboeAudioCapture fresh;
+        check(fresh.sampleAccountingContinuous(), "a fresh capture is continuous");
+        check(fresh.lastReadEndPosition() == 0, "a fresh capture's read position starts at zero");
+    }
+
     std::printf(gFailures == 0 ? "all checks passed\n" : "%d CHECK(S) FAILED\n", gFailures);
     return gFailures == 0 ? 0 : 1;
 }

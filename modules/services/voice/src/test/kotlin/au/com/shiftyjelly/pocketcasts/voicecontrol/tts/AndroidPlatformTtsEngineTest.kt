@@ -53,16 +53,36 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
-    fun `an accepted synthesis whose callbacks never arrive fails the utterance within the bound`() = runTest {
+    fun `an accepted synthesis whose callbacks never arrive fails the utterance within the bound`() {
         // REVIEWER 4356632247: an engine that queues SUCCESS but never delivers onDone/onError/onStop
         // used to leave speak() suspended forever; speakWithHeartbeat kept reporting emission, so
         // the user's next utterance was suppressed for the whole session.
-        engine.synthesisWaitMs = 200
-        engine.synthesizeToFile = { _, _, _, _ -> android.speech.tts.TextToSpeech.SUCCESS }
+        //
+        // REVIEWER (4.20 UTC round): the previous version stubbed synthesizeToFile on an engine that
+        // was never initialized, so speak could return false BEFORE synthesis entry and the bound
+        // was never exercised. This version uses the production initialization callback (the fake
+        // fires the same lambda the real TextToSpeech invokes), asserts the engine ACCEPTED the
+        // request (the fake queued it and returned SUCCESS), and only then holds silence.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        wired.synthesisWaitMs = 200
+
+        val scope = CoroutineScope(Dispatchers.Default)
         val start = android.os.SystemClock.elapsedRealtime()
-        val delivered = engine.speak("hello", "en")
+        val job = scope.launch { assertFalse(wired.speak("hello", "en")) }
+        // PRECONDITION, asserted not assumed: the request must actually reach synthesis and be
+        // accepted -- otherwise the false return below proves nothing about the bounded wait.
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("precondition: the synthesis must actually be queued", queued)
+        // The fake never delivers a callback for this utterance: hold silence past the bound.
+        val joined = runBlocking { kotlinx.coroutines.withTimeoutOrNull(5_000) { job.join() } }
         val elapsed = android.os.SystemClock.elapsedRealtime() - start
-        assertFalse("a callback-less synthesis must not count as delivered", delivered)
+        scope.cancel()
+        assertNotNull("speak must return within the bound instead of suspending forever", joined)
         assertTrue("the wait must be bounded (took $elapsed ms)", elapsed < 5_000)
     }
 

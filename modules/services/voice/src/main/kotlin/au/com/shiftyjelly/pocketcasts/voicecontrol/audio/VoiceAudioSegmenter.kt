@@ -60,14 +60,19 @@ fun captureTimeNsForPosition(captureClock: LongArray?, streamPositionInSegment: 
  * The monotonic instant the segment's speech onset was CAPTURED, or null when the stream reported no
  * timestamp.
  *
- * The segment's frames are a window whose first sample is the onset, so the onset's stream position
- * is `framePosition` and the clock already describes that instant. Computing it explicitly keeps the
- * conversion at the point the clock and the samples are both in hand, rather than reconstructing it
- * from a millisecond offset later and losing the sub-millisecond part.
+ * The clock observation is taken at segment COMPLETION (OboeCaptureEngine reads it in the drain loop
+ * after the whole segment has been copied), so the observation's frame position names the sample just
+ * past the segment's end -- not the onset. The onset's stream position is therefore
+ * `framePosition - (segmentSamples - speechOnsetSample)`, and that is the position converted here.
+ * Anchoring at the observation's own position instead would place the segment at the instant it was
+ * DELIVERED, up to a whole segment late, and the bleed filter's delay window would miss the device's
+ * own answer on long utterances.
  */
 fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSpeechOnsetMs(): Long? {
     val observation = captureClock ?: return null
-    return captureTimeNsForPosition(observation, streamPositionInSegment = observation[0])?.div(1_000_000L)
+    val segmentSamples = frames.sumOf { it.samples.size.toLong() }
+    val onsetStreamPosition = observation[0] - (segmentSamples - speechOnsetSample)
+    return captureTimeNsForPosition(observation, onsetStreamPosition)?.div(1_000_000L)
 }
 
 enum class RejectionReason {

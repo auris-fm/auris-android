@@ -115,16 +115,48 @@ class CaptureClockMappingTest {
     }
 
     @Test
-    fun `the segment's onset uses the observation's own frame position`() {
-        // The frames in a SpeechEnded begin at the onset, so the onset IS the observed instant. This
-        // is the piece the production filter consumes, so it is asserted through the public helper.
-        val observation = clock(framePosition = 12_345, timestampNs = 7_500_000_000L)
-
-        assertEquals(
-            7_500L,
-            VoiceSegmenterResult.SpeechEnded(frames = emptyList(), captureClock = observation)
-                .captureTimeOfSpeechOnsetMs(),
+    fun `the onset is anchored where speech started in the segment, not where the clock was read`() {
+        // PRODUCTION WIRING (reviewer 4357640837 capture-anchor part): OboeCaptureEngine drains the
+        // WHOLE segment into `frames`, records the onset as an OFFSET within that buffer, and reads
+        // nativeCaptureClock only afterwards -- at segment COMPLETION, where framePosition names the
+        // sample just past the segment's end. The onset's stream position is therefore
+        // framePosition - (segmentSamples - speechOnsetSample), and only that position converts to
+        // the onset's instant. Anchoring the segment at the completion timestamp instead places the
+        // microphone audio up to a whole segment late, so the bleed filter's delay window misses the
+        // device's own answer on long utterances. A 2-second segment whose speech started 1.5 s in
+        // must land 500 ms before the observation, not at it.
+        val frames = listOf(
+            PcmAudioFrame(ShortArray(16_000), 16_000),
+            PcmAudioFrame(ShortArray(16_000), 16_000),
         )
+        val observation = clock(framePosition = 32_000, timestampNs = 10_000_000_000L)
+
+        val onsetMs = VoiceSegmenterResult.SpeechEnded(
+            frames = frames,
+            speechOnsetSample = 24_000,
+            captureClock = observation,
+        ).captureTimeOfSpeechOnsetMs()
+
+        // 32_000 - (32_000 - 24_000) = 24_000: exactly 500 ms before the observed instant.
+        // The helper returns MILLISECONDS (it does the ns->ms conversion itself).
+        assertEquals(9_500L, onsetMs!!)
+    }
+
+    @Test
+    fun `an onset one millisecond before the segment's end lands one millisecond before the observation`() {
+        // Complement: an over-correcting mutant that subtracts the WHOLE segment length (instead of
+        // the segment length minus the onset offset) places this onset 2 s early, not 1 ms early.
+        // 16 samples at 16 kHz is exactly 1 ms, so the assertion is truncation-free.
+        val frames = listOf(PcmAudioFrame(ShortArray(16_000), 16_000))
+        val observation = clock(framePosition = 16_000, timestampNs = 4_000_000_000L)
+
+        val onsetMs = VoiceSegmenterResult.SpeechEnded(
+            frames = frames,
+            speechOnsetSample = 15_984,
+            captureClock = observation,
+        ).captureTimeOfSpeechOnsetMs()
+
+        assertEquals(3_999L, onsetMs!!)
     }
 
     @Test

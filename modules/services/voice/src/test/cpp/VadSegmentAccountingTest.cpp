@@ -433,6 +433,90 @@ int main() {
         capture.clearStreamForTest();
     }
 
+    // (8b) READ CURSOR, NOT A PRODUCER-CURSOR SNAPSHOT (reviewer round 4): chunk-alignment, >=
+    // speech-end and <= write-cursor bounds are also satisfied by a snapshot of the PRODUCER cursor
+    // taken at finalization. To discriminate, the consumer is held SLOW (20 ms per read) while the
+    // producer runs ahead: at finalization the write cursor is provably past the read cursor, so
+    // the accounted end must be strictly BELOW the write cursor. A mutant that records the write
+    // cursor at read time lands ON it and fails.
+    {
+        struct SlowCapture : OboeAudioCapture {
+            std::atomic<int> readCount{0};
+            int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
+                const int32_t read = OboeAudioCapture::readRingBuffer(outData, maxSamples, timeoutMs);
+                readCount.fetch_add(1);
+                std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                return read;
+            }
+        };
+        SlowCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x5100);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+        int16_t quiet[kFrame] = {0};
+        std::vector<int16_t> loud(kFrame, 4000);
+
+        // Pre-load a PARTIAL backlog (16 frames: 3 pre-roll + 5 speech + 8 trailing), then run the
+        // consumer SLOW (30 ms per chunk) against a FASTER writer (25 ms per frame): the backlog
+        // grows at +1 frame per 150 ms and peaks around 26 of the ring's 32 frames -- the producer
+        // is provably ahead at finalization, with no overflow and no drop.
+        for (int i = 0; i < 3; i++) capture.onAudioReady(stream, quiet, kFrame);
+        for (int i = 0; i < 5; i++) capture.onAudioReady(stream, loud.data(), kFrame);
+        for (int i = 0; i < 8; i++) capture.onAudioReady(stream, quiet, kFrame);
+        check(capture.sampleAccountingContinuous(),
+            "premise: the exact-capacity backlog did not drop anything");
+
+        NativeVadProcessor processor(&capture);
+        check(processor.start(), "slow-consumer capture starts");
+        bool closed = false;
+        // Let the consumer drain two chunks before feeding again: the first trailing write must
+        // not land on a full ring (that would latch a drop, which is case 9's scenario, not this
+        // one). With the 25 ms cadence the consumer then stays 15 ms behind per chunk -- provably
+        // behind without overflowing.
+        for (int i = 0; i < 500 && processor.getFramesConsumed() < 2; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        check(processor.getFramesConsumed() >= 2, "premise: the slow consumer is draining the backlog");
+        // The writer runs the FULL script before polling for the close. Per chunk the writer
+        // (25 ms) outpaces the consumer (30 ms), so the backlog grows -- bounded below the ring's
+        // 32-frame capacity -- and the producer is provably ahead at finalization.
+        for (int i = 0; i < 60; i++) {
+            capture.onAudioReady(stream, quiet, kFrame);
+            check(capture.sampleAccountingContinuous(), "premise: no drop during the slow-consumer drain");
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        while (!closed) {
+            const int e = processor.waitForEvent(30000);
+            if (e == 2) { closed = true; }
+            else if (e != 1) break;
+        }
+        check(closed, "the slow-consumer script produces a segment");
+        if (closed) {
+            const int64_t endPos = processor.getSpeechEndStreamPosition();
+            const int64_t writeAtEvent = capture.writeCursorForTest();
+            const int64_t consumedBound =
+                static_cast<int64_t>(capture.readCount.load()) * kFrame;
+            std::printf("      slow: endPos=%lld consumedBound=%lld writeCursor=%lld\n",
+                (long long)endPos, (long long)consumedBound, (long long)writeAtEvent);
+            check(endPos > 0, "the anchor is available (no drop latched in this scenario)");
+            // PRODUCER PROVABLY AHEAD: the writer is well past everything the consumer has read.
+            check(consumedBound < writeAtEvent,
+                "premise: at finalization the write cursor is past every consumed chunk");
+            // The anchor must come from CONSUMED chunks. A mutant that snapshots the producer's
+            // write cursor lands far beyond consumedBound (the consumer is held ~10 ms per chunk
+            // behind the writer) and fails here.
+            check(endPos <= consumedBound,
+                "the anchor is a consumed-chunk position, not a producer-cursor snapshot");
+            check(endPos % kFrame == 0, "the anchor is chunk-aligned");
+            check(processor.getSpeechEndStreamPosition() == endPos,
+                "the recorded anchor stays stable after finalization");
+        }
+        // The consumer only halts after the assertions: stop() resets the snapshot, and reading
+        // readCount/writeCursor for the controls above requires the values as of finalization
+        // plus the already-terminated consumer's counters (stop() joins the loop first).
+        processor.stop();
+        capture.clearStreamForTest();
+    }
+
     // (9) PARTIAL DROP -> UNAVAILABLE ANCHOR (reviewer round 3): when a write cannot fit, the ring
     // drops the remainder and the cursors' continuity with real stream positions is broken. Every
     // segment finalized after that must report the position as UNAVAILABLE (0), never a value that

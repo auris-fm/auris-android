@@ -78,10 +78,12 @@ class RealServiceReleaseCountControlTest {
         // the reviewer flagged: an asynchronous teardown from this test could land in the next
         // test's assertions. Await it here, pumping the Main looper (the releases run there), with
         // the bound on the COROUTINE, not the test thread.
+        // BASELINE BEFORE destroy (reviewer fe405146): an extra release during destroy must be
+        // seen, so the counter is captured before teardown starts, not after.
+        val callsBefore = RecognizerReleaseProbe.calls.get()
         controller.destroy()
         val service = controller.get()
         val teardown = service.currentTeardown ?: return
-        val callsBefore = RecognizerReleaseProbe.calls.get()
         val deadline = System.currentTimeMillis() + 30_000
         while (!teardown.isCompleted) {
             shadowOf(Looper.getMainLooper()).idle()

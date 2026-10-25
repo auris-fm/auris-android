@@ -559,9 +559,17 @@ class TeardownOrderContractTest {
             "the teardown must be a Deferred so its outcome is observable",
             productionFileSource().contains("private fun stopVoiceControl(): Deferred<TeardownResult>"),
         )
+        // A THROWING RELEASE IS REPORTED AS AN AMBIGUOUS RELEASE, not a resumable Residual
+        // (reviewer 97ab6e9a). The verdict kind is load-bearing: a Residual is clearable by a
+        // quiescence recheck, and replaying a release that may already have taken effect would
+        // perform destructive cleanup twice.
         assertTrue(
             "a throwing release must be reported as Held, not escape the launch",
-            source.contains("TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)))"),
+            source.contains("TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.AmbiguousRelease(error)))"),
+        )
+        assertTrue(
+            "a throwing release must NOT be recorded as a resumable Residual",
+            !source.contains("Residual(remaining = 0, error = error)"),
         )
     }
 

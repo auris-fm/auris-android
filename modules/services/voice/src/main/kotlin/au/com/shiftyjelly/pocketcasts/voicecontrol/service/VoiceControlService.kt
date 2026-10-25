@@ -1004,7 +1004,7 @@ class VoiceControlService : Service() {
                     // reported, never thrown out of this unrouted launch.
                     onFailure = { error ->
                         Timber.e(error, "[VoicePipeline] resource release failed")
-                        TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)))
+                        TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.AmbiguousRelease(error)))
                     },
                 )
             }
@@ -1045,8 +1045,18 @@ class VoiceControlService : Service() {
                         recheck = { voiceAsrEngine.get().unfinishedProcessingJobs },
                         // A hold that is NOT about quiescence cannot be cured by an empty list
                         // (reviewer 9f873b94): a failed stop or abnormal finish stays unproven.
+                        // ONLY A QUIESCENCE HOLD MAY BE CLEARED BY OBSERVING QUIESCENCE (reviewer
+                        // 97ab6e9a). `Residual` with no error is a work-outstanding hold that a
+                        // recheck can legitimately resolve. `AmbiguousRelease` is NOT: the release
+                        // may have taken effect before throwing, so replaying it could perform
+                        // destructive cleanup twice, and no recheck can prove otherwise. It is
+                        // therefore never exempt.
                         unresolvedHold = previous.verdict.takeIf {
-                            it !is EngineQuiescence.Verdict.Residual && it !is EngineQuiescence.Verdict.Settled
+                            when (it) {
+                                is EngineQuiescence.Verdict.Residual -> it.error != null
+                                is EngineQuiescence.Verdict.Settled -> false
+                                else -> true
+                            }
                         },
                     )
                 ) {
@@ -1060,7 +1070,7 @@ class VoiceControlService : Service() {
                             Timber.e(error, "[VoicePipeline] retry release failed")
                             return@async TeardownResult.Held(
                                 TeardownFailure(
-                                    EngineQuiescence.Verdict.Residual(remaining = 0, error = error),
+                                    EngineQuiescence.Verdict.AmbiguousRelease(error),
                                 ),
                             )
                         }
@@ -1165,14 +1175,26 @@ class VoiceControlService : Service() {
      * slightly later publish is harmless. Claiming the two can never disagree would be false.
      */
     private fun recordTeardownOutcome(teardown: Deferred<TeardownResult>) {
+        // THE ATTEMPT THIS CALLBACK BELONGS TO, captured now (reviewer 97ab6e9a). Serializing
+        // CREATION was not enough: the completion callbacks still published unconditionally, so an
+        // older attempt finishing late could overwrite a newer attempt's outcome and reinstate a
+        // hold that had already been resolved. Publication is guarded by the SAME ownership protocol
+        // as creation, and an attempt may only publish while it is still the current one.
+        val attempt = teardown
         teardown.invokeOnCompletion {
             // KEYED BY ATTEMPT, NOT BY "FIRST EVER" (reviewer a9271b39). A compareAndSet(null, ...)
             // recorded the FIRST teardown forever, so a Held->Released retry could never replace it
             // and `teardownFailure` stayed stale: the retry would succeed and the service would go on
             // reporting a hold. Each attempt now owns its own record, and the CURRENT attempt is the
             // one the caller consults.
-            teardownOutcome = settleRecord(teardown)
-            teardownFailure = teardownOutcome?.failure
+            synchronized(retryLock) {
+                // A SUPERSEDED ATTEMPT PUBLISHES NOTHING. Its outcome was computed from a state the
+                // newer attempt has already moved past, so publishing it would resurrect a stale
+                // verdict. `stopInFlightJob` is the current attempt by construction.
+                if (stopInFlightJob !== attempt) return@invokeOnCompletion
+                teardownOutcome = settleRecord(attempt)
+                teardownFailure = teardownOutcome?.failure
+            }
         }
     }
 
@@ -1188,10 +1210,11 @@ class VoiceControlService : Service() {
 
             null -> {
                 val error = outcome.exceptionOrNull()
+                    ?: IllegalStateException("teardown produced no result and no error")
                 Timber.e(error, "[VoicePipeline] teardown itself failed")
                 TeardownOutcome(
                     Released = false,
-                    failure = TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)),
+                    failure = TeardownFailure(EngineQuiescence.Verdict.AmbiguousRelease(error)),
                 )
             }
         }

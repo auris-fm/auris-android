@@ -99,6 +99,17 @@ internal object EngineQuiescence {
 
         /** Work kept appearing past the round bound: release nothing. */
         data class Residual(val remaining: Int, val error: Throwable? = null) : Verdict
+
+        /**
+         * A release was ATTEMPTED and threw, so it is UNKNOWN whether the effect happened.
+         *
+         * This is distinct from [Residual] on purpose (reviewer 97ab6e9a). A residual join means
+         * "work is still running", which quiescence can genuinely resolve later. A release that
+         * threw may have completed its effect before failing, so replaying it could perform
+         * destructive cleanup twice. Nothing a recheck can observe proves otherwise, so this verdict
+         * must REFUSE all automatic retry — it is never exempted by a quiescence recheck.
+         */
+        data class AmbiguousRelease(val error: Throwable) : Verdict
     }
 
     /**

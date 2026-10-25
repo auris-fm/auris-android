@@ -248,6 +248,11 @@ void NativeVadProcessor::runLoop() {
         // A full frame was read: count it, so callers can tell "capture is running" from "captured
         // audio is actually reaching the VAD" even while no speech event fires.
         mFramesConsumed.fetch_add(1, std::memory_order_relaxed);
+        // The chunk's absolute end in RING accounting -- the read cursor after this read -- is the
+        // sample position the segment anchor is derived from. This is the ring's own read position,
+        // not a count of successful reads: the two coincide only while nothing is dropped, which is
+        // exactly the condition the finalize path checks.
+        mLastChunkEndPosition = mCapture->lastReadEndPosition();
 
 
         // 2. No cooldown gate and no forced duration endpoint. Internal framing retains and joins
@@ -386,19 +391,24 @@ void NativeVadProcessor::runLoop() {
                 if (mDrainRemaining <= 0) {
                     // Drain complete — finalize the utterance.
 
-                    // The finalize point IS the sample-accounting anchor: this thread has just
-                    // consumed the frame containing the segment's last sample, so the absolute
-                    // position of that end is the running consumed-sample count. Recorded HERE,
+                    // The finalize point IS the sample-accounting anchor: this thread just
+                    // consumed the frame containing the segment's last sample, and the ring's read
+                    // cursor after that read is the segment's absolute end position. Recorded HERE,
                     // under the same lock as the snapshot, because the callback keeps advancing the
-                    // ring afterwards -- a position read later would include that lag.
-                    const int64_t consumedSamples =
-                        mFramesConsumed.load(std::memory_order_relaxed) * kVadFrameSize;
+                    // ring afterwards -- a position read later would include that lag. If any write
+                    // has dropped samples, cursor continuity with real stream positions is broken
+                    // and 0 is recorded instead: the Kotlin side treats that as "timing
+                    // unavailable" and falls back to offset matching, which is honest rather than
+                    // confidently wrong.
+                    const int64_t accountedEnd = mCapture->sampleAccountingContinuous()
+                        ? mLastChunkEndPosition
+                        : 0;
                     {
                         std::lock_guard<std::mutex> lock(mSpeechMutex);
                         mSnapshotBuffer = std::move(mSpeechBuffer);
                         mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
                         mSnapshotSpeechEndSample = mSpeechEndSample;
-                        mSnapshotSpeechEndStreamPosition = consumedSamples;
+                        mSnapshotSpeechEndStreamPosition = accountedEnd;
                         mSpeechBuffer.clear();
                     }
 

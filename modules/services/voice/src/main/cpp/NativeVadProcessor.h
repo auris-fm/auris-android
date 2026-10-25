@@ -154,6 +154,9 @@ private:
     int32_t mSnapshotSpeechOnsetSample = 0;
     int32_t mSnapshotSpeechEndSample = 0;
     int64_t mSnapshotSpeechEndStreamPosition = 0;
+
+    /** Ring read-cursor position after the most recent chunk this thread consumed (VAD thread only). */
+    int64_t mLastChunkEndPosition = 0;
     std::mutex mSpeechMutex;
 
     int32_t mConsecutiveSilentFrames = 0;

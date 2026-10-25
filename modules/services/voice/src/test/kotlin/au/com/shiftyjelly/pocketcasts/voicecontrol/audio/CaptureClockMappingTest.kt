@@ -115,13 +115,14 @@ class CaptureClockMappingTest {
     }
 
     @Test
-    fun `the onset is anchored where speech started in the segment, not where the clock was read`() {
-        // PRODUCTION WIRING (reviewer 4357640837 capture-anchor part, round 2): the segment's
-        // position comes from VAD SAMPLE ACCOUNTING (nativeGetSpeechEndStreamPosition), not from the
-        // hardware observation -- the observation is read at drain time and can lag the segment's
-        // true end. A segment of 32 000 samples whose speech started at offset 24 000, with the
-        // segment's END bound at absolute position 32 000 and the clock observed exactly at that
-        // end, must place the onset at 9 500 ms.
+    fun `the anchor is the segment sample zero the filter receives, not the clock-read instant`() {
+        // PRODUCTION WIRING (reviewer 4357640837 capture-anchor part, round 3): the segment's
+        // position comes from RING SAMPLE ACCOUNTING (the read cursor at the moment the final chunk
+        // was consumed), not from the hardware observation -- the observation is read at drain time
+        // and can lag the segment's true end. The anchor is the segment's FIRST SAMPLE (sample 0,
+        // pre-roll included): the engine hands the WHOLE buffer to the filter, so a 32 000-sample
+        // segment whose end is bound at absolute position 32 000, observed exactly at that end,
+        // must place sample 0 at 8 000 ms -- NOT the onset inside it at 9 500 ms.
         val frames = listOf(
             PcmAudioFrame(ShortArray(16_000), 16_000),
             PcmAudioFrame(ShortArray(16_000), 16_000),
@@ -133,23 +134,24 @@ class CaptureClockMappingTest {
             speechOnsetSample = 24_000,
             captureClock = observation,
             segmentEndStreamPosition = 32_000L,
-        ).captureTimeOfSpeechOnsetMs()
+        ).captureTimeOfSegmentStartMs()
 
-        // 32_000 - (32_000 - 24_000) = 24_000: exactly 500 ms before the observed instant.
+        // 32_000 - 32_000 = 0: sample 0, exactly 2 s before the observed instant. The onset at
+        // offset 24_000 would be 9 500 ms -- asserting 8 000 is what kills onset-anchoring.
         // The helper returns MILLISECONDS (it does the ns->ms conversion itself).
-        assertEquals(9_500L, onsetMs!!)
+        assertEquals(8_000L, onsetMs!!)
     }
 
     @Test
-    fun `a clock observation delivered after the stream advanced leaves the onset unchanged`() {
+    fun `a clock observation delivered after the stream advanced leaves the anchor unchanged`() {
         // REVIEWER (round 2): reading the timestamp AFTER copying the completed segment does not
         // mean the observation's frame position is the segment's end -- the callback and ring can
         // advance while VAD processing and drain delivery lag. Here the SAME segment is observed
         // 8 000 samples (500 ms) later than the timely control above, with the timestamp advanced
-        // by exactly that much. The onset must still be 9 500 ms: the anchor is the accounted
-        // segment end, and the observation only supplies the instant that position is converted
+        // by exactly that much. Sample 0 must still be 8 000 ms: the anchor is the accounted
+        // segment start, and the observation only supplies the instant that position is converted
         // against. A mutant that derives the anchor from the observation's frame position places
-        // this onset at 10 000 ms and fails.
+        // sample 0 at 8 500 ms and fails.
         val frames = listOf(
             PcmAudioFrame(ShortArray(16_000), 16_000),
             PcmAudioFrame(ShortArray(16_000), 16_000),
@@ -161,9 +163,9 @@ class CaptureClockMappingTest {
             speechOnsetSample = 24_000,
             captureClock = laggedObservation,
             segmentEndStreamPosition = 32_000L,
-        ).captureTimeOfSpeechOnsetMs()
+        ).captureTimeOfSegmentStartMs()
 
-        assertEquals("delivery lag must not move the onset", 9_500L, onsetMs!!)
+        assertEquals("delivery lag must not move the anchor", 8_000L, onsetMs!!)
     }
 
     @Test
@@ -180,15 +182,17 @@ class CaptureClockMappingTest {
                 speechOnsetSample = 15_984,
                 captureClock = observation,
                 segmentEndStreamPosition = null,
-            ).captureTimeOfSpeechOnsetMs(),
+            ).captureTimeOfSegmentStartMs(),
         )
     }
 
     @Test
     fun `an onset one millisecond before the segment's end lands one millisecond before the observation`() {
-        // Complement: an over-correcting mutant that subtracts the WHOLE segment length (instead of
-        // the segment length minus the onset offset) places this onset 2 s early, not 1 ms early.
-        // 16 samples at 16 kHz is exactly 1 ms, so the assertion is truncation-free.
+        // Complement, NONZERO PRE-ROLL (reviewer round 3): a 1 s segment whose speech starts only
+        // at its last millisecond. The buffer's sample 0 sits at 16 000 - 16 000 = 0, i.e. 1 s
+        // before the observation; an onset-anchoring mutant would report 3 999 ms (1 ms before the
+        // observation) and fail. 16 samples at 16 kHz is exactly 1 ms, so the arithmetic is
+        // truncation-free.
         val frames = listOf(PcmAudioFrame(ShortArray(16_000), 16_000))
         val observation = clock(framePosition = 16_000, timestampNs = 4_000_000_000L)
 
@@ -197,16 +201,16 @@ class CaptureClockMappingTest {
             speechOnsetSample = 15_984,
             captureClock = observation,
             segmentEndStreamPosition = 16_000L,
-        ).captureTimeOfSpeechOnsetMs()
+        ).captureTimeOfSegmentStartMs()
 
-        assertEquals(3_999L, onsetMs!!)
+        assertEquals(3_000L, onsetMs!!)
     }
 
     @Test
-    fun `a segment with no clock has no onset time`() {
+    fun `a segment with no clock has no anchor time`() {
         assertNull(
             VoiceSegmenterResult.SpeechEnded(frames = emptyList(), captureClock = null)
-                .captureTimeOfSpeechOnsetMs(),
+                .captureTimeOfSegmentStartMs(),
         )
     }
 

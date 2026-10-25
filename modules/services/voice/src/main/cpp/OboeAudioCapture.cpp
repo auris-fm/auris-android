@@ -25,12 +25,19 @@ int32_t RingBuffer::write(const int16_t* data, int32_t numSamples) {
     int64_t available = capacity - used;
 
     if (available <= 0) {
-        // Buffer full — drop samples. Acceptable for ASR.
+        // Buffer full — drop samples. Acceptable for ASR, but NOT for timing: a drop breaks the
+        // cursors' continuity with real stream positions, so the accounting is flagged and every
+        // later sample position is reported as unavailable rather than wrong.
+        mSamplesDropped.store(true, std::memory_order_release);
         return 0;
     }
 
     int32_t toWrite = static_cast<int32_t>(
         (numSamples < available) ? numSamples : available);
+    if (toWrite < numSamples) {
+        // A partial write drops the remainder -- same continuity break as a full drop.
+        mSamplesDropped.store(true, std::memory_order_release);
+    }
 
     for (int32_t i = 0; i < toWrite; ++i) {
         int32_t idx = static_cast<int32_t>((writeCursor + i) % kRingBufferCapacity);
@@ -71,6 +78,9 @@ int32_t RingBuffer::available() const {
 void RingBuffer::reset() {
     mWriteCursor.store(0, std::memory_order_relaxed);
     mReadCursor.store(0, std::memory_order_relaxed);
+    // A new session is a new position epoch: cursors and continuity restart together, matching the
+    // new stream's timestamp epoch.
+    mSamplesDropped.store(false, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -290,7 +300,14 @@ int32_t OboeAudioCapture::readRingBuffer(int16_t* outData, int32_t maxSamples, i
         return 0;
     }
 
-    return mRingBuffer.read(outData, maxSamples);
+    const int32_t read = mRingBuffer.read(outData, maxSamples);
+    if (read > 0) {
+        // The read cursor IS the absolute stream position of this chunk's last sample (while the
+        // accounting is continuous). Recorded at the read, so the VAD can bind a finalized segment
+        // to the position its final chunk actually ended at -- not to any later clock read.
+        mLastReadEndPosition.store(mRingBuffer.readCursor(), std::memory_order_release);
+    }
+    return read;
 }
 
 oboe::DataCallbackResult OboeAudioCapture::onAudioReady(

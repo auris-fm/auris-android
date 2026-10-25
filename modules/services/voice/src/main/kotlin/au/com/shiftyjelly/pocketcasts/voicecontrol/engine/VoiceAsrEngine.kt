@@ -10,7 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSpeechOnsetMs
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
@@ -333,7 +333,10 @@ class VoiceAsrEngine @Inject constructor(
         // Named `Ms` because the correlator's clock is in milliseconds: the capture observation is
         // nanoseconds and the conversion happens here, so a reader cannot pair the two domains by
         // accident. The comment on the helper says the same thing at the point of the division.
-        val micPositionMs = segment.captureTimeOfSpeechOnsetMs()
+        // The anchor describes SAMPLE 0 of the buffer the filter receives (pre-roll included):
+        // the correlator aligns the whole buffer against the reference window, so the anchor must
+        // be the buffer's own start, not the speech onset inside it.
+        val micPositionMs = segment.captureTimeOfSegmentStartMs()
         if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference, micPositionMs)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
             return

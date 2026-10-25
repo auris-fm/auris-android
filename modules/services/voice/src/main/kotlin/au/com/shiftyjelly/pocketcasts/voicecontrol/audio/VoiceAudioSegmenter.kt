@@ -66,26 +66,27 @@ fun captureTimeNsForPosition(captureClock: LongArray?, streamPositionInSegment: 
 }
 
 /**
- * The monotonic instant the segment's speech onset was CAPTURED, or null when the alignment is
- * unavailable.
+ * The monotonic instant the segment's FIRST SAMPLE (sample 0, including any pre-roll) was CAPTURED,
+ * or null when the alignment is unavailable.
  *
- * The anchor is SAMPLE-ACCOUNTED, not read from the clock: the native VAD records the absolute
- * position of the segment's end (in consumed-stream samples) when it finalizes the segment, so
- * delivery lag -- the callback and ring advancing between the segment's last sample and the drain
- * loop's timestamp read -- cannot move the anchor. The onset's stream position is
- * `segmentEndStreamPosition - (segmentSamples - speechOnsetSample)`, and the clock observation only
- * supplies the instant that position is converted against. Anchoring at the observation's own frame
- * position instead would fold the queue lag into every delayed segment's position.
+ * The engine hands the WHOLE segment to the bleed filter, so the anchor must describe sample 0 --
+ * anchoring at the speech onset instead would leave the pre-roll earlier than the supplied anchor,
+ * and the correlator's window math would compound that displacement. The anchor is SAMPLE-ACCOUNTED,
+ * not read from the clock: the native VAD records the absolute position of the segment's end (in the
+ * ring's consumed-stream samples) when it finalizes the segment, so delivery lag -- the callback and
+ * ring advancing between the segment's last sample and the drain loop's timestamp read -- cannot
+ * move it. Sample 0's stream position is `segmentEndStreamPosition - segmentSamples`, and the clock
+ * observation only supplies the instant that position is converted against.
  *
  * Null when either the accounted end position or a timestamp observation is missing: an absent
  * binding must stay absent (the engine falls back to offset matching), never approximate.
  */
-fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSpeechOnsetMs(): Long? {
+fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentStartMs(): Long? {
     val endPosition = segmentEndStreamPosition ?: return null
     val observation = captureClock ?: return null
     val segmentSamples = frames.sumOf { it.samples.size.toLong() }
-    val onsetStreamPosition = endPosition - (segmentSamples - speechOnsetSample)
-    return captureTimeNsForPosition(observation, onsetStreamPosition)?.div(1_000_000L)
+    val segmentStartPosition = endPosition - segmentSamples
+    return captureTimeNsForPosition(observation, segmentStartPosition)?.div(1_000_000L)
 }
 
 enum class RejectionReason {

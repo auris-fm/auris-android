@@ -48,12 +48,33 @@ public:
         return mWriteCursor.load(std::memory_order_acquire);
     }
 
+    /**
+     * The consumer's monotonic sample counter: the total samples READ since construction. After a
+     * successful read of N samples, this is the absolute stream position of the LAST sample that
+     * read returned -- the accounting the segment anchor is derived from. Valid as a stream
+     * position only while [samplesDropped] is false.
+     */
+    int64_t readCursor() const {
+        return mReadCursor.load(std::memory_order_acquire);
+    }
+
+    /**
+     * True once a write had to drop samples because the consumer fell behind. Dropped samples make
+     * the cursors diverge from real stream positions (the stream advanced by more than was
+     * consumed), so any position derived from them afterwards is untrustworthy and consumers must
+     * report timing unavailable rather than wrong.
+     */
+    bool samplesDropped() const {
+        return mSamplesDropped.load(std::memory_order_acquire);
+    }
+
     void reset();
 
 private:
     int16_t mBuffer[kRingBufferCapacity];
     std::atomic<int64_t> mWriteCursor{0};
     std::atomic<int64_t> mReadCursor{0};
+    std::atomic<bool> mSamplesDropped{false};
 };
 
 /**
@@ -88,6 +109,29 @@ public:
     // Block until data is available, then read from the ring buffer.
     // This is the sole consumer path for the VAD processing thread.
     // Returns number of samples read, 0 on timeout, -1 if stream is not active.
+
+    /**
+     * The absolute stream position (ring read cursor) of the last sample a successful
+     * readRingBuffer returned. Meaningful only while [sampleAccountingContinuous] holds.
+     */
+    int64_t lastReadEndPosition() const {
+        return mLastReadEndPosition.load(std::memory_order_acquire);
+    }
+
+    /**
+     * Whether the ring's cursors still correspond 1:1 to real stream positions. False once any
+     * write dropped samples (consumer fell behind): positions after a drop are untrustworthy, and
+     * the anchor must be reported unavailable instead of wrong.
+     *
+     * Origin: the ring is constructed with the capture and reset only when the capture closes, so
+     * within one capture session position 0 is the session's first captured sample -- the same
+     * epoch the stream's timestamp frame positions count from (the existing fallback anchor makes
+     * the same identification). A capture restart builds a new capture, ring, stream and VAD
+     * together, so both epochs restart together.
+     */
+    bool sampleAccountingContinuous() const {
+        return !mRingBuffer.samplesDropped();
+    }
     virtual int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs);
 
     // Stop the stream.
@@ -233,6 +277,7 @@ private:
     bool mTestTimestampAvailable = false;
     int64_t mTestTimestampFrame = 0;
     int64_t mTestTimestampNs = 0;
+    std::atomic<int64_t> mLastReadEndPosition{0};
 
 
     RingBuffer mRingBuffer;

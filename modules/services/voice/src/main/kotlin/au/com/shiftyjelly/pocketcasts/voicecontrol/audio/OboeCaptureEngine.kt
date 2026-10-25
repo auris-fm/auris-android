@@ -242,7 +242,11 @@ internal class OboeCaptureEngine(
                                 // delay between that moment and this timestamp read. This is the
                                 // anchor the onset time is derived from; the clock only supplies
                                 // the instant it is converted against.
-                                val segmentEnd = OboeNative.nativeGetSpeechEndStreamPosition()
+                                // Routed through the injected hardware seam like every other
+                                // segment field, and 0 means the native accounting is unavailable
+                                // (ring overrun): a completed segment's end position is always
+                                // positive, so the sentinel cannot collide with a real value.
+                                val segmentEnd = hardware.getSpeechEndStreamPosition().takeIf { it > 0L }
                                 emit(
                                     VoiceSegmenterResult.SpeechEnded(
                                         frames = frames,

@@ -412,6 +412,73 @@ class VoiceAsrEngineTest {
         }
     }
 
+    // ── Capture-anchor binding, through the production filter call ──
+
+    @Test
+    fun `the filter receives the segment buffer start position, not the speech onset`() = runTest {
+        // REVIEWER (round 3 slice binding): the engine hands the WHOLE segment to
+        // UtteranceFilter.shouldProcessReference, so the mic position it supplies must describe
+        // SAMPLE 0 of that buffer -- including the pre-roll before the speech onset. This segment
+        // is 2 s long with speech starting only at offset 24 000 (1.5 s); its accounted end is at
+        // absolute ring position 32 000 and the clock was observed exactly there. Sample 0 is
+        // therefore at 8 000 ms on the clock; an onset-anchored value would be 9 500 ms. Asserted
+        // against the PRODUCTION filter call (the mock capturing the real argument), not the
+        // helper alone, so the binding cannot drift from what the correlator consumes.
+        val capturedMicPositionMs = mutableListOf<Long?>()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        val frames = listOf(
+            PcmAudioFrame(ShortArray(16_000), 16_000),
+            PcmAudioFrame(ShortArray(16_000), 16_000),
+        )
+        val capture = flowOf(
+            VoiceSegmenterResult.SpeechEnded(
+                frames = frames,
+                speechOnsetSample = 24_000,
+                captureClock = longArrayOf(32_000L, 10_000_000_000L, 16_000L, 1L),
+                segmentEndStreamPosition = 32_000L,
+            ),
+        )
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(capture)
+        `when`(
+            utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull()),
+        ).thenAnswer { invocation ->
+            @Suppress("UNCHECKED_CAST")
+            capturedMicPositionMs.add(invocation.getArgument(4))
+            true
+        }
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
+            )
+        }
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        startEngine(AudioRoute.Speaker)
+        try {
+            kotlinx.coroutines.withTimeout(5_000) {
+                while (capturedMicPositionMs.isEmpty()) kotlinx.coroutines.delay(10)
+            }
+            assertEquals(
+                "the filter must receive the buffer's sample-0 time (8 000 ms), not the onset (9 500 ms)",
+                listOf(8_000L),
+                capturedMicPositionMs,
+            )
+        } finally {
+            runCatching { engine.stop() }
+        }
+    }
+
     // ── Task #78: non-content ASR output is silently discarded before any routing ──
 
     private fun speechSegment(): Flow<VoiceSegmenterResult> = flowOf(

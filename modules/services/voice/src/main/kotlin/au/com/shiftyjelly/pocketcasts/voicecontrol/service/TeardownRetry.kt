@@ -41,6 +41,16 @@ internal object TeardownRetry {
         recheck: () -> List<Job>,
         observe: Boolean = true,
         unresolvedHold: Any? = null,
+        // A JOB THAT IS GONE MAY HAVE FAILED ON ITS WAY OUT (reviewer 3ecf1db0). The initial
+        // teardown classifies every owned job's finish; the retry only counted unfinished jobs, so a
+        // processing job that completed ABNORMALLY after a residual hold looked indistinguishable
+        // from one that settled cleanly, and the retry released. This callback is the SAME production
+        // predicate the initial teardown uses, applied to the jobs that were owned when the hold
+        // began. Returning non-null means "this job did not fail"; null means clean.
+        abnormalFinish: (Job) -> Throwable? = { null },
+        // The jobs that existed when the hold was taken. Needed because a job removed from the live
+        // list cannot be re-examined from it.
+        heldJobs: () -> List<Job> = { emptyList() },
     ): Decision = when {
         !observe -> Decision.Unproven(IllegalStateException("retry requires continued observation"))
 
@@ -60,7 +70,18 @@ internal object TeardownRetry {
                     IllegalStateException("retry cannot clear an unresolved hold: $unresolvedHold"),
                 )
 
-                else -> Decision.Quiescent
+                // AN EMPTY LIST IS NOT PROOF OF A CLEAN FINISH. Now that nothing is unfinished, ask
+                // the production predicate what actually happened to the jobs the hold covered. A
+                // late failure must not be mistaken for quiescence.
+                else -> {
+                    val failed = runCatching { heldJobs().firstNotNullOfOrNull(abnormalFinish) }
+                        .getOrElse { return Decision.Unproven(it) }
+                    if (failed != null) {
+                        Decision.Unproven(failed)
+                    } else {
+                        Decision.Quiescent
+                    }
+                }
             }
         }
     }

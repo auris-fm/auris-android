@@ -22,6 +22,11 @@ import org.junit.Test
  * unfinished jobs are real coroutines, not stubs.
  */
 class TeardownRetryControlTest {
+    /** A real, genuinely finished job: `ownedJobs` deliberately outlives completion. */
+    private fun completedJob(): kotlinx.coroutines.Job = CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { Unit }.also {
+        kotlinx.coroutines.runBlocking { it.join() }
+    }
+
     @Test
     fun `a retry releases only once the current state proves quiet`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -118,5 +123,45 @@ class TeardownRetryControlTest {
             TeardownRetry.fullyReleased(all, emptySet()),
         )
         assertEquals("every release is pending", all, TeardownRetry.pendingReleases(all, emptySet()))
+    }
+
+    @Test
+    fun `a residual hold that ends in an abnormal job failure is NOT quiescence`() = runBlocking {
+        // Reviewer 3ecf1db0. The retry used to count unfinished jobs only. A processing job that
+        // completed ABNORMALLY after a residual hold had already left the live list, so it looked
+        // exactly like a clean settle and the retry released. The production predicate must be
+        // re-run on the jobs the hold covered.
+        val failure = IllegalStateException("late processing failure")
+        val finished = completedJob()
+
+        val decision = TeardownRetry.decide(
+            recheck = { emptyList() },
+            heldJobs = { listOf(finished) },
+            abnormalFinish = { failure },
+        )
+
+        assertTrue(
+            "a late job failure must not be mistaken for quiescence; got $decision",
+            decision is TeardownRetry.Decision.Unproven,
+        )
+    }
+
+    @Test
+    fun `a residual hold that ends in a clean settle IS quiescence`() = runBlocking {
+        // THE COMPLEMENT. Without it the control above would also pass if the retry simply refused
+        // every residual hold forever, which would neither prove the predicate nor permit recovery.
+        val finished = completedJob()
+
+        val decision = TeardownRetry.decide(
+            recheck = { emptyList() },
+            heldJobs = { listOf(finished) },
+            abnormalFinish = { null },
+        )
+
+        assertEquals(
+            "a genuinely clean settle must still allow the retry to release",
+            TeardownRetry.Decision.Quiescent,
+            decision,
+        )
     }
 }

@@ -6,6 +6,7 @@ import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import dagger.hilt.android.testing.HiltTestApplication
 import javax.inject.Inject
+import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Before
@@ -65,11 +66,27 @@ class RealServiceLifecycleControlTest {
         )
     }
 
+    /** Controllers live for one test; a leaked one leaves a service running into its neighbour. */
+    private val controllers = mutableListOf<org.robolectric.android.controller.ServiceController<VoiceControlService>>()
+
+    @After
+    fun disposeEveryController() {
+        controllers.forEach { controller ->
+            // destroy() IS the teardown: it runs the service's own onDestroy, which owns scope
+            // cancellation and the teardown result. Disposing the controller is what makes cleanup
+            // unconditional and stops a service running into the next test.
+            controller.destroy()
+        }
+        controllers.clear()
+    }
+
+    private fun build(): org.robolectric.android.controller.ServiceController<VoiceControlService> = Robolectric.buildService(VoiceControlService::class.java).also { controllers.add(it) }
+
     @Test
     fun `the production service builds through real Hilt injection and runs onCreate`() {
         hiltRule.inject()
 
-        val service = Robolectric.buildService(VoiceControlService::class.java).create().get()
+        val service = build().create().get()
 
         assertNotNull(
             "dependencies must arrive through generated Hilt injection, not a hand-built injector",
@@ -86,23 +103,32 @@ class RealServiceLifecycleControlTest {
     fun `destroying the real service really tears its scope down`() {
         hiltRule.inject()
 
-        val controller = Robolectric.buildService(VoiceControlService::class.java)
+        val controller = build()
         val service = controller.create().get()
         val lifetime = service.lifecycle.lifetime
 
         controller.destroy()
 
+        // SCOPE (reviewer 8318db26): this proves the production SCOPE is cancelled. It does NOT
+        // prove the full resource teardown completed — that result is a Deferred this test does not
+        // await, because the pipeline was never started here.
         assertFalse(
             "destroy must tear the production scope down, not merely return",
             lifetime.isActive,
         )
     }
 
+    /**
+     * SCOPE, stated narrowly on purpose (reviewer 8318db26): this starts from `isStarted == false`
+     * and asserts it stays false. It therefore exercises the platform STOP entry point's handling,
+     * NOT the stopping of an admitted start or of running work — that needs a started pipeline this
+     * harness does not stand up.
+     */
     @Test
-    fun `a platform stop intent leaves the real service reporting not-started`() {
+    fun `a platform stop intent on an idle service leaves it not-started`() {
         hiltRule.inject()
 
-        val controller = Robolectric.buildService(VoiceControlService::class.java)
+        val controller = build()
         val service = controller.create().get()
 
         // Drive the PLATFORM entry point with the production action constant.
@@ -113,7 +139,7 @@ class RealServiceLifecycleControlTest {
         )
 
         assertFalse(
-            "a user stop must leave the production seam reporting not-started",
+            "a stop on an IDLE service must leave the production seam reporting not-started",
             service.lifecycle.isStarted,
         )
     }

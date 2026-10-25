@@ -149,6 +149,14 @@ class VoiceControlService : Service() {
      */
     internal var teardownFailure: TeardownFailure? = null
 
+    // READ-ONLY observation for controls. `releasedResources` itself stays private and mutable
+    // only inside the service; these expose the teardown's outcome, not its levers.
+    internal val releasedKinds: Set<String> get() = releasedResources.toSet()
+
+    internal val currentTeardown: Deferred<TeardownResult>? get() = stopInFlightJob
+
+    internal val allReleaseKinds: List<String> get() = ALL_RELEASES
+
     // What a HELD teardown already released. A retry must skip these: repeating a media-session or
     // renderer release is destructive, not merely redundant (spec d885d207).
     private val releasedResources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -1043,6 +1051,14 @@ class VoiceControlService : Service() {
                 when (
                     val decision = TeardownRetry.decide(
                         recheck = { voiceAsrEngine.get().unfinishedProcessingJobs },
+                        // THE SAME PRODUCTION PREDICATE THE INITIAL TEARDOWN USES (reviewer
+                        // 3ecf1db0). Counting unfinished jobs alone treated a late processing
+                        // FAILURE as quiescence, because the job had already dropped out of the live
+                        // list. The retry now re-classifies what actually happened to each job the
+                        // hold covered, using `abnormalEngineFinish` and the engine's owned set,
+                        // which deliberately outlives completion.
+                        abnormalFinish = { job -> abnormalEngineFinish(job) },
+                        heldJobs = { voiceAsrEngine.get().ownedJobs.toList() },
                         // A hold that is NOT about quiescence cannot be cured by an empty list
                         // (reviewer 9f873b94): a failed stop or abnormal finish stays unproven.
                         // ONLY A QUIESCENCE HOLD MAY BE CLEARED BY OBSERVING QUIESCENCE (reviewer

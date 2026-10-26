@@ -136,7 +136,12 @@ public:
         // advances the hardware stream without ever entering RingBuffer::write, so the ring stays
         // self-consistent while the cursors fall behind real stream positions -- exactly the case a
         // ring-only check reports as continuous. Positions derived from either are unavailable.
-        return !mRingBuffer.samplesDropped() && !mXrunBreaksContinuity.load(std::memory_order_acquire);
+        // An epoch whose baseline was never established has no continuity to speak of, so it is
+        // NOT continuous: requiring the flag explicitly closes the case where start() could not
+        // baseline it and nothing else had sampled yet.
+        return !mRingBuffer.samplesDropped() &&
+            mXrunBaselineValid.load(std::memory_order_acquire) &&
+            !mXrunBreaksContinuity.load(std::memory_order_acquire);
     }
     virtual int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs);
 
@@ -224,6 +229,23 @@ public:
     }
 
     /**
+     * Installs a REAL (test-provided but fully implemented) stream, leaving the test-placeholder
+     * flag clear so `start()` takes its production path.
+     *
+     * The distinction matters: `installStreamForTest` marks the pointer as a placeholder and
+     * `start()` returns early for it, so no control using that seam reaches `requestStart()` or the
+     * baseline that follows. A defect in that sequence -- it held the stream lock and then re-locked
+     * it, hanging every real start -- was invisible to every existing control for exactly this
+     * reason. This seam is how the real path gets driven instead of bypassed.
+     */
+    void installRealStreamForTest(oboe::AudioStream* stream) {
+        std::lock_guard<std::mutex> lock(mStreamMutex);
+        mStream = stream;
+        mTestStreamInstalled = false;
+        mActive.store(false, std::memory_order_release);
+    }
+
+    /**
      * Clears the active flag an installed stream sets, WITHOUT calling stop() -- which would
      * requestStop() the placeholder and crash (stop() has no test-installed guard; close() does).
      * The JNI-ownership host test uses this so the entries under test perform the actual start
@@ -253,6 +275,15 @@ public:
      * never established for the epoch, so timing stays unavailable rather than assumed good.
      */
     void sampleXrunContinuity();
+
+    /**
+     * The same observation for a caller that ALREADY holds mStreamMutex.
+     *
+     * `start()` holds the stream lock for its whole body, so calling the locking entry point from
+     * there would re-lock a non-recursive mutex and hang every real start. The locked core exists so
+     * that path can still baseline without the lock being released underneath it.
+     */
+    void sampleXrunContinuityLocked();
 
     /** Host-test control of the xrun evidence: unavailable emulates a backend without support. */
     void setXrunCountForTest(bool supported, int32_t count) {

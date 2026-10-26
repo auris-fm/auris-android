@@ -146,30 +146,33 @@ bool OboeAudioCapture::start() {
         return false;
     }
 
-    // A test-installed placeholder cannot be started (requestStart is pure virtual; calling
-    // through it is undefined) -- the same accommodation close() makes. Marking active directly
-    // is exactly what a successful requestStart would have done.
     // A new stream is a new continuity epoch: the xrun counter restarts with the stream, so the
     // previous epoch's evidence must not carry over into this one.
     mXrunBaselineValid.store(false, std::memory_order_release);
     mXrunBreaksContinuity.store(false, std::memory_order_release);
 
+    // A test-installed placeholder cannot be started (requestStart is pure virtual; calling
+    // through it is undefined) -- the same accommodation close() makes. Marking active directly
+    // is exactly what a successful requestStart would have done.
     if (mTestStreamInstalled) {
         mActive.store(true, std::memory_order_release);
         return true;
     }
 
+    // BASELINE BEFORE requestStart. A successful start does not prove no xrun occurred: the stream
+    // is live the moment it starts, and a baseline read afterwards absorbs anything the HAL dropped
+    // in the interim, reporting a compromised epoch as continuous. Reading before start is the only
+    // ordering where "unchanged since baseline" really does mean "nothing was dropped while live".
+    sampleXrunContinuityLocked();
+
     oboe::Result result = mStream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start stream: %s", oboe::convertToText(result));
+        // A stream that never started must not leave a usable continuity claim behind.
+        mXrunBaselineValid.store(false, std::memory_order_release);
+        mXrunBreaksContinuity.store(true, std::memory_order_release);
         return false;
     }
-
-    // Baseline the xrun counter HERE, while the stream has just started and before the VAD thread
-    // consumes anything: a baseline taken later could absorb an xrun that happened since start and
-    // report a compromised epoch as continuous. Taken after requestStart() succeeds, so the stream
-    // exists and the query is meaningful.
-    sampleXrunContinuity();
 
     mActive.store(true, std::memory_order_release);
     LOGI("Capture started");
@@ -218,6 +221,11 @@ void OboeAudioCapture::close() {
     }
 
     mRingBuffer.reset();
+    // A closed capture has no stream, so it has no xrun evidence: the epoch's baseline is void.
+    // Leaving it valid would let the NEXT session inherit a continuity claim measured against a
+    // stream that no longer exists -- the same stale-observation defect the restart path guards.
+    mXrunBaselineValid.store(false, std::memory_order_release);
+    mXrunBreaksContinuity.store(false, std::memory_order_release);
     mSampleRate = kSampleRate;
     mChannelCount = kChannelCount;
     // No stream, no observed capture device. Clearing here covers the explicit close path the same
@@ -237,7 +245,12 @@ int32_t OboeAudioCapture::getDeviceId() {
 
 void OboeAudioCapture::sampleXrunContinuity() {
     std::lock_guard<std::mutex> lock(mStreamMutex);
+    sampleXrunContinuityLocked();
+}
 
+void OboeAudioCapture::sampleXrunContinuityLocked() {
+    // PRECONDITION: the caller holds mStreamMutex. start() holds it for its whole body, and the
+    // mutex is not recursive, so that path must come through here rather than re-locking.
     int32_t count = 0;
     bool supported = false;
 

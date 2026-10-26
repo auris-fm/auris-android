@@ -109,11 +109,13 @@ class CollectionFenceContractTest {
      * refusal control here passes `liveGateAllowed = true`, so before this one the `!liveAllowed`
      * branch of [HandoffCoordinator] had no control at all.
      *
-     * It must also preserve the distinction the other controls establish: the refusal terminates
-     * THIS capture exactly once and releases its prefix, and it does not touch a different capture.
+     * SCOPE, deliberately narrow (reviewer aea2b700): this proves the denied capture retains nothing,
+     * releases its prefix and ends CLOSED. It does NOT count terminal callbacks ("exactly once") and
+     * does NOT prove a separate retained capture is preserved — only one capture may be open at a
+     * time, so a concurrent bystander cannot be established here.
      */
     @Test
-    fun `a handoff denied by the closed live gate retains nothing and terminates once`() {
+    fun `a handoff denied by the closed live gate retains nothing and releases its prefix`() {
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
@@ -128,9 +130,10 @@ class CollectionFenceContractTest {
             },
         )
 
-        // Only ONE capture may be open at a time, so the "doesn't touch a different capture"
-        // distinction is established SEQUENTIALLY: a bystander denied first must leave nothing that
-        // affects the next capture, which then opens and is denied independently.
+        // Two SEQUENTIAL denials: the first must leave nothing that blocks or contaminates the
+        // second. Only one capture may be open at a time, so this is not a bystander-preservation
+        // proof — it shows the refusal leaves the observer usable and each capture independently
+        // denied.
         val first = observer.speechStartedAdmitting(2L, "Headset", 8)!!
         observer.adoptFirstChunk(first, ShortArray(8))
         HandoffCoordinator(tx, validateIssuedLocked = { true }).handoff(
@@ -142,7 +145,7 @@ class CollectionFenceContractTest {
             observer,
             liveGateAllowed = false,
         )
-        assertEquals("the first denied capture is closed", false, observer.isOpen(first.context.captureId))
+        assertEquals("the first denied capture ends closed", false, observer.isOpen(first.context.captureId))
 
         val denied = observer.speechStartedAdmitting(1L, "Headset", 8)!!
         observer.adoptFirstChunk(denied, ShortArray(8))
@@ -160,7 +163,7 @@ class CollectionFenceContractTest {
             liveGateAllowed = false,
         )
 
-        assertEquals("the denied capture is terminated", false, observer.isOpen(denied.context.captureId))
+        assertEquals("the denied capture ends closed", false, observer.isOpen(denied.context.captureId))
         assertEquals("no new retention occurs", 0, sink.retainedCount())
         assertEquals("its prefix charge is released", 0L, sink.prefixBytesChargedForTest(denied.context))
     }

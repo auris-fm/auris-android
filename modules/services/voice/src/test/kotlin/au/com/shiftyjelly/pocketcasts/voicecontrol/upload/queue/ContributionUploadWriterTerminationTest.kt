@@ -168,15 +168,15 @@ class ContributionUploadWriterTerminationTest {
             ContributionUploadTransport.Response.Cancelled,
             response,
         )
-        // The cause is also checked directly, but this is REDUNDANT SAFETY, not independent coverage.
+        // REDUNDANT SAFETY ONLY - it neither covers nor reports anything the block above does not.
         // The outer catch sets `unexpectedExitForTest` AND returns `Ambiguous(null)`, so the assertEquals
-        // above already fails on that path: a non-null flag cannot coexist with a Cancelled response in
-        // the shipped code. What this adds is the throwable as its own named failure instead of only as
-        // message text on the assertion above (reviewer 73d714ae).
+        // above throws first on that path and this line is never reached. The diagnostic that actually
+        // surfaces the cause there is the interpolation inside the assertEquals message, not this check.
+        // Kept as a guard that the flag is empty on the clean-withdrawal path; it establishes no flake
+        // fix, no added detection, and does not identify the known outer-catch failure (reviewer e5a042ed).
         assertNull(
-            "an unexpected exit was recorded, so this is a failure inside the exchange (not necessarily " +
-                "the known WriterTermination flake, which this does not identify): " +
-                watchedTransport.unexpectedExitForTest,
+            "an unexpected exit was recorded on a path that returned Cancelled, which the shipped code " +
+                "does not produce: " + watchedTransport.unexpectedExitForTest,
             watchedTransport.unexpectedExitForTest,
         )
         // No writer may outlive its attempt.

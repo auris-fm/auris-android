@@ -65,7 +65,7 @@ class VoiceUploadCompositionPathTest {
      * server records zero requests.
      */
     @Test
-    fun `the module's own trigger polls with the compiled-off gate and touches nothing`() {
+    fun `the module's own trigger polls, sends nothing, and clears a pre-existing queue when compiled off`() {
         val (server, hits) = loopback()
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
         try {
@@ -124,7 +124,14 @@ class VoiceUploadCompositionPathTest {
             trigger.start()
             assertEquals("one loop only", 1, trigger.pollsStarted.get())
             assertEquals("compiled-off: the gate is closed, so nothing is sent", 0, hits.get())
-            assertTrue("the capture is untouched in the queue", store.readyEntries().any { it.captureId == id })
+            // CORRECTED against the ruled contract (spec voice-recording-uploads.md:75, 51ebeb5f):
+            // startup-disabled has NO compiled-off exemption, so the FIRST disabled observation must
+            // clear a queue left by an earlier enabled run. Retention here would be the violation.
+            assertEquals(
+                "a startup-disabled policy clears the pre-existing queue",
+                0,
+                store.readyEntries().size,
+            )
         } finally {
             scope.cancel()
             server.stop(0)

@@ -49,14 +49,15 @@ object IdentityRevocationWatchers {
         // of introducing a second, weaker purge path.
         policyProvider?.let { provider ->
             this@coroutineScope.launch {
-                // TRANSITION, not level. A compiled-off build publishes disabled from the start and
-                // every restart re-emits it; purging on the VALUE would delete the queue on each boot
-                // and touch user data in a build that never collected anything. Only an ENABLED->
-                // DISABLED edge is a policy withdrawal that must destroy what was captured under it.
-                var wasEnabled = provider.publishedPolicy.value.enabled
+                // LEVEL, not just an edge (spec voice-recording-uploads.md:75, ruling 51ebeb5f):
+                // "Disabling, withdrawal or policy-lease expiry cancels collection-owned work and
+                // deletes pending local contribution audio/metadata, including partial buffers."
+                // There is NO same-process-edge exemption and NO compiled-off exemption, so the
+                // FIRST disabled observation must purge too — a build that starts disabled may still
+                // find a queue left by an earlier enabled run, and leaving it would retain audio the
+                // current policy says must not exist.
                 provider.publishedPolicy.collect { snap ->
-                    if (wasEnabled && !snap.enabled) store.revokeAndPurge("policy-disable")
-                    wasEnabled = snap.enabled
+                    if (!snap.enabled) store.revokeAndPurge("policy-disable")
                 }
             }
         }

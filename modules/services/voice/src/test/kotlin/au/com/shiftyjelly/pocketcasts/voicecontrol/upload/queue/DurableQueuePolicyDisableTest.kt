@@ -3,6 +3,14 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +74,50 @@ class DurableQueuePolicyDisableTest {
 
     private fun chunks(vararg sizes: Int) = sizes.map { ShortArray(it) { i -> i.toShort() } to it }
 
+    /** The real WAV the store will write, so the record's declared sha matches the bytes on disk. */
+    private fun wavBytes(samples: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        WavWriter.writeHeader(out, samples)
+        WavWriter.writePcm(out, ShortArray(samples) { i -> i.toShort() }, samples)
+        return out.toByteArray()
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    /**
+     * A FULLY VALID canonical record bound to the real audio, so a fresh store's `recover()` actually
+     * restores this capture. A minimal `{capture_id}` record cannot: recovery validates the declared
+     * audio sha against the WAV on disk and would drop it, making any later "recovers nothing"
+     * assertion vacuously true.
+     */
+    private fun validRecord(captureId: String, samples: Int): ByteArray {
+        val audio = wavBytes(samples)
+        val block = AudioBlock(
+            sha256 = sha256Hex(audio),
+            byteCount = audio.size.toLong(),
+            retainedSamples = samples.toLong(),
+            originalFormat = "pcm_s16le",
+            conversionVersion = "v1",
+            truncated = false,
+            droppedSpans = emptyList(),
+        )
+        return CanonicalJson.canonicalBytes(
+            ContributionRecordBuilder(captureId, "epoch-1", "42")
+                .model("vad", ModelRef.Named("silero-vad", "4.0"))
+                .model("wakeword", ModelRef.Named("auris-wake", "1.2"))
+                .model("asr", ModelRef.Named("whisper-small", "2024-11"))
+                .model("translation", ModelRef.None)
+                .model("router", ModelRef.Named("lfm-intent", "0.3"))
+                .stage(StageName.Wake, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected"))))
+                .stage(StageName.Bleed, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("no_overlap"))))
+                .stage(StageName.Asr, StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("skip this ad"))))
+                .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+                .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+                .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("outcome_wait_expired"))))
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = block),
+        )
+    }
+
     /**
      * Files carrying the capture's CONTENT (audio, metadata, sidecars). Excludes `disqualified/<id>`,
      * which is the store's deliberate tombstone recording that this capture must never be served
@@ -80,13 +132,14 @@ class DurableQueuePolicyDisableTest {
     fun `a published disable purges the durable entry and a fresh owner cannot recover it`() {
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        val audio = chunks(1600, 1600)
+        val audio = chunks(1600)
 
+        val metadata = validRecord(id, 1600)
         val entry = store.prepare(
             captureId = id,
             enrollmentEpoch = "epoch-1",
             pcmChunks = audio,
-            canonicalMetadata = """{"capture_id":"$id"}""".toByteArray(),
+            canonicalMetadata = metadata,
             enrollmentAccount = "me@example.com",
             enrollmentSession = 1L,
         )
@@ -98,6 +151,16 @@ class DurableQueuePolicyDisableTest {
         val filesBefore = captureContentFiles(id)
         assertTrue("the capture has audio and metadata files on disk", filesBefore.size >= 2)
         assertTrue("its audio file is genuinely nonempty", filesBefore.any { it.name.endsWith(".wav") && it.length() > 0L })
+
+        // THE PREMISE: a fresh owner over the same directory really DOES recover this capture while
+        // the policy is still enabled. Without this, "recovers nothing after the disable" would be
+        // satisfied by a store that never recovers anything at all.
+        val premiseOwner = ContributionStore(root, QueueLimits.defaults())
+        val recoveredBefore = premiseOwner.recover()
+        assertTrue(
+            "PREMISE: a fresh owner recovers the published capture before the disable (got $recoveredBefore)",
+            recoveredBefore.any { it.captureId == id },
+        )
 
         // THE LIVE EVENT: a disable on the provider's OWN published flow. A cancelled scope keeps
         // the provider's init refresh from overwriting the explicit fixture.
@@ -133,9 +196,16 @@ class DurableQueuePolicyDisableTest {
         assertTrue("the purge reports no residue, so nothing survived it", store.purgeResidue.isEmpty())
         assertTrue("the purge is attributed to the observed disable", store.purgeReasons.contains("policy-disable"))
 
-        // THE FRESH OWNER: a brand-new store over the same directory cannot recover it.
+        // THE FRESH OWNER: a brand-new store over the same directory, explicitly RECOVERED. A fresh
+        // store's index is empty until recover() reads disk, so asserting readyEntries() alone would
+        // pass whether or not anything survived. The premise is proven separately below.
         val freshOwner = ContributionStore(root, QueueLimits.defaults())
-        assertTrue("a fresh owner recovers nothing", freshOwner.readyEntries().isEmpty())
+        val recoveredAfter = freshOwner.recover()
+        assertTrue(
+            "a fresh owner RECOVERS NOTHING after the disable (got $recoveredAfter)",
+            recoveredAfter.isEmpty(),
+        )
+        assertTrue("its index is empty too", freshOwner.readyEntries().isEmpty())
         assertTrue(
             "a fresh owner finds no audio or metadata file for the purged capture",
             captureContentFiles(id).isEmpty(),
@@ -180,12 +250,77 @@ class DurableQueuePolicyDisableTest {
         scope.launch { watcher() }
         dispatcher.scheduler.runCurrent()
 
+        // Establish a REAL in-progress partial: a `.part` staging file is exactly what
+        // discardCurrentPartials() sweeps. Without it the contrast would prove only that a COMPLETED
+        // entry survives, saying nothing about partial disposal.
+        val contributions = File(root, "contributions").apply { mkdirs() }
+        val partial = File(contributions, "${UUID.randomUUID()}.wav.part")
+        partial.writeBytes(ByteArray(3200))
+        assertTrue("the partial exists before closure", partial.isFile)
+
         // ORDINARY CLOSURE: listening ends, the policy was never disabled.
         store.discardCurrentPartials()
         dispatcher.scheduler.runCurrent()
 
         assertEquals("the published entry SURVIVES ordinary closure", 1, store.readyEntries().size)
         assertTrue("its content files are intact on disk", captureContentFiles(id).size >= 2)
+        assertTrue("the in-progress PARTIAL is discarded by ordinary closure", !partial.exists())
         assertTrue("no purge ran", store.purgeReasons.isEmpty())
+    }
+
+    /**
+     * STARTUP-DISABLED (ruling 51ebeb5f / spec voice-recording-uploads.md:75): the FIRST disabled
+     * observation must purge a queue seeded by an earlier enabled run. There is no same-process-edge
+     * and no compiled-off exemption, so this seeds the queue BEFORE the watcher ever runs and never
+     * publishes an enabled value at all.
+     */
+    @Test
+    fun `a startup-disabled policy purges a pre-existing queue on its first observation`() {
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        val metadata = validRecord(id, 1600)
+        assertTrue(
+            "the legacy entry publishes",
+            store.prepare(
+                captureId = id,
+                enrollmentEpoch = "epoch-1",
+                pcmChunks = chunks(1600),
+                canonicalMetadata = metadata,
+                enrollmentAccount = "me@example.com",
+                enrollmentSession = 1L,
+            ) != null,
+        )
+
+        // PREMISE: the seeded queue is genuinely recoverable by a fresh owner before anything runs.
+        val premise = ContributionStore(root, QueueLimits.defaults()).recover()
+        assertTrue("PREMISE: a fresh owner recovers the seeded capture (got $premise)", premise.any { it.captureId == id })
+
+        // The provider starts DISABLED and is never enabled: its very first emission is the disable.
+        val startup = VoiceUploadCompositionFixtures.startup(ApplicationProvider.getApplicationContext<Application>())
+        val policyProvider = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+            remoteConfig = org.mockito.kotlin.mock(),
+            featureProvider = org.mockito.kotlin.mock(),
+            ownership = startup.ownerForHandoff(),
+            scope = CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
+        )
+        policyProvider.applySnapshotForTest(disabled())
+
+        val watcher = IdentityRevocationWatchers.production(
+            binding = startup.binding,
+            accountState = startup.state,
+            snapshot = { null },
+            epoch = { null },
+            store = store,
+            policyProvider = policyProvider,
+        )
+        scope.launch { watcher() }
+        dispatcher.scheduler.runCurrent()
+
+        assertTrue("the pre-existing queue is cleared on the first disabled observation", store.readyEntries().isEmpty())
+        assertTrue("the purge is attributed to the disable", store.purgeReasons.contains("policy-disable"))
+        assertTrue("no content file survives", captureContentFiles(id).isEmpty())
+
+        val recoveredAfter = ContributionStore(root, QueueLimits.defaults()).recover()
+        assertTrue("a fresh owner recovers nothing after startup-disabled purge", recoveredAfter.isEmpty())
     }
 }

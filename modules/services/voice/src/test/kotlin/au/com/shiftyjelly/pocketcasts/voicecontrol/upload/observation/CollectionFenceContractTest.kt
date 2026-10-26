@@ -103,6 +103,68 @@ class CollectionFenceContractTest {
         assertEquals(1, sink.retainedSnapshot().count { it.context == ctx.context })
     }
 
+    /**
+     * NEW-RETENTION DENIAL (spec 8b3d9269): a segment completing while the collection gate has
+     * CLOSED must not be retained, even for a fully authorised, non-stale capture. Every other
+     * refusal control here passes `liveGateAllowed = true`, so before this one the `!liveAllowed`
+     * branch of [HandoffCoordinator] had no control at all.
+     *
+     * It must also preserve the distinction the other controls establish: the refusal terminates
+     * THIS capture exactly once and releases its prefix, and it does not touch a different capture.
+     */
+    @Test
+    fun `a handoff denied by the closed live gate retains nothing and terminates once`() {
+        val owner = FakeOwner()
+        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val observer = SegmentObserver(
+            gate = CollectionGate { true },
+            sink = sink,
+            authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
+            issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1") },
+            handoff = HandoffCoordinator(tx, validateIssuedLocked = { true }),
+            fenceGate = object : FenceGate {
+                override fun <R> gate(block: () -> R): R = tx.transaction(block)
+            },
+        )
+
+        // Only ONE capture may be open at a time, so the "doesn't touch a different capture"
+        // distinction is established SEQUENTIALLY: a bystander denied first must leave nothing that
+        // affects the next capture, which then opens and is denied independently.
+        val first = observer.speechStartedAdmitting(2L, "Headset", 8)!!
+        observer.adoptFirstChunk(first, ShortArray(8))
+        HandoffCoordinator(tx, validateIssuedLocked = { true }).handoff(
+            first.context,
+            0,
+            8,
+            SegmentObservation.WakeState.Detected,
+            { listOf(ShortArray(8)) to 8 },
+            observer,
+            liveGateAllowed = false,
+        )
+        assertEquals("the first denied capture is closed", false, observer.isOpen(first.context.captureId))
+
+        val denied = observer.speechStartedAdmitting(1L, "Headset", 8)!!
+        observer.adoptFirstChunk(denied, ShortArray(8))
+        assertTrue("the denied capture holds charged prefix bytes", sink.prefixBytesChargedForTest(denied.context) > 0L)
+        assertTrue("it is genuinely a DIFFERENT capture", denied.context.captureId != first.context.captureId)
+
+        // Authority is fully valid and the issued authority validates; ONLY the live gate is closed.
+        HandoffCoordinator(tx, validateIssuedLocked = { true }).handoff(
+            denied.context,
+            0,
+            8,
+            SegmentObservation.WakeState.Detected,
+            { listOf(ShortArray(8)) to 8 },
+            observer,
+            liveGateAllowed = false,
+        )
+
+        assertEquals("the denied capture is terminated", false, observer.isOpen(denied.context.captureId))
+        assertEquals("no new retention occurs", 0, sink.retainedCount())
+        assertEquals("its prefix charge is released", 0L, sink.prefixBytesChargedForTest(denied.context))
+    }
+
     @Test
     fun `invalid handoff without context still terminates exactly once and releases prefix`() {
         val owner = FakeOwner()

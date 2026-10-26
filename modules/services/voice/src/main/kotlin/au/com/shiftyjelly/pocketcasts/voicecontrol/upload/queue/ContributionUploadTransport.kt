@@ -388,7 +388,7 @@ class ContributionUploadTransport(
      * Test seam: how many calls are currently registered. A cap refusal must not add one, so a count is
      * what distinguishes "refused by the cap" from an `Ambiguous` produced for any other reason.
      */
-    fun registeredCountForTest(): Int = registered.size
+    internal fun registeredCountForTest(): Int = registered.size
 
     /**
      * Registered calls, keyed by attempt handle. A single reference could not represent more than one

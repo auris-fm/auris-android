@@ -191,66 +191,87 @@ class ContributionUploadWriterTerminationTest {
         val first = UUID.randomUUID().toString()
         val second = UUID.randomUUID().toString()
         val revoked = AtomicBoolean(false)
-        val firstEntered = CountDownLatch(1)
-        val writerExited = CountDownLatch(1)
 
-        // ONE transport for BOTH attempts. The previous version built a second transport for the second
-        // attempt, so each carried its own semaphore and the cap was never shared - the control could not
-        // fail for the reason its name claims (reviewer scope, spec e2a26113).
+        // The first attempt is PARKED at a proven boundary: `onRegistered` fires AFTER register(call) and
+        // BEFORE execute(), so the writer is registered and admitted but has not run. An earlier version
+        // latched on `isCancelled`, which is called before registration and before any transfer, so it
+        // established nothing about the writer being in flight (reviewer b3fa447f).
+        val firstParked = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val firstExited = CountDownLatch(1)
+        // The second attempt must NEVER reach registration. This counts cumulative entry rather than
+        // sampling `registered.size`, which a bypassed exchange could satisfy by registering, failing and
+        // unregistering before the assertion ran (reviewer b3fa447f).
+        val secondRegistrations = AtomicInteger(0)
+        val firstRegistrations = AtomicInteger(0)
+
         val shared = transport(port, budgetMs = 60_000, maxConcurrent = 1)
         val pool = Executors.newFixedThreadPool(2) { r -> Thread(r).apply { isDaemon = true } }
         try {
             val firstResult = pool.submit<ContributionUploadTransport.Response> {
                 try {
-                    shared.upload(first, record(first), wavFile(first, AtomicInteger()), isCancelled = {
-                        firstEntered.countDown()
-                        revoked.get()
-                    })
+                    // onRegistered fires AFTER register(call) and BEFORE execute(): park here.
+                    shared.upload(
+                        first,
+                        record(first),
+                        wavFile(first, AtomicInteger()),
+                        isCancelled = { revoked.get() },
+                        onRegistered = {
+                            firstRegistrations.incrementAndGet()
+                            firstParked.countDown()
+                            releaseFirst.await(30, TimeUnit.SECONDS)
+                        },
+                    )
                 } finally {
-                    writerExited.countDown()
+                    firstExited.countDown()
                 }
             }
 
-            // ESTABLISH the first writer is genuinely in flight and inside the transfer: the permit is
-            // HELD. Without this the second attempt could be refused for any incidental reason.
-            assertTrue("the first writer entered the transfer", firstEntered.await(15, TimeUnit.SECONDS))
+            // PROVEN PRECONDITION: the first exchange is registered and parked, holding the sole permit.
+            assertTrue("the first exchange registered and is parked", firstParked.await(20, TimeUnit.SECONDS))
             assertEquals("the first attempt holds the only permit", 1, shared.inFlightForTest())
+            assertEquals("exactly one call is registered", 1, shared.registeredCountForTest())
 
-            // The second attempt on the SAME transport must be refused locally, not queued behind the first.
-            val secondResponse = shared.upload(second, record(second), wavFile(second, AtomicInteger()))
-
-            // Ambiguous ALONE is not proof: a timeout or a construction failure returns it too. The
-            // discriminator is that a cap refusal never acquires a permit - the count stays at 1 and no
-            // call is registered for the second attempt.
-            assertEquals(
-                "a cap refusal leaves the first attempt's permit untouched",
-                1,
-                shared.inFlightForTest(),
+            // Same transport, same semaphore: the second attempt must be refused locally, not queued.
+            val secondResponse = shared.upload(
+                second,
+                record(second),
+                wavFile(second, AtomicInteger()),
+                onRegistered = { secondRegistrations.incrementAndGet() },
             )
+
             assertTrue(
                 "an attempt beyond the concurrency cap is refused locally rather than queued: $secondResponse",
                 secondResponse is ContributionUploadTransport.Response.Ambiguous,
             )
+            // THE DISCRIMINATOR: the refused attempt never reached registration at all. A cap bypass would
+            // have entered it (and, if it later failed, unregistered - which `registered.size` cannot see).
             assertEquals(
-                "only the first attempt is registered",
-                1,
-                shared.registeredCountForTest(),
+                "the refused attempt never reached registration",
+                0,
+                secondRegistrations.get(),
             )
+            assertEquals("the first attempt's permit is untouched", 1, shared.inFlightForTest())
+            assertEquals("only the first attempt is registered", 1, shared.registeredCountForTest())
 
-            // Release, then prove the writer actually left rather than merely that the caller returned.
+            // Release, then prove the writer actually LEFT rather than merely that the caller returned.
+            releaseFirst.countDown()
             revoked.set(true)
             firstResult.get(30, TimeUnit.SECONDS)
-            assertTrue("the released writer exited", writerExited.await(10, TimeUnit.SECONDS))
+            assertTrue("the released writer exited", firstExited.await(10, TimeUnit.SECONDS))
             assertEquals("the permit is released after the writer exits", 0, shared.inFlightForTest())
         } finally {
-            // CLEANUP RUNS EVEN ON ASSERTION FAILURE: release the flag, join the first attempt, and only
-            // then shut the pool down. A failure above must not leave a blocked writer or a live thread.
+            // CLEANUP RUNS EVEN ON ASSERTION FAILURE, and its success is ASSERTED, not assumed: a failure
+            // above must not leave a parked writer or a live thread behind (reviewer b3fa447f).
+            releaseFirst.countDown()
             revoked.set(true)
             pool.shutdown()
-            if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
+            var terminated = pool.awaitTermination(30, TimeUnit.SECONDS)
+            if (!terminated) {
                 pool.shutdownNow()
-                pool.awaitTermination(10, TimeUnit.SECONDS)
+                terminated = pool.awaitTermination(10, TimeUnit.SECONDS)
             }
+            assertTrue("both attempts terminated during cleanup", terminated)
         }
     }
 

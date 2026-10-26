@@ -13,6 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -316,17 +317,72 @@ class VoiceControlModelRowsTest {
     }
 
     @Test
-    fun `the recognition model row reports its own download state and never says wake`() {
-        assertEquals("Not downloaded", recognitionModelText(ModelDownloadState.NotStarted, modelReady = false))
-        assertEquals("Ready", recognitionModelText(ModelDownloadState.NotStarted, modelReady = true))
-        assertEquals("Downloading: 42%", recognitionModelText(ModelDownloadState.Downloading(42), modelReady = false))
-        assertEquals("Ready", recognitionModelText(ModelDownloadState.Ready, modelReady = false))
-        assertEquals("Download failed", recognitionModelText(ModelDownloadState.Failed("http 500"), modelReady = false))
-    }
-
-    @Test
     fun `the labels separate the wake word model from the recognition model`() {
         assertEquals("Wake Word Model", WAKE_WORD_MODEL_LABEL)
         assertEquals("Speech Recognition Model", RECOGNITION_MODEL_LABEL)
+    }
+
+    /**
+     * Reviewer correction (cec2f3be): the row must report the SELECTED transcription backend, not
+     * Moonshine. Moonshine is not a selectable backend at all -- `AsrBackendSelector` chooses
+     * SenseVoice or Canary Flash by locale -- so showing Moonshine's absence as "Not downloaded"
+     * under a generic "Speech Recognition Model" label said the wrong component was unready while
+     * the real backend was fine.
+     */
+    @Test
+    fun `the recognition row names the selected backend and reports that backend's readiness`() {
+        assertEquals(
+            "SenseVoice ready",
+            recognitionModelText(
+                backend = RecognitionBackend.SenseVoice,
+                backendReady = true,
+                moonshineDownloaded = false,
+            ),
+        )
+        assertEquals(
+            "SenseVoice model missing",
+            recognitionModelText(
+                backend = RecognitionBackend.SenseVoice,
+                backendReady = false,
+                moonshineDownloaded = true,
+            ),
+        )
+        assertEquals(
+            "Canary Flash ready",
+            recognitionModelText(
+                backend = RecognitionBackend.CanaryFlash,
+                backendReady = true,
+                moonshineDownloaded = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `an unsupported locale says so instead of reporting an unselected model`() {
+        assertEquals(
+            "Not available for this language",
+            recognitionModelText(
+                backend = null,
+                backendReady = false,
+                moonshineDownloaded = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `the optional Moonshine download is reported as its own separate row`() {
+        assertEquals("Moonshine (optional)", MOONSHINE_MODEL_LABEL)
+        assertEquals("Downloaded", moonshineModelText(moonshineDownloaded = true))
+        assertEquals("Not downloaded", moonshineModelText(moonshineDownloaded = false))
+    }
+
+    @Test
+    fun `the recognition row never mentions Moonshine`() {
+        RecognitionBackend.entries.forEach { backend ->
+            listOf(true, false).forEach { ready ->
+                val text = recognitionModelText(backend, backendReady = ready, moonshineDownloaded = true)
+                assertFalse("row must not mention Moonshine: $text", text.contains("Moonshine", ignoreCase = true))
+            }
+        }
     }
 }

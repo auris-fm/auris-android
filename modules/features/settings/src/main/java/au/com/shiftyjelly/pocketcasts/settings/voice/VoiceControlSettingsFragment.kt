@@ -40,6 +40,9 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
@@ -59,6 +62,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
     @Inject lateinit var modelManager: ModelManager
 
     @Inject lateinit var wakeWordDetector: WakeWordDetector
+
+    @Inject lateinit var asrBackendSelector: AsrBackendSelector
 
     @Inject lateinit var gate: VoiceControlGate
 
@@ -82,9 +87,19 @@ class VoiceControlSettingsFragment : BaseFragment() {
             val context = LocalContext.current
             val enabled by settings.voiceControlUserDisabled.flow
                 .collectAsState(false)
+            // The row must name the backend the product actually selects for this locale, and the
+            // optional Moonshine download is reported separately -- never as recognition readiness.
             val modelState by modelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
-            val modelReady = modelManager.isMoonshineModelReady()
+            val selectedBackend = asrBackendSelector.select()
+            val recognitionBackend = when (selectedBackend) {
+                is SenseVoiceBackend -> RecognitionBackend.SenseVoice
+                is CanaryFlashBackend -> RecognitionBackend.CanaryFlash
+                null -> null
+                else -> null
+            }
+            val recognitionBackendReady = modelState is ModelDownloadState.Ready
+            val moonshineDownloaded = modelManager.isMoonshineModelReady()
             // The wake word is a different component from the recognition backend: its model is
             // bundled with the app and its readiness is the detector's own load result. Reading the
             // recognition model's absence as wake readiness contradicted the status row directly
@@ -128,8 +143,9 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
             VoiceControlSettingsPage(
                 enabled = !enabled,
-                modelReady = modelReady,
-                modelState = modelState,
+                recognitionBackend = recognitionBackend,
+                recognitionBackendReady = recognitionBackendReady,
+                moonshineDownloaded = moonshineDownloaded,
                 wakeWordReady = detectorReady,
                 statusText = voiceControlStatus(
                     mode = mode,
@@ -151,8 +167,9 @@ class VoiceControlSettingsFragment : BaseFragment() {
 @Composable
 private fun VoiceControlSettingsPage(
     enabled: Boolean,
-    modelReady: Boolean,
-    modelState: ModelDownloadState,
+    recognitionBackend: RecognitionBackend?,
+    recognitionBackendReady: Boolean,
+    moonshineDownloaded: Boolean,
     wakeWordReady: Boolean,
     statusText: String,
     onEnabledChange: (Boolean) -> Unit,
@@ -188,7 +205,15 @@ private fun VoiceControlSettingsPage(
             item {
                 SettingRow(
                     primaryText = RECOGNITION_MODEL_LABEL,
-                    secondaryText = recognitionModelText(modelState, modelReady),
+                    secondaryText = recognitionModelText(recognitionBackend, recognitionBackendReady, moonshineDownloaded),
+                    toggle = SettingRowToggle.None,
+                    indent = false,
+                )
+            }
+            item {
+                SettingRow(
+                    primaryText = MOONSHINE_MODEL_LABEL,
+                    secondaryText = moonshineModelText(moonshineDownloaded),
                     toggle = SettingRowToggle.None,
                     indent = false,
                 )
@@ -213,8 +238,9 @@ private fun VoiceControlSettingsPagePreview(
     AppTheme(themeType) {
         VoiceControlSettingsPage(
             enabled = true,
-            modelReady = true,
-            modelState = ModelDownloadState.Ready,
+            recognitionBackend = RecognitionBackend.SenseVoice,
+            recognitionBackendReady = true,
+            moonshineDownloaded = false,
             wakeWordReady = true,
             statusText = "Active (wake word required)",
             onEnabledChange = {},
@@ -227,6 +253,17 @@ private fun VoiceControlSettingsPagePreview(
 /** Each row names the component it measures; Moonshine's absence is never presented as wake readiness. */
 internal const val WAKE_WORD_MODEL_LABEL = "Wake Word Model"
 internal const val RECOGNITION_MODEL_LABEL = "Speech Recognition Model"
+internal const val MOONSHINE_MODEL_LABEL = "Moonshine (optional)"
+
+/**
+ * The transcription backends the product actually selects between, mirroring `AsrBackendSelector`.
+ * Moonshine is deliberately absent: it is not a selectable backend, so it cannot be the thing a
+ * "recognition model" row reports.
+ */
+internal enum class RecognitionBackend(val displayName: String) {
+    SenseVoice("SenseVoice"),
+    CanaryFlash("Canary Flash"),
+}
 
 /**
  * The wake word model's row. Readiness is the detector's own load result -- not an assumption that
@@ -234,10 +271,23 @@ internal const val RECOGNITION_MODEL_LABEL = "Speech Recognition Model"
  */
 internal fun wakeWordModelText(detectorReady: Boolean): String = if (detectorReady) "Ready" else "Unavailable"
 
-/** The recognition backend's row: its own download state, named as such. */
-internal fun recognitionModelText(modelState: ModelDownloadState, modelReady: Boolean): String = when (modelState) {
-    is ModelDownloadState.NotStarted -> if (modelReady) "Ready" else "Not downloaded"
-    is ModelDownloadState.Downloading -> "Downloading: ${modelState.progressPercent}%"
-    is ModelDownloadState.Ready -> "Ready"
-    is ModelDownloadState.Failed -> "Download failed"
+/**
+ * The recognition row reports the SELECTED backend and that backend's readiness.
+ *
+ * Reviewer finding cec2f3be: this row previously reported Moonshine's download state under a
+ * generic label, so on a device whose selected backend was SenseVoice it announced that speech
+ * recognition was unavailable when only an unselected, optional model was missing. A `null`
+ * backend means the OS locale is outside the product language set -- say that, rather than blame
+ * a model that was never selected.
+ */
+internal fun recognitionModelText(
+    backend: RecognitionBackend?,
+    backendReady: Boolean,
+    moonshineDownloaded: Boolean,
+): String {
+    if (backend == null) return "Not available for this language"
+    return if (backendReady) "${backend.displayName} ready" else "${backend.displayName} model missing"
 }
+
+/** The optional Moonshine download, reported as its own row and never as recognition readiness. */
+internal fun moonshineModelText(moonshineDownloaded: Boolean): String = if (moonshineDownloaded) "Downloaded" else "Not downloaded"

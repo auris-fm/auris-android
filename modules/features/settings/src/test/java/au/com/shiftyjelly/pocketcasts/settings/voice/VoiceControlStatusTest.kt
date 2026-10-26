@@ -376,6 +376,59 @@ class VoiceControlModelRowsTest {
         assertEquals("Not downloaded", moonshineModelText(moonshineDownloaded = false))
     }
 
+    /**
+     * Reviewer finding 7e0bf9bf: the row's readiness must come from the SELECTED backend's
+     * `requiredModel` via `ModelManager.isModelReady(spec)`, not from the shared download-progress
+     * flow. `ModelManager` initialises that flow to NotStarted and never assigns Ready, so a
+     * preinstalled working backend still read as "model missing", and another model's download
+     * could drive it too. The previous helper tests could not catch this because they were handed a
+     * ready Boolean directly -- this one goes through the same wiring production uses.
+     */
+    @Test
+    fun `a preinstalled working backend is ready even though the download flow is NotStarted`() {
+        val rows = recognitionRowsFor(
+            selectedBackend = RecognitionBackend.SenseVoice,
+            backendFilesPresent = true,
+            downloadState = ModelDownloadState.NotStarted,
+            moonshineDownloaded = false,
+        )
+        assertEquals("SenseVoice ready", rows.recognitionText)
+    }
+
+    @Test
+    fun `another model starting a download does not make the selected backend ready`() {
+        val rows = recognitionRowsFor(
+            selectedBackend = RecognitionBackend.SenseVoice,
+            backendFilesPresent = false,
+            downloadState = ModelDownloadState.Ready,
+            moonshineDownloaded = true,
+        )
+        assertEquals("SenseVoice model missing", rows.recognitionText)
+    }
+
+    @Test
+    fun `a downloading selected backend reports its own progress and not readiness`() {
+        val rows = recognitionRowsFor(
+            selectedBackend = RecognitionBackend.CanaryFlash,
+            backendFilesPresent = false,
+            downloadState = ModelDownloadState.Downloading(37),
+            moonshineDownloaded = false,
+        )
+        assertEquals("Canary Flash model missing", rows.recognitionText)
+        assertEquals("Downloading: 37%", rows.recognitionProgressText)
+    }
+
+    @Test
+    fun `an unsupported locale is not blamed on a missing model`() {
+        val rows = recognitionRowsFor(
+            selectedBackend = null,
+            backendFilesPresent = false,
+            downloadState = ModelDownloadState.NotStarted,
+            moonshineDownloaded = false,
+        )
+        assertEquals("Not available for this language", rows.recognitionText)
+    }
+
     @Test
     fun `the recognition row never mentions Moonshine`() {
         RecognitionBackend.entries.forEach { backend ->

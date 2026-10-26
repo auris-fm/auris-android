@@ -727,6 +727,8 @@ class DirectoryDurabilityTest {
 
         // And the SURVIVING FILES must agree with the reported state: restart must not discover a
         // ready entry the store denied, nor silently delete one it reported as published.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val restarted = ContributionStore(root, limits(), directorySync = RecordingSync())
         val recoveredIds = restarted.recover().map { it.captureId }
         if (outcome is PublicationUncertain) {
@@ -764,6 +766,8 @@ class DirectoryDurabilityTest {
         )
         assertTrue("no entry may be ready after a pre-marker failure", store.readyEntries().isEmpty())
         // And nothing recoverable: the marker was never written.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val restarted = ContributionStore(root, limits(), directorySync = RecordingSync())
         assertTrue("recovery must find nothing after a pre-marker failure", restarted.recover().isEmpty())
     }
@@ -1008,6 +1012,8 @@ class DirectoryDurabilityTest {
 
         // And no resurrection: a fresh healthy store must not bring it back.
         failSyncs = false
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val fresh = ContributionStore(root, limits())
         assertEquals("a fresh store resurrected a purged entry", emptyList<String>(), fresh.recover().map { it.captureId })
         assertEquals("nothing may be ready after purge", emptyList<String>(), fresh.readyEntries().map { it.captureId })
@@ -1098,6 +1104,8 @@ class DirectoryDurabilityTest {
             ContributionStore(sizingRoot, limits()).prepare(id0, "epoch-1", chunks(1600), meta(id0), "a@x", 7L)
         }
         val oneEntry = 4_265L
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        sizing.close()
         val store = ContributionStore(
             root,
             // ONE LESS byte than charge+probe: with the charge released the probe fits easily; with the
@@ -1350,6 +1358,8 @@ class DirectoryDurabilityTest {
         assertTrue("the purge must report the capture whose bytes survived", store.purgeResidue.contains(id))
         assertTrue("the surviving bytes are still there", wav.exists())
         // Intent is durable, so a later healthy store must not serve it.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val later = ContributionStore(root, limits())
         assertTrue(
             "a purged-but-surviving capture must never be served",
@@ -1425,6 +1435,8 @@ class DirectoryDurabilityTest {
 
         // A FRESH store with a healthy barrier must still know this capture was meant to go.
         blockIntent = false
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val fresh = ContributionStore(root, limits())
         fresh.expireOlderThan()
         assertTrue(
@@ -1508,6 +1520,8 @@ class DirectoryDurabilityTest {
         assertTrue("repeated sweeps must not destroy with an unconfirmed namespace", wav.isFile)
 
         // And a FRESH owner, which never saw the earlier attempts, must also refuse.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val fresh = ContributionStore(root, limits(), intentDirectorySyncOverride = faulting)
         fresh.recover()
         fresh.expireOlderThan()
@@ -1516,6 +1530,8 @@ class DirectoryDurabilityTest {
         // Once the namespace is healthy the barrier must RUN and only then may deletion happen.
         blockNamespace = false
         var namespaceRuns = 0
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        fresh.close()
         val healthy = ContributionStore(
             root,
             limits(),
@@ -1582,6 +1598,8 @@ class DirectoryDurabilityTest {
         val payload = File(attempts, "level1/payload.bin")
         payload.writeBytes(ByteArray(4096))
 
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val direct = ContributionStore(root, limits())
         direct.expireOlderThan()
         val charged = direct.chargedBytesForTest(id)
@@ -2541,6 +2559,8 @@ class DirectoryDurabilityTest {
         File(deep, "tail.bin").writeBytes(ByteArray(16))
 
         // A fresh, UNRECOVERED store adopts from disk on its first expireOlderThan.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        writer.close()
         val reader = ContributionStore(root, limits())
         reader.expireOlderThan()
 
@@ -2581,6 +2601,8 @@ class DirectoryDurabilityTest {
         }
         File(deep, "tail.bin").writeBytes(ByteArray(16))
 
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val fresh = ContributionStore(root, limits())
         fresh.expireOlderThan()
         assertTrue("measurement must have been reported as failing", fresh.measurementFailures >= 1L)
@@ -2592,6 +2614,8 @@ class DirectoryDurabilityTest {
         // probe even without the unknown rule - which masked the mutant in my first version. Collapse the
         // per-capture size bound so the placeholder alone cannot fill the queue's headroom, leaving the
         // unknown rule as the only thing that can refuse here.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        fresh.close()
         val roomy = ContributionStore(
             root,
             QueueLimits.defaults().copy(
@@ -2643,6 +2667,8 @@ class DirectoryDurabilityTest {
         // Assert the MEASURED CHARGE DIRECTLY. A sidecar band of this fixture is only tens of bytes, so no
         // admission budget can straddle it reliably; the reviewer offered this form explicitly. The charge
         // must equal the WHOLE retained footprint, not just the audio+metadata baseline.
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val fresh = ContributionStore(root, limits())
         fresh.expireOlderThan() // first and only accounting for this capture
         val charged = fresh.chargedBytesForTest(id)
@@ -2770,6 +2796,8 @@ class DirectoryDurabilityTest {
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         // Marker written by the store itself via a failed delete.
         File(root, "disqualified/$id").apply { parentFile?.mkdirs() }.writeText("disqualified\n")
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val restarted = ContributionStore(root, limits())
         assertTrue(
             "a disqualified capture must never be exposed as ready",
@@ -2838,6 +2866,8 @@ class DirectoryDurabilityTest {
         assertTrue("expected a ready marker to exist", readyFiles != null && readyFiles.isNotEmpty())
         readyFiles!!.forEach { it.delete() }
 
+        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
+        store.close()
         val recovered = ContributionStore(root, limits(), directorySync = RecordingSync())
         recovered.recover()
         assertTrue(

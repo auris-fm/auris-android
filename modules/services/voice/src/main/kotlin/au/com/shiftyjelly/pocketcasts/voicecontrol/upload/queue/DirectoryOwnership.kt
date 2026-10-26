@@ -67,6 +67,13 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
     /** Acquires exclusively, or records why it could not. Never throws for a contested directory. */
     @Synchronized
     fun acquire(): DirectoryOwnership {
+        // CLOSED IS TERMINAL. A late callback must not be able to take the OS lock again: isHeld() would
+        // still report false (closed stays true), so the handle would hold the directory while reporting
+        // that it does not - denying every legitimate owner that tries to take over.
+        if (closed) {
+            reason = reason ?: "closed"
+            return this
+        }
         if (lock != null || reason != null) return this
         try {
             lockFile.parentFile?.mkdirs()
@@ -99,15 +106,72 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
 
     override fun unavailableReason(): String? = if (isHeld()) null else reason ?: "closed"
 
+    /** Operations that passed the guard and have not finished; see [enter]/[leave]. */
+    private val inFlight = java.util.concurrent.atomic.AtomicInteger()
+
+    /** Monitors [inFlight] transitions so [close] can wait for the count to reach zero. */
+    private val drained = java.util.concurrent.locks.ReentrantLock()
+    private val drainSignal: java.util.concurrent.locks.Condition = drained.newCondition()
+
+    /**
+     * Admits ONE operation into the directory. Returns false when this handle may not touch it, which
+     * includes the window during and after [close].
+     *
+     * The count is incremented BEFORE the liveness check and decremented by [leave], so a thread cannot
+     * slip between "close saw zero in-flight" and "I registered myself".
+     */
+    fun enter(): Boolean {
+        inFlight.incrementAndGet()
+        leaseThreads.add(Thread.currentThread())
+        if (isHeld()) return true
+        leave()
+        return false
+    }
+
+    fun leave() {
+        leaseThreads.remove(Thread.currentThread())
+        if (inFlight.decrementAndGet() == 0) {
+            drained.lock()
+            try {
+                drainSignal.signalAll()
+            } finally {
+                drained.unlock()
+            }
+        }
+    }
+
     override fun close() {
         // INVALIDATE FIRST: a delayed callback observing isHeld()==false must refuse before the directory
         // becomes someone else's. Releasing first would leave a window in which a stale writer passes the
         // guard and mutates a directory a new owner already holds.
         closed = true
+        // THEN DRAIN. Invalidating fences new entrants; it does NOT stop an operation that already passed
+        // the guard from resuming after a successor owns the directory. Waiting for in-flight work to reach
+        // zero is what makes close a real handover boundary.
+        awaitDrained()
         runCatching { lock?.release() }
         runCatching { channel?.close() }
         lock = null
         channel = null
+    }
+
+    /** Threads currently inside [enter]; used so a self-close never waits on its own lease. */
+    private val leaseThreads = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+
+    private fun awaitDrained() {
+        // A close() issued from INSIDE an operation - a hook that tears the store down mid-write - must not
+        // wait for its own lease. The in-flight count includes the caller, so waiting would deadlock against
+        // itself forever. The caller's operation is abandoned with the directory as before.
+        if (Thread.currentThread() in leaseThreads) return
+        drained.lock()
+        try {
+            while (inFlight.get() > 0) {
+                // A stuck writer must not hang teardown forever; the bound is a poll, not a policy change.
+                drainSignal.await(DRAIN_POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        } finally {
+            drained.unlock()
+        }
     }
 
     companion object {
@@ -119,6 +183,9 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
          * location is derived from the same root.
          */
         const val OWNER_LOCK_SUFFIX = ".owner.lock"
+
+        /** Bound on each drain wait; a stuck writer must not hang teardown forever. */
+        private const val DRAIN_POLL_MS = 50L
     }
 }
 

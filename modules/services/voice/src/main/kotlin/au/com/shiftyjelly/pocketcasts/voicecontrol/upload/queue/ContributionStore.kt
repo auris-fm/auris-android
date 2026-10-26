@@ -166,15 +166,78 @@ class ContributionStore(
     fun unavailableReason(): String? = directoryOwnership.unavailableReason()
 
     /**
-     * Refuses when ownership is absent, and then performs [block]. Every mutation and every read that can
-     * admit work goes through here, so losing ownership is not a state the queue can silently ignore.
+     * Refuses when ownership is absent, and then runs [block] holding an OPERATION LEASE for its whole
+     * duration. Every mutation and every read that can admit work goes through here.
+     *
+     * The lease is what makes [close] a real handover boundary (reviewer 7db01cd9 finding 1): checking
+     * ownership once at entry fences new callers but not one already running, which could resume after a
+     * successor owns the directory. [DirectoryOwnership.enter] registers the operation and [leave] releases
+     * it, so close waits for this block to finish before it drops the OS lock.
+     *
+     * Not inline on purpose: an inline body would be copied into each caller, and the lease must be
+     * released on every path including exceptions thrown out of [block].
      */
-    private inline fun <T> guarded(unavailable: T, block: () -> T): T {
-        if (!acquireOwnership()) {
+    private fun <T> guarded(unavailable: T, block: () -> T): T {
+        if (!acquireOwnership() || !enterOperation()) {
             logGuardedRefusal()
             return unavailable
         }
-        return block()
+        try {
+            return block()
+        } finally {
+            leaveOperation()
+        }
+    }
+
+    /**
+     * Entry fence for every OTHER mutating surface (reviewer 7db01cd9 finding 2): an old valid in-memory
+     * generation is not a directory lease. These paths already revalidate the generation, but generation
+     * says "same owner in this process" and says nothing about whether a successor now owns the directory.
+     *
+     * Returns false when this instance must refuse. Re-entrant per thread so a fenced method may call
+     * another fenced method (prepare -> discardCurrentPartials, for example) without deadlocking the lease.
+     */
+    private fun withLease(block: () -> Unit): Boolean {
+        if ((leaseDepth.get() ?: 0) > 0) {
+            block()
+            return true
+        }
+        if (!acquireOwnership() || !enterOperation()) {
+            logGuardedRefusal()
+            return false
+        }
+        leaseDepth.set(1)
+        try {
+            block()
+            return true
+        } finally {
+            leaseDepth.set(0)
+            leaveOperation()
+        }
+    }
+
+    private val leaseDepth = ThreadLocal.withInitial { 0 }
+
+    /** Like [guarded] but returns [unavailable] instead of running a block when the lease is refused. */
+    private fun <T> withLeaseResult(unavailable: T, block: () -> T): T {
+        if (!acquireOwnership() || !enterOperation()) {
+            logGuardedRefusal()
+            return unavailable
+        }
+        try {
+            return block()
+        } finally {
+            leaveOperation()
+        }
+    }
+
+    /** Operation-lease admission; false when this instance may not touch the directory. */
+    private fun enterOperation(): Boolean =
+        (directoryOwnership as? FileDirectoryOwnership)?.enter()
+            ?: directoryOwnership.isHeld()
+
+    private fun leaveOperation() {
+        (directoryOwnership as? FileDirectoryOwnership)?.leave()
     }
 
     /**
@@ -208,14 +271,20 @@ class ContributionStore(
      * does not publish the entry.
      */
     fun admit(sampleCount: Long, metadataBytes: Int): Admission? = guarded(null) {
-        if (sampleCount < 0 || metadataBytes < 0) return null
-        // Duration bound is independent of the byte bound: a long quiet clip can stay under
-        // max_clip_bytes while still exceeding the specced max_clip_ms.
-        if (durationMs(sampleCount) > limits.maxClipMs) return null
-        val projected = WavWriter.fileBytes(sampleCount) + metadataBytes
-        if (projected > limits.maxClipBytes) return null
-        if (metadataBytes > limits.maxMetadataBytes) return null
-        return reserve(sampleCount, projected)
+        if (sampleCount < 0 || metadataBytes < 0) {
+            null
+        } else if (durationMs(sampleCount) > limits.maxClipMs) {
+            // Duration bound is independent of the byte bound: a long quiet clip can stay under
+            // max_clip_bytes while still exceeding the specced max_clip_ms.
+            null
+        } else {
+            val projected = WavWriter.fileBytes(sampleCount) + metadataBytes
+            when {
+                projected > limits.maxClipBytes -> null
+                metadataBytes > limits.maxMetadataBytes -> null
+                else -> reserve(sampleCount, projected)
+            }
+        }
     }
 
     /** Byte-projection used by tests/callers that need the same arithmetic the cap checks use. */
@@ -625,7 +694,11 @@ class ContributionStore(
 
     // The IMMUTABLE token for the attempt pickup just admitted (reviewer 20a5440b): the count is never
     // re-read afterwards, so a caller cannot capture a successor's identity.
-    fun pickupAttemptToken(generation: Long, captureId: String, nowMs: Long = clock()): AdmittedAttempt? = synchronized(lock) {
+    fun pickupAttemptToken(generation: Long, captureId: String, nowMs: Long = clock()): AdmittedAttempt? = withLeaseResult(null) {
+        pickupAttemptTokenGuarded(generation, captureId, nowMs)
+    }
+
+    private fun pickupAttemptTokenGuarded(generation: Long, captureId: String, nowMs: Long): AdmittedAttempt? = synchronized(lock) {
         if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
             null
         } else {
@@ -645,7 +718,11 @@ class ContributionStore(
     // generation-only write would let a same-generation successor admitted between validation and
     // mutation receive an OLD attempt's delay (reviewer 20a5440b). Null = token no longer owns the
     // queue; NOTHING was mutated.
-    fun scheduleRetryForAdmittedAttempt(token: AdmittedAttempt, retryAfterS: Long? = null): Long? = synchronized(lock) {
+    fun scheduleRetryForAdmittedAttempt(token: AdmittedAttempt, retryAfterS: Long? = null): Long? = withLeaseResult(null) {
+        scheduleRetryForAdmittedAttemptGuarded(token, retryAfterS)
+    }
+
+    private fun scheduleRetryForAdmittedAttemptGuarded(token: AdmittedAttempt, retryAfterS: Long?): Long? = synchronized(lock) {
         // (spec f6a8f380) ONE owner transaction validates and mutates; no currentGeneration fallback.
         // A REVOKED epoch still allows disposal when the token still owns the attempt slot: the capture
         // was retained, no successor attempt was admitted, and only ownership retired. A successor
@@ -913,6 +990,19 @@ class ContributionStore(
      *    the single fixed lock order store -> fence; a fenced-off attempt publishes nothing.
      */
     fun prepareAt(
+        generation: Long,
+        admission: Admission,
+        captureId: String,
+        enrollmentEpoch: String,
+        pcmChunks: List<Pair<ShortArray, Int>>,
+        canonicalMetadata: ByteArray,
+        enrollmentAccount: String? = null,
+        enrollmentSession: Long? = null,
+    ): Entry? = withLeaseResult(null) {
+        prepareAtGuarded(generation, admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata, enrollmentAccount, enrollmentSession)
+    }
+
+    private fun prepareAtGuarded(
         generation: Long,
         admission: Admission,
         captureId: String,
@@ -1207,7 +1297,11 @@ class ContributionStore(
     fun dirForTest(): File = dir
 
     /** Expiry removes ONLY expired entries; others are untouched. */
-    fun expireOlderThan(): List<String> {
+    fun expireOlderThan(): List<String> = guarded(emptyList()) {
+        expireOlderThanGuarded()
+    }
+
+    private fun expireOlderThanGuarded(): List<String> {
         retryDisqualifiedCleanupLocked()
         val now = clock()
         val removed = mutableListOf<String>()
@@ -1412,6 +1506,14 @@ class ContributionStore(
         generation: Long,
         captureId: String,
         retryAfterS: Long? = null,
+    ): Long? = withLeaseResult(null) {
+        scheduleRetryAfterFailureGuarded(generation, captureId, retryAfterS)
+    }
+
+    private fun scheduleRetryAfterFailureGuarded(
+        generation: Long,
+        captureId: String,
+        retryAfterS: Long? = null,
     ): Long? = synchronized(lock) { scheduleRetryAfterFailureLocked(generation, captureId, retryAfterS) }
 
     // Requires the caller to already hold the lock: validate-and-mutate must be indivisible (reviewer
@@ -1505,7 +1607,11 @@ class ContributionStore(
      * [LaunchLease.cancel] (driven by a revocation listener) is visible while the upload is in flight.
      * Returns null when the epoch already changed, i.e. the launch is refused before any request.
      */
-    fun leaseTransportLaunch(generation: Long, captureId: String): LaunchLease? = ownership.transaction(
+    fun leaseTransportLaunch(generation: Long, captureId: String): LaunchLease? = withLeaseResult(null) {
+        leaseTransportLaunchGuarded(generation, captureId)
+    }
+
+    private fun leaseTransportLaunchGuarded(generation: Long, captureId: String): LaunchLease? = ownership.transaction(
         object : (QueueOwnership.OwnershipTransaction) -> LaunchLease? {
             override fun invoke(tx: QueueOwnership.OwnershipTransaction): LaunchLease? = if (!tx.isValid(generation)) {
                 null
@@ -1592,6 +1698,8 @@ class ContributionStore(
      * revocation both invalidates the epoch and makes already-launched uploads observe cancellation.
      */
     fun revokeAndCancelLaunches(reason: String) {
+        // Delegates to revokeAndPurge, which takes its own lease; taking a second one here would be
+        // nested for no gain.
         revokeAndPurge(reason)
         synchronized(launchLeasesLock) {
             launchLeases.forEach { it.cancel() }
@@ -1608,6 +1716,15 @@ class ContributionStore(
      * never complete a send). Returns the cancelled capture ids for control observability.
      */
     fun cancelLaunchesIdentityMismatch(
+        liveAccount: String?,
+        liveSession: Long?,
+        liveEpoch: String?,
+        reason: String,
+    ): Set<String> = withLeaseResult(emptySet()) {
+        cancelLaunchesIdentityMismatchGuarded(liveAccount, liveSession, liveEpoch, reason)
+    }
+
+    private fun cancelLaunchesIdentityMismatchGuarded(
         liveAccount: String?,
         liveSession: Long?,
         liveEpoch: String?,
@@ -1644,6 +1761,10 @@ class ContributionStore(
      * REVOKED lease is left to be cleared wholesale by [revokeAndCancelLaunches].
      */
     fun releaseLaunchLease(lease: LaunchLease) {
+        if (!withLease { releaseLaunchLeaseGuarded(lease) }) return
+    }
+
+    private fun releaseLaunchLeaseGuarded(lease: LaunchLease) {
         synchronized(launchLeasesLock) { if (!lease.isCancelled()) launchLeases.remove(lease) }
     }
 
@@ -1663,7 +1784,11 @@ class ContributionStore(
     /** Test seam: how many launch leases are currently outstanding. */
     fun launchLeasesForTest(): Int = synchronized(launchLeasesLock) { launchLeases.size }
 
-    fun pickupAttempt(generation: Long, captureId: String, nowMs: Long = clock()): Int? = synchronized(lock) {
+    fun pickupAttempt(generation: Long, captureId: String, nowMs: Long = clock()): Int? = withLeaseResult(null) {
+        pickupAttemptGuarded(generation, captureId, nowMs)
+    }
+
+    private fun pickupAttemptGuarded(generation: Long, captureId: String, nowMs: Long): Int? = synchronized(lock) {
         if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
             null
         } else {
@@ -1686,7 +1811,11 @@ class ContributionStore(
      */
     private fun readRetryBoundaryLocked(id: String): Long? = reconcileRetryIntentLocked(id)
 
-    fun recordAttempt(generation: Long, captureId: String): Int? {
+    fun recordAttempt(generation: Long, captureId: String): Int? = withLeaseResult(null) {
+        recordAttemptGuarded(generation, captureId)
+    }
+
+    private fun recordAttemptGuarded(generation: Long, captureId: String): Int? {
         // ONE ownership transaction: validate, advance the index, and write the durable attempts sidecar all
         // happen while holding the shared monitor (reviewer ee26880c finding 4). The pre-fix shape validated
         // under the lock and then wrote outside it, so a revocation could land between the two and leave a
@@ -1757,7 +1886,11 @@ class ContributionStore(
      * to drop an entry that a revocation already purged (or that now belongs to a successor), so the removal
      * and the file deletion happen inside the same guarded critical section as the ownership check.
      */
-    fun dropEntry(generation: Long, captureId: String, reason: TerminalReason): Boolean {
+    fun dropEntry(generation: Long, captureId: String, reason: TerminalReason): Boolean = withLeaseResult(false) {
+        dropEntryGuarded(generation, captureId, reason)
+    }
+
+    private fun dropEntryGuarded(generation: Long, captureId: String, reason: TerminalReason): Boolean {
         val removed = synchronized(lock) {
             if (ownership.isValidUnderLock(generation)) memoryEntries.remove(captureId)?.also { deleteLocked(it) } else null
         } != null
@@ -1870,6 +2003,11 @@ class ContributionStore(
 
     /** Listening/permission closure: remove IN-PROGRESS preparation only; ready entries stay. */
     fun discardCurrentPartials() {
+        if (!acquireOwnership() || !enterOperation()) {
+            logGuardedRefusal()
+            return
+        }
+        try {
         // Same bounded traversal as recovery (reviewer d1cce25b): enumeration failure defers the sweep.
         val files = try {
             boundedRootListing()
@@ -1883,6 +2021,9 @@ class ContributionStore(
         // Same checked deletion as the recovery sweep. Discarding the result here left surviving partials
         // invisible to accounting (reviewer e4342946).
         files.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
+        } finally {
+            leaveOperation()
+        }
     }
 
     /**

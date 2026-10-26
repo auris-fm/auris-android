@@ -1391,4 +1391,67 @@ class ContributionStoreTest {
         assertEquals(listOf(ID_A), successor.readyEntries().map { it.captureId })
         assertEquals("epoch-new", successor.readyEntries().single().enrollmentEpoch)
     }
+    @Test
+    fun `close drains an operation already past the guard and refuses a later one`() {
+        // REVIEWER 7db01cd9 finding 1: invalidating on close fences NEW entrants but not an operation
+        // already running, which could resume after a successor owns the directory. This parks a real
+        // writer inside the store, closes, and proves the close WAITS for it.
+        val root = tempRoot()
+        val parked = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val store = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            hooks = StoreHooks(onWavPartWrite = { _ ->
+                entered.countDown()
+                parked.countDown()
+                release.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            }),
+        )
+        val writer = Thread {
+            runCatching { store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L) }
+        }
+        writer.start()
+        assertTrue("PREMISE: the writer reached the guarded write", parked.await(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        val closedAt = java.util.concurrent.CountDownLatch(1)
+        val closer = Thread {
+            store.close()
+            closedAt.countDown()
+        }
+        closer.start()
+        // close() must NOT complete while an operation is inside the guarded section.
+        assertFalse(
+            "close returned while a guarded operation was still running",
+            closedAt.await(400, java.util.concurrent.TimeUnit.MILLISECONDS),
+        )
+        release.countDown()
+        assertTrue("close completes once the writer drains", closedAt.await(30, java.util.concurrent.TimeUnit.SECONDS))
+        writer.join()
+
+        // And after the drain, the directory is genuinely free for a successor.
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("a successor acquires the drained directory", successor.isAvailable())
+        assertNotNull("the successor can publish", successor.prepare(java.util.UUID.randomUUID().toString(), "epoch-epoch", chunks(8), meta(java.util.UUID.randomUUID().toString()), "a@x", 7L))
+    }
+
+    @Test
+    fun `a closed handle cannot reacquire the directory and lock out a successor`() {
+        // REVIEWER 7db01cd9 finding 3: close() cleared lock/reason, so acquire() would happily take the OS
+        // lock again while isHeld() still reported false - holding the directory and denying every owner.
+        val root = tempRoot()
+        val abandoned = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("PREMISE: it starts as the owner", abandoned.isAvailable())
+        abandoned.close()
+
+        // A late callback must be refused, not silently re-acquire.
+        assertNull("closed handle refuses admission", abandoned.admit(8, meta(ID_A).size))
+        assertEquals("and says why", "closed", abandoned.unavailableReason())
+
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the successor takes the directory; nothing was re-acquired", successor.isAvailable())
+        assertEquals(null, successor.unavailableReason())
+        assertNotNull(successor.prepare(java.util.UUID.randomUUID().toString(), "epoch-epoch", chunks(8), meta(java.util.UUID.randomUUID().toString()), "a@x", 7L))
+    }
 }

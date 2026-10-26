@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -56,6 +57,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureSt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import javax.inject.Provider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @AndroidEntryPoint
 class VoiceControlSettingsFragment : BaseFragment() {
@@ -64,7 +68,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
     @Inject lateinit var modelManager: ModelManager
 
-    @Inject lateinit var wakeWordDetector: WakeWordDetector
+    @Inject lateinit var wakeWordDetector: Provider<WakeWordDetector>
 
     @Inject lateinit var asrBackendSelector: AsrBackendSelector
 
@@ -122,15 +126,18 @@ class VoiceControlSettingsFragment : BaseFragment() {
             // bundled with the app and its readiness is the detector's own load result. Reading the
             // recognition model's absence as wake readiness contradicted the status row directly
             // above it (owner-observed: "Not downloaded" next to "Active (wake word required)").
-            val wakeWordReady = wakeWordDetector.isReady
+            // Defer detector construction and native model loading to IO.
+            // Until loading completes, readiness remains unconfirmed.
+            var detectorReady by remember { mutableStateOf(false) }
+            var detectorRevision by remember { mutableIntStateOf(0) }
+            LaunchedEffect(detectorRevision) {
+                detectorReady = readWakeWordReadiness(wakeWordDetector)
+            }
             // Recomputed on resume so a detector that initialized after first composition is shown
             // as it actually is, rather than as it looked once.
-            var detectorReady by remember { mutableStateOf(wakeWordReady) }
             DisposableEffect(this) {
                 val observer = LifecycleEventObserver { _, event ->
-                    if (event == Lifecycle.Event.ON_RESUME) {
-                        detectorReady = wakeWordDetector.isReady
-                    }
+                    if (event == Lifecycle.Event.ON_RESUME) detectorRevision++
                 }
                 lifecycle.addObserver(observer)
                 onDispose { lifecycle.removeObserver(observer) }
@@ -221,7 +228,7 @@ private fun VoiceControlSettingsPage(
             item {
                 SettingRow(
                     primaryText = RECOGNITION_MODEL_LABEL,
-                    secondaryText = recognitionRows.recognitionText,
+                    secondaryText = recognitionRowSecondaryText(recognitionRows),
                     toggle = SettingRowToggle.None,
                     indent = false,
                 )
@@ -283,6 +290,11 @@ internal data class RecognitionRows(
     val recognitionText: String,
     val recognitionProgressText: String,
 )
+
+internal fun recognitionRowSecondaryText(rows: RecognitionRows): String = rows.recognitionProgressText.ifEmpty { rows.recognitionText }
+
+// Resolve the provider inside IO: eager injection would load native models on the main thread.
+internal suspend fun readWakeWordReadiness(detector: Provider<WakeWordDetector>): Boolean = withContext(Dispatchers.IO) { detector.get().isReady }
 
 /**
  * The fragment's own row construction: maps the selected `AsrBackend` to the row enum and hands its

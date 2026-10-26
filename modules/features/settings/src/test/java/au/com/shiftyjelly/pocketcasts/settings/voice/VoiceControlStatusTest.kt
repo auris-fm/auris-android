@@ -17,8 +17,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -418,6 +422,62 @@ class VoiceControlModelRowsTest {
             downloadState = ModelDownloadState.Ready,
         )
         assertEquals("SenseVoice model missing", rows.recognitionText)
+    }
+
+    @Test
+    fun `wake word readiness is read off the main thread`() {
+        // Claude review 4374362889: the detector's construction loads ~3.4MB of ONNX and creates
+        // native sessions, so reading it during composition stalled the settings screen. Records the
+        // thread the READ happens on -- the observable that decides whether the screen stalls.
+        var readOn: String? = null
+        val detector = object : WakeWordDetector {
+            override val isReady: Boolean
+                get() {
+                    readOn = Thread.currentThread().name
+                    return true
+                }
+
+            override suspend fun detect(segment: FloatArray, sampleRateHz: Int, speechOnsetSample: Int) = WakeWordResult(detected = false)
+
+            override fun release() = Unit
+        }
+        var providedOn: Thread? = null
+        val caller = Thread.currentThread()
+        val provider = javax.inject.Provider<WakeWordDetector> {
+            providedOn = Thread.currentThread()
+            detector
+        }
+        val ready = kotlinx.coroutines.runBlocking { readWakeWordReadiness(provider) }
+        assertTrue("detector construction must run off the caller thread", providedOn != caller)
+        assertTrue("premise: readiness was read", ready)
+        assertNotNull("premise: the getter ran", readOn)
+        // Dispatchers.IO names its threads "DefaultDispatcher-worker-*". Anything else means the
+        // read ran on the caller's thread, which is the stall this control exists to prevent.
+        assertTrue(
+            "readiness must be read on an IO worker, was: $readOn",
+            readOn!!.contains("DefaultDispatcher-worker"),
+        )
+    }
+
+    @Test
+    fun `the rendered row shows a download in flight, not just the computed field`() {
+        // Claude review 4374362768: the progress text was computed and asserted, but the row
+        // rendered recognitionText only, so a downloading model looked identical to a missing one.
+        // Assert the RENDERED choice, which is what the earlier test did not cover.
+        val rows = RecognitionRows(
+            recognitionText = "SenseVoice model missing",
+            recognitionProgressText = "Downloading: 37%",
+        )
+        assertEquals("Downloading: 37%", recognitionRowSecondaryText(rows))
+    }
+
+    @Test
+    fun `the rendered row falls back to readiness when nothing is downloading`() {
+        val rows = RecognitionRows(
+            recognitionText = "SenseVoice ready",
+            recognitionProgressText = "",
+        )
+        assertEquals("SenseVoice ready", recognitionRowSecondaryText(rows))
     }
 
     @Test

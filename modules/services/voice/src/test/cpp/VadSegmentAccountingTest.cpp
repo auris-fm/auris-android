@@ -16,8 +16,12 @@
 // forward-declares the capture.
 #include "OboeAudioCapture.h"
 
+#include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <chrono>
 #include <deque>
 #include <thread>
@@ -165,9 +169,16 @@ public:
     std::atomic<bool> xrunSupported{true};
     std::atomic<bool> started{false};
     std::atomic<bool> failQuery{false};
+    // An xrun the HAL recorded DURING start. Advancing it inside requestStart is the only way to
+    // distinguish a correct pre-start baseline from a late one: a baseline taken after start would
+    // read the already-advanced count and call the epoch continuous.
+    std::atomic<int32_t> xrunsDuringStart{0};
 
     oboe::Result requestStart() override {
         started.store(true);
+        if (xrunsDuringStart.load() != 0) {
+            xruns.store(xrunsDuringStart.load());
+        }
         return oboe::Result::OK;
     }
     oboe::Result requestPause() override { return oboe::Result::OK; }
@@ -188,6 +199,19 @@ public:
     void updateFramesWritten() override {}
     void updateFramesRead() override {}
 };
+// Waits up to [timeoutMs] for [pid] to exit, WITHOUT blocking indefinitely: a hung child must become
+// an observable failure rather than a hung harness. Returns false on timeout (child still alive).
+bool waitForChild(pid_t pid, int timeoutMs, int* status) {
+    const int sliceUs = 5 * 1000;
+    for (int waited = 0; waited < timeoutMs; waited += sliceUs / 1000) {
+        const pid_t r = waitpid(pid, status, WNOHANG);
+        if (r == pid) return true;
+        if (r < 0 && errno != EINTR) return true;   // cannot wait further; treat as exited
+        std::this_thread::sleep_for(std::chrono::microseconds(sliceUs));
+    }
+    return false;
+}
+
 int main() {
     std::printf("native VAD segment accounting\n");
 
@@ -653,178 +677,295 @@ int main() {
         check(fresh.lastReadEndPosition() == 0, "a fresh capture's read position starts at zero");
     }
 
-    // (9) XRUN CONTINUITY (reviewer 0c28e33a / spec d3fbda32): the ring flag only catches drops the
-    // RING performed. An AAudio overrun discards input in the HAL before it ever reaches
-    // RingBuffer::write, so the ring stays self-consistent -- cursors keep advancing, no drop is
-    // recorded -- while they fall behind real stream positions. A ring-only continuity check calls
-    // that epoch continuous and the anchor derived from it is confidently wrong. The xrun counter is
-    // the evidence the ring cannot see.
+    // THE ENTIRE XRUN SECTION RUNS IN A CHILD PROCESS. Every case here calls start(), and a
+    // regression that deadlocks start() would hang the harness before any in-process guard runs --
+    // the guard for one call cannot protect the calls before it. Forking the section makes "did not
+    // finish" an observable exit status, and a hung child is killed without the parent ever touching
+    // objects the child was using.
     {
-        OboeAudioCapture capture;
-        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6100);
-        capture.installStreamForTest(stream, /*deviceId=*/1);
-        capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+        std::fflush(stdout);
+        pid_t child = fork();
+        if (child == 0) {
+        // (9) XRUN CONTINUITY (reviewer 0c28e33a / spec d3fbda32): the ring flag only catches drops the
+        // RING performed. An AAudio overrun discards input in the HAL before it ever reaches
+        // RingBuffer::write, so the ring stays self-consistent -- cursors keep advancing, no drop is
+        // recorded -- while they fall behind real stream positions. A ring-only continuity check calls
+        // that epoch continuous and the anchor derived from it is confidently wrong. The xrun counter is
+        // the evidence the ring cannot see.
+        {
+            OboeAudioCapture capture;
+            auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6100);
+            capture.installStreamForTest(stream, /*deviceId=*/1);
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
 
-        // An epoch whose xrun count never moves stays continuous. This is the COMPLEMENT case: if
-        // the control only ever asserted "unavailable", a mutant that always reports unavailable
-        // would pass it, and "conservative" would be indistinguishable from "broken".
-        capture.sampleXrunContinuity();
-        capture.sampleXrunContinuity();
-        check(capture.sampleAccountingContinuous(),
-            "a stable xrun count keeps the epoch continuous");
+            // An epoch whose xrun count never moves stays continuous. This is the COMPLEMENT case: if
+            // the control only ever asserted "unavailable", a mutant that always reports unavailable
+            // would pass it, and "conservative" would be indistinguishable from "broken".
+            capture.sampleXrunContinuity();
+            capture.sampleXrunContinuity();
+            check(capture.sampleAccountingContinuous(),
+                "a stable xrun count keeps the epoch continuous");
 
-        // The count advances with NO ring drop: this is the case the ring flag cannot distinguish.
-        // Audio is flowing and the ring wrote everything it was handed, so
-        // ring.samplesDropped() is still false -- only the counter can reveal the discontinuity.
-        int16_t quiet[kFrame] = {0};
-        for (int i = 0; i < 3; i++) capture.onAudioReady(stream, quiet, kFrame);
-        capture.setXrunCountForTest(/*supported=*/true, /*count=*/4);
-        capture.sampleXrunContinuity();
+            // The count advances with NO ring drop: this is the case the ring flag cannot distinguish.
+            // Audio is flowing and the ring wrote everything it was handed, so
+            // ring.samplesDropped() is still false -- only the counter can reveal the discontinuity.
+            int16_t quiet[kFrame] = {0};
+            for (int i = 0; i < 3; i++) capture.onAudioReady(stream, quiet, kFrame);
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/4);
+            capture.sampleXrunContinuity();
 
-        check(!capture.sampleAccountingContinuous(),
-            "an xrun advance breaks continuity even though the ring dropped nothing");
+            check(!capture.sampleAccountingContinuous(),
+                "an xrun advance breaks continuity even though the ring dropped nothing");
 
-        // LATCHED for the rest of the epoch: recovering the count to its baseline must not re-open
-        // continuity. Samples already discarded left a permanent hole in the position sequence.
-        capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(),
-            "continuity stays broken for the epoch once an xrun has been observed");
+            // LATCHED for the rest of the epoch: recovering the count to its baseline must not re-open
+            // continuity. Samples already discarded left a permanent hole in the position sequence.
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(),
+                "continuity stays broken for the epoch once an xrun has been observed");
 
-        // A RESTART is a NEW epoch: a fresh stream gets a fresh counter, so the previous epoch's
-        // break must not carry over.
-        capture.start();
-        capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
-        capture.sampleXrunContinuity();
-        check(capture.sampleAccountingContinuous(),
-            "a stream restart begins a new continuity epoch");
-        capture.close();
-    }
-
-    // (9a2) THE QUERY-ERROR PATH, isolated. A stream that SUPPORTS the count but fails the query
-    // must land in the same unavailable state as an unsupported one -- and critically must not stay
-    // "continuous" because some other flag happened to be set. This is the case that discriminates
-    // "unknown is unavailable" on its own, without the baseline flag masking the difference.
-    {
-        ScriptedStream stream;
-        stream.xrunSupported.store(true);
-        stream.failQuery.store(false);   // the baseline below must SUCCEED
-        OboeAudioCapture capture;
-        capture.installRealStreamForTest(&stream);
-        // start() baselines while the query SUCCEEDS, so a valid baseline exists. Only then is the
-        // failing query the single reason continuity cannot be claimed.
-        capture.start();
-        check(capture.sampleAccountingContinuous(), "premise: a successfully baselined epoch is continuous");
-
-        // Now the query fails. There IS a baseline, so a mutant that keys only on the baseline or
-        // treats an error as "unchanged" reports continuous here. The error means the evidence for
-        // this epoch is unknown, and unknown is unavailable.
-        stream.failQuery.store(true);
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(),
-            "a failing xrun query leaves timing unavailable despite a valid baseline");
-        capture.close();
-        stream.failQuery.store(false);
-    }
-
-    // (9b) UNKNOWN EVIDENCE IS NOT CONTINUITY. A backend that cannot report xruns, or a query that
-    // errors, leaves continuity UNESTABLISHED. Reporting it as continuous is the same bug in a
-    // different disguise: the anchor would be published with false confidence.
-    {
-        OboeAudioCapture capture;
-        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6200);
-        capture.installStreamForTest(stream, /*deviceId=*/1);
-        capture.setXrunCountForTest(/*supported=*/false, /*count=*/0);
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(),
-            "an unsupported xrun count leaves timing unavailable, not continuous");
-        capture.close();
-    }
-
-    // (9c) A STALE OLD-STREAM OBSERVATION must not judge the current epoch. After a restart the
-    // previous stream's count belongs to a dead stream; sampling it would either invent a break or
-    // erase a real one. The epoch guard is what makes the restart above meaningful rather than
-    // lucky.
-    {
-        OboeAudioCapture capture;
-        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6300);
-        capture.installStreamForTest(stream, /*deviceId=*/1);
-        capture.setXrunCountForTest(/*supported=*/true, /*count=*/2);
-        capture.sampleXrunContinuity();
-        check(capture.sampleAccountingContinuous(), "baseline taken at 2 is continuous");
-        capture.setXrunCountForTest(/*supported=*/true, /*count=*/5);
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(), "an advance from that baseline breaks it");
-        capture.close();
-    }
-
-
-
-    // (10) THE REAL start() PATH (reviewer a1633944). start() holds mStreamMutex for its whole body
-    // and then baselines; the locking entry point would re-lock a non-recursive mutex and hang every
-    // real start. Every earlier control used installStreamForTest(), which start() short-circuits, so
-    // none of them reached that line. These run start() itself, bounded: a deadlock shows up as a
-    // timeout rather than hanging the harness forever.
-    {
-        ScriptedStream stream;
-        OboeAudioCapture capture;
-        capture.installRealStreamForTest(&stream);
-
-        std::atomic<bool> done{false};
-        std::thread starter([&] {
+            // A RESTART is a NEW epoch: a fresh stream gets a fresh counter, so the previous epoch's
+            // break must not carry over.
             capture.start();
-            done.store(true);
-        });
-        starter.detach();
-        for (int i = 0; i < 200 && !done.load(); i++) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+            capture.sampleXrunContinuity();
+            check(capture.sampleAccountingContinuous(),
+                "a stream restart begins a new continuity epoch");
+            capture.close();
         }
-        check(done.load(), "a real start() completes instead of deadlocking on its own stream lock");
-        check(stream.started.load(), "the production path actually called requestStart()");
 
-        // The baseline is taken BEFORE requestStart, so a count that moves during start is a real
-        // discontinuity. The count was 0 at baseline; the stream is now at 3.
-        stream.xruns.store(3);
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(),
-            "an xrun that appeared during start is not absorbed by a late baseline");
-        capture.close();
-    }
+        // (9a2) THE QUERY-ERROR PATH, isolated. A stream that SUPPORTS the count but fails the query
+        // must land in the same unavailable state as an unsupported one -- and critically must not stay
+        // "continuous" because some other flag happened to be set. This is the case that discriminates
+        // "unknown is unavailable" on its own, without the baseline flag masking the difference.
+        {
+            ScriptedStream stream;
+            stream.xrunSupported.store(true);
+            stream.failQuery.store(false);   // the baseline below must SUCCEED
+            OboeAudioCapture capture;
+            capture.installRealStreamForTest(&stream);
+            // start() baselines while the query SUCCEEDS, so a valid baseline exists. Only then is the
+            // failing query the single reason continuity cannot be claimed.
+            capture.start();
+            check(capture.sampleAccountingContinuous(), "premise: a successfully baselined epoch is continuous");
 
-    // (10b) A QUERY ERROR is not zero. The stream reports a count it cannot support; continuity must
-    // stay unavailable rather than being read as a benign unchanged count.
-    {
-        ScriptedStream stream;
-        stream.xrunSupported.store(false);
-        OboeAudioCapture capture;
-        capture.installRealStreamForTest(&stream);
-        capture.start();
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(),
-            "a stream that cannot report xruns leaves timing unavailable");
-        capture.close();
-    }
+            // Now the query fails. There IS a baseline, so a mutant that keys only on the baseline or
+            // treats an error as "unchanged" reports continuous here. The error means the evidence for
+            // this epoch is unknown, and unknown is unavailable.
+            stream.failQuery.store(true);
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(),
+                "a failing xrun query leaves timing unavailable despite a valid baseline");
+            capture.close();
+            stream.failQuery.store(false);
+        }
 
-    // (10c) RESTART OPENS A NEW EPOCH, and a STALE observation from the dead stream cannot judge it.
-    // Break continuity on the first epoch, restart, then confirm the new epoch is continuous -- so
-    // the previous epoch's evidence provably did not carry over.
-    {
-        ScriptedStream stream;
-        OboeAudioCapture capture;
-        capture.installRealStreamForTest(&stream);
-        capture.start();
-        stream.xruns.store(5);
-        capture.sampleXrunContinuity();
-        check(!capture.sampleAccountingContinuous(), "first epoch breaks on an xrun");
+        // (9b) UNKNOWN EVIDENCE IS NOT CONTINUITY. A backend that cannot report xruns, or a query that
+        // errors, leaves continuity UNESTABLISHED. Reporting it as continuous is the same bug in a
+        // different disguise: the anchor would be published with false confidence.
+        {
+            OboeAudioCapture capture;
+            auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6200);
+            capture.installStreamForTest(stream, /*deviceId=*/1);
+            capture.setXrunCountForTest(/*supported=*/false, /*count=*/0);
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(),
+                "an unsupported xrun count leaves timing unavailable, not continuous");
+            capture.close();
+        }
 
-        capture.close();
-        stream.xruns.store(0);
-        capture.installRealStreamForTest(&stream);
-        capture.start();
-        capture.sampleXrunContinuity();
-        check(capture.sampleAccountingContinuous(),
-            "the restarted stream starts continuous despite the dead stream's count");
-        capture.close();
+        // (9c) A STALE OLD-STREAM OBSERVATION must not judge the current epoch. After a restart the
+        // previous stream's count belongs to a dead stream; sampling it would either invent a break or
+        // erase a real one. The epoch guard is what makes the restart above meaningful rather than
+        // lucky.
+        {
+            OboeAudioCapture capture;
+            auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6300);
+            capture.installStreamForTest(stream, /*deviceId=*/1);
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/2);
+            capture.sampleXrunContinuity();
+            check(capture.sampleAccountingContinuous(), "baseline taken at 2 is continuous");
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/5);
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(), "an advance from that baseline breaks it");
+            capture.close();
+        }
+
+
+
+        // (10) THE REAL start() PATH (reviewer a1633944 / 8a3eb1ad). start() holds mStreamMutex for its
+        // whole body and then baselines; the locking entry point would re-lock a non-recursive mutex and
+        // hang every real start. Every earlier control used installStreamForTest(), which start()
+        // short-circuits, so none of them reached that line.
+        //
+        // The deadlock is checked in a CHILD PROCESS. An in-process bounded wait was not enough: when the
+        // wait expired, the hung thread still owned the mutex, so the very next call (sampleXrunContinuity
+        // or close) blocked forever and a DETACHED thread went on referencing stack objects that were
+        // being destroyed. A fork-and-join makes "start() did not return" an observable exit status, and
+        // the parent then never touches the dead capture at all.
+        {
+            std::fflush(stdout);
+            pid_t child = fork();
+            if (child == 0) {
+                // Child: run the real start() and exit by its outcome. Any later hang cannot reach the
+                // parent's objects.
+                ScriptedStream stream;
+                OboeAudioCapture capture;
+                capture.installRealStreamForTest(&stream);
+                capture.start();
+                _exit(0);
+            }
+            check(child > 0, "premise: the deadlock probe forked");
+            if (child > 0) {
+                int status = 0;
+                const bool exited = waitForChild(child, /*timeoutMs=*/5000, &status);
+                check(exited, "a real start() completes instead of deadlocking on its own stream lock");
+                if (!exited) {
+                    // The child is hung inside start(). Kill it and FAIL the run here rather than
+                    // continuing: everything after this point would block on the same mutex.
+                    kill(child, SIGKILL);
+                    waitpid(child, &status, 0);
+                    std::printf("%d CHECK(S) FAILED\n", ++gFailures);
+                    std::fflush(stdout);
+                    return 1;
+                }
+                check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the child's start() returned success");
+            }
+        }
+
+        // (10a) AN XRUN DURING requestStart IS NOT ABSORBED. The count advances INSIDE requestStart, so a
+        // baseline taken before start sees 0 and the later observation sees 3; a baseline taken after
+        // start would read 3 and call the epoch continuous. This is what makes the pre-start ordering
+        // observable rather than merely stated.
+        {
+            ScriptedStream stream;
+            stream.xrunsDuringStart.store(3);
+            OboeAudioCapture capture;
+            capture.installRealStreamForTest(&stream);
+            capture.start();
+            check(stream.started.load(), "premise: the production path called requestStart()");
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(),
+                "an xrun recorded during requestStart is not absorbed by a late baseline");
+            capture.close();
+        }
+
+        // (10b) A QUERY ERROR is not zero. The stream reports a count it cannot support; continuity must
+        // stay unavailable rather than being read as a benign unchanged count.
+        {
+            ScriptedStream stream;
+            stream.xrunSupported.store(false);
+            OboeAudioCapture capture;
+            capture.installRealStreamForTest(&stream);
+            capture.start();
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(),
+                "a stream that cannot report xruns leaves timing unavailable");
+            capture.close();
+        }
+
+        // (10c) RESTART OPENS A NEW EPOCH, and a STALE observation from the dead stream cannot judge it.
+        // Break continuity on the first epoch, restart, then confirm the new epoch is continuous -- so
+        // the previous epoch's evidence provably did not carry over.
+        {
+            ScriptedStream stream;
+            OboeAudioCapture capture;
+            capture.installRealStreamForTest(&stream);
+            capture.start();
+            stream.xruns.store(5);
+            capture.sampleXrunContinuity();
+            check(!capture.sampleAccountingContinuous(), "first epoch breaks on an xrun");
+
+            capture.close();
+            stream.xruns.store(0);
+            capture.installRealStreamForTest(&stream);
+            capture.start();
+            capture.sampleXrunContinuity();
+            check(capture.sampleAccountingContinuous(),
+                "the restarted stream starts continuous despite the dead stream's count");
+            capture.close();
+        }
+
+        // (11) AN XRUN DURING SEGMENT EXTRACTION (reviewer 8a3eb1ad). NativeVadProcessor revalidates the
+        // xrun evidence AFTER collecting the segment and before publishing the anchor. A poll taken only
+        // on the way in would miss an overrun during the extraction -- the exact window that displaces the
+        // position -- and the anchor would be published as though continuous.
+        //
+        // The count advances on a read that falls INSIDE the segment's own drain, driven through the real
+        // processor loop. Removing the final sampleXrunContinuity() call makes this control fail, because
+        // the epoch is then still marked continuous when the anchor is recorded.
+        {
+            // Counts reads and advances the xrun count at a chosen read: past the pre-roll, so the
+            // segment is already open and being collected.
+            struct ExtractionCapture : OboeAudioCapture {
+                std::atomic<int> reads{0};
+                int advanceAtRead = -1;
+                int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
+                    const int32_t read = OboeAudioCapture::readRingBuffer(outData, maxSamples, timeoutMs);
+                    if (read > 0 && advanceAtRead >= 0 && reads.load() == (size_t)advanceAtRead) {
+                        // The HAL discarded input at this moment: only the counter knows.
+                        setXrunCountForTest(/*supported=*/true, /*count=*/7);
+                    }
+                    if (read > 0) reads.fetch_add(1);
+                    return read;
+                }
+            };
+
+            ExtractionCapture capture;
+            auto* stream = reinterpret_cast<oboe::AudioStream*>(0x9000);
+            capture.installStreamForTest(stream, /*deviceId=*/1);
+            capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+            capture.sampleXrunContinuity();          // the baseline a real start() takes
+
+            int16_t quiet[kFrame] = {0};
+            std::vector<int16_t> loud(kFrame, 4000);
+            auto push = [&](const int16_t* data) {
+                return capture.onAudioReady(stream, const_cast<int16_t*>(data), kFrame);
+            };
+            for (int i = 0; i < 3; i++) push(quiet);
+            for (int i = 0; i < 5; i++) push(loud.data());
+
+            // Advance on a read that lands after the segment has opened but before it is finalized.
+            capture.advanceAtRead = 4;
+
+            NativeVadProcessor processor(&capture);
+            check(processor.start(), "extraction-capture starts");
+            bool closed = false;
+            for (int i = 0; i < 60 && !closed; i++) {
+                push(quiet);
+                if (processor.waitForEvent(5) == 2) closed = true;
+            }
+            while (!closed) {
+                if (processor.waitForEvent(30000) == 2) closed = true;
+                else break;
+            }
+            check(closed, "the extraction script produces a segment");
+            if (closed) {
+                check(capture.reads.load() > (size_t)capture.advanceAtRead,
+                    "premise: the xrun advance happened during extraction, not after it");
+                check(processor.getSpeechEndStreamPosition() == 0,
+                    "an xrun during extraction reports the anchor UNAVAILABLE rather than wrong");
+            }
+            processor.stop();
+            capture.clearStreamForTest();
+        }
+            _exit(gFailures == 0 ? 0 : 1);
+        }
+        check(child > 0, "premise: the xrun controls forked");
+        if (child > 0) {
+            int status = 0;
+            const bool finished = waitForChild(child, /*timeoutMs=*/20000, &status);
+            if (!finished) {
+                kill(child, SIGKILL);
+                waitpid(child, &status, 0);
+                std::printf("FAIL  the xrun controls did not finish (start() deadlocked)\n");
+                std::printf("%d CHECK(S) FAILED\n", ++gFailures);
+                std::fflush(stdout);
+                return 1;
+            }
+            check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                "every xrun control passed in the isolated child");
+        }
     }
 
     std::printf(gFailures == 0 ? "all checks passed\n" : "%d CHECK(S) FAILED\n", gFailures);

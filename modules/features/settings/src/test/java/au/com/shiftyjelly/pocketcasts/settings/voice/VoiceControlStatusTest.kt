@@ -1,5 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.settings.voice
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
@@ -377,18 +382,50 @@ class VoiceControlModelRowsTest {
     }
 
     /**
-     * Reviewer finding 7e0bf9bf: the row's readiness must come from the SELECTED backend's
-     * `requiredModel` via `ModelManager.isModelReady(spec)`, not from the shared download-progress
-     * flow. `ModelManager` initialises that flow to NotStarted and never assigns Ready, so a
-     * preinstalled working backend still read as "model missing", and another model's download
-     * could drive it too. The previous helper tests could not catch this because they were handed a
-     * ready Boolean directly -- this one goes through the same wiring production uses.
+     * Reviewer findings 7e0bf9bf and 16d8af35. Production calls `recognitionRowsFor` from the
+     * fragment, so controlling it governs the fragment's real input. These tests pass a fake
+     * `AsrBackend` and a recording readiness provider, and assert WHICH spec is queried -- the
+     * previous versions supplied a fabricated Boolean to a projection with no production caller,
+     * which could not detect a misbound input source.
      */
+    private class FakeBackend(override val requiredModel: ModelSpec) : AsrBackend {
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult(text = "")
+        override val capabilities: AsrCapabilities = AsrCapabilities(
+            supportedLanguages = setOf("en"),
+            canTranslateToEnglish = false,
+            requiresSnapdragon = false,
+        )
+        override fun release() = Unit
+    }
+
+    private fun spec(dir: String) = ModelSpec(
+        files = listOf(ModelFile(url = "https://example/$dir.ort", filename = "$dir.ort")),
+        targetDir = dir,
+    )
+
+    @Test
+    fun `the row queries the selected backend's own required model`() {
+        val backend = FakeBackend(spec("sensevoice-model"))
+        val queried = mutableListOf<ModelSpec>()
+        recognitionRowsFor(
+            selectedBackend = backend,
+            isModelReady = { s ->
+                queried += s
+                false
+            },
+            downloadState = ModelDownloadState.NotStarted,
+            moonshineDownloaded = true,
+        )
+        assertEquals(listOf(backend.requiredModel), queried)
+        assertFalse(queried.any { it.targetDir.contains("moonshine") })
+    }
+
     @Test
     fun `a preinstalled working backend is ready even though the download flow is NotStarted`() {
         val rows = recognitionRowsFor(
-            selectedBackend = RecognitionBackend.SenseVoice,
-            backendFilesPresent = true,
+            selectedBackend = FakeBackend(spec("sensevoice-model")),
+            isModelReady = { true },
             downloadState = ModelDownloadState.NotStarted,
             moonshineDownloaded = false,
         )
@@ -398,8 +435,8 @@ class VoiceControlModelRowsTest {
     @Test
     fun `another model starting a download does not make the selected backend ready`() {
         val rows = recognitionRowsFor(
-            selectedBackend = RecognitionBackend.SenseVoice,
-            backendFilesPresent = false,
+            selectedBackend = FakeBackend(spec("sensevoice-model")),
+            isModelReady = { false },
             downloadState = ModelDownloadState.Ready,
             moonshineDownloaded = true,
         )
@@ -409,12 +446,12 @@ class VoiceControlModelRowsTest {
     @Test
     fun `a downloading selected backend reports its own progress and not readiness`() {
         val rows = recognitionRowsFor(
-            selectedBackend = RecognitionBackend.CanaryFlash,
-            backendFilesPresent = false,
+            selectedBackend = FakeBackend(spec("sensevoice-model")),
+            isModelReady = { false },
             downloadState = ModelDownloadState.Downloading(37),
             moonshineDownloaded = false,
         )
-        assertEquals("Canary Flash model missing", rows.recognitionText)
+        assertEquals("SenseVoice model missing", rows.recognitionText)
         assertEquals("Downloading: 37%", rows.recognitionProgressText)
     }
 
@@ -422,7 +459,7 @@ class VoiceControlModelRowsTest {
     fun `an unsupported locale is not blamed on a missing model`() {
         val rows = recognitionRowsFor(
             selectedBackend = null,
-            backendFilesPresent = false,
+            isModelReady = { error("no spec should be queried when no backend is selected") },
             downloadState = ModelDownloadState.NotStarted,
             moonshineDownloaded = false,
         )

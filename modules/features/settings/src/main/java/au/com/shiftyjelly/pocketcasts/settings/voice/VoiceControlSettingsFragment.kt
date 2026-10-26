@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -40,8 +41,10 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
@@ -100,19 +103,23 @@ class VoiceControlSettingsFragment : BaseFragment() {
             }
             // Readiness is the selected backend's OWN model files, the same surface
             // VoiceControlService uses. The shared downloadState flow never reports Ready.
-            var backendFilesPresent by remember {
-                mutableStateOf(selectedBackend?.let { modelManager.isModelReady(it.requiredModel) } ?: false)
-            }
+            // Recomputed on resume so a backend that finishes installing shows as ready.
+            var readinessRevision by remember { mutableIntStateOf(0) }
             DisposableEffect(this) {
                 val observer = LifecycleEventObserver { _, event ->
-                    if (event == Lifecycle.Event.ON_RESUME) {
-                        backendFilesPresent = selectedBackend?.let { modelManager.isModelReady(it.requiredModel) } ?: false
-                    }
+                    if (event == Lifecycle.Event.ON_RESUME) readinessRevision++
                 }
                 lifecycle.addObserver(observer)
                 onDispose { lifecycle.removeObserver(observer) }
             }
-            val moonshineDownloaded = modelManager.isMoonshineModelReady()
+            val recognitionRows = remember(selectedBackend, modelState, readinessRevision) {
+                recognitionRowsFor(
+                    selectedBackend = selectedBackend,
+                    isModelReady = modelManager::isModelReady,
+                    downloadState = modelState,
+                    moonshineDownloaded = modelManager.isMoonshineModelReady(),
+                )
+            }
             // The wake word is a different component from the recognition backend: its model is
             // bundled with the app and its readiness is the detector's own load result. Reading the
             // recognition model's absence as wake readiness contradicted the status row directly
@@ -157,8 +164,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
             VoiceControlSettingsPage(
                 enabled = !enabled,
                 recognitionBackend = recognitionBackend,
-                recognitionBackendReady = backendFilesPresent,
-                moonshineDownloaded = moonshineDownloaded,
+                recognitionRows = recognitionRows,
                 wakeWordReady = detectorReady,
                 statusText = voiceControlStatus(
                     mode = mode,
@@ -181,8 +187,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
 private fun VoiceControlSettingsPage(
     enabled: Boolean,
     recognitionBackend: RecognitionBackend?,
-    recognitionBackendReady: Boolean,
-    moonshineDownloaded: Boolean,
+    recognitionRows: RecognitionRows,
     wakeWordReady: Boolean,
     statusText: String,
     onEnabledChange: (Boolean) -> Unit,
@@ -218,7 +223,7 @@ private fun VoiceControlSettingsPage(
             item {
                 SettingRow(
                     primaryText = RECOGNITION_MODEL_LABEL,
-                    secondaryText = recognitionModelText(recognitionBackend, recognitionBackendReady, moonshineDownloaded),
+                    secondaryText = recognitionRows.recognitionText,
                     toggle = SettingRowToggle.None,
                     indent = false,
                 )
@@ -226,7 +231,7 @@ private fun VoiceControlSettingsPage(
             item {
                 SettingRow(
                     primaryText = MOONSHINE_MODEL_LABEL,
-                    secondaryText = moonshineModelText(moonshineDownloaded),
+                    secondaryText = recognitionRows.moonshineText,
                     toggle = SettingRowToggle.None,
                     indent = false,
                 )
@@ -252,8 +257,11 @@ private fun VoiceControlSettingsPagePreview(
         VoiceControlSettingsPage(
             enabled = true,
             recognitionBackend = RecognitionBackend.SenseVoice,
-            recognitionBackendReady = true,
-            moonshineDownloaded = false,
+            recognitionRows = RecognitionRows(
+                recognitionText = "SenseVoice ready",
+                recognitionProgressText = "",
+                moonshineText = "Not downloaded",
+            ),
             wakeWordReady = true,
             statusText = "Active (wake word required)",
             onEnabledChange = {},
@@ -284,7 +292,7 @@ internal enum class RecognitionBackend(val displayName: String) {
  */
 internal fun wakeWordModelText(detectorReady: Boolean): String = if (detectorReady) "Ready" else "Unavailable"
 
-/** The rows the recognition section renders, computed from real readiness surfaces. */
+/** The rows the recognition section renders. */
 internal data class RecognitionRows(
     val recognitionText: String,
     val recognitionProgressText: String,
@@ -292,20 +300,52 @@ internal data class RecognitionRows(
 )
 
 /**
- * Builds the recognition rows from the SELECTED backend's own model files.
- *
- * Reviewer finding 7e0bf9bf: readiness must come from `ModelManager.isModelReady(backendSpec)` --
- * the per-spec file check `VoiceControlService` itself uses -- not from the shared
- * `downloadState` flow. That flow starts at `NotStarted`, is only ever assigned `Downloading`, and
- * never becomes `Ready`, so deriving readiness from it reported a preinstalled, working backend as
- * "model missing" and let an unrelated model's download influence the row.
+ * The fragment's own row construction: maps the selected `AsrBackend` to the row enum and hands its
+ * `requiredModel` to the resolver. Production calls exactly this, so a control over it governs the
+ * fragment's real input rather than a parallel projection.
  */
 internal fun recognitionRowsFor(
-    selectedBackend: RecognitionBackend?,
-    backendFilesPresent: Boolean,
+    selectedBackend: AsrBackend?,
+    isModelReady: (ModelSpec) -> Boolean,
     downloadState: ModelDownloadState,
     moonshineDownloaded: Boolean,
 ): RecognitionRows {
+    val row = when {
+        selectedBackend == null -> null
+
+        selectedBackend is CanaryFlashBackend -> RecognitionBackend.CanaryFlash
+
+        // SenseVoice is the product default; any other selectable backend it presents as itself.
+        selectedBackend is SenseVoiceBackend -> RecognitionBackend.SenseVoice
+
+        else -> RecognitionBackend.SenseVoice
+    }
+    return resolveRecognitionRows(
+        selectedBackend = row,
+        requiredModel = selectedBackend?.requiredModel,
+        isModelReady = isModelReady,
+        downloadState = downloadState,
+        moonshineDownloaded = moonshineDownloaded,
+    )
+}
+
+/**
+ * Resolves the recognition rows by querying the SELECTED backend's own required model through the
+ * file-readiness provider.
+ *
+ * Reviewer finding 16d8af35: the earlier version of this function received an already-computed
+ * `backendFilesPresent` Boolean and had no production caller, so its tests could not establish
+ * which spec production actually queried. This one takes the spec the backend requires and the
+ * readiness provider, so a test can assert the queried spec, and production calls it.
+ */
+internal fun resolveRecognitionRows(
+    selectedBackend: RecognitionBackend?,
+    requiredModel: ModelSpec?,
+    isModelReady: (ModelSpec) -> Boolean,
+    downloadState: ModelDownloadState,
+    moonshineDownloaded: Boolean,
+): RecognitionRows {
+    val backendFilesPresent = requiredModel?.let(isModelReady) ?: false
     val progressText = when (downloadState) {
         is ModelDownloadState.Downloading -> "Downloading: ${downloadState.progressPercent}%"
         is ModelDownloadState.Failed -> "Download failed"

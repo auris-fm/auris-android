@@ -902,7 +902,7 @@ int main() {
                 int advanceAtRead = -1;
                 int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
                     const int32_t read = OboeAudioCapture::readRingBuffer(outData, maxSamples, timeoutMs);
-                    if (read > 0 && advanceAtRead >= 0 && reads.load() == (size_t)advanceAtRead) {
+                    if (read > 0 && advanceAtRead >= 0 && (int)reads.load() == advanceAtRead) {
                         // The HAL discarded input at this moment: only the counter knows.
                         setXrunCountForTest(/*supported=*/true, /*count=*/7);
                     }
@@ -941,7 +941,7 @@ int main() {
             }
             check(closed, "the extraction script produces a segment");
             if (closed) {
-                check(capture.reads.load() > (size_t)capture.advanceAtRead,
+                check((int)capture.reads.load() > capture.advanceAtRead,
                     "premise: the xrun advance happened during extraction, not after it");
                 check(processor.getSpeechEndStreamPosition() == 0,
                     "an xrun during extraction reports the anchor UNAVAILABLE rather than wrong");

@@ -302,10 +302,10 @@ class VoiceControlStatusTest {
 }
 
 /**
- * The Speech Model rows must name the component they measure. The wake word runs from a bundled
- * detector model; Moonshine is the separately-downloaded recognition backend. Reporting Moonshine's
- * absence as "Not downloaded" next to "Active (wake word required)" told the reader the wake word
- * was unready when it was working (owner-observed on the Pixel 8).
+ * The model rows must name the component they measure. The wake word runs from a bundled detector
+ * model; speech recognition is SenseVoice or Canary Flash depending on locale. A single
+ * "Speech Model" row that reported a different component's state told the reader the wake word was
+ * unready while it was working (owner-observed on the Pixel 8).
  */
 class VoiceControlModelRowsTest {
 
@@ -329,10 +329,9 @@ class VoiceControlModelRowsTest {
 
     /**
      * Reviewer correction (cec2f3be): the row must report the SELECTED transcription backend, not
-     * Moonshine. Moonshine is not a selectable backend at all -- `AsrBackendSelector` chooses
-     * SenseVoice or Canary Flash by locale -- so showing Moonshine's absence as "Not downloaded"
-     * under a generic "Speech Recognition Model" label said the wrong component was unready while
-     * the real backend was fine.
+     * The row must report the SELECTED transcription backend. `AsrBackendSelector` chooses
+     * SenseVoice or Canary Flash by locale, so a row keyed to anything else says the wrong
+     * component is unready while the real backend is fine.
      */
     @Test
     fun `the recognition row names the selected backend and reports that backend's readiness`() {
@@ -341,7 +340,6 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = RecognitionBackend.SenseVoice,
                 backendReady = true,
-                moonshineDownloaded = false,
             ),
         )
         assertEquals(
@@ -349,7 +347,6 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = RecognitionBackend.SenseVoice,
                 backendReady = false,
-                moonshineDownloaded = true,
             ),
         )
         assertEquals(
@@ -357,7 +354,6 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = RecognitionBackend.CanaryFlash,
                 backendReady = true,
-                moonshineDownloaded = false,
             ),
         )
     }
@@ -369,25 +365,10 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = null,
                 backendReady = false,
-                moonshineDownloaded = false,
             ),
         )
     }
 
-    @Test
-    fun `the optional Moonshine download is reported as its own separate row`() {
-        assertEquals("Moonshine (optional)", MOONSHINE_MODEL_LABEL)
-        assertEquals("Downloaded", moonshineModelText(moonshineDownloaded = true))
-        assertEquals("Not downloaded", moonshineModelText(moonshineDownloaded = false))
-    }
-
-    /**
-     * Reviewer findings 7e0bf9bf and 16d8af35. Production calls `recognitionRowsFor` from the
-     * fragment, so controlling it governs the fragment's real input. These tests pass a fake
-     * `AsrBackend` and a recording readiness provider, and assert WHICH spec is queried -- the
-     * previous versions supplied a fabricated Boolean to a projection with no production caller,
-     * which could not detect a misbound input source.
-     */
     private class FakeBackend(override val requiredModel: ModelSpec) : AsrBackend {
         override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
         override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult(text = "")
@@ -415,10 +396,8 @@ class VoiceControlModelRowsTest {
                 false
             },
             downloadState = ModelDownloadState.NotStarted,
-            moonshineDownloaded = true,
         )
         assertEquals(listOf(backend.requiredModel), queried)
-        assertFalse(queried.any { it.targetDir.contains("moonshine") })
     }
 
     @Test
@@ -427,7 +406,6 @@ class VoiceControlModelRowsTest {
             selectedBackend = FakeBackend(spec("sensevoice-model")),
             isModelReady = { true },
             downloadState = ModelDownloadState.NotStarted,
-            moonshineDownloaded = false,
         )
         assertEquals("SenseVoice ready", rows.recognitionText)
     }
@@ -438,7 +416,6 @@ class VoiceControlModelRowsTest {
             selectedBackend = FakeBackend(spec("sensevoice-model")),
             isModelReady = { false },
             downloadState = ModelDownloadState.Ready,
-            moonshineDownloaded = true,
         )
         assertEquals("SenseVoice model missing", rows.recognitionText)
     }
@@ -449,7 +426,6 @@ class VoiceControlModelRowsTest {
             selectedBackend = FakeBackend(spec("sensevoice-model")),
             isModelReady = { false },
             downloadState = ModelDownloadState.Downloading(37),
-            moonshineDownloaded = false,
         )
         assertEquals("SenseVoice model missing", rows.recognitionText)
         assertEquals("Downloading: 37%", rows.recognitionProgressText)
@@ -461,18 +437,7 @@ class VoiceControlModelRowsTest {
             selectedBackend = null,
             isModelReady = { error("no spec should be queried when no backend is selected") },
             downloadState = ModelDownloadState.NotStarted,
-            moonshineDownloaded = false,
         )
         assertEquals("Not available for this language", rows.recognitionText)
-    }
-
-    @Test
-    fun `the recognition row never mentions Moonshine`() {
-        RecognitionBackend.entries.forEach { backend ->
-            listOf(true, false).forEach { ready ->
-                val text = recognitionModelText(backend, backendReady = ready, moonshineDownloaded = true)
-                assertFalse("row must not mention Moonshine: $text", text.contains("Moonshine", ignoreCase = true))
-            }
-        }
     }
 }

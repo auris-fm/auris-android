@@ -9,9 +9,8 @@ import javax.inject.Singleton
  * Filters utterances before they reach the intent parser.
  *
  * Two checks:
- * 1. Speaker consistency — Moonshine diarization via [identify_speakers].
- *    First accepted command in a listening session establishes the target speaker;
- *    subsequent utterances from other speaker indices are dropped.
+ * 1. Speaker consistency — the first accepted command in a listening session establishes the
+ *    target speaker; subsequent utterances from other speaker indices are dropped.
  * 2. Playback bleed rejection — cross-correlation of mic audio against the
  *    playback buffer. Disabled when using a headset (no acoustic path from
  *    speaker to mic).

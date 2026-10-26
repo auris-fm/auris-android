@@ -35,16 +35,26 @@ import org.junit.rules.TemporaryFolder
  *   recovery tests rely on, and I label it that way rather than as a device restart.
  * - NOT claimed: that a real HTTP client received these bytes. The response is supplied at the
  *   transport seam using the fixture's exact bodies; the transport's own code-to-disposition table is
- *   exercised elsewhere.
+ *   exercised by LoopbackRefusalSettlementTest over a real socket.
+ *
+ * FIVE codes, not six. An earlier version of this list also carried `capture_conflict`, following the
+ * first Cloud fixture, which classified 409 capture_conflict as retryable. That classification was
+ * WRONG and Cloud corrected it (spec ruling 681704d4): the same capture identity arriving with a
+ * DIFFERENT digest is a permanent refusal, since repeating the request can never succeed. The
+ * genuinely retryable concurrent case is 503 upload_pending - same capture, same bytes, still in
+ * flight. Production has always classified 409 capture_conflict as TERMINAL
+ * (ContributionUploadTransport.byCode), so keeping it here asserted store-retention semantics for a
+ * refusal the production transport never surfaces as retryable. It proved nothing about the client
+ * and invited a future reader to believe the client retries a 409. The terminal case is pinned
+ * separately, over a real socket, in LoopbackRefusalSettlementTest.
  */
 class RetryableRefusalRetentionTest {
 
     @get:Rule
     val tmp = TemporaryFolder()
 
-    /** Exact bodies from Cloud's fixture, read from the route's own emitter. */
+    /** The five bodies Production actually classifies RETRY, matching the corrected Cloud fixture. */
     private val retryableBodies = listOf(
-        "capture_conflict" to """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}""",
         "rate_limited" to """{"schema_version":1,"code":"rate_limited","retry_after_s":30}""",
         "quota_exceeded" to """{"schema_version":1,"code":"quota_exceeded","retry_after_s":30}""",
         "upload_pending" to """{"schema_version":1,"code":"upload_pending","retry_after_s":30}""",
@@ -220,6 +230,72 @@ class RetryableRefusalRetentionTest {
         root.walkTopDown().firstOrNull { it.isFile && it.name == "$captureId.recording.wav" }?.let { return it }
         val recordings = root.walkTopDown().filter { it.isFile && it.name.endsWith(".recording.wav") }.toList()
         return recordings.singleOrNull() ?: File(root, "$captureId.recording.wav")
+    }
+
+    /**
+     * THE FIXTURE LIST MUST AGREE WITH PRODUCTION, PROVEN RATHER THAN DECLARED.
+     *
+     * This list was wrong once: it carried `capture_conflict` (409) as retryable for weeks after
+     * Cloud corrected the fixture, because nothing tied the list to the code that actually decides.
+     * That is the direction this control now catches: adding a code production refuses fails here
+     * instead of quietly asserting store semantics for a refusal the client never retries.
+     *
+     * WHAT THIS DOES NOT PROVE (reviewer 1cff028d): it does not prove the list is EXHAUSTIVE.
+     * Deleting a retryable fixture removes a loop iteration and leaves nothing behind to fail -
+     * a control cannot notice an absence. MEASURED, not assumed: deleting the `rate_limited` entry
+     * was applied as a mutant and the class stayed GREEN, so this really is a survivor rather than
+     * a theoretical gap. So the covered claim is "every code listed here is
+     * retryable in production, and these specific excluded codes are terminal", not "the list is
+     * exactly production's retryable set". Closing the gap would need a table to compare against,
+     * and a copied table asserts nothing because both copies move together, so the honest position
+     * is to state the limit rather than manufacture coverage.
+     *
+     * Goes through the REAL `classify` on the real (status, body) pair, so this is not a second
+     * copy of the disposition table.
+     */
+    @Test
+    fun `every retryable fixture is genuinely retryable in production, and the excluded codes are terminal`() {
+        val transport = ContributionUploadTransport(
+            endpoint = "http://127.0.0.1:1/v1/contributions",
+            authorization = { "Bearer test-token" },
+            callTimeoutMs = 1_000,
+        )
+
+        // Every code the fixture set claims to retain must actually be RETRYABLE in production.
+        for ((code, body) in retryableBodies) {
+            val status = statusForFixture(code)
+            val response = transport.classifyForTest(status, body.toByteArray())
+            assertTrue(
+                "$code is in this control's fixture list but production classifies it as " +
+                    "${response::class.simpleName}, not Retryable. Either the fixture list is stale " +
+                    "or production changed - reconcile them against the Cloud fixture before editing " +
+                    "either.",
+                response is ContributionUploadTransport.Response.Retryable,
+            )
+        }
+
+        // And the codes we deliberately KEEP OUT must be genuinely non-retryable, so removing them
+        // from the list was a correction rather than a convenient omission.
+        val terminal = listOf(
+            "capture_conflict" to (409 to """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}"""),
+            "invalid_request" to (400 to """{"schema_version":1,"code":"invalid_request"}"""),
+            "record_gone" to (410 to """{"schema_version":1,"code":"record_gone"}"""),
+        )
+        for ((code, pair) in terminal) {
+            val response = transport.classifyForTest(pair.first, pair.second.toByteArray())
+            assertTrue(
+                "$code must stay TERMINAL: it is excluded from the retention fixture because " +
+                    "retrying it can never succeed, so retaining audio behind it would hold it forever",
+                response is ContributionUploadTransport.Response.Terminal,
+            )
+        }
+    }
+
+    /** The owning status for each fixture body, per the client's own status-for-code envelope. */
+    private fun statusForFixture(code: String): Int = when (code) {
+        "rate_limited", "quota_exceeded" -> 429
+        "upload_pending", "policy_unavailable", "storage_unavailable" -> 503
+        else -> error("no fixture status declared for $code - add it here AND in the Cloud fixture")
     }
 
     private fun sha256Of(file: File): String = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes())

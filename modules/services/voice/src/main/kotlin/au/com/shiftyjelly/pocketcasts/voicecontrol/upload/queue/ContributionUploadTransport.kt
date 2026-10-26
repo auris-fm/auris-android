@@ -287,6 +287,16 @@ class ContributionUploadTransport(
 
     private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
+    /**
+     * Test seam: the disposition this transport would reach for a real (status, body) pair.
+     *
+     * Exists so a control can assert that a fixture list agrees with PRODUCTION classification
+     * instead of re-declaring the table beside it - a copied table asserts nothing, since both
+     * copies move together. Routed through [classify] on purpose: this must never grow a second
+     * decision path.
+     */
+    internal fun classifyForTest(status: Int, body: ByteArray): Response = classify(status, body)
+
     private fun classify(status: Int, body: ByteArray): Response {
         if (status in 200..299) return Response.Accepted(status, body)
         // An error body is NOT a receipt: read it strictly and BOUNDED. A body that is not exactly

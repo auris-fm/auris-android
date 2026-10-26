@@ -1,4 +1,4 @@
-// EmbeddingJni.cpp — multilingual-e5-small inference via Moonshine's ORT.
+// EmbeddingJni.cpp — multilingual-e5-small inference via the ONNX Runtime C API.
 //
 // Uses ORT C API via dlsym from onnxruntime-android (loaded via System.loadLibrary).
 // CreateSessionFromArray from bytes, no session options.

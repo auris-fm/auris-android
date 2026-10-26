@@ -1,18 +1,20 @@
-// VadJni.cpp — Silero VAD via Moonshine's ONNX Runtime C API.
+// VadJni.cpp — Silero VAD via the ONNX Runtime C API.
 //
 // Runs the Silero VAD model (silero_vad.onnx) directly against
-// libonnxruntime.so (bundled by Moonshine Voice SDK), avoiding the
-// Java ONNX API and its symbol-version conflicts.
+// libonnxruntime.so, avoiding the Java ONNX API and its
+// symbol-version conflicts.
 //
 // Uses dlsym to resolve OrtGetApiBase at runtime since we can't
 // link against the prebuilt libonnxruntime.so at build time.
 //
 // The onnxruntime_c_*.h headers committed in this directory are
-// build-time-only C API declarations. The actual .so comes from
-// ai.moonshine:moonshine-voice, so these headers must match whatever
-// ONNX Runtime version that AAR bundles. We commit them directly
-// rather than pulling via Maven/FetchContent to avoid .so conflicts
-// and to guarantee ABI compatibility with Moonshine's build.
+// build-time-only C API declarations. The actual .so ships in this
+// module's jniLibs alongside libsherpa-onnx-jni.so, taken from the
+// sherpa-onnx distribution the ASR backends already use, so these
+// headers must match the ONNX Runtime version that distribution
+// bundles. We commit them directly rather than pulling via
+// Maven/FetchContent to avoid .so conflicts and to guarantee ABI
+// compatibility with the shipped library.
 
 #include <jni.h>
 #include <android/asset_manager_jni.h>

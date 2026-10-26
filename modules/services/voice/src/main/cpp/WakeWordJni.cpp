@@ -1,7 +1,8 @@
 // WakeWordJni.cpp — openWakeWord-style wake word detection via ONNX Runtime.
 //
-// Runs a 3-stage ONNX pipeline against libonnxruntime.so (already loaded by
-// the Moonshine Voice SDK), using dlsym to resolve OrtGetApiBase at runtime.
+// Runs a 3-stage ONNX pipeline against libonnxruntime.so (shipped in this
+// module's jniLibs beside libsherpa-onnx-jni.so), using dlsym to resolve
+// OrtGetApiBase at runtime.
 //
 // Pipeline:
 //   1. Mel spectrogram  — raw PCM → mel filterbank features (melspectrogram.onnx)

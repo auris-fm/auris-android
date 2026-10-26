@@ -171,6 +171,7 @@ object VoiceUploadModule {
         assembly: ContributionUploadAssembly,
         store: ContributionStore,
         accountStartup: VoiceSharingAccountStartup,
+        policyProvider: VoiceSharingPolicyProvider,
         @UploadTriggerScope scope: CoroutineScope,
         publishTrigger: RetentionPublishTrigger,
     ): UploadTrigger {
@@ -188,6 +189,9 @@ object VoiceUploadModule {
                 snapshot = { accountStartup.authoritySnapshot() },
                 epoch = { accountStartup.state.projection.value?.enrollmentEpoch },
                 store = store,
+                // THE policy-disable tail: a published disable must also purge QUEUED audio, not
+                // merely close the upload gate.
+                policyProvider = policyProvider,
             ),
             publishTrigger = publishTrigger,
         )

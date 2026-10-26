@@ -110,6 +110,7 @@ class VoiceUploadCompositionPathTest {
                 assembly = assembly,
                 store = store,
                 accountStartup = startup,
+                policyProvider = policy,
                 scope = scope,
                 publishTrigger = publishTrigger,
             )

@@ -168,17 +168,14 @@ class ContributionUploadWriterTerminationTest {
             ContributionUploadTransport.Response.Cancelled,
             response,
         )
-        // THE FLAKE INSTRUMENT MUST ASSERT, NOT MERELY NARRATE (flake WriterTermination).
-        // `unexpectedExitForTest` is set only in the transport's outer catch - an unexpected throwable
-        // escaping the WHOLE exchange, which is exactly the shape this flake would take. Before this it
-        // was only interpolated into the message above, so it was read only when the test had ALREADY
-        // failed, and only by a human. A withdrawal that returned Cancelled while an unexpected exit had
-        // also occurred would have passed, with its own evidence sitting unused beside it.
-        // Asserting null is the discrimination: a clean cancellation sets nothing, so if this ever fires
-        // the throwable arrives as a test FAILURE rather than as decoration on some other failure.
+        // The cause is also checked directly, but this is REDUNDANT SAFETY, not independent coverage.
+        // The outer catch sets `unexpectedExitForTest` AND returns `Ambiguous(null)`, so the assertEquals
+        // above already fails on that path: a non-null flag cannot coexist with a Cancelled response in
+        // the shipped code. What this adds is the throwable as its own named failure instead of only as
+        // message text on the assertion above (reviewer 73d714ae).
         assertNull(
-            "the exchange left through the outer catch instead of a clean withdrawal, so this is the " +
-                "WriterTermination flake reproducing, not a passing cancellation: " +
+            "an unexpected exit was recorded, so this is a failure inside the exchange (not necessarily " +
+                "the known WriterTermination flake, which this does not identify): " +
                 watchedTransport.unexpectedExitForTest,
             watchedTransport.unexpectedExitForTest,
         )

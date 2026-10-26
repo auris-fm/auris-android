@@ -1391,6 +1391,7 @@ class ContributionStoreTest {
         assertEquals(listOf(ID_A), successor.readyEntries().map { it.captureId })
         assertEquals("epoch-new", successor.readyEntries().single().enrollmentEpoch)
     }
+
     @Test
     fun `close drains an operation already past the guard and refuses a later one`() {
         // REVIEWER 7db01cd9 finding 1: invalidating on close fences NEW entrants but not an operation

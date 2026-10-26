@@ -232,9 +232,8 @@ class ContributionStore(
     }
 
     /** Operation-lease admission; false when this instance may not touch the directory. */
-    private fun enterOperation(): Boolean =
-        (directoryOwnership as? FileDirectoryOwnership)?.enter()
-            ?: directoryOwnership.isHeld()
+    private fun enterOperation(): Boolean = (directoryOwnership as? FileDirectoryOwnership)?.enter()
+        ?: directoryOwnership.isHeld()
 
     private fun leaveOperation() {
         (directoryOwnership as? FileDirectoryOwnership)?.leave()
@@ -2008,19 +2007,19 @@ class ContributionStore(
             return
         }
         try {
-        // Same bounded traversal as recovery (reviewer d1cce25b): enumeration failure defers the sweep.
-        val files = try {
-            boundedRootListing()
-        } catch (unknown: MeasurementError) {
-            synchronized(lock) {
-                rootEnumerationUnknown = true
-                measurementFailures++
+            // Same bounded traversal as recovery (reviewer d1cce25b): enumeration failure defers the sweep.
+            val files = try {
+                boundedRootListing()
+            } catch (unknown: MeasurementError) {
+                synchronized(lock) {
+                    rootEnumerationUnknown = true
+                    measurementFailures++
+                }
+                return
             }
-            return
-        }
-        // Same checked deletion as the recovery sweep. Discarding the result here left surviving partials
-        // invisible to accounting (reviewer e4342946).
-        files.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
+            // Same checked deletion as the recovery sweep. Discarding the result here left surviving partials
+            // invisible to accounting (reviewer e4342946).
+            files.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
         } finally {
             leaveOperation()
         }

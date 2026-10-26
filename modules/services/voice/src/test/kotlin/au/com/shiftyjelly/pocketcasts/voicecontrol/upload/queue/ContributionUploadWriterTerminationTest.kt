@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -166,6 +167,20 @@ class ContributionUploadWriterTerminationTest {
                 (watchedTransport.unexpectedExitForTest?.let { " (unexpected exit: $it)" } ?: ""),
             ContributionUploadTransport.Response.Cancelled,
             response,
+        )
+        // THE FLAKE INSTRUMENT MUST ASSERT, NOT MERELY NARRATE (flake WriterTermination).
+        // `unexpectedExitForTest` is set only in the transport's outer catch - an unexpected throwable
+        // escaping the WHOLE exchange, which is exactly the shape this flake would take. Before this it
+        // was only interpolated into the message above, so it was read only when the test had ALREADY
+        // failed, and only by a human. A withdrawal that returned Cancelled while an unexpected exit had
+        // also occurred would have passed, with its own evidence sitting unused beside it.
+        // Asserting null is the discrimination: a clean cancellation sets nothing, so if this ever fires
+        // the throwable arrives as a test FAILURE rather than as decoration on some other failure.
+        assertNull(
+            "the exchange left through the outer catch instead of a clean withdrawal, so this is the " +
+                "WriterTermination flake reproducing, not a passing cancellation: " +
+                watchedTransport.unexpectedExitForTest,
+            watchedTransport.unexpectedExitForTest,
         )
         // No writer may outlive its attempt.
         assertEquals("no call is left outstanding", 0, transport(port, 60_000).inFlightForTest())

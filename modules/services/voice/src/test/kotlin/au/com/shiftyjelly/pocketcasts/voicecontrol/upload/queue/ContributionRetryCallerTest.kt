@@ -430,6 +430,9 @@ class ContributionRetryCallerTest {
         assertEquals("the consumed attempt is still accounted", 1, hooked.stateAttemptsForTest(id))
 
         // A FRESH owner reads the SAME durable boundary: not through the old generation, not in memory.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        hooked.close()
+        store.close()
         val fresh = newStore(root, { now })
         fresh.recover()
         val boundary = fresh.retryBoundariesForTest()[id]
@@ -655,6 +658,8 @@ class ContributionRetryCallerTest {
         caller.pollOnce()
 
         // A FRESH owner (restart) reads the same durable boundary: at least the server minimum.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val fresh = newStore(root, { now })
         fresh.recover()
         val boundary = fresh.retryBoundariesForTest()[id]

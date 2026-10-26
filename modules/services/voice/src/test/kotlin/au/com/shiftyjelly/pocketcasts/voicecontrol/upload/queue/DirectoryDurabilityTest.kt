@@ -161,6 +161,8 @@ class DirectoryDurabilityTest {
 
         // Recovery re-reads the durable sidecar (count-only, the failed write never landed) and resolves
         // the uncertainty: the entry is eligible again under its recomputed state.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val revived = ContributionStore(
             root,
             limits().copy(retryInitialS = 4, retryMaxS = 8),
@@ -196,6 +198,8 @@ class DirectoryDurabilityTest {
 
         // FRESH owner, working sync: the visible intent is reconciled, and the boundary it carried is
         // honored - not eligible before it, eligible at it.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        faulted.close()
         val fresh = ContributionStore(
             root,
             limits().copy(retryInitialS = 4, retryMaxS = 8),
@@ -229,6 +233,8 @@ class DirectoryDurabilityTest {
         File(contributions, "$id.retry").writeText(boundaryAt.toString())
         now += 999_999L
 
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val fresh = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
         assertEquals(listOf(id), fresh.recover().map { it.captureId })
         assertTrue("orphan record boundary honored after reconciliation", fresh.retryEligible(boundaryAt - 1).isEmpty())
@@ -342,6 +348,8 @@ class DirectoryDurabilityTest {
         assertTrue("second count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
         now += 10L
 
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val fresh = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
         assertTrue("the entry survives its pending count intent", fresh.recover().any { it.captureId == id })
         assertEquals(
@@ -511,6 +519,8 @@ class DirectoryDurabilityTest {
         assertEquals(now + 3_999L, store.scheduleRetryAfterFailure(generation, id, retryAfterS = null))
 
         // RESTART: a fresh instance over the same root must load the durable not-before boundary.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val revived = ContributionStore(
             root,
             limits().copy(retryInitialS = 4, retryMaxS = 8),
@@ -825,6 +835,8 @@ class DirectoryDurabilityTest {
         // directory already existed, so publication proceeded into a non-durable namespace.
         failParent = false
         val parentSyncs = java.util.concurrent.atomic.AtomicInteger()
+        // One live owner per queue: the observer takes over only after the previous owner releases.
+        store.close()
         val observing = ContributionStore(
             root,
             limits(),
@@ -849,11 +861,15 @@ class DirectoryDurabilityTest {
         // The confirmation step must run, and must be able to FAIL, on a fresh instance.
         val root = tmp.newFolder("queue-uncertain-recovery")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits(), directorySync = RecordingSync()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        // One live owner per queue (spec c8f766fb): each owner below releases before the next takes over.
+        val seeder = ContributionStore(root, limits(), directorySync = RecordingSync())
+        seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        seeder.close()
 
         val failingFileSync = FileSync { throw java.io.IOException("simulated confirmation failure") }
         val fresh = ContributionStore(root, limits(), directorySync = RecordingSync(), fileSync = failingFileSync)
         val recovered = fresh.recover()
+        fresh.close()
 
         assertTrue(
             "recovery exposed an entry whose durability it could not confirm: ${recovered.map { it.captureId }}",
@@ -1111,13 +1127,17 @@ class DirectoryDurabilityTest {
         // accounting says the queue is empty, so new work is admitted on top of them.
         val root = tmp.newFolder("queue-reload-charge")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        // One live owner per queue (spec c8f766fb): each owner below is explicit and releases before the
+        // next takes the directory.
+        val seeder = ContributionStore(root, limits())
+        seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        seeder.close()
 
         val probeMeta = meta(java.util.UUID.randomUUID().toString())
         val probeSamples = 256L
-        val charge = ContributionStore(root, limits()).let { sizing ->
-            sizing.recover().single().let { it.audioBytes + it.metadataBytes }
-        }
+        val sizing = ContributionStore(root, limits())
+        val charge = sizing.recover().single().let { it.audioBytes + it.metadataBytes }
+        sizing.close()
         val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
         assertTrue("precondition: probe is smaller than the stored entry", probeBytes < charge)
 
@@ -1193,6 +1213,9 @@ class DirectoryDurabilityTest {
         File(wav, "held").delete()
         wav.delete()
         assertTrue("precondition: the audio is finally gone", !wav.exists())
+        // One live owner per queue (spec c8f766fb): the final owner takes over after the previous release.
+        deletingStore.close()
+        tight.close()
         val after = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes))
         assertTrue(
             "after a successful retry the capacity must be released",
@@ -1229,6 +1252,8 @@ class DirectoryDurabilityTest {
         assertEquals("the entry still leaves the index", listOf(id), expired)
 
         // Whatever survived, the entry must not be served and must stay accounted for.
+        // One live owner per queue (spec c8f766fb): the restart takes over after the previous owner releases.
+        store.close()
         val restarted = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
         val recovered = restarted.recover()
         assertTrue(
@@ -1239,8 +1264,11 @@ class DirectoryDurabilityTest {
         val stillThere = wav.exists()
         val probeMeta = meta(java.util.UUID.randomUUID().toString())
         val probeBytes = ContributionStore(root, limits()).projectedBytesFor(256L, probeMeta.size)
+        // One live owner per queue: each successive owner below takes over only after the previous releases.
+        restarted.close()
+        var squeezed: ContributionStore? = null
         if (stillThere) {
-            val squeezed = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
+            squeezed = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
             squeezed.recover()
             assertTrue(
                 "surviving bytes must stay charged after a failed delete",
@@ -1250,9 +1278,11 @@ class DirectoryDurabilityTest {
 
         // Cleanup succeeds once the directory is writable again, and capacity returns.
         contributions.setWritable(true)
+        squeezed?.close()
         val cleanup = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
         cleanup.expireOlderThan()
         assertTrue("precondition: audio finally removed", !wav.exists())
+        cleanup.close()
         val after = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
         after.recover()
         assertTrue(
@@ -1430,6 +1460,8 @@ class DirectoryDurabilityTest {
         // end with the files gone, so a final-state assertion proves nothing.
         failIntent = false
         var barrierRuns = 0
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val healthy = ContributionStore(
             root,
             limits(),
@@ -1520,6 +1552,8 @@ class DirectoryDurabilityTest {
         val debris = File(contributions, "$id.sha256")
         File(debris, "extra").writeBytes(ByteArray(2048))
 
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val fresh = ContributionStore(root, limits())
         fresh.recover() // invalid -> attempts cleanup -> every delete fails
 
@@ -1577,6 +1611,8 @@ class DirectoryDurabilityTest {
         File(ready, "two").writeBytes(ByteArray(8))
 
         var yielded = 0
+        // One live owner per queue (spec c8f766fb): the reader takes over after the writer releases.
+        writer.close()
         val reader = ContributionStore(
             root,
             limits(),
@@ -2465,6 +2501,8 @@ class DirectoryDurabilityTest {
         wav.mkdirs()
         File(wav, "held.bin").writeBytes(ByteArray(16))
 
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val fresh = ContributionStore(root, limits())
         fresh.recover()
 
@@ -2656,6 +2694,8 @@ class DirectoryDurabilityTest {
         sweep.join()
         assertTrue("the residual files are removed", !wav.exists())
         assertTrue("the marker is cleared", !File(root, "disqualified/$id").exists())
+        // One live owner per queue (spec c8f766fb): the next owner takes over after this one releases.
+        store.close()
         val after = ContributionStore(root, limits())
         after.recover()
         assertTrue(

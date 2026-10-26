@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -114,6 +115,8 @@ class ContributionStoreTest {
         val id2 = UUID.randomUUID().toString()
         File(root, "contributions").mkdirs()
         File(root, "contributions/$id2.wav.part").writeBytes(ByteArray(10))
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val recovered = ContributionStore(root, QueueLimits.defaults()).recover()
         assertEquals(listOf(id), recovered.map { it.captureId })
         assertFalse(File(root, "contributions/$id2.wav.part").exists())
@@ -161,6 +164,8 @@ class ContributionStoreTest {
         assertNotNull(store.prepare(idB, "epoch-1", chunks(8), meta(idB), "a@x", 7L))
         store.recordAttempt(store.fence.currentGeneration(), idA)
         // RESTART: fresh store recovers durable state including attempt counts.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val store2 = ContributionStore(root, limits, clock = { now })
         val recovered = store2.recover()
         assertEquals(2, recovered.size)
@@ -204,6 +209,8 @@ class ContributionStoreTest {
         // Corrupt the bad entry's WAV AFTER it was marked ready (truncated body vs header).
         val wav = File(root, "contributions/$bad.recording.wav")
         wav.writeBytes(wav.readBytes().copyOf(wav.readBytes().size - 2))
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val store2 = ContributionStore(root, QueueLimits.defaults())
         val recovered = store2.recover()
         assertEquals(listOf(good), recovered.map { it.captureId })
@@ -315,6 +322,7 @@ class ContributionStoreTest {
         // The successor runs on the NEW generation after a revoke, which is exactly what an account
         // change does: old owner purged, new owner opens its own store instance on the same directory.
         lateinit var theStore: ContributionStore
+        lateinit var successor: ContributionStore
         theStore = ContributionStore(
             root,
             QueueLimits.defaults().copy(maxQueueRecords = 2),
@@ -323,9 +331,14 @@ class ContributionStoreTest {
             hooks = StoreHooks(onWavPartWrite = { _ ->
                 hooked = true
                 fence.revoke() // revocation lands DURING the stale owner's actual WAV write
-                ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-                    .prepare(SUCC, "epoch-B", chunks(8), meta(SUCC), "a@x", 7L)
                 theStore.purgeQueue("account-change")
+                // DIRECTORY OWNERSHIP (spec c8f766fb): a successor CANNOT publish while this owner still
+                // holds the directory - the old fixture published into a live owner's namespace, which is
+                // the concurrency the contract removes. The purge above happens first (unchanged), then the
+                // owner releases, then the successor publishes. Every survival assertion below is kept.
+                theStore.close()
+                successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+                successor.prepare(SUCC, "epoch-B", chunks(8), meta(SUCC), "a@x", 7L)
             }),
         )
         val store = theStore
@@ -342,8 +355,11 @@ class ContributionStoreTest {
         assertTrue(File(root, "contributions/$SUCC.ready").isFile)
         // And the stale preparation must not leave its own debris behind.
         assertFalse(File(root, "contributions/$ID_A.ready").exists())
-        // One-slot queue: the stale reservation was released, so a fresh admission fits again.
-        assertNotNull(store.admit(8, 100))
+        // The stale reservation was released with the owner: a CLOSED owner refuses admission outright
+        // (spec c8f766fb - no unguarded fallback), so the capacity check moves to the live successor.
+        assertNull("a closed owner must not admit", store.admit(8, 100))
+        assertNotNull("a closed owner reports why it is unusable", store.unavailableReason())
+        assertNotNull("the live owner still has its capacity", successor.admit(8, 100))
     }
 
     @Test
@@ -463,6 +479,9 @@ class ContributionStoreTest {
 
         // A late callback carrying that stale generation must be refused on every mutating surface.
         // The entry below belongs to THIS (now revoked) owner's index, so only the fence can stop it.
+        // DIRECTORY OWNERSHIP (spec c8f766fb): the store below takes over only after the first releases;
+        // the stale callback the assertions deliver is unchanged.
+        store.close()
         val victim = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         assertNotNull(victim.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertEquals(1, victim.readyEntries().size)
@@ -488,6 +507,10 @@ class ContributionStoreTest {
         fence.revoke()
         oldStore.purgeQueue("account-change")
 
+        // DIRECTORY OWNERSHIP (spec c8f766fb): the successor takes the directory only after the old owner
+        // releases it. The stale callback below is still delivered to the OLD instance exactly as before -
+        // that is what this control is about; only the simultaneous-writable-store setup is removed.
+        oldStore.close()
         val newStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         assertNotNull(newStore.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A), "a@x", 7L))
         val succAttempts = newStore.recordAttempt(newStore.fence.currentGeneration(), ID_A)
@@ -610,9 +633,20 @@ class ContributionStoreTest {
         assertNotNull(oldOwner.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
         fence.revoke()
         oldOwner.revokeAndPurge("account-change")
+        // DIRECTORY OWNERSHIP (spec c8f766fb): the old owner RELEASES the directory before the successor
+        // takes over. Previously both were live at once, which is the concurrency this contract removes;
+        // what the assertions below still prove is unchanged - a successor's identical-id files survive the
+        // old owner's LATE purge, because purge is scoped to ids that owner actually held.
+        oldOwner.close()
         val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         assertNotNull(successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A, "epoch-new"), "a@x", 7L))
+        // The closed owner refuses every mutation, so its late purge cannot reach the directory at all -
+        // a strictly stronger outcome than the old "scoped so it does not delete" one.
         oldOwner.revokeAndPurge("late-second-purge")
+        assertNotNull(
+            "a closed owner must refuse the late purge outright",
+            oldOwner.unavailableReason(),
+        )
         assertTrue("successor WAV deleted by a revoked owner's late cleanup", File(successor.dirForTest(), "$ID_A.recording.wav").isFile)
         assertTrue("successor READY deleted by a revoked owner's late cleanup", File(successor.dirForTest(), "$ID_A.ready").isFile)
         assertEquals(listOf(ID_A), successor.readyEntries().map { it.captureId })
@@ -944,6 +978,8 @@ class ContributionStoreTest {
         val id = UUID.randomUUID().toString()
         val bytes = meta(id)
         val created = store.prepare(id, "epoch-1", chunks(8), bytes, "a@x", 7L)!!
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        store.close()
         val reloaded = ContributionStore(root, QueueLimits.defaults()).recover().single()
         assertEquals(created.recordSha256, reloaded.recordSha256)
         assertEquals(id, reloaded.captureId)
@@ -974,11 +1010,15 @@ class ContributionStoreTest {
                 assertFalse("residual $id$suffix after account change", File(dir, "$id$suffix").exists())
             }
         }
-        // A later recover() must not resurrect purged entries (recovered latch).
-        assertTrue(ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+        // A later recover() must not resurrect purged entries (recovered latch). Each restart below takes
+        // the directory only after the previous owner RELEASES it (spec c8f766fb: one live owner).
+        store.close()
+        val restarted = ContributionStore(root, QueueLimits.defaults())
+        assertTrue(restarted.recover().isEmpty())
 
         // A NEW store instance on the same directory models the controller restart after the switch:
         // still nothing. Then a fresh admission under account B works normally.
+        restarted.close()
         val storeB = ContributionStore(root, QueueLimits.defaults())
         assertTrue(storeB.recover().isEmpty())
         val idC = UUID.randomUUID().toString()
@@ -1306,5 +1346,49 @@ class ContributionStoreTest {
         val oldSha = sha256HexForTest(wavBytes(8))
         tamperMetadata(root, id, meta(id).toString(Charsets.UTF_8).replace(oldSha, newSha))
         assertTrue("odd-length data admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `a closed owner refuses every stale mutation instead of touching the successor`() {
+        // SPEC c8f766fb asks for proof of which stale operations survive their fences. MEASURED here:
+        // none of them do. close() invalidates the handle BEFORE the OS lock is dropped, so a delayed
+        // callback into the old instance refuses on every mutating surface, and the successor's
+        // identical-id entry keeps its files and its readiness. No persisted owner token is needed for
+        // this case, which is why none was added.
+        val root = tempRoot()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val old = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        assertNotNull(old.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
+        val staleGen = fence.currentGeneration()
+        fence.revoke()
+        old.revokeAndPurge("account-change")
+        old.close()
+
+        val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        assertNotNull("PREMISE: the successor publishes the same id", successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A), "a@x", 7L))
+        val wavBefore = File(root, "contributions/$ID_A.recording.wav").readBytes()
+
+        // Every stale surface the old instance can still be called on.
+        assertNull("stale recordAttempt", old.recordAttempt(staleGen, ID_A))
+        assertFalse("stale dropEntry", old.dropEntry(staleGen, ID_A, ContributionStore.TerminalReason.SERVER_TERMINAL))
+        assertNull("stale admit", old.admit(8, meta(ID_A).size))
+        assertEquals("stale recover must return nothing", emptyList<ContributionStore.Entry>(), old.recover())
+        val refusalsBefore = old.guardedRefusalsForTest()
+        old.revokeAndPurge("late-second-purge")
+        assertNotNull("the closed owner reports why", old.unavailableReason())
+        // The stale purge must not be a silent no-op either. Counting the DELTA around this call is what
+        // makes it observable: "the files are still there" would also hold if the purge ran and found an
+        // empty index, which is exactly how a missing guard hides.
+        assertEquals(
+            "the closed owner's purge must be REFUSED, not silently applied",
+            refusalsBefore + 1,
+            old.guardedRefusalsForTest(),
+        )
+
+        // The successor's entry is untouched by any of it.
+        assertArrayEquals("successor audio rewritten by a stale operation", wavBefore, File(root, "contributions/$ID_A.recording.wav").readBytes())
+        assertEquals(listOf(ID_A), successor.readyEntries().map { it.captureId })
+        assertEquals("epoch-new", successor.readyEntries().single().enrollmentEpoch)
     }
 }

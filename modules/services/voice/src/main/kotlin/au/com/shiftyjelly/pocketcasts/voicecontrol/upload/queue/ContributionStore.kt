@@ -28,6 +28,12 @@ import java.util.EnumMap
 class ContributionStore(
     private val root: File,
     internal val limits: QueueLimits,
+    /**
+     * THE DIRECTORY-OWNERSHIP EXCLUSION (spec c8f766fb). Defaults to a REAL OS lock; tests that deliberately
+     * model a second owner pass an unheld one. A store whose ownership is not held is UNAVAILABLE: every
+     * read that can admit work and every mutation refuses. There is no unguarded fallback.
+     */
+    private val directoryOwnership: DirectoryOwnership = FileDirectoryOwnership(File(root, DIR_NAME)),
     private val clock: () -> Long = System::currentTimeMillis,
     /**
      * Full-jitter source for the retry policy: given the exclusive backoff bound in ms, returns the drawn
@@ -153,13 +159,55 @@ class ContributionStore(
         fun stateForTest(): Int = synchronized(lock) { state }
     }
 
+    /** True when this instance validly owns the directory and no other owner can be mutating it. */
+    fun isAvailable(): Boolean = acquireOwnership()
+
+    /** Why this store is unavailable, for diagnosis. Null while available. */
+    fun unavailableReason(): String? = directoryOwnership.unavailableReason()
+
+    /**
+     * Refuses when ownership is absent, and then performs [block]. Every mutation and every read that can
+     * admit work goes through here, so losing ownership is not a state the queue can silently ignore.
+     */
+    private inline fun <T> guarded(unavailable: T, block: () -> T): T {
+        if (!acquireOwnership()) {
+            logGuardedRefusal()
+            return unavailable
+        }
+        return block()
+    }
+
+    /**
+     * Takes the directory lock on first real use. Idempotent; a closed or contested owner stays closed.
+     */
+    private fun acquireOwnership(): Boolean {
+        (directoryOwnership as? FileDirectoryOwnership)?.acquire()
+        return directoryOwnership.isHeld()
+    }
+
+    @Volatile
+    private var guardedRefusals = 0L
+
+    private fun logGuardedRefusal() {
+        synchronized(lock) { guardedRefusals++ }
+    }
+
+    /** Count of operations refused for lack of directory ownership (test seam + diagnosis). */
+    fun guardedRefusalsForTest(): Long = synchronized(lock) { guardedRefusals }
+
+    /**
+     * INVALIDATE FIRST, THEN RELEASE (spec c8f766fb): after this returns, a delayed callback into this
+     * instance refuses instead of mutating a directory a new owner may hold.
+     */
+    fun close() = directoryOwnership.close()
+
     /**
      * Reserve room for one entry BEFORE any PCM copy/disk work: deny-by-default, bounded, and atomic
      * across concurrent callers (the count and byte budgets are claimed under [lock], not merely read).
      * Returns null when the entry does not fit; the caller must [Admission.discard] on every path that
      * does not publish the entry.
      */
-    fun admit(sampleCount: Long, metadataBytes: Int): Admission? {
+    fun admit(sampleCount: Long, metadataBytes: Int): Admission? = guarded(null) {
         if (sampleCount < 0 || metadataBytes < 0) return null
         // Duration bound is independent of the byte bound: a long quiet clip can stay under
         // max_clip_bytes while still exceeding the specced max_clip_ms.
@@ -1747,6 +1795,13 @@ class ContributionStore(
      * claims first and our scoped snapshot (ids we actually owned) simply does not include that id.
      */
     fun revokeAndPurge(reason: String) {
+        // A CLOSED or non-owning instance must not mutate: it may be a stale callback into an owner whose
+        // directory a successor now holds (spec c8f766fb). Measured before this guard existed: a closed
+        // owner's late purge ran to completion, which none of the other mutating surfaces allowed.
+        if (!acquireOwnership()) {
+            logGuardedRefusal()
+            return
+        }
         synchronized(lock) {
             ownership.revokeUnderLock()
             cancelLiveLaunchesLocked() // ONE authoritative transition: a purge also withdraws launches
@@ -1880,6 +1935,12 @@ class ContributionStore(
     }
 
     fun recover(): List<Entry> {
+        // Recovery MUTATES (sweeps partials, deletes unmarked files), so it is ownership-guarded like any
+        // other mutation: a closed owner must not sweep a successor's directory.
+        if (!acquireOwnership()) {
+            logGuardedRefusal()
+            return emptyList()
+        }
         dir.mkdirs()
         val files = try {
             boundedRootListing()

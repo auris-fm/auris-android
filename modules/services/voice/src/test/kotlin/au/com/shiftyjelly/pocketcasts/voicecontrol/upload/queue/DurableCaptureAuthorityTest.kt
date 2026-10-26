@@ -79,6 +79,8 @@ class DurableCaptureAuthorityTest {
         prepare(store, root, id)
         assertNotNull(store.durableCapture(id))
         // RESTART: a fresh store instance over the same directory; recover() rebuilds the index.
+        // The previous owner is GONE - in production the process died and the OS dropped the lock.
+        store.close()
         val reopened = newStore(root)
         assertEquals(listOf(id), reopened.recover().map { it.captureId })
         val recapture = reopened.durableCapture(id)!!

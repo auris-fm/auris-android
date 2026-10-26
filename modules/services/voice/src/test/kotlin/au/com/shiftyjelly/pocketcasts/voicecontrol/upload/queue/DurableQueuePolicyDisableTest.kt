@@ -155,12 +155,15 @@ class DurableQueuePolicyDisableTest {
         // THE PREMISE: a fresh owner over the same directory really DOES recover this capture while
         // the policy is still enabled. Without this, "recovers nothing after the disable" would be
         // satisfied by a store that never recovers anything at all.
+        // The publisher releases first (spec c8f766fb): one live owner per queue.
+        store.close()
         val premiseOwner = ContributionStore(root, QueueLimits.defaults())
         val recoveredBefore = premiseOwner.recover()
         assertTrue(
             "PREMISE: a fresh owner recovers the published capture before the disable (got $recoveredBefore)",
             recoveredBefore.any { it.captureId == id },
         )
+        premiseOwner.close()
 
         // THE LIVE EVENT: a disable on the provider's OWN published flow. A cancelled scope keeps
         // the provider's init refresh from overwriting the explicit fixture.
@@ -269,19 +272,21 @@ class DurableQueuePolicyDisableTest {
     }
 
     /**
-     * STARTUP-DISABLED (ruling 51ebeb5f / spec voice-recording-uploads.md:75): the FIRST disabled
-     * observation must purge a queue seeded by an earlier enabled run. There is no same-process-edge
-     * and no compiled-off exemption, so this seeds the queue BEFORE the watcher ever runs and never
-     * publishes an enabled value at all.
+     * STARTUP-DISABLED ACROSS PROCESSES (rulings 51ebeb5f, c47ef263): the production shape is a
+     * PREVIOUS process that published the queue and a NEW process that finds it. The new store has
+     * never run recover(), so its in-memory index is empty - the case an index-only purge silently
+     * missed. The disable arrives on the provider's own flow as the FIRST observation; the test never
+     * calls revokeAndPurge and never asks the store to recover first.
      */
     @Test
     fun `a startup-disabled policy purges a pre-existing queue on its first observation`() {
-        val store = ContributionStore(root, QueueLimits.defaults())
+        // THE PREVIOUS OWNER: a separate store instance publishes, then is abandoned entirely.
+        val previousOwner = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
         val metadata = validRecord(id, 1600)
         assertTrue(
             "the legacy entry publishes",
-            store.prepare(
+            previousOwner.prepare(
                 captureId = id,
                 enrollmentEpoch = "epoch-1",
                 pcmChunks = chunks(1600),
@@ -290,10 +295,21 @@ class DurableQueuePolicyDisableTest {
                 enrollmentSession = 1L,
             ) != null,
         )
+        assertTrue("the previous owner's files reach disk", captureContentFiles(id).size >= 2)
 
-        // PREMISE: the seeded queue is genuinely recoverable by a fresh owner before anything runs.
-        val premise = ContributionStore(root, QueueLimits.defaults()).recover()
+        // PREMISE: the seeded queue is genuinely recoverable across processes before anything runs.
+        // One live owner per queue (spec c8f766fb): each successive owner takes over after the previous
+        // releases. The abandoning owner models process death, which drops the lock.
+        previousOwner.close()
+        val premiseOwner = ContributionStore(root, QueueLimits.defaults())
+        val premise = premiseOwner.recover()
         assertTrue("PREMISE: a fresh owner recovers the seeded capture (got $premise)", premise.any { it.captureId == id })
+        premiseOwner.close()
+
+        // THIS PROCESS'S STORE: constructed and NEVER recovered. Its index is empty by construction,
+        // which is exactly the shape that made the earlier control pass for the wrong reason.
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the fresh store's index starts empty (unrecovered)", store.readyEntries().isEmpty())
 
         // The provider starts DISABLED and is never enabled: its very first emission is the disable.
         val startup = VoiceUploadCompositionFixtures.startup(ApplicationProvider.getApplicationContext<Application>())
@@ -316,11 +332,47 @@ class DurableQueuePolicyDisableTest {
         scope.launch { watcher() }
         dispatcher.scheduler.runCurrent()
 
-        assertTrue("the pre-existing queue is cleared on the first disabled observation", store.readyEntries().isEmpty())
+        assertTrue(
+            "the pre-existing queue's files are cleared on the first disabled observation",
+            captureContentFiles(id).isEmpty(),
+        )
         assertTrue("the purge is attributed to the disable", store.purgeReasons.contains("policy-disable"))
         assertTrue("no content file survives", captureContentFiles(id).isEmpty())
 
         val recoveredAfter = ContributionStore(root, QueueLimits.defaults()).recover()
         assertTrue("a fresh owner recovers nothing after startup-disabled purge", recoveredAfter.isEmpty())
+    }
+
+    /**
+     * DISCOVERY IS SCOPED to names this store could have written (ruling c47ef263: "enumerate only
+     * the queue's owned storage namespace, not arbitrary files"). Asserts that unrelated files in the
+     * queue directory survive.
+     *
+     * NOT claimed here: that one owner never deletes ANOTHER capture's files. A foreign capture is
+     * "{uuid}.recording.wav", structurally identical to an owned one, and on a fresh store the index
+     * holds no ownership to compare against - so disk discovery cannot distinguish them. That is a
+     * real limitation of purging without prior recovery, reported to @spec rather than asserted away.
+     */
+    @Test
+    fun `a purge leaves files outside the capture storage namespace alone`() {
+        val previousOwner = ContributionStore(root, QueueLimits.defaults())
+        val owned = UUID.randomUUID().toString()
+        assertTrue(previousOwner.prepare(owned, "epoch-1", chunks(1600), validRecord(owned, 1600), "me@example.com", 1L) != null)
+
+        val contributions = File(root, "contributions").apply { mkdirs() }
+        val unrelated = File(contributions, "notes.txt").apply { writeText("user data") }
+        val bareWav = File(contributions, "backup.wav").apply { writeBytes(ByteArray(64)) }
+        val prefixed = File(contributions, "capture-notes.wav").apply { writeBytes(ByteArray(8)) }
+
+        // The purging owner takes the directory only after the previous owner releases (spec c8f766fb).
+        previousOwner.close()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        store.revokeAndPurge("policy-disable")
+
+        assertTrue("the owned capture's own files are gone", captureContentFiles(owned).isEmpty())
+        assertTrue("an unrelated text file survives", unrelated.isFile)
+        assertEquals("its contents are untouched", "user data", unrelated.readText())
+        assertTrue("a bare .wav is not a store suffix and survives", bareWav.isFile)
+        assertTrue("a non-capture-named file survives", prefixed.isFile)
     }
 }

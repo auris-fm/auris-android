@@ -153,6 +153,8 @@ class RetryableRefusalRetentionTest {
             assertEquals("the capture must be attempted once before the refusal", listOf(id), firstAttempts)
 
             // --- THE RESTART. A FRESH OWNER over the SAME directory: nothing is carried in memory. ---
+            // The previous owner released the directory first (spec c8f766fb: one live owner per queue).
+            store.close()
             val fresh = newStore(root) { now }
             fresh.recover()
 

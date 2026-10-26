@@ -168,6 +168,8 @@ class LoopbackRefusalSettlementTest {
             )
 
             // --- FRESH OWNER over the SAME directory: nothing carried in memory. ---
+            // The previous owner released the directory first (spec c8f766fb).
+            store.close()
             val fresh = newStore(root) { now }
             fresh.recover()
             val recovered = recordingIn(root, id)
@@ -292,6 +294,8 @@ class LoopbackRefusalSettlementTest {
             // A FRESH owner over the SAME directory: recovery is asserted from the FRESH store only -
             // the durable capture with its identity, and the EXACT persisted boundary value.
             now += 1_000
+            // The previous owner released the directory first (spec c8f766fb).
+            store.close()
             val freshStore = newStore(root) { now }
             // Recovery is EXPLICIT on a fresh owner (as RetryableRefusalRetentionTest pins); the
             // assertion reads what the fresh owner itself recovered, not the original store.

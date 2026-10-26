@@ -530,6 +530,8 @@ class VoiceUploadModuleWiringTest {
         prepareCapture(first, id)
         // THE RESTART: a NEW store over the SAME directory; recovery must carry the FULL admitted
         // identity from the validated owner sidecar - a null-ownership lease would skip comparisons.
+        // A restart implies the previous owner released the directory (spec c8f766fb).
+        first.close()
         val store = newStore(root)
         val recovered = store.recover()
         assertTrue("the capture recovered", recovered.any { it.captureId == id })

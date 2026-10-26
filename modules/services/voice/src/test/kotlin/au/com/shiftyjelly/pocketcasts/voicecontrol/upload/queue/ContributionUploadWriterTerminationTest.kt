@@ -191,24 +191,67 @@ class ContributionUploadWriterTerminationTest {
         val first = UUID.randomUUID().toString()
         val second = UUID.randomUUID().toString()
         val revoked = AtomicBoolean(false)
+        val firstEntered = CountDownLatch(1)
+        val writerExited = CountDownLatch(1)
 
-        // Hold the first attempt in flight with a long budget.
-        val firstResult = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
-            val file = File(tmp.root, "$first.recording.wav").also { it.writeBytes(ByteArray(8 * 1024 * 1024) { b -> (b % 251).toByte() }) }
-            transport(port, budgetMs = 60_000, maxConcurrent = 1)
-                .upload(first, record(first), file, isCancelled = { revoked.get() })
+        // ONE transport for BOTH attempts. The previous version built a second transport for the second
+        // attempt, so each carried its own semaphore and the cap was never shared - the control could not
+        // fail for the reason its name claims (reviewer scope, spec e2a26113).
+        val shared = transport(port, budgetMs = 60_000, maxConcurrent = 1)
+        val pool = Executors.newFixedThreadPool(2) { r -> Thread(r).apply { isDaemon = true } }
+        try {
+            val firstResult = pool.submit<ContributionUploadTransport.Response> {
+                try {
+                    shared.upload(first, record(first), wavFile(first, AtomicInteger()), isCancelled = {
+                        firstEntered.countDown()
+                        revoked.get()
+                    })
+                } finally {
+                    writerExited.countDown()
+                }
+            }
+
+            // ESTABLISH the first writer is genuinely in flight and inside the transfer: the permit is
+            // HELD. Without this the second attempt could be refused for any incidental reason.
+            assertTrue("the first writer entered the transfer", firstEntered.await(15, TimeUnit.SECONDS))
+            assertEquals("the first attempt holds the only permit", 1, shared.inFlightForTest())
+
+            // The second attempt on the SAME transport must be refused locally, not queued behind the first.
+            val secondResponse = shared.upload(second, record(second), wavFile(second, AtomicInteger()))
+
+            // Ambiguous ALONE is not proof: a timeout or a construction failure returns it too. The
+            // discriminator is that a cap refusal never acquires a permit - the count stays at 1 and no
+            // call is registered for the second attempt.
+            assertEquals(
+                "a cap refusal leaves the first attempt's permit untouched",
+                1,
+                shared.inFlightForTest(),
+            )
+            assertTrue(
+                "an attempt beyond the concurrency cap is refused locally rather than queued: $secondResponse",
+                secondResponse is ContributionUploadTransport.Response.Ambiguous,
+            )
+            assertEquals(
+                "only the first attempt is registered",
+                1,
+                shared.registeredCountForTest(),
+            )
+
+            // Release, then prove the writer actually left rather than merely that the caller returned.
+            revoked.set(true)
+            firstResult.get(30, TimeUnit.SECONDS)
+            assertTrue("the released writer exited", writerExited.await(10, TimeUnit.SECONDS))
+            assertEquals("the permit is released after the writer exits", 0, shared.inFlightForTest())
+        } finally {
+            // CLEANUP RUNS EVEN ON ASSERTION FAILURE: release the flag, join the first attempt, and only
+            // then shut the pool down. A failure above must not leave a blocked writer or a live thread.
+            revoked.set(true)
+            pool.shutdown()
+            if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
+                pool.shutdownNow()
+                pool.awaitTermination(10, TimeUnit.SECONDS)
+            }
         }
-        Thread.sleep(1_000)
-        // A second attempt against the same transport budget must be refused locally rather than
-        // accumulate a writer behind the first.
-        val secondResponse = transport(port, budgetMs = 60_000, maxConcurrent = 1)
-            .upload(second, record(second), wavFile(second, AtomicInteger()))
-        assertTrue(
-            "an attempt beyond the concurrency cap is refused locally: $secondResponse",
-            secondResponse is ContributionUploadTransport.Response.Ambiguous,
-        )
-        revoked.set(true)
-        firstResult.get(30, TimeUnit.SECONDS)
     }
 
     @Test

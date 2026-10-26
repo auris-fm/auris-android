@@ -596,6 +596,85 @@ int main() {
         check(fresh.lastReadEndPosition() == 0, "a fresh capture's read position starts at zero");
     }
 
+    // (9) XRUN CONTINUITY (reviewer 0c28e33a / spec d3fbda32): the ring flag only catches drops the
+    // RING performed. An AAudio overrun discards input in the HAL before it ever reaches
+    // RingBuffer::write, so the ring stays self-consistent -- cursors keep advancing, no drop is
+    // recorded -- while they fall behind real stream positions. A ring-only continuity check calls
+    // that epoch continuous and the anchor derived from it is confidently wrong. The xrun counter is
+    // the evidence the ring cannot see.
+    {
+        OboeAudioCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6100);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+        capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+
+        // An epoch whose xrun count never moves stays continuous. This is the COMPLEMENT case: if
+        // the control only ever asserted "unavailable", a mutant that always reports unavailable
+        // would pass it, and "conservative" would be indistinguishable from "broken".
+        capture.sampleXrunContinuity();
+        capture.sampleXrunContinuity();
+        check(capture.sampleAccountingContinuous(),
+            "a stable xrun count keeps the epoch continuous");
+
+        // The count advances with NO ring drop: this is the case the ring flag cannot distinguish.
+        // Audio is flowing and the ring wrote everything it was handed, so
+        // ring.samplesDropped() is still false -- only the counter can reveal the discontinuity.
+        int16_t quiet[kFrame] = {0};
+        for (int i = 0; i < 3; i++) capture.onAudioReady(stream, quiet, kFrame);
+        capture.setXrunCountForTest(/*supported=*/true, /*count=*/4);
+        capture.sampleXrunContinuity();
+
+        check(!capture.sampleAccountingContinuous(),
+            "an xrun advance breaks continuity even though the ring dropped nothing");
+
+        // LATCHED for the rest of the epoch: recovering the count to its baseline must not re-open
+        // continuity. Samples already discarded left a permanent hole in the position sequence.
+        capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+        capture.sampleXrunContinuity();
+        check(!capture.sampleAccountingContinuous(),
+            "continuity stays broken for the epoch once an xrun has been observed");
+
+        // A RESTART is a NEW epoch: a fresh stream gets a fresh counter, so the previous epoch's
+        // break must not carry over.
+        capture.start();
+        capture.setXrunCountForTest(/*supported=*/true, /*count=*/0);
+        capture.sampleXrunContinuity();
+        check(capture.sampleAccountingContinuous(),
+            "a stream restart begins a new continuity epoch");
+        capture.close();
+    }
+
+    // (9b) UNKNOWN EVIDENCE IS NOT CONTINUITY. A backend that cannot report xruns, or a query that
+    // errors, leaves continuity UNESTABLISHED. Reporting it as continuous is the same bug in a
+    // different disguise: the anchor would be published with false confidence.
+    {
+        OboeAudioCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6200);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+        capture.setXrunCountForTest(/*supported=*/false, /*count=*/0);
+        capture.sampleXrunContinuity();
+        check(!capture.sampleAccountingContinuous(),
+            "an unsupported xrun count leaves timing unavailable, not continuous");
+        capture.close();
+    }
+
+    // (9c) A STALE OLD-STREAM OBSERVATION must not judge the current epoch. After a restart the
+    // previous stream's count belongs to a dead stream; sampling it would either invent a break or
+    // erase a real one. The epoch guard is what makes the restart above meaningful rather than
+    // lucky.
+    {
+        OboeAudioCapture capture;
+        auto* stream = reinterpret_cast<oboe::AudioStream*>(0x6300);
+        capture.installStreamForTest(stream, /*deviceId=*/1);
+        capture.setXrunCountForTest(/*supported=*/true, /*count=*/2);
+        capture.sampleXrunContinuity();
+        check(capture.sampleAccountingContinuous(), "baseline taken at 2 is continuous");
+        capture.setXrunCountForTest(/*supported=*/true, /*count=*/5);
+        capture.sampleXrunContinuity();
+        check(!capture.sampleAccountingContinuous(), "an advance from that baseline breaks it");
+        capture.close();
+    }
+
     std::printf(gFailures == 0 ? "all checks passed\n" : "%d CHECK(S) FAILED\n", gFailures);
     return gFailures == 0 ? 0 : 1;
 }

@@ -400,6 +400,12 @@ void NativeVadProcessor::runLoop() {
                     // and 0 is recorded instead: the Kotlin side treats that as "timing
                     // unavailable" and falls back to offset matching, which is honest rather than
                     // confidently wrong.
+                    // Revalidate the xrun evidence AFTER the segment was collected, not before it:
+                    // a single poll taken on the way in would miss an overrun that happened during
+                    // the extraction, which is precisely the window that displaces a position. The
+                    // poll runs on this thread (never the audio callback) and is idempotent -- it
+                    // compares against the epoch baseline set at stream start.
+                    mCapture->sampleXrunContinuity();
                     const int64_t accountedEnd = mCapture->sampleAccountingContinuous()
                         ? mLastChunkEndPosition
                         : 0;

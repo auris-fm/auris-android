@@ -149,6 +149,11 @@ bool OboeAudioCapture::start() {
     // A test-installed placeholder cannot be started (requestStart is pure virtual; calling
     // through it is undefined) -- the same accommodation close() makes. Marking active directly
     // is exactly what a successful requestStart would have done.
+    // A new stream is a new continuity epoch: the xrun counter restarts with the stream, so the
+    // previous epoch's evidence must not carry over into this one.
+    mXrunBaselineValid.store(false, std::memory_order_release);
+    mXrunBreaksContinuity.store(false, std::memory_order_release);
+
     if (mTestStreamInstalled) {
         mActive.store(true, std::memory_order_release);
         return true;
@@ -159,6 +164,12 @@ bool OboeAudioCapture::start() {
         LOGE("Failed to start stream: %s", oboe::convertToText(result));
         return false;
     }
+
+    // Baseline the xrun counter HERE, while the stream has just started and before the VAD thread
+    // consumes anything: a baseline taken later could absorb an xrun that happened since start and
+    // report a compromised epoch as continuous. Taken after requestStart() succeeds, so the stream
+    // exists and the query is meaningful.
+    sampleXrunContinuity();
 
     mActive.store(true, std::memory_order_release);
     LOGI("Capture started");
@@ -222,6 +233,51 @@ int32_t OboeAudioCapture::getDeviceId() {
         return -1;
     }
     return mStream->getDeviceId();
+}
+
+void OboeAudioCapture::sampleXrunContinuity() {
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+
+    int32_t count = 0;
+    bool supported = false;
+
+    if (mStream == nullptr) {
+        // No live stream: there is no evidence to establish continuity from.
+        supported = false;
+    } else if (mTestStreamInstalled) {
+        supported = mTestXrunSupported;
+        count = mTestXrunCount;
+    } else if (mStream->isXRunCountSupported()) {
+        auto xruns = mStream->getXRunCount();
+        if (xruns) {
+            supported = true;
+            count = xruns.value();
+        }
+        // An error is NOT zero: it is the absence of evidence, handled by the unsupported path.
+    }
+
+    if (!supported) {
+        // Could not establish the baseline. Continuity is unavailable for this epoch, and stays
+        // unavailable: "unknown" must never be reported as "continuous".
+        mXrunBaselineValid.store(false, std::memory_order_release);
+        mXrunBreaksContinuity.store(true, std::memory_order_release);
+        return;
+    }
+
+    if (!mXrunBaselineValid.load(std::memory_order_acquire)) {
+        // First observation of this epoch -- the baseline. Only sound if it is taken before audio
+        // flows; start() takes it there, so a first VAD-thread call means start() could not, and the
+        // epoch is already suspect.
+        mXrunBaseline = count;
+        mXrunBaselineValid.store(true, std::memory_order_release);
+        return;
+    }
+
+    if (count != mXrunBaseline) {
+        // The count moved: the HAL discarded input somewhere the ring never saw. Every position
+        // derived from these cursors afterwards is untrustworthy for the rest of the epoch.
+        mXrunBreaksContinuity.store(true, std::memory_order_release);
+    }
 }
 
 OboeAudioCapture::CaptureClock OboeAudioCapture::captureClock() const {

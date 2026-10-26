@@ -130,7 +130,13 @@ public:
      * together, so both epochs restart together.
      */
     bool sampleAccountingContinuous() const {
-        return !mRingBuffer.samplesDropped();
+        // TWO independent ways continuity can break, and BOTH must be clear. The ring flag catches a
+        // drop the ring itself performed; the xrun count catches a drop the HAL performed before the
+        // samples ever reached us (an overrun discards input when nobody read in time). The second
+        // advances the hardware stream without ever entering RingBuffer::write, so the ring stays
+        // self-consistent while the cursors fall behind real stream positions -- exactly the case a
+        // ring-only check reports as continuous. Positions derived from either are unavailable.
+        return !mRingBuffer.samplesDropped() && !mXrunBreaksContinuity.load(std::memory_order_acquire);
     }
     virtual int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs);
 
@@ -233,6 +239,28 @@ public:
      * timestamp would be covered by nothing. Setting it to "unavailable" is how the
      * unavailable-stays-unavailable property is exercised rather than assumed.
      */
+    /**
+     * Samples the stream's xrun counter, the evidence the ring cannot see.
+     *
+     * MUST be called from the VAD thread, never from `onAudioReady`: the AAudio implementation takes
+     * the stream's shared lock to read the count, and calling a locking stream method from the data
+     * callback risks priority inversion against the stream being measured.
+     *
+     * The FIRST call in a stream epoch records the baseline; every later call compares against it.
+     * That ordering is the point: a baseline taken after audio has already started could absorb an
+     * xrun that occurred since start, reporting the epoch as continuous when it never was. If the
+     * baseline cannot be taken -- unsupported on this backend, or the query errors -- continuity is
+     * never established for the epoch, so timing stays unavailable rather than assumed good.
+     */
+    void sampleXrunContinuity();
+
+    /** Host-test control of the xrun evidence: unavailable emulates a backend without support. */
+    void setXrunCountForTest(bool supported, int32_t count) {
+        std::lock_guard<std::mutex> lock(mStreamMutex);
+        mTestXrunSupported = supported;
+        mTestXrunCount = count;
+    }
+
     void setStreamTimestampForTest(bool available, int64_t framePosition, int64_t timestampNs) {
         std::lock_guard<std::mutex> lock(mStreamMutex);
         mTestTimestampAvailable = available;
@@ -283,6 +311,14 @@ private:
     bool mTestTimestampAvailable = false;
     int64_t mTestTimestampFrame = 0;
     int64_t mTestTimestampNs = 0;
+    bool mTestXrunSupported = true;
+    int32_t mTestXrunCount = 0;
+
+    // The xrun evidence, published for sampleAccountingContinuous(). `mXrunBaselineValid` is false
+    // until a baseline is taken, and false means "continuity not established", never "continuous".
+    std::atomic<bool> mXrunBreaksContinuity{false};
+    std::atomic<bool> mXrunBaselineValid{false};
+    int32_t mXrunBaseline = 0;
     std::atomic<int64_t> mLastReadEndPosition{0};
 
 

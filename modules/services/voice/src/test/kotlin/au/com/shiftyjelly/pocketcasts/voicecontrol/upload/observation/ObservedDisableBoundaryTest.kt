@@ -11,6 +11,7 @@ import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -55,19 +56,25 @@ import org.robolectric.RobolectricTestRunner
 class ObservedDisableBoundaryTest {
 
     private val dispatcher = UnconfinedTestDispatcher()
-    private val scope = CoroutineScope(dispatcher)
+
+    // A per-test scope holding the real watcher's collectors. Cancelled in tearDown so no collector
+    // outlives the test and leaks into the next one (reviewer 05e8da53).
+    private lateinit var scope: CoroutineScope
     private lateinit var app: Application
     private lateinit var sharedLock: Any
 
     @Before
     fun setUp() {
         Dispatchers.setMain(dispatcher)
+        scope = CoroutineScope(dispatcher)
         app = ApplicationProvider.getApplicationContext()
         sharedLock = Any()
     }
 
     @After
     fun tearDown() {
+        // Cancel the collectors the real watcher launched, THEN restore the main dispatcher.
+        if (::scope.isInitialized) scope.cancel()
         Dispatchers.resetMain()
     }
 
@@ -86,7 +93,7 @@ class ObservedDisableBoundaryTest {
             remoteConfig = config,
             featureProvider = mock(),
             scope = scope,
-            nowMs = { 1_000L },
+            nowMs = { android.os.SystemClock.elapsedRealtime() },
             sleepMs = { },
             sharedCollectionLock = sharedLock,
         )
@@ -94,9 +101,15 @@ class ObservedDisableBoundaryTest {
 
     private fun startup(): VoiceSharingAccountStartup = VoiceUploadCompositionFixtures.startup(app)
 
+    /**
+     * The activation stamp must be a REAL monotonic instant, not an invented small number. The
+     * watcher arms an exact lease deadline from this stamp; a fabricated past value is already
+     * expired, so start() fires `lease-deadline` and purges the candidate before the disable under
+     * test — which would make this control pass or fail for entirely the wrong reason.
+     */
     private fun snapshot(enabled: Boolean) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
         enabled = enabled,
-        activatedAtMonotonicMs = if (enabled) 1_000L else 0L,
+        activatedAtMonotonicMs = if (enabled) android.os.SystemClock.elapsedRealtime() else 0L,
         activationGeneration = if (enabled) 1L else 0L,
     )
 
@@ -150,63 +163,107 @@ class ObservedDisableBoundaryTest {
         authority = live,
     )
 
+    /** Retains REAL PCM through the production handoff, so retainedBytes() is genuinely nonzero. */
+    private fun retainRealPcm(sink: ContributionRetentionSink, context: CaptureContext): Boolean = sink.completed(
+        SegmentObservation.Completed(
+            context = context,
+            frames = listOf(ShortArray(1600) { i -> (i % 1000).toShort() }),
+            sampleRateHz = 16000,
+            speechOnsetSample = 0,
+            speechEndSample = 1600,
+            wakeState = SegmentObservation.WakeState.Detected,
+        ),
+    )
+
     /**
-     * An observed disable, delivered through the real watcher subscription, must delete the retained
-     * completed entry: `retainedCandidateForTest` finds nothing and no bytes remain retained.
+     * An observed disable, delivered through the real watcher subscription, deletes REAL retained
+     * PCM. The enabled state is established BEFORE subscribing and re-asserted immediately before
+     * the disable: the provider's compiled default is disabled, so an initial flow emission could
+     * otherwise purge the candidate and make a later assertion pass for the wrong reason.
      */
     @Test
-    fun `the real watcher deletes the retained completed entry when the published policy disables`() {
+    fun `the real watcher deletes retained PCM when the published policy disables`() {
         val sink = realSink()
-        val captureId = UUID.randomUUID()
+        val context = CaptureContext(UUID.randomUUID(), 1L, "Headset")
 
-        // PREMISE on the production sink: a completed entry is genuinely retained right now.
-        assertTrue("the completed entry is retained", sink.retainCandidateForTest(captureId))
-        assertNotNull("the retained entry is readable", sink.retainedCandidateForTest(captureId))
+        // REAL retention: actual PCM through the production handoff, not an empty test candidate.
+        assertTrue("real PCM is retained", retainRealPcm(sink, context))
+        val retainedBefore = sink.retainedBytes()
+        assertTrue("the retained amount is genuinely nonzero before the flip", retainedBefore > 0L)
 
-        var permitted = true
-        val observer = observerFor(sink) {
-            AuthorityDecision(collectionPermitted = permitted, fullRevocation = false)
-        }
-        val startup = startup()
+        val observer = observerFor(sink) { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         val policy = provider(enabled = true)
+        // Let the provider's own lifecycle init (which launches a failing refresh against a mock
+        // feature provider and therefore publishes DISABLED) SETTLE FIRST, then establish enabled.
+        // Injecting before init would just be overwritten, and the watcher would then arm its lease
+        // deadline off a disabled snapshot and purge on `lease-deadline` before the flip.
+        dispatcher.scheduler.advanceUntilIdle()
+        policy.applySnapshotForTest(snapshot(enabled = true))
+        val startup = startup()
+        // A REAL account is published first. `emailFlow()` emits immediately on subscribe, and the
+        // watcher routes it through reconcileAndNotifySessionEnd(); with no account in the owner that
+        // ends the session and fires account-change, which would purge the candidate on a fixture
+        // artifact rather than on the disable under test.
+        val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
+        owner.publish("me@example.com", 1L, "Bearer-established")
         val watcher = realWatcher(policy, startup, observer)
         watcher.start()
+        // runCurrent, NOT advanceUntilIdle: the watcher arms an exact lease deadline with a virtual
+        // delay, and advanceUntilIdle fast-forwards past the 15-minute lease so `lease-deadline`
+        // fires and purges before the disable under test is ever published.
+        dispatcher.scheduler.runCurrent()
 
-        // THE LIVE EVENT: a disable published through the provider's REAL publishedPolicy flow.
-        // The watcher's collector reacts to it and is what calls revoked("policy-disable") — this
-        // test never calls revoked() itself. `applySnapshotForTest` is the provider's own
-        // @VisibleForTesting seam, so the emission is the production flow, not a stand-in.
-        permitted = false
+        // The candidate must still be there right up to the flip, or the disable is not what removed it.
+        assertNotNull(
+            "the retained PCM survives establishing the enabled state and start()",
+            sink.retainedCandidateForTest(context.captureId),
+        )
+        assertEquals("the retained bytes are unchanged by start()", retainedBefore, sink.retainedBytes())
+
+        // THE LIVE EVENT: a disable published through the provider's own flow. The WATCHER'S
+        // collector reacts; this test never calls revoked() itself.
         policy.applySnapshotForTest(snapshot(enabled = false))
-        dispatcher.scheduler.advanceUntilIdle()
+        dispatcher.scheduler.runCurrent()
 
         assertNull(
-            "the retained completed entry is GONE after the observed disable",
-            sink.retainedCandidateForTest(captureId),
+            "the retained PCM is GONE after the observed disable",
+            sink.retainedCandidateForTest(context.captureId),
         )
         assertEquals("no retained bytes survive the disable", 0L, sink.retainedBytes())
     }
 
     /**
-     * ORDINARY CLOSURE must preserve the completed entry. If closure purged like a disable, the
-     * spec's two causes would be indistinguishable and this control would fail.
+     * ORDINARY CLOSURE must do BOTH halves: discard the open PARTIAL and PRESERVE the completed
+     * entry. Asserting only survival would pass for a closure that did nothing.
      */
     @Test
-    fun `ordinary closure preserves the completed entry, unlike an observed disable`() {
+    fun `ordinary closure discards the partial and preserves the completed entry`() {
         val sink = realSink()
-        val captureId = UUID.randomUUID()
-        assertTrue("the completed entry is retained", sink.retainCandidateForTest(captureId))
+        val completedContext = CaptureContext(UUID.randomUUID(), 1L, "Headset")
+        val partialContext = CaptureContext(UUID.randomUUID(), 1L, "Headset")
 
-        val observer = observerFor(sink) {
-            AuthorityDecision(collectionPermitted = true, fullRevocation = false)
-        }
+        assertTrue("real PCM is retained", retainRealPcm(sink, completedContext))
+        assertTrue(
+            "the partial opens on the real sink",
+            sink.started(SegmentObservation.Started(partialContext, ShortArray(1600) { 7 })),
+        )
+        assertTrue("the partial holds charged bytes", sink.prefixBytesChargedForTest(partialContext) > 0L)
 
-        val closedAsRevocation = observer.revoked("listening-closed")
+        sink.cancelled(SegmentObservation.Cancelled(partialContext, "listening-closed"))
 
-        assertFalse("closure is not a revocation cause", closedAsRevocation)
+        assertEquals(
+            "the partial's charge is released by ordinary closure",
+            0L,
+            sink.prefixBytesChargedForTest(partialContext),
+        )
+        assertTrue(
+            "the discard is recorded as a partial discard",
+            sink.lossEvents.any { it.startsWith("partial-discard:") },
+        )
         assertNotNull(
             "the completed entry SURVIVES ordinary closure",
-            sink.retainedCandidateForTest(captureId),
+            sink.retainedCandidateForTest(completedContext.captureId),
         )
+        assertTrue("the completed PCM is still charged", sink.retainedBytes() > 0L)
     }
 }

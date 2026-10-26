@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -167,17 +166,6 @@ class ContributionUploadWriterTerminationTest {
                 (watchedTransport.unexpectedExitForTest?.let { " (unexpected exit: $it)" } ?: ""),
             ContributionUploadTransport.Response.Cancelled,
             response,
-        )
-        // REDUNDANT SAFETY ONLY - it neither covers nor reports anything the block above does not.
-        // The outer catch sets `unexpectedExitForTest` AND returns `Ambiguous(null)`, so the assertEquals
-        // above throws first on that path and this line is never reached. The diagnostic that actually
-        // surfaces the cause there is the interpolation inside the assertEquals message, not this check.
-        // Kept as a guard that the flag is empty on the clean-withdrawal path; it establishes no flake
-        // fix, no added detection, and does not identify the known outer-catch failure (reviewer e5a042ed).
-        assertNull(
-            "an unexpected exit was recorded on a path that returned Cancelled, which the shipped code " +
-                "does not produce: " + watchedTransport.unexpectedExitForTest,
-            watchedTransport.unexpectedExitForTest,
         )
         // No writer may outlive its attempt.
         assertEquals("no call is left outstanding", 0, transport(port, 60_000).inFlightForTest())

@@ -266,9 +266,16 @@ class ContributionStore(
     fun close() = directoryOwnership.close()
 
     /**
-     * Non-blocking teardown for a LIFECYCLE callback (spec c12c569f): invalidates immediately so later
-     * callbacks refuse, and drains on [scope] because an in-flight operation may be a network write.
-     * Returns a future that is false when ownership could not be released yet.
+     * Non-blocking teardown, for a future caller that must not block a lifecycle callback (spec c12c569f):
+     * invalidates immediately so later callbacks refuse, and drains on [scope] because an in-flight
+     * operation may be a network write. Returns a future that is false when ownership could not be
+     * released yet.
+     *
+     * HONEST STATUS, traced 2026-10-27: this store is an application-scoped singleton
+     * (`VoiceUploadModule.provideContributionStore`, `@Singleton`) and NOTHING in production closes it —
+     * there is no close site anywhere outside tests. So this method currently has no production caller;
+     * it is the teardown a real close site should use, not one that exists yet. Do not read its presence
+     * as evidence that shutdown is wired.
      */
     fun closeAsync(
         scope: java.util.concurrent.ExecutorService,
@@ -530,10 +537,11 @@ class ContributionStore(
             runCatching { source.close() }
             return null
         }
-        // ACCOUNT THE PIN (spec ee31a3cc): if this capture's file is already gone, the open descriptor is
-        // retaining those bytes, so the charge moves from the linked entry to the pin. It is dropped only
-        // when the descriptor closes - never on cancellation, which does not free an open inode.
-        pinIfUnlinkedLocked(captureId, owned.audio)
+        // REGISTER EVERY OPEN SOURCE (reviewer 7c2f30e3): the file is normally still linked here, so a
+        // pin-if-unlinked-once decision would never fire. Registration is what makes a LATER purge/unlink
+        // accountable. The charge is dropped only at descriptor close - never on cancellation, which does
+        // not free an open inode.
+        registerOpenSourceLocked(captureId, owned.audio)
         DurableCapture(owned.record, audio, entry.enrollmentEpoch, owned.ownerAccount, owned.ownerSession, owned.audio)
     }
 
@@ -927,7 +935,12 @@ class ContributionStore(
      * holds it.
      */
     private fun ownerBytesLocked(exclude: String? = null): Long = ownedCharges.values.sumOf { it.bytes } +
-        reservations.entries.filterNot { it.key == exclude }.sumOf { it.value }
+        reservations.entries.filterNot { it.key == exclude }.sumOf { it.value } +
+        // PINNED-BUT-UNLINKED (reviewer 7c2f30e3): bytes an open descriptor still retains after its
+        // file was unlinked are REAL occupancy on the device. Counting them here is what makes the
+        // retained total a capacity consumer rather than a passive report - otherwise a purge during
+        // an upload would appear to free room that has not been freed.
+        pinnedUnlinkedBytes()
 
     /** Records occupied = every owned capture (ready or uncertain) + live reservations. */
     private fun ownerRecordsLocked(exclude: String? = null): Int = ownedCharges.size + reservations.keys.count { it != exclude }
@@ -1461,22 +1474,63 @@ class ContributionStore(
      */
     fun totalRetainedBytes(): Long = totalQueuedBytes() + pinnedUnlinkedBytes()
 
+    /** TEST SEAM: proves the settle callback actually ran, so a pin that never drops cannot pass. */
+    internal val settleCallbacksForTest = java.util.concurrent.atomic.AtomicInteger(0)
+
     /** TEST SEAM: a hook that runs immediately BEFORE the pin decision, so the window is reachable. */
     internal var beforePinForTest: (() -> Unit)? = null
 
     /**
-     * Register a pin for [owned] when its capture is no longer linked. Idempotent, and never applied while
-     * the file is still present, so the same bytes are never counted twice.
+     * Every open source this store has handed down, with the capture it belongs to.
+     *
+     * REVIEWER 7c2f30e3: pinning only at handoff was wrong, because the WAV is normally still LINKED at
+     * that moment, so no pin was ever registered and a later purge/unlink added nothing. The store now
+     * registers EVERY open source at handoff and accounts its transition whenever the file goes away.
      */
-    private fun pinIfUnlinkedLocked(captureId: String, owned: OwnedAudio) {
-        if (pinnedUnlinked.containsKey(owned)) return
+    private val openSources = java.util.IdentityHashMap<OwnedAudio, String>()
+
+    /**
+     * Register [owned] as an open source for [captureId]. Called at EVERY handoff, linked or not, so a later
+     * unlink can be accounted after the fact.
+     */
+    private fun registerOpenSourceLocked(captureId: String, owned: OwnedAudio) {
+        if (openSources.containsKey(owned)) return
+        openSources[owned] = captureId
+        owned.onSettled {
+            settleCallbacksForTest.incrementAndGet()
+            synchronized(lock) {
+                openSources.remove(owned)
+                pinnedUnlinked.remove(owned)
+            }
+        }
+        accountUnlinkLocked(captureId, owned)
+    }
+
+    /**
+     * Account [owned]'s bytes against capacity IF its file is no longer linked. Idempotent and counted
+     * once: while linked, [readyEntries] already charges these bytes, so the pin exists only for the
+     * unlinked interval. Must be called again after any unlink (see [accountUnlinksLocked]).
+     */
+    private fun accountUnlinkLocked(captureId: String, owned: OwnedAudio) {
+        if (!openSources.containsKey(owned)) return
         beforePinForTest?.invoke()
         val audio = File(dir, "$captureId$SUFFIX_WAV")
-        if (audio.isFile) return // still linked: readyEntries already charges it
+        if (audio.isFile) {
+            // Still linked: the entry carries the charge, so there must be no pin (never count twice).
+            pinnedUnlinked.remove(owned)
+            return
+        }
         val bytes = owned.byteCount
         if (bytes <= 0) return
         pinnedUnlinked[owned] = bytes
-        owned.onSettled { synchronized(lock) { pinnedUnlinked.remove(owned) } }
+    }
+
+    /** Re-account every open source after a deletion pass, so an upload that outlived its file still counts. */
+    private fun accountUnlinksLocked() {
+        if (openSources.isEmpty()) return
+        for ((owned, captureId) in openSources.entries.toList()) {
+            accountUnlinkLocked(captureId, owned)
+        }
     }
 
     fun totalQueuedBytes(): Long = readyEntries().sumOf { it.audioBytes + it.metadataBytes }
@@ -2210,6 +2264,11 @@ class ContributionStore(
             countersFile.delete()
             terminalCounters.clear()
             _purgeReasons.add(reason)
+            // UNLINK ACCOUNTING (reviewer 7c2f30e3): the purge deleted files that an in-flight upload may
+            // still hold open. Those bytes are NOT freed - the descriptor retains them - so they must be
+            // counted against capacity until it closes. This purge does not route through deleteLocked, so
+            // the accounting has to happen here explicitly.
+            accountUnlinksLocked()
         }
     }
 
@@ -2822,6 +2881,10 @@ class ContributionStore(
             // Residual bytes stay OWNED and CHARGED; the capture is not ready, and a later cleanup retries.
             chargeRetainedLocked(id, ready = false)
         }
+        // UNLINK ACCOUNTING (reviewer 7c2f30e3): a deletion may have removed the file of a capture whose
+        // descriptor is still open. That upload keeps retaining those bytes, so account the transition
+        // HERE rather than only at handoff.
+        accountUnlinksLocked()
     }
 
     // A measurement that could not be completed. Distinct from a measured value on purpose: the java.io

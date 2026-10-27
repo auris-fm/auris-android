@@ -74,6 +74,7 @@ class OwnedAudio internal constructor(
                 settledCondition.signalAll()
             } finally {
                 state.unlock()
+                runSettleCallbacks()
             }
         }
     }
@@ -131,17 +132,11 @@ class OwnedAudio internal constructor(
     fun settle(timeoutMs: Long): Boolean {
         state.lock()
         try {
-            terminal = true
-            val deadline = System.nanoTime() + timeoutMs * 1_000_000
-            while (activeBorrows.get() > 0) {
-                val remaining = deadline - System.nanoTime()
-                if (remaining <= 0) return false
-                settledCondition.await(remaining, TimeUnit.NANOSECONDS)
-            }
-            closeDescriptorLocked()
-            return true
+            return drainAndCloseLocked(timeoutMs)
         } finally {
             state.unlock()
+            // Callbacks run AFTER the monitor is released; see runSettleCallbacks().
+            runSettleCallbacks()
         }
     }
 
@@ -152,17 +147,23 @@ class OwnedAudio internal constructor(
     fun awaitSettlement(timeoutMs: Long): Boolean {
         state.lock()
         try {
-            val deadline = System.nanoTime() + timeoutMs * 1_000_000
-            while (activeBorrows.get() > 0) {
-                val remaining = deadline - System.nanoTime()
-                if (remaining <= 0) return false
-                settledCondition.await(remaining, TimeUnit.NANOSECONDS)
-            }
-            closeDescriptorLocked()
-            return true
+            return drainAndCloseLocked(timeoutMs)
         } finally {
             state.unlock()
+            runSettleCallbacks()
         }
+    }
+
+    /** Waits for borrows (bounded) then closes the descriptor. Caller holds the monitor. */
+    private fun drainAndCloseLocked(timeoutMs: Long): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (activeBorrows.get() > 0) {
+            val remaining = deadline - System.nanoTime()
+            if (remaining <= 0) return false
+            settledCondition.await(remaining, TimeUnit.NANOSECONDS)
+        }
+        closeDescriptorLocked()
+        return true
     }
 
     /**
@@ -177,6 +178,7 @@ class OwnedAudio internal constructor(
             if (activeBorrows.get() == 0) closeDescriptorLocked()
         } finally {
             state.unlock()
+            runSettleCallbacks()
         }
     }
 
@@ -200,12 +202,36 @@ class OwnedAudio internal constructor(
 
     private val settleCallbacks = mutableListOf<() -> Unit>()
 
+    /**
+     * Closes the descriptor and runs settle callbacks with NO lock held.
+     *
+     * SETTLE CALLBACKS MUTATE STORE STATE and take the store's lock. Running them while holding this monitor
+     * would nest store-lock-inside-source-lock - the reverse of the order every other path uses (store lock
+     * -> source) - and would deadlock against it. The descriptor is closed under the monitor so it happens
+     * exactly once; the callbacks run after the monitor is released.
+     */
     private fun closeDescriptorLocked() {
         if (closed) return
         closed = true
         runCatching { source.close() }
-        val pending = settleCallbacks.toList()
+        notifyPending = settleCallbacks.toList()
         settleCallbacks.clear()
+    }
+
+    /**
+     * Runs this source's settle callbacks with NO lock held.
+     *
+     * They mutate store state and take the STORE's lock; invoking them while holding this monitor would
+     * nest store-lock-inside-source-lock, the reverse of the order every other path uses (store lock ->
+     * source), and could deadlock against it. Every terminal path calls this AFTER releasing the monitor.
+     */
+    private fun runSettleCallbacks() {
+        val pending = notifyPending
+        if (pending.isNullOrEmpty()) return
+        notifyPending = emptyList()
         pending.forEach { runCatching(it) }
     }
+
+    /** Callbacks queued by [closeDescriptorLocked] (which runs with the monitor held) and run afterwards. */
+    private var notifyPending: List<() -> Unit>? = null
 }

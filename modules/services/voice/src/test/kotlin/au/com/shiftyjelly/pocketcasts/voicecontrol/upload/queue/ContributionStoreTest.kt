@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder
@@ -1895,38 +1896,114 @@ class ContributionStoreTest {
     }
 
     @Test
-    fun `an unlinked-but-open source is counted against capacity and stops counting when it closes`() {
-        // Unlinking frees no bytes while a descriptor holds the inode, so the charge must follow the
-        // DESCRIPTOR, not the file. The pin window (file vanishes between validation and hand-down) is
-        // reached deterministically through the pre-pin seam rather than hoped for.
+    fun `a purge during an open upload still counts the retained bytes until the descriptor closes`() {
+        // THE PRODUCTION ORDER (reviewer 7c2f30e3): handoff happens while the file is still LINKED, so a
+        // pin-if-unlinked-at-handoff decision never fires. The bytes become retained only when a later
+        // purge/drop unlinks them. This exercises handoff -> unlink -> close, with no pre-pin seam.
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
-        val audio = File(root, "contributions/$ID_A.recording.wav")
-        assertTrue("PREMISE: the audio exists", audio.isFile)
-        val audioBytes = audio.length()
-        assertTrue("PREMISE: the entry is charged while linked", store.totalQueuedBytes() >= audioBytes)
-
-        // Unlink INSIDE the window: after the store opened and hashed, before the pin decision.
-        store.beforePinForTest = {
-            if (audio.isFile) audio.delete()
-        }
-        val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store still vouches: it holds the bytes open" }
-        store.beforePinForTest = null
+        val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches for its bytes" }
         val owned = requireNotNull(capture.owned)
+        val audio = File(root, "contributions/$ID_A.recording.wav")
+        val audioBytes = audio.length()
+        assertTrue("PREMISE: the file is still linked at handoff", audio.isFile)
+        assertEquals("PREMISE: nothing is pinned while linked", 0L, store.pinnedUnlinkedBytes())
 
-        assertFalse("PREMISE: the file is gone", audio.isFile)
-        assertEquals("the unlinked but open audio is not counted", audioBytes, store.pinnedUnlinkedBytes())
-        assertTrue(
-            "capacity under-reports an open unlinked upload",
-            store.totalRetainedBytes() >= audioBytes,
+        // A purge while the upload is still open removes the file; the descriptor keeps retaining bytes.
+        store.revokeAndPurge("test-purge")
+        assertFalse("PREMISE: the purge unlinked the file", audio.isFile)
+        assertEquals(
+            "a purge during an open upload reported zero retained bytes",
+            audioBytes,
+            store.pinnedUnlinkedBytes(),
         )
 
-        // Closing the descriptor is what releases the retention.
+        // The dispatch call must close the descriptor LAST; that is what releases the charge.
         owned.close()
         assertEquals("the charge must drop when the descriptor closes", 0L, store.pinnedUnlinkedBytes())
         store.close()
     }
+
+    @Test
+    fun `an upload started after its file is unlinked is accounted from handoff`() {
+        // The other ordering: the file is already gone when the store hands the source down.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val audio = File(root, "contributions/$ID_A.recording.wav")
+        val audioBytes = audio.length()
+        store.beforePinForTest = { if (audio.isFile) audio.delete() }
+        val capture = requireNotNull(store.durableCapture(ID_A))
+        store.beforePinForTest = null
+        assertEquals("a source handed down over an unlinked file was not counted", audioBytes, store.pinnedUnlinkedBytes())
+        capture.owned?.close()
+        assertEquals("the charge must drop when the descriptor closes", 0L, store.pinnedUnlinkedBytes())
+        store.close()
+    }
+
+    @Test
+    fun `bytes retained by an open descriptor block a new admission`() {
+        // Reviewer 7c2f30e3: totalRetainedBytes had no capacity consumer. An upload whose file was purged
+        // still occupies the device, so it must deny a new admission.
+        //
+        // Sized so the QUEUE BYTE BUDGET is the binding constraint: a tight maxQueueBytes with the clip
+        // caps left generous. Otherwise the per-clip duration/byte cap denies the probe and the control
+        // proves nothing about the pin. (First attempt did exactly that: 64 MiB probe vs a 30 s clip cap.)
+        val defaults = QueueLimits.defaults()
+        // maxClipBytes sits ABOVE the queue budget so the queue budget is what binds; the clip cap must
+        // not deny the probe.
+        val limits = defaults.copy(
+            maxQueueBytes = 2_000_000L,
+            maxClipBytes = 2_600_000L,
+            maxClipMs = 120_000L,
+        )
+        val root = tempRoot()
+        val store = ContributionStore(root, limits)
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val capture = requireNotNull(store.durableCapture(ID_A))
+        val owned = requireNotNull(capture.owned)
+        val audio = File(root, "contributions/$ID_A.recording.wav")
+        assertTrue("PREMISE: the file is linked at handoff", audio.isFile)
+
+        store.revokeAndPurge("test-purge")
+        assertFalse("PREMISE: the purge unlinked the file", audio.isFile)
+        val pinned = store.pinnedUnlinkedBytes()
+        assertTrue("PREMISE: the open descriptor retains bytes", pinned > 0)
+
+        // A probe that fits ONLY IF the retained bytes were free: it needs more than the remaining room
+        // but stays inside the per-clip caps.
+        // The probe must FIT once the pin is released, yet EXCEED the room available while it is held.
+        // So: probe <= budget, and probe + pinned > budget. (First attempt added pinned/2 on top of the
+        // full budget, so it could never fit afterwards - a test arithmetic error, not a product one.)
+        val probeBytes = limits.maxQueueBytes - pinned / 2
+        assertTrue("PREMISE: the probe over-commits while the pin is held", probeBytes + pinned > limits.maxQueueBytes)
+        assertTrue(
+            "PREMISE: the probe stays within the clip cap (probe=$probeBytes cap=${limits.maxClipBytes})",
+            probeBytes <= limits.maxClipBytes,
+        )
+        val samples = sampleCountFor(probeBytes)
+        assertEquals("PREMISE: the probe is not blocked by the clip cap", probeBytes, WavWriter.fileBytes(samples))
+
+        assertNull(
+            "admission ignored bytes an open descriptor still retains",
+            store.admit(samples, 0),
+        )
+        assertEquals("PREMISE: nothing is unmeasured", "unmeasured=[] rootUnknown=false markerUnknown=false", store.unknownBreakdownForTest())
+
+        // Once the descriptor closes the bytes are genuinely gone and the same request fits.
+        owned.close()
+        assertEquals("PREMISE: the settle callback never ran, so the pin could not be dropped", 1, store.settleCallbacksForTest.get())
+        assertEquals("PREMISE: the pin was released", 0L, store.pinnedUnlinkedBytes())
+        assertNotNull(
+            "the freed bytes were not returned to the budget",
+            store.admit(samples, 0),
+        )
+        store.close()
+    }
+
+    /** Sample count whose WAV is the largest that fits within [byteBudget]. */
+    private fun sampleCountFor(byteBudget: Long): Long = ((byteBudget - 44) / 2).coerceAtLeast(0)
 
     @Test
     fun `a still-linked capture is charged ONCE, not once as an entry and again as a pin`() {

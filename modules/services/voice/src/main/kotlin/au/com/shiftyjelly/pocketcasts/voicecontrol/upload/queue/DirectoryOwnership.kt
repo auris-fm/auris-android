@@ -38,8 +38,9 @@ interface DirectoryOwnership {
 
     /**
      * Non-blocking teardown: invalidates on the caller's thread, drains and releases on [scope], and
-     * reports whether ownership was actually released. Used from lifecycle callbacks, where waiting for
-     * in-flight work could mean waiting on a network write.
+     * reports whether ownership was actually released. Intended for lifecycle callbacks, where waiting
+     * for in-flight work could mean waiting on a network write. NOTE: no production close site exists yet
+     * (the store is an unclosed application singleton), so this is the contract a close site should use.
      */
     fun closeAsync(
         scope: java.util.concurrent.ExecutorService,

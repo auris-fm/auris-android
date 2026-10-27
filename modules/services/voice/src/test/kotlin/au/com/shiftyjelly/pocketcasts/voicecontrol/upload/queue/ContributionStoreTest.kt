@@ -2022,6 +2022,51 @@ class ContributionStoreTest {
     }
 
     @Test
+    fun `open sources are bounded by a global slot taken before the open and held to closure`() {
+        // Reviewer 6456b2a5 finding 3: no global source slot existed before open/validation. The bound must
+        // apply to REAL OPEN DESCRIPTORS, not attempts - a descriptor keeps retaining bytes after unlink, so
+        // an unbounded source population would hold unbounded retained bytes while the queue looked idle.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val ids = (1..(ContributionStore.MAX_OPEN_SOURCES + 1)).map { java.util.UUID.randomUUID().toString() }
+        for (id in ids.take(ContributionStore.MAX_OPEN_SOURCES)) {
+            assertNotNull(store.prepare(id, "epoch-epoch", chunks(8), meta(id), "a@x", 7L))
+        }
+        // Open one source per capture, up to the bound.
+        val held = mutableListOf<OwnedAudio>()
+        for (id in ids.take(ContributionStore.MAX_OPEN_SOURCES)) {
+            val capture = requireNotNull(store.durableCapture(id)) { "PREMISE: capture $id is available" }
+            held += requireNotNull(capture.owned)
+        }
+        assertEquals(
+            "PREMISE: the bound is reached",
+            ContributionStore.MAX_OPEN_SOURCES,
+            store.openSourceSlotsForTest(),
+        )
+
+        // The next capture must be REFUSED, and must not have opened a descriptor to say so.
+        assertNotNull(store.prepare(ids.last(), "epoch-epoch", chunks(8), meta(ids.last()), "a@x", 7L))
+        assertNull(
+            "a source was opened beyond the global bound",
+            store.durableCapture(ids.last()),
+        )
+        assertEquals(
+            "the refusal leaked a slot",
+            ContributionStore.MAX_OPEN_SOURCES,
+            store.openSourceSlotsForTest(),
+        )
+
+        // Closing a descriptor releases exactly one slot; the refused capture becomes available again.
+        held.first().close()
+        assertEquals("a closed descriptor did not release its slot", ContributionStore.MAX_OPEN_SOURCES - 1, store.openSourceSlotsForTest())
+        val retried = requireNotNull(store.durableCapture(ids.last())) { "PREMISE: a freed slot admits the capture" }
+        retried.owned?.close()
+        held.drop(1).forEach { it.close() }
+        assertEquals("all slots were not returned", 0, store.openSourceSlotsForTest())
+        store.close()
+    }
+
+    @Test
     fun `closing the store does not release the directory while an upload still owns bytes`() {
         // Reviewer 7c2f30e3 finding 2: the operation lease ends when durableCapture returns, so closeAsync
         // could release the directory while an upload still held an open source. A SOURCE LEASE keeps the

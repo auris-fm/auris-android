@@ -1,10 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import java.io.File
+import java.io.FileInputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -181,4 +183,66 @@ class OwnedAudioTest {
     }
 
     private fun File.also(block: (File) -> Unit): File = this.apply(block)
+
+    @Test
+    fun `cancellation between sequential body attempts refuses a new borrow and never rewinds`() {
+        // Reviewer 6456b2a5: "after settle, no replay" was the WRONG window. settle() makes the source
+        // terminal, so it proves nothing about cancellation. The required window is the LIVE one: a body has
+        // finished, the attempt has NOT settled, and a retry/redirect asks for a second body while the call
+        // is still in flight. Cancelling there must refuse admission - and must not rewind the file position
+        // of a body that is legitimately still running.
+        val file = temp.newFile("audio.wav").also { it.writeBytes(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)) }
+        val audio = OwnedAudio(FileInputStream(file), file.length(), "sha-of-test-bytes")
+        try {
+            // FIRST body: consume it fully, then close it. No settle has happened.
+            val first = requireNotNull(audio.borrowForBody()) { "PREMISE: the first body is admitted" }
+            val firstRead = first.stream.readBytes()
+            first.close()
+            assertFalse("PREMISE: the source is NOT terminal yet", audio.isClosed())
+
+            // Cancel while the call is still in flight, between body attempts.
+            audio.cancelFurtherBorrows()
+
+            assertNull(
+                "a cancelled in-flight attempt was granted a second body",
+                audio.borrowForBody()?.also { it.close() },
+            )
+            // The first body's read is untouched: cancellation must not corrupt bytes already sent.
+            assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8), firstRead)
+        } finally {
+            audio.close()
+        }
+    }
+
+    @Test
+    fun `cancellation does not disturb a body that is still running`() {
+        // The other half: a borrow already granted keeps its own file position. Cancellation refuses FUTURE
+        // replays only - yanking the buffer from a running writer would corrupt the bytes on the wire.
+        val file = temp.newFile("audio.wav").also { it.writeBytes(byteArrayOf(10, 20, 30, 40)) }
+        val audio = OwnedAudio(FileInputStream(file), file.length(), "sha-of-test-bytes")
+        try {
+            val running = requireNotNull(audio.borrowForBody()) { "PREMISE: the body is admitted" }
+            // Consume PART of the body, so its position is mid-stream and a rewind is observable.
+            val head = ByteArray(2)
+            assertEquals("PREMISE: two bytes are read", 2, running.stream.read(head))
+            assertArrayEquals("PREMISE: the head is the file's first bytes", byteArrayOf(10, 20), head)
+            val positionBefore = running.stream.channel.position()
+            assertEquals("PREMISE: the writer is mid-stream", 2L, positionBefore)
+
+            audio.cancelFurtherBorrows()
+
+            // Cancellation must not move the RUNNING writer: a rewind would resend bytes already on the wire.
+            assertEquals(
+                "cancellation moved a running body's file position",
+                positionBefore,
+                running.stream.channel.position(),
+            )
+            // And it still streams the remainder from where it was, not from the start.
+            assertArrayEquals("the remainder was not read from the writer's own position", byteArrayOf(30, 40), running.stream.readBytes())
+            running.close()
+            assertNull("a cancelled attempt was granted another body", audio.borrowForBody()?.also { it.close() })
+        } finally {
+            audio.close()
+        }
+    }
 }

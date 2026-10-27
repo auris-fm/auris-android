@@ -271,11 +271,21 @@ class ContributionStore(
      * operation may be a network write. Returns a future that is false when ownership could not be
      * released yet.
      *
-     * HONEST STATUS, traced 2026-10-27: this store is an application-scoped singleton
-     * (`VoiceUploadModule.provideContributionStore`, `@Singleton`) and NOTHING in production closes it —
-     * there is no close site anywhere outside tests. So this method currently has no production caller;
-     * it is the teardown a real close site should use, not one that exists yet. Do not read its presence
-     * as evidence that shutdown is wired.
+     * HONEST STATUS, TRACED to the actual owners (reviewer 6456b2a5):
+     *
+     * - THE UPLOAD OWNER is `UploadTrigger` (`VoiceUploadModule`), started once from
+     *   `PocketCastsApplication.initializeOnAppStart` via `voiceUploadTrigger.start()`. It polls
+     *   `assembly.poll()` in an endless loop, with an account-revocation watcher launched on the same scope.
+     * - THE EXECUTOR is the app-wide `@ApplicationScope` CoroutineScope (`provideUploadTriggerScope`
+     *   delegates to it). Its lifetime is the PROCESS, and nothing cancels it short of process death.
+     * - THEREFORE there is no shutdown call site to attach to, and this method has NO production caller.
+     *   Source retention is instead bounded by the ATTEMPT: every attempt settles its own descriptor in a
+     *   `finally`, so no source outlives the call that owned it. An open source only survives past a close
+     *   if that attempt is still running - which on process death the kernel reclaims with the process.
+     *
+     * This method stays as the contract a genuinely bounded teardown would use. Do NOT read its presence,
+     * or the source lease's, as evidence that shutdown is wired: the store outliving the process, and the
+     * attempt outliving nothing, is what actually closes descriptors here.
      */
     fun closeAsync(
         scope: java.util.concurrent.ExecutorService,
@@ -528,10 +538,16 @@ class ContributionStore(
         // descriptor actually closes - which is the real lifetime of the retained bytes.
         val sourceLease = directoryOwnership.acquireSourceLease()
             ?: return null // ownership unavailable: do not open a source nothing protects
+        // GLOBAL SOURCE SLOT, BEFORE THE OPEN: a refused slot must not create a descriptor at all.
+        if (!tryAcquireSourceSlot()) {
+            runCatching { sourceLease.close() }
+            return null
+        }
         val source = try {
             java.io.FileInputStream(audio)
         } catch (io: Throwable) {
             runCatching { sourceLease.close() }
+            releaseSourceSlot()
             return null
         }
         openedProbe.get()?.set(source)
@@ -540,10 +556,12 @@ class ContributionStore(
         } catch (failure: Throwable) {
             runCatching { source.close() }
             runCatching { sourceLease.close() }
+            releaseSourceSlot()
             return null
         } ?: run {
             runCatching { source.close() }
             runCatching { sourceLease.close() }
+            releaseSourceSlot()
             return null
         }
         // REGISTER EVERY OPEN SOURCE (reviewer 7c2f30e3): the file is normally still linked here, so a
@@ -624,7 +642,9 @@ class ContributionStore(
         source.channel.position(0)
         // The source lease travels INSIDE the owned source, so the directory cannot be released before the
         // descriptor closes - and nothing can forget to release it.
-        val owned = OwnedAudio(source, source.channel.size(), actualAudioSha, sourceLease)
+        // The slot is released by the SAME handle that closes the descriptor, so the bound tracks real open
+        // descriptors rather than attempts (reviewer 6456b2a5 finding 3).
+        val owned = OwnedAudio(source, source.channel.size(), actualAudioSha, sourceLease, onDescriptorClosed = ::releaseSourceSlot)
         return OpenedAudio(record, owned, owner.account, owner.session)
     }
 
@@ -1499,6 +1519,40 @@ class ContributionStore(
 
     /** TEST SEAM: a hook that runs immediately BEFORE the pin decision, so the window is reachable. */
     internal var beforePinForTest: (() -> Unit)? = null
+
+    /**
+     * THE GLOBAL SOURCE SLOT (reviewer 6456b2a5 finding 3).
+     *
+     * At most [MAX_OPEN_SOURCES] descriptors may be open at once, and the slot is taken BEFORE the open so
+     * a refused slot creates no descriptor at all. It is released only when the descriptor actually closes -
+     * not when the handing call returns and not on cancellation - so the bound is on REAL open descriptors
+     * rather than on attempts. The transport's semaphore bounds calls; this bounds SOURCES, which outlive a
+     * call whenever a writer is parked.
+     *
+     * Why the bound exists: every open descriptor retains its bytes after an unlink, so an unbounded source
+     * population would let a chain of captures hold unbounded retained bytes while looking idle.
+     */
+    private val openSourceSlots = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** Take a source slot, or null when the global bound is reached. Pair with [releaseSourceSlot]. */
+    private fun tryAcquireSourceSlot(): Boolean {
+        while (true) {
+            val current = openSourceSlots.get()
+            if (current >= MAX_OPEN_SOURCES) return false
+            if (openSourceSlots.compareAndSet(current, current + 1)) return true
+        }
+    }
+
+    private fun releaseSourceSlot() {
+        while (true) {
+            val current = openSourceSlots.get()
+            if (current <= 0) return
+            if (openSourceSlots.compareAndSet(current, current - 1)) return
+        }
+    }
+
+    /** TEST SEAM: how many source slots are currently held, to prove the bound is real and released. */
+    fun openSourceSlotsForTest(): Int = openSourceSlots.get()
 
     /**
      * Every open source this store has handed down, with the capture it belongs to.
@@ -3251,6 +3305,13 @@ class ContributionStore(
 
         /** Cap for reading a published metadata file back; the recorded size must fit under it. */
         private const val MAX_METADATA_READ_BYTES = 1L shl 20
+
+        /**
+         * The global source-slot bound (reviewer 6456b2a5 finding 3). Matches the transport's call bound:
+         * at most this many descriptors may be open, so retained bytes cannot grow past a bounded number of
+         * captures while the queue looks idle.
+         */
+        internal const val MAX_OPEN_SOURCES = 8
         private const val STAGING_PREFIX = "gen$"
         private const val ADMISSION_HELD = 0
         private const val ADMISSION_RELEASED = 1

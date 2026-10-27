@@ -43,6 +43,11 @@ class OwnedAudio internal constructor(
      * counted until THIS descriptor closes - which is the real lifetime of the retention.
      */
     private val sourceLease: AutoCloseable? = null,
+    /**
+     * Runs exactly once when the descriptor actually closes. Used to release the store's GLOBAL SOURCE
+     * SLOT, so the bound tracks real open descriptors rather than attempts (reviewer 6456b2a5 finding 3).
+     */
+    private val onDescriptorClosed: (() -> Unit)? = null,
 ) : AutoCloseable {
     /** Guards EVERY state transition: admission, cancellation, close, and borrow exit. */
     private val state = ReentrantLock()
@@ -232,6 +237,7 @@ class OwnedAudio internal constructor(
         // The bytes are only really gone once the descriptor is closed, so the directory may be released
         // only now. Idempotent, and safe to run under the monitor: it takes no store lock.
         runCatching { sourceLease?.close() }
+        runCatching { onDescriptorClosed?.invoke() }
         notifyPending = settleCallbacks.toList()
         settleCallbacks.clear()
     }

@@ -1784,40 +1784,103 @@ class ContributionStoreTest {
     }
 
     @Test
-    fun `bytes validated by durableCapture are re-read at transport time so replacement is detectable`() {
-        // REVIEWER 54d0f185: a DurableCapture is a PATHNAME plus a record, not pinned bytes. Validation
-        // hashes the file, then the transport later opens that same path. If the file is replaced in
-        // between, the transport sends bytes the store never validated. This control performs the real
-        // sequence - validate, replace the file, open through the transport body - and asserts the
-        // replacement is DETECTED rather than silently uploaded.
+    fun `the transport reads the bytes the store validated even after the path is replaced`() {
+        // CLOSES the gap reviewer 54d0f185 demonstrated (spec ee31a3cc). The same real sequence as before -
+        // validate, let the directory change hands, publish different bytes at the same path - but now the
+        // transport reads the OWNED descriptor instead of re-opening the pathname. What it sends is what the
+        // store hashed, because it is the same file description.
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches for its bytes" }
+        val owned = requireNotNull(capture.owned) { "PREMISE: the store hands down an owned source" }
         val audioNode = capture.record.fields.getValue("audio") as au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj
         val validatedSha = (audioNode.fields.getValue("sha256") as au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str).value
         assertEquals("PREMISE: the on-disk bytes match the record", validatedSha, sha256Of(capture.audio))
+        assertEquals("PREMISE: the descriptor hashed its own bytes", validatedSha, owned.audioSha256)
 
-        // The directory changes hands, and the new owner publishes DIFFERENT bytes at the same path.
+        // The directory changes hands and the new owner publishes DIFFERENT bytes at the same path.
         store.close()
         val successor = ContributionStore(root, QueueLimits.defaults())
         assertTrue("the successor owns the directory", successor.isAvailable())
-        // Deliberately DIFFERENT audio: a longer clip, so the replacement cannot hash the same.
         val replaced = java.util.UUID.randomUUID().toString()
         assertNotNull(successor.prepare(replaced, "epoch-epoch", chunks(40), meta(replaced), "a@x", 7L))
         val replacementBytes = File(root, "contributions/$replaced.recording.wav").readBytes()
-        assertNotEquals("PREMISE: the replacement differs", validatedSha, sha256Of(File(root, "contributions/$replaced.recording.wav")))
-        capture.audio.writeBytes(replacementBytes)
+        // MODEL THE REAL MECHANISM: production publishes by writing <id>.wav.part and RENAMING it into
+        // place (claimFinalNames), never by rewriting a final name in place. A rename swaps the inode, so
+        // the path now resolves to different bytes while an already-open descriptor keeps the old inode.
+        // An in-place writeBytes() would truncate the SAME inode and an open descriptor would correctly
+        // follow it - that models something production never does and cannot demonstrate this gap.
+        val staged = File(root, "contributions/$ID_A.replacement.staged")
+        staged.writeBytes(replacementBytes)
+        assertTrue("PREMISE: the replacement was published by rename", staged.renameTo(capture.audio))
+        assertNotEquals("PREMISE: the replacement differs", validatedSha, sha256Of(capture.audio))
 
-        // The transport opens the OLD File handle now. What it would read is NOT the validated bytes.
-        val bytesAtTransportOpen = capture.audio.readBytes()
-        assertNotEquals(
-            "the transport would send bytes the store never validated",
-            validatedSha,
-            java.security.MessageDigest.getInstance("SHA-256").digest(bytesAtTransportOpen)
-                .joinToString("") { "%02x".format(it) },
+        // Re-opening the path now yields the replacement - this is what the old code sent.
+        assertEquals(
+            "PREMISE: the pathname now serves different bytes",
+            sha256HexOf(replacementBytes),
+            sha256Of(capture.audio),
         )
+
+        // The owned source still serves the validated bytes, which is what the transport now reads.
+        val borrow = requireNotNull(owned.borrowForBody()) { "PREMISE: the source is borrowable" }
+        val transmitted = try {
+            sha256HexOf(borrow.stream.readBytes())
+        } finally {
+            borrow.close()
+            owned.close()
+        }
+        assertEquals("the transport sent bytes the store never validated", validatedSha, transmitted)
     }
+
+    @Test
+    fun `a capture that cannot open its descriptor is refused rather than served by path`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        // Remove the audio: validation cannot open a descriptor, so no capture may be served.
+        assertTrue(File(root, "contributions/$ID_A.recording.wav").delete())
+        assertNull("the store served a capture it could not bind to bytes", store.durableCapture(ID_A))
+    }
+
+    @Test
+    fun `a refused capture closes the descriptor instead of leaking it`() {
+        // Every refusal path after the open must close the descriptor. A corrupt owner sidecar is the
+        // cheapest reachable refusal that happens AFTER the open.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches once" }
+        requireNotNull(capture.owned).close()
+
+        // Corrupt the sidecar: the epoch no longer matches, so the next attempt refuses AFTER opening.
+        store.close()
+        val sidecar = File(root, "contributions/$ID_A.owner")
+        assertTrue("PREMISE: the sidecar exists", sidecar.isFile)
+        sidecar.writeText("""{"capture_id":"$ID_A","account":"a@x","session":7,"epoch":"WRONG"}""")
+        val fresh = ContributionStore(root, QueueLimits.defaults())
+        assertNull("a mismatched sidecar must refuse the capture", fresh.durableCapture(ID_A))
+        // If the refusal leaked, repeated refusals exhaust the process's descriptors. Prove it does not by
+        // refusing many times and still being able to open a file.
+        repeat(64) { assertNull(fresh.durableCapture(ID_A)) }
+        val probe = File(root, "contributions/$ID_A.recording.wav").inputStream()
+        probe.close()
+    }
+
+    @Test
+    fun `a capture whose descriptor is closed cannot be replayed`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val capture = requireNotNull(store.durableCapture(ID_A))
+        val owned = requireNotNull(capture.owned)
+        owned.close()
+        assertNull("a settled source admitted another body read", owned.borrowForBody())
+        store.close()
+    }
+
+    private fun sha256HexOf(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun sha256Of(file: File): String = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
 }

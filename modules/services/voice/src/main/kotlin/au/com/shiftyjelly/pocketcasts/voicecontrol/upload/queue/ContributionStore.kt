@@ -497,43 +497,82 @@ class ContributionStore(
         // STREAMED AUDIO BINDING: the header check alone lets a same-length PCM mutation through, so the
         // FULL payload is hashed while streaming and compared to the sha256 the record itself declares.
         val declaredAudioSha = audioShaOf(record) ?: return null
-        val actualAudioSha = try {
-            sha256HexBounded(audio, limits.maxClipBytes) ?: return null
+        // BYTE BINDING (spec ee31a3cc): OPEN THE DESCRIPTOR FIRST, then hash THAT descriptor. A path-based
+        // hash would validate bytes that a successor owner could replace between validation and the
+        // transport's later open; hashing the descriptor we then hand down makes the validated bytes and
+        // the transmitted bytes the same file description. The descriptor is rewound to 0 on success.
+        val source = try {
+            java.io.FileInputStream(audio)
         } catch (io: Throwable) {
             return null
         }
-        if (actualAudioSha != declaredAudioSha) return null
-        // The audio must still be the WAV these bytes describe.
-        val header = try {
-            audio.inputStream().use { input ->
-                val buffer = ByteArray(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.HEADER_BYTES)
-                var read = 0
-                while (read < buffer.size) {
-                    val n = input.read(buffer, read, buffer.size - read)
-                    if (n < 0) return null
-                    read += n
-                }
-                buffer
+        val actualAudioSha = try {
+            sha256HexBounded(source, limits.maxClipBytes) ?: run {
+                source.close()
+                return null
             }
         } catch (io: Throwable) {
+            source.close()
             return null
         }
-        if (WavHeaderValidator.validate(header, audio.length()) == null) return null
+        if (actualAudioSha != declaredAudioSha) {
+            source.close()
+            return null
+        }
+        try {
+            source.channel.position(0)
+        } catch (io: Throwable) {
+            source.close()
+            return null
+        }
+        // The header is read from the SAME descriptor (rewound above), so it cannot come from a different
+        // file than the payload we just hashed.
+        val header = try {
+            source.channel.position(0)
+            val buffer = ByteArray(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.HEADER_BYTES)
+            var read = 0
+            while (read < buffer.size) {
+                val n = source.read(buffer, read, buffer.size - read)
+                if (n < 0) {
+                    source.close()
+                    return null
+                }
+                read += n
+            }
+            buffer
+        } catch (io: Throwable) {
+            source.close()
+            return null
+        }
+        if (WavHeaderValidator.validate(header, source.channel.size()) == null) {
+            source.close()
+            return null
+        }
         // FAIL CLOSED (reviewer 0081c95f): the admitted ownership is REQUIRED. A missing or corrupt
         // sidecar refuses to serve the capture at all - it retains on disk but can never be sent,
         // because an unvouched identity must not silently degrade to an epoch-only check that a
         // removed or damaged sidecar could bypass.
         val owner = readOwnerSidecar(captureId) ?: run {
             sidecarRefusals++
+            source.close()
             return null
         }
         // EPOCH BINDING VERIFIED, not discarded (reviewer 2b67e016): a sidecar whose epoch disagrees
         // with the admitted entry is a corruption - refuse the capture entirely.
         if (owner.epoch != entry.enrollmentEpoch) {
             sidecarRefusals++
+            source.close()
             return null
         }
-        DurableCapture(record, audio, entry.enrollmentEpoch, owner.account, owner.session)
+        // Ownership passes to the caller: it must close the owned source exactly once after the call
+        // settles (OwnedAudio's lifetime).
+        val owned = try {
+            OwnedAudio(source, source.channel.size(), actualAudioSha)
+        } catch (io: Throwable) {
+            runCatching { source.close() }
+            return null
+        }
+        DurableCapture(record, audio, entry.enrollmentEpoch, owner.account, owner.session, owned)
     }
 
     /**
@@ -585,6 +624,32 @@ class ContributionStore(
         }
     }
 
+    /**
+     * Stream the WHOLE payload of an ALREADY-OPEN descriptor through SHA-256, refusing anything past
+     * [maxBytes] DURING the read, then REWIND it to byte 0 so the same descriptor can be read again.
+     *
+     * This is the byte-binding primitive (spec ee31a3cc): the digest is computed from the very file
+     * description the transport will later read, so no replacement of the pathname can insert different
+     * bytes between validation and transmission. A path-based hash cannot make that claim.
+     */
+    private fun sha256HexBounded(source: java.io.InputStream, maxBytes: Long): String? {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var total = 0L
+        return try {
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val n = source.read(buffer)
+                if (n < 0) break
+                total += n
+                if (total > maxBytes) return null
+                digest.update(buffer, 0, n)
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (io: Throwable) {
+            null
+        }
+    }
+
     /** The audio sha256 the record itself declares, as written at capture time. */
     private fun audioShaOf(record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj): String? {
         val audio = record.fields["audio"] as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj ?: return null
@@ -595,11 +660,22 @@ class ContributionStore(
     /** A capture THIS STORE vouches for: validated record bytes, matching audio, the owning identity. */
     class DurableCapture(
         val record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj,
+        /**
+         * The pathname this capture was published at. Kept for diagnostics only - it is NOT what the
+         * transport reads. Reading [audio] would re-open a pathname a successor can replace; the bytes to
+         * transmit come from [owned] (spec ee31a3cc).
+         */
         val audio: File,
         val enrollmentEpoch: String,
         /** Admitted account/session from the owner sidecar; null for older epoch-only admissions. */
         val enrollmentAccount: String? = null,
         val enrollmentSession: Long? = null,
+        /**
+         * The validated bytes as an OPEN DESCRIPTOR, hashed by reading this same descriptor. Null when the
+         * store produced the capture without a bound source; the transport must refuse such a capture
+         * rather than fall back to the path, because a pathname cannot bind validation to transmission.
+         */
+        val owned: OwnedAudio? = null,
     )
 
     /**

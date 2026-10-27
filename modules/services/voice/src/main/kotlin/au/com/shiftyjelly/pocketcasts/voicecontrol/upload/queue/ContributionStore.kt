@@ -453,9 +453,16 @@ class ContributionStore(
      * Between validation and that open the path can be replaced by a new owner publishing at the same id,
      * and a control in the suite demonstrates it: validated bytes and bytes-at-transport-open can differ.
      * Validation therefore establishes what the store vouched for AT HANDOFF, not what the socket will
-     * send. Ownership at handoff does NOT by itself prove the transmitted bytes are the validated ones;
-     * that requires pinning (open the stream under the lease and hand the stream down) or re-hashing at
-     * open. Neither is implemented here, so this must not be read as a guarantee.
+     * send. Ownership at handoff does NOT by itself prove the transmitted bytes are the validated ones.
+     *
+     * No byte-binding mechanism is implemented, and none of the obvious ones is proven here:
+     * - re-hashing while sending detects a mismatch only AFTER unvalidated bytes may already have left
+     *   the client (reviewer ac2d270c), so it cannot guarantee what was transmitted;
+     * - opening the pathname pins a file identity, not immutable contents, while any writer can reach
+     *   that inode.
+     * A defensible fix binds validation and transmission to the same stable bytes (an owned immutable
+     * snapshot whose no-in-place-mutation lifetime is proven, validated before sending and retained until
+     * transport finishes). That is a contract choice under Spec review, deliberately not decided here.
      */
     private fun durableCaptureLocked(captureId: String): DurableCapture? = synchronized(lock) {
         val entry = memoryEntries[captureId] ?: return null

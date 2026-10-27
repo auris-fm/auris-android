@@ -1760,4 +1760,26 @@ class ContributionStoreTest {
             File(root, "contributions/$ID_A.recording.wav").isFile,
         )
     }
+
+    @Test
+    fun `durableCapture refuses once the owner is closed even though the bytes remain`() {
+        // Reviewer c5a00f02: durableCapture() reads and HASHES the WAV, metadata and .digest sidecar, so it
+        // is filesystem work, not an in-memory read. It must sit inside the lease like any other surface that
+        // touches the directory: a closed owner must not validate bytes out of a successor's namespace.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        assertNotNull("PREMISE: the mounted owner can validate its own bytes", store.durableCapture(ID_A))
+
+        store.close()
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the successor owns the directory", successor.isAvailable())
+
+        assertNull(
+            "a closed owner vouchsafed bytes inside a successor's directory",
+            store.durableCapture(ID_A),
+        )
+        // The successor serves from its OWN recovered index; a fresh store has not recovered, which is the
+        // separately-tracked startup-discovery gap, so this control asserts nothing about it.
+    }
 }

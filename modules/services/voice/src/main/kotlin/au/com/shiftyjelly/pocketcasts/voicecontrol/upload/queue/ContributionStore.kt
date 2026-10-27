@@ -432,7 +432,25 @@ class ContributionStore(
      *   damaged audio cannot ride a valid record.
      * Null means "this store cannot vouch for these bytes", which the assembly holds rather than sends.
      */
-    fun durableCapture(captureId: String): DurableCapture? = synchronized(lock) {
+    fun durableCapture(captureId: String): DurableCapture? = withLeaseResult(null) {
+        durableCaptureLocked(captureId)
+    }
+
+    /**
+     * The body of [durableCapture], run while the caller holds the ownership lease.
+     *
+     * WHAT THE LEASE COVERS (reviewer c5a00f02): validation only - the bounded metadata read, the hashing of
+     * the WAV, and the .digest comparison all happen while this store provably owns the directory, so a
+     * successor cannot replace the bytes mid-check and a closed owner cannot vouch for someone else's
+     * namespace.
+     *
+     * WHAT IT DOES NOT COVER: the returned [DurableCapture.audio] File outlives this call. Transport reads it
+     * afterwards, OUTSIDE any store critical section - deliberately, because network work must not hold the
+     * queue's lock. The handoff is safe because this store owned the directory and vouched for these exact
+     * bytes at handoff time; if a purge or takeover lands afterwards the upload's own authorization
+     * revalidates, and the byte-survival guarantees are scoped to ids this owner held.
+     */
+    private fun durableCaptureLocked(captureId: String): DurableCapture? = synchronized(lock) {
         val entry = memoryEntries[captureId] ?: return null
         if (heldUncertainLocked(captureId)) return null
         val audio = File(dir, "$captureId$SUFFIX_WAV")

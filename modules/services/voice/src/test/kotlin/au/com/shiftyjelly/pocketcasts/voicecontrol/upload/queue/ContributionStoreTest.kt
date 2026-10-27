@@ -2061,13 +2061,18 @@ class ContributionStoreTest {
         // an unbounded source population would hold unbounded retained bytes while the queue looked idle.
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
-        val ids = (1..(ContributionStore.MAX_OPEN_SOURCES + 1)).map { java.util.UUID.randomUUID().toString() }
-        for (id in ids.take(ContributionStore.MAX_OPEN_SOURCES)) {
+        // AMBIENT-TOLERANT (reviewer 6025a47f): a neighbour's residue is legitimate, so fill exactly the
+        // free headroom. The bound and the refusal are still asserted against the ABSOLUTE bound, which
+        // this test's opens alone must reach.
+        val baseline = store.openSourceSlotsForTest()
+        val free = ContributionStore.MAX_OPEN_SOURCES - baseline
+        val ids = (1..(free + 1)).map { java.util.UUID.randomUUID().toString() }
+        for (id in ids.take(free)) {
             assertNotNull(store.prepare(id, "epoch-epoch", chunks(8), meta(id), "a@x", 7L))
         }
         // Open one source per capture, up to the bound.
         val held = mutableListOf<OwnedAudio>()
-        for (id in ids.take(ContributionStore.MAX_OPEN_SOURCES)) {
+        for (id in ids.take(free)) {
             val capture = requireNotNull(store.durableCapture(id)) { "PREMISE: capture $id is available" }
             held += requireNotNull(capture.owned)
         }
@@ -2095,7 +2100,7 @@ class ContributionStoreTest {
         val retried = requireNotNull(store.durableCapture(ids.last())) { "PREMISE: a freed slot admits the capture" }
         retried.owned?.close()
         held.drop(1).forEach { it.close() }
-        assertEquals("all slots were not returned", 0, store.openSourceSlotsForTest())
+        assertEquals("all slots were not returned", baseline, store.openSourceSlotsForTest())
         store.close()
     }
 
@@ -2108,24 +2113,30 @@ class ContributionStoreTest {
         // The counter is now process-wide, which makes this control HAZARDOUS: anything it fails to close
         // starves every later test in the JVM. It therefore closes what it holds in a finally, and asserts
         // the counter is back to zero at the end - a leak here must fail THIS test rather than 30 others.
-        val half = ContributionStore.MAX_OPEN_SOURCES / 2
         val rootA = tempRoot()
         val rootB = tempRoot()
         val storeA = ContributionStore(rootA, QueueLimits.defaults()).also { storesForTeardown += it }
         val storeB = ContributionStore(rootB, QueueLimits.defaults()).also { storesForTeardown += it }
         val held = mutableListOf<OwnedAudio>()
+        // Captured before the try so the post-close residue assertion can use it (reviewer 6025a47f).
+        val baseline: Int
         try {
-            // AMBIENT-TOLERANT: suite neighbours may legitimately leave residue; this control only needs
-            // enough headroom under the process-wide bound to fill half of it through each store.
-            val baseline = storeA.openSourceSlotsForTest()
+            // AMBIENT-TOLERANT (reviewer 6025a47f): a suite neighbour's residue is legitimate, so this
+            // control fills exactly the FREE headroom under the shared bound, split across the two stores.
+            // It must never open MORE than the headroom - the refusal assertions below are only attributable
+            // if the bound was filled to exactly MAX by THIS test's opens.
+            baseline = storeA.openSourceSlotsForTest()
+            val free = ContributionStore.MAX_OPEN_SOURCES - baseline
             org.junit.Assert.assertTrue(
-                "PREMISE: need at least 4 free slots under the process-wide bound, have ${ContributionStore.MAX_OPEN_SOURCES - baseline}",
-                baseline <= ContributionStore.MAX_OPEN_SOURCES - 4,
+                "PREMISE: need at least 2 free slots under the process-wide bound, have $free",
+                free >= 2,
             )
+            val throughA = free / 2
+            val throughB = free - throughA
 
-            // Open half the slots through EACH store: together they must fill the shared bound.
-            for (store in listOf(storeA, storeB)) {
-                repeat(half) {
+            // Open the free headroom through BOTH stores: together they must fill the shared bound.
+            for ((store, count) in listOf(storeA to throughA, storeB to throughB)) {
+                repeat(count) {
                     val id = java.util.UUID.randomUUID().toString()
                     assertNotNull(store.prepare(id, "epoch-epoch", chunks(8), meta(id), "a@x", 7L))
                     val capture = requireNotNull(store.durableCapture(id)) { "PREMISE: capture opens" }
@@ -2169,7 +2180,7 @@ class ContributionStoreTest {
         try {
             assertEquals(
                 "the control leaked shared source slots into the rest of the JVM",
-                0,
+                baseline,
                 residue.openSourceSlotsForTest(),
             )
         } finally {

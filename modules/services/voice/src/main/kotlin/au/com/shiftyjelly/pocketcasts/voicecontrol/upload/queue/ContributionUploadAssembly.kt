@@ -103,6 +103,10 @@ class ContributionUploadAssembly(
             // for exactly as long as the call runs. Every exit - refusal, cancellation, failure, or an
             // accepted answer - settles it once. Leaking it here was the defect: captureFor built a Capture
             // and silently dropped the descriptor, one per successful capture.
+            //
+            // NO PATH FALLBACK: a capture without an owned source cannot be bound to what was validated,
+            // so it is refused as unavailable (and retained) rather than sent by pathname.
+            val owned = capture.owned ?: throw CaptureUnavailable(captureId)
             try {
                 // IDENTITY BINDING: an admitted epoch that is no longer the account's current epoch is a
                 // retired identity - the capture is RETAINED, never sent under it.
@@ -134,7 +138,7 @@ class ContributionUploadAssembly(
                 val response = transport.upload(
                     captureId,
                     capture.record,
-                    capture.audio,
+                    owned,
                     isCancelled = isRevoked,
                     authorizationOverride = frozenBearer,
                     // LAUNCH OWNERSHIP at the network edge (reviewer 0081c95f): evaluated by the
@@ -160,7 +164,7 @@ class ContributionUploadAssembly(
                 // Settle the descriptor on EVERY path above, including the thrown refusals. A bounded
                 // timeout is enough because a body writer exits when the call completes; if it does not,
                 // ownership stays unresolved rather than being declared clean (spec c12c569f).
-                capture.owned?.settle(DESCRIPTOR_SETTLE_TIMEOUT_MS)
+                owned.settle(DESCRIPTOR_SETTLE_TIMEOUT_MS)
             }
         },
         onSuccess = onAccepted,

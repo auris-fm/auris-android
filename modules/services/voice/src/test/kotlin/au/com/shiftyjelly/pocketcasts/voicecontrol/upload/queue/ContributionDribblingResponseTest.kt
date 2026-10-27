@@ -124,7 +124,7 @@ class ContributionDribblingResponseTest {
         val budgetMs = 1_500L
 
         val startedAt = System.nanoTime()
-        val result = transport(budgetMs = budgetMs).upload(id, record(id), wavFile(id))
+        val result = transport(budgetMs = budgetMs).upload(id, record(id), ownedOf(wavFile(id)))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         // THE CLAIM UNDER TEST: the client stopped on its OWN budget. The socket inactivity timeout was
@@ -165,7 +165,7 @@ class ContributionDribblingResponseTest {
         server.start()
         port = server.address.port
 
-        val result = transport(budgetMs = 30_000).upload(id, record(id), wavFile(id))
+        val result = transport(budgetMs = 30_000).upload(id, record(id), ownedOf(wavFile(id)))
 
         assertEquals(
             "a slow but complete receipt is still a receipt",
@@ -173,4 +173,11 @@ class ContributionDribblingResponseTest {
             result::class,
         )
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

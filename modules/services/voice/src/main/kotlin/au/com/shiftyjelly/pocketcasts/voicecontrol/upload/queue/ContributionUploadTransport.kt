@@ -91,7 +91,11 @@ class ContributionUploadTransport(
     fun upload(
         captureId: String,
         record: RecordNode.Obj,
-        audio: File,
+        /**
+         * The validated bytes as an OPEN DESCRIPTOR (spec ee31a3cc). The caller owns it and settles it
+         * after this call returns; the transport only BORROWS it, once per body invocation.
+         */
+        owned: OwnedAudio,
         isCancelled: () -> Boolean = { false },
         remainingMs: Long? = null,
         /** Receives the handle of the registered call, so the revoker can cancel THAT call directly. */
@@ -128,7 +132,7 @@ class ContributionUploadTransport(
             // never outlive the total the caller promised.
             val budget = (remainingMs ?: callTimeoutMs).coerceAtMost(callTimeoutMs).coerceAtLeast(1)
             val callClient = client.newBuilder().callTimeout(budget, TimeUnit.MILLISECONDS).build()
-            val call = callClient.newCall(buildRequest(credentials, metadata, audio, isCancelled, remainingMs, onBodyProgressForTest))
+            val call = callClient.newCall(buildRequest(credentials, metadata, owned, isCancelled, remainingMs, onBodyProgressForTest))
             // The admission-to-send window: everything up to here has already decided to upload, and the
             // request below is the first thing that touches the network. A withdrawal landing here must
             // still prevent transmission.
@@ -200,25 +204,34 @@ class ContributionUploadTransport(
     /** The exact request body this transport emits, for a parity harness to feed the real intake. */
     internal fun requestEnvelope(record: RecordNode.Obj, audio: File): Pair<ByteArray, String>? {
         val metadata = metadataPart(record) ?: return null
-        val body = multipartFor(metadata, audio, isCancelled = { false }, remainingMs = null) ?: return null
+        if (!audio.isFile) return null
+        // The parity harness builds an envelope from a standalone file; it owns the source for the
+        // duration of that construction and settles it here.
+        val owned = runCatching {
+            OwnedAudio(java.io.FileInputStream(audio), audio.length(), sha256Of(audio))
+        }.getOrNull() ?: return null
+        val body = multipartFor(metadata, owned, isCancelled = { false }, remainingMs = null) ?: run {
+            owned.close()
+            return null
+        }
         return runCatching {
             val out = java.io.ByteArrayOutputStream()
             val sink = okio.Buffer()
             body.writeTo(sink)
             out.write(sink.readByteArray())
             out.toByteArray() to requireNotNull(body.contentType()).toString()
-        }.getOrElse { null }
+        }.getOrElse { null }.also { owned.close() }
     }
 
     private fun buildRequest(
         credentials: String,
         metadata: ByteArray,
-        audio: File,
+        owned: OwnedAudio,
         isCancelled: () -> Boolean,
         remainingMs: Long?,
         onBodyProgress: (() -> Unit)? = null,
     ): Request {
-        val body = requireNotNull(multipartFor(metadata, audio, isCancelled, remainingMs, onBodyProgress)) { "envelope" }
+        val body = requireNotNull(multipartFor(metadata, owned, isCancelled, remainingMs, onBodyProgress)) { "envelope" }
         // The per-call budget is the caller's REMAINING deadline when it has one, so this can never
         // outlive the total the caller promised.
         return Request.Builder()
@@ -230,19 +243,37 @@ class ContributionUploadTransport(
 
     private fun multipartFor(
         metadata: ByteArray,
-        audio: File,
+        owned: OwnedAudio,
         isCancelled: () -> Boolean,
         remainingMs: Long?,
         onBodyProgress: (() -> Unit)? = null,
     ): MultipartBody? {
-        if (!audio.isFile) return null
         val metadataBody = metadata.toRequestBody(METADATA_TYPE)
-        // The audio is STREAMED from disk and never held in memory; each chunk re-checks the withdrawal.
+        // The audio is STREAMED from the OPEN DESCRIPTOR the store validated, never re-opened by path.
+        // Re-opening the path is what let a successor's replacement be transmitted instead of the bytes
+        // the store vouched for (spec ee31a3cc).
+        //
+        // Each writeTo invocation takes a BORROW. OkHttp may invoke writeTo more than once - the shared
+        // client does not disable retryOnConnectionFailure - and a borrow rewinds to byte 0, so a replay
+        // resends exactly the same validated bytes. The descriptor is closed by the ATTEMPT, not here:
+        // closing it per body would leave the next replay with a dead stream.
         val audioBody = object : RequestBody() {
             override fun contentType() = AUDIO_TYPE
-            override fun contentLength() = audio.length()
+            override fun contentLength() = owned.byteCount
+
+            // Replayable: the source supports rewind, so OkHttp must not treat a second attempt as
+            // "length known, body consumed".
+            override fun isOneShot() = false
+
             override fun writeTo(sink: BufferedSink) {
-                audio.inputStream().use { input -> copyCancellable(input, sink, isCancelled, onBodyProgress) }
+                val borrow = owned.borrowForBody()
+                    ?: throw java.io.IOException("audio source unavailable for this attempt")
+                try {
+                    copyCancellable(borrow.stream, sink, isCancelled, onBodyProgress)
+                } finally {
+                    // Drops the borrow only. The attempt owns the descriptor's lifetime.
+                    borrow.close()
+                }
             }
         }
         return MultipartBody.Builder(boundaryToken())
@@ -254,6 +285,11 @@ class ContributionUploadTransport(
             .build()
             .also { remainingMs?.let { _ -> } }
     }
+
+    /** SHA-256 of a file this transport opened itself; used only by the parity harness. */
+    private fun sha256Of(file: File): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(file.readBytes())
+        .joinToString("") { "%02x".format(it) }
 
     /** The boundary the parity harness expects; a plain UUID, never a random base64 token. */
     private fun boundaryToken(): String = "----auris-contribution-" + java.util.UUID.randomUUID()

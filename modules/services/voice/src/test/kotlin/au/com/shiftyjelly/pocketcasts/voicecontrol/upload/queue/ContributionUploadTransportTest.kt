@@ -134,6 +134,46 @@ class ContributionUploadTransportTest {
         callTimeoutMs = 10_000,
     )
 
+    @Test
+    fun `the transport sends the owned bytes even after the path is replaced underneath it`() {
+        // The end-to-end byte-binding control (spec ee31a3cc). The store validates an open descriptor; a
+        // successor then RENAMES different bytes onto the same path, swapping the inode. The transport must
+        // still transmit the validated bytes, because it reads the descriptor and never re-opens the path.
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        val validatedBytes = file.readBytes()
+        val validatedSha = MessageDigest.getInstance("SHA-256").digest(validatedBytes).joinToString("") { "%02x".format(it) }
+        val owned = ownedOf(file)
+
+        val replacementBytes = ByteArray(2048) { (it * 7).toByte() }
+        val replacement = File(tmp.root, "$id.replacement")
+        replacement.writeBytes(replacementBytes)
+        assertTrue("PREMISE: the replacement is published by rename", replacement.renameTo(file))
+        assertFalse(
+            "PREMISE: the path now serves different bytes",
+            MessageDigest.getInstance("SHA-256").digest(file.readBytes()).contentEquals(MessageDigest.getInstance("SHA-256").digest(validatedBytes)),
+        )
+
+        responseStatus = 200
+        responseBody = receipt(id, validatedSha, "accepted")
+        transport().upload(id, record(id), owned)
+
+        val sent = requireNotNull(receivedBodies.firstOrNull()) { "PREMISE: the server received a body" }
+        assertTrue("the transmitted body carries the VALIDATED audio", sent.contains(validatedBytes))
+        assertFalse("the transmitted body carries the REPLACED audio", sent.contains(replacementBytes))
+        owned.close()
+    }
+
+    /** True when this array contains [needle] as a contiguous run. */
+    private fun ByteArray.contains(needle: ByteArray): Boolean {
+        if (needle.isEmpty() || needle.size > size) return false
+        outer@ for (i in 0..(size - needle.size)) {
+            for (j in needle.indices) if (this[i + j] != needle[j]) continue@outer
+            return true
+        }
+        return false
+    }
+
     private fun wavFile(id: String): File {
         val file = File(tmp.root, "$id.recording.wav")
         // A minimal but structurally valid WAV: RIFF/WAVE header + one PCM data chunk.
@@ -169,7 +209,7 @@ class ContributionUploadTransportTest {
         responseStatus = 200
         responseBody = receipt(id, digest)
 
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
 
         assertEquals("exactly one request", 1, requestCount.get())
         assertEquals("POST", receivedMethods.single())
@@ -197,7 +237,7 @@ class ContributionUploadTransportTest {
         responseStatus = 201
         responseBody = receipt(id, sha256(file), status = "upload_pending")
 
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
 
         val accepted = result as ContributionUploadTransport.Response.Accepted
         val validator = CaptureReceiptValidator { sha256(file) }
@@ -213,7 +253,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 201
         responseBody = receipt(id, sha256(file), status = "duplicate")
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertEquals(201, (result as ContributionUploadTransport.Response.Accepted).statusCode)
     }
 
@@ -223,7 +263,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 503
         responseBody = """{"schema_version":1,"code":"storage_unavailable","retry_after_s":30}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         val retryable = result as ContributionUploadTransport.Response.Retryable
         assertEquals(503, retryable.statusCode)
         assertEquals(30L, retryable.retryAfterS)
@@ -235,7 +275,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 401
         responseBody = """{"schema_version":1,"code":"unauthorized"}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue("a 401 is a credential problem, not a stored capture: $result", result is ContributionUploadTransport.Response.Unauthorized)
     }
 
@@ -248,7 +288,7 @@ class ContributionUploadTransportTest {
             authorization = { null },
         )
         val before = requestCount.get()
-        val result = noAuth.upload(id, record(id), file)
+        val result = noAuth.upload(id, record(id), ownedOf(file))
         assertTrue("a local credential refusal is Unauthorized", result is ContributionUploadTransport.Response.Unauthorized)
         assertEquals("no bytes left the device", before, requestCount.get())
     }
@@ -259,7 +299,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 503
         responseBody = """{"schema_version":1,"code":"invalid_request"}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue("a mismatched code/status pair is never a terminal delete", result is ContributionUploadTransport.Response.Retryable)
     }
 
@@ -269,7 +309,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 503
         responseBody = """{"schema_version":1,"code":"upload_pending","code":"storage_unavailable"}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue("duplicate members make the answer unknown", result is ContributionUploadTransport.Response.Retryable)
     }
 
@@ -280,7 +320,7 @@ class ContributionUploadTransportTest {
         responseStatus = 503
         // A perfectly valid terminal-looking prefix, then an excess that must not be truncated into it.
         responseBody = """{"schema_version":1,"code":"invalid_request"}""" + "x".repeat(2 shl 20)
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue(
             "a truncated prefix must never become a delete verdict: $result",
             result is ContributionUploadTransport.Response.Ambiguous,
@@ -293,7 +333,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 400
         responseBody = """{"schema_version":1,"code":"invalid_request"}""" + " ".repeat(3 shl 20) + "}"
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue("oversize is unknown, not terminal: $result", result is ContributionUploadTransport.Response.Ambiguous)
     }
 
@@ -303,7 +343,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 400
         responseBody = """{"schema_version":"1","code":"invalid_request"}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue("a quoted version is not a numeric envelope: $result", result is ContributionUploadTransport.Response.Retryable)
     }
 
@@ -313,7 +353,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 503
         responseBody = """{"schema_version":1,"code":"storage_unavailable","retry_after_s":"30"}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue("a quoted hint is malformed: $result", result is ContributionUploadTransport.Response.Retryable)
         assertNull("no server minimum can be read from a type-mismatched field", (result as ContributionUploadTransport.Response.Retryable).retryAfterS)
     }
@@ -341,7 +381,7 @@ class ContributionUploadTransportTest {
         for ((status, code, expected) in cases) {
             responseStatus = status
             responseBody = """{"schema_version":1,"code":"$code"}"""
-            val result = transport().upload(id, record(id), file)
+            val result = transport().upload(id, record(id), ownedOf(file))
             assertEquals("$status $code", expected, result::class)
         }
     }
@@ -352,7 +392,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 400
         responseBody = """{"schema_version":1,"code":"some_future_code"}"""
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         assertTrue(
             "an unknown code retains rather than deletes",
             result !is ContributionUploadTransport.Response.Accepted && result !is ContributionUploadTransport.Response.Terminal,
@@ -369,7 +409,7 @@ class ContributionUploadTransportTest {
             authorization = { "Bearer t" },
             callTimeoutMs = 5_000,
         )
-        val result = dead.upload(id, record(id), file)
+        val result = dead.upload(id, record(id), ownedOf(file))
         assertTrue("a failed connection is ambiguous", result is ContributionUploadTransport.Response.Ambiguous)
         assertNull("no status for a request that never landed", (result as ContributionUploadTransport.Response.Ambiguous).statusCode)
     }
@@ -381,7 +421,7 @@ class ContributionUploadTransportTest {
         responseStatus = 200
         responseBody = """{"schema_version":1,"code":"storage_unavailable"}"""
         val validator = CaptureReceiptValidator { sha256(file) }
-        val result = transport().upload(id, record(id), file)
+        val result = transport().upload(id, record(id), ownedOf(file))
         val accepted = result as ContributionUploadTransport.Response.Accepted
         assertFalse("a 2xx error body must not validate", validator.validate(id, accepted.payload, accepted.statusCode))
     }
@@ -393,7 +433,14 @@ class ContributionUploadTransportTest {
         responseStatus = 200
         responseBody = receipt(id, "0".repeat(64))
         val validator = CaptureReceiptValidator { sha256(file) }
-        val accepted = transport().upload(id, record(id), file) as ContributionUploadTransport.Response.Accepted
+        val accepted = transport().upload(id, record(id), ownedOf(file)) as ContributionUploadTransport.Response.Accepted
         assertFalse("a forged digest must not validate", validator.validate(id, accepted.payload, accepted.statusCode))
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

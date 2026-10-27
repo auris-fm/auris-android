@@ -190,7 +190,15 @@ class ContributionUploadAssemblyTest {
         }
     }
 
-    private fun capturesFor(store: ContributionStore, fixture: Fixture): MutableMap<String, ContributionUploadAssembly.Capture> = mutableMapOf(fixture.id to ContributionUploadAssembly.Capture(record(fixture.id, sha256Hex(fixture.file.readBytes()), fixture.file.length()), fixture.file))
+    // The fixture supplies the owned source the transport now requires, exactly as the store does in
+    // production; without it the attempt correctly refuses before any request leaves.
+    private fun capturesFor(store: ContributionStore, fixture: Fixture): MutableMap<String, ContributionUploadAssembly.Capture> = mutableMapOf(
+        fixture.id to ContributionUploadAssembly.Capture(
+            record(fixture.id, sha256Hex(fixture.file.readBytes()), fixture.file.length()),
+            fixture.file,
+            owned = OwnedAudio(java.io.FileInputStream(fixture.file), fixture.file.length(), sha256Hex(fixture.file.readBytes())),
+        ),
+    )
 
     @Test
     fun `a validated receipt over real HTTP releases the entry and reports the acceptance`() {

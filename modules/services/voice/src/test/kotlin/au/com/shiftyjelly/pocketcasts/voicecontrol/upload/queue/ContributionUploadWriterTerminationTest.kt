@@ -139,7 +139,7 @@ class ContributionUploadWriterTerminationTest {
                 watchedTransport.upload(
                     id,
                     record(id),
-                    file,
+                    ownedOf(file),
                     isCancelled = {
                         copyStarted.countDown()
                         revoked.get()
@@ -178,7 +178,7 @@ class ContributionUploadWriterTerminationTest {
         val budgetMs = 2_000L
 
         val startedAt = System.nanoTime()
-        val response = transport(port, budgetMs).upload(id, record(id), wavFile(id, AtomicInteger()))
+        val response = transport(port, budgetMs).upload(id, record(id), ownedOf(wavFile(id, AtomicInteger())))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue("the exchange ended on its own budget (took ${elapsedMs}ms)", elapsedMs < 20_000)
@@ -214,7 +214,7 @@ class ContributionUploadWriterTerminationTest {
                     shared.upload(
                         first,
                         record(first),
-                        wavFile(first, AtomicInteger()),
+                        ownedOf(wavFile(first, AtomicInteger())),
                         isCancelled = { revoked.get() },
                         onRegistered = {
                             firstRegistrations.incrementAndGet()
@@ -236,7 +236,7 @@ class ContributionUploadWriterTerminationTest {
             val secondResponse = shared.upload(
                 second,
                 record(second),
-                wavFile(second, AtomicInteger()),
+                ownedOf(wavFile(second, AtomicInteger())),
                 onRegistered = { secondRegistrations.incrementAndGet() },
             )
 
@@ -281,7 +281,7 @@ class ContributionUploadWriterTerminationTest {
         val id = UUID.randomUUID().toString()
         val transport = transport(port, budgetMs = 5_000)
 
-        val response = transport.upload(id, record(id), wavFile(id, AtomicInteger()), isCancelled = { true })
+        val response = transport.upload(id, record(id), ownedOf(wavFile(id, AtomicInteger())), isCancelled = { true })
 
         assertEquals(ContributionUploadTransport.Response.Cancelled, response)
         assertFalse("nothing may be registered for a withdrawn attempt", transport.registeredCallForTest() != null)
@@ -295,7 +295,7 @@ class ContributionUploadWriterTerminationTest {
         // A transport that would allow a long call, given only a short remainder.
         val startedAt = System.nanoTime()
         val response = transport(port, budgetMs = 60_000)
-            .upload(id, record(id), wavFile(id, AtomicInteger()), remainingMs = 1_500)
+            .upload(id, record(id), ownedOf(wavFile(id, AtomicInteger())), remainingMs = 1_500)
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue(
@@ -304,4 +304,11 @@ class ContributionUploadWriterTerminationTest {
         )
         assertTrue("unknown, never a disposition: $response", response is ContributionUploadTransport.Response.Ambiguous)
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

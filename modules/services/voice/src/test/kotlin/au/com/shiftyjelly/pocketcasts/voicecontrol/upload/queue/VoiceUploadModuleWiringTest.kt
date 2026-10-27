@@ -108,7 +108,7 @@ class VoiceUploadModuleWiringTest {
                 authorization = { "Bearer t" },
                 callTimeoutMs = 2_000,
             ),
-            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio) } },
+            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio, owned = it.owned) } },
             clock = { 51_000_000L },
             policyAllows = { false },
             networkAvailable = { true },
@@ -160,7 +160,7 @@ class VoiceUploadModuleWiringTest {
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
                     // The admitted epoch travels with the capture (as the module does).
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, owned = it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -199,7 +199,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, owned = it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -239,7 +239,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, owned = it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -294,7 +294,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, owned = it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -342,7 +342,7 @@ class VoiceUploadModuleWiringTest {
                 store.durableCapture(captureId)?.let {
                     assertEquals("the admitted account travelled", "a@x", it.enrollmentAccount)
                     assertEquals(7L, it.enrollmentSession)
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -407,7 +407,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -488,7 +488,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -574,7 +574,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -649,7 +649,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -733,7 +733,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
                 }
             },
             clock = { 51_000_000L },
@@ -783,7 +783,7 @@ class VoiceUploadModuleWiringTest {
         val assembly = ContributionUploadAssembly(
             store = store,
             transport = transport,
-            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio) } },
+            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio, owned = it.owned) } },
             clock = { 51_000_000L },
             policyAllows = { false }, // the compiled-off published policy
             networkAvailable = { true },
@@ -812,7 +812,7 @@ class VoiceUploadModuleWiringTest {
                 endpoint = "http://127.0.0.1:$port/v1/contributions",
                 authorization = { "Bearer t" },
             ),
-            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio) } },
+            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio, owned = it.owned) } },
             clock = { 51_000_000L },
             policyAllows = { true }, // an explicitly enabled fixture
             networkAvailable = { true },

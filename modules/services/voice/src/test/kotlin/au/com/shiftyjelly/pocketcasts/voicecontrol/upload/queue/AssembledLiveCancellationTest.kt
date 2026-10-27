@@ -157,7 +157,10 @@ class AssembledLiveCancellationTest {
         val assembly = ContributionUploadAssembly(
             store = store,
             transport = transport,
-            captureFor = { captureId -> ContributionUploadAssembly.Capture(record(captureId), capture(captureId)) },
+            captureFor = { captureId ->
+                val file = capture(captureId)
+                ContributionUploadAssembly.Capture(record(captureId), file, owned = ownedOf(file))
+            },
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
@@ -200,11 +203,18 @@ class AssembledLiveCancellationTest {
         val response = transport.upload(
             id,
             record(id),
-            file,
+            ownedOf(file),
             onRegistered = { throw IllegalStateException("binder failed") },
         )
         assertTrue("a failed binder is an unknown outcome: $response", response is ContributionUploadTransport.Response.Ambiguous)
         assertEquals("no permit leaked", 0, transport.inFlightForTest())
         assertTrue("no handle leaked", transport.registeredCallForTest() == null)
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

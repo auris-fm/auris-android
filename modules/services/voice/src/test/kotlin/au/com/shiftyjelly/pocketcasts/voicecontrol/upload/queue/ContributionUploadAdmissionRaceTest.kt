@@ -160,7 +160,7 @@ class ContributionUploadAdmissionRaceTest {
         val pool = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
         servers += pool
         val result = pool.submit<ContributionUploadTransport.Response> {
-            transport.upload(id, record(id), wav(id), isCancelled = { revoked.get() })
+            transport.upload(id, record(id), ownedOf(wav(id)), isCancelled = { revoked.get() })
         }
 
         assertTrue("the barrier was reached before registration", barrierReached.await(10, TimeUnit.SECONDS))
@@ -224,7 +224,7 @@ class ContributionUploadAdmissionRaceTest {
             transport.upload(
                 id,
                 record(id),
-                wav(id),
+                ownedOf(wav(id)),
                 isCancelled = { revoked.get() },
                 onRegistered = { handle ->
                     registered.countDown()
@@ -303,7 +303,7 @@ class ContributionUploadAdmissionRaceTest {
         val pool = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
         servers += pool
         val result = pool.submit<ContributionUploadTransport.Response> {
-            transport.upload(id, record(id), big, onRegistered = { registered.countDown() })
+            transport.upload(id, record(id), ownedOf(big), onRegistered = { registered.countDown() })
         }
         assertTrue("the call was registered", registered.await(15, TimeUnit.SECONDS))
         // FORCED INTERLEAVING instead of a sleep: the server has the head and one chunk and has
@@ -326,4 +326,11 @@ class ContributionUploadAdmissionRaceTest {
         )
         assertEquals("this transport has no call left outstanding", 0, transport.inFlightForTest())
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

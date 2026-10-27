@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.OwnedAudio
 import java.io.File
 import java.net.URLDecoder
 import java.util.UUID
@@ -97,7 +98,7 @@ class ContributionMultipartTransportTest {
         val recordBytes = CanonicalJson.canonicalBytes(record)
         server.enqueue(MockResponse().setResponseCode(responseStatus).setBody(responseBody))
 
-        val result = transport().upload(id, record, wav())
+        val result = transport().upload(id, record, ownedOf(wav()))
 
         val recorded = server.takeRequest()
         assertEquals("Bearer test-token", recorded.getHeader("Authorization"))
@@ -133,4 +134,11 @@ class ContributionMultipartTransportTest {
 
         assertTrue(result is ContributionUploadTransport.Response.Accepted)
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

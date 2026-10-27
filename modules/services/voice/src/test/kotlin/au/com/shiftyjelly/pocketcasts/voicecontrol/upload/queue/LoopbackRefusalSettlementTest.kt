@@ -143,7 +143,7 @@ class LoopbackRefusalSettlementTest {
 
             // FIRST ATTEMPT: a REAL HTTP exchange against the loopback backend.
             val firstResponse = runCatching {
-                transport().upload(id, ContributionRetryCallerTestSupport.record(id), recordingBefore)
+                transport().upload(id, ContributionRetryCallerTestSupport.record(id), ownedOf(recordingBefore))
             }.getOrThrow()
 
             assertEquals(
@@ -202,7 +202,7 @@ class LoopbackRefusalSettlementTest {
             responseBody = ContributionRetryCallerTestSupport.acceptance(id, digestBefore)
             requestCount.set(0)
             receivedBodies.clear()
-            val secondResponse = transport().upload(id, ContributionRetryCallerTestSupport.record(id), recovered)
+            val secondResponse = transport().upload(id, ContributionRetryCallerTestSupport.record(id), ownedOf(recovered))
             assertTrue(
                 "$code: the re-attempt must be ACCEPTED over the real socket, got $secondResponse",
                 secondResponse is ContributionUploadTransport.Response.Accepted,
@@ -454,7 +454,7 @@ class LoopbackRefusalSettlementTest {
         transport = transport(),
         captureFor = { captureId ->
             store.durableCapture(captureId)?.let {
-                ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession, it.owned)
             }
         },
         clock = now,
@@ -538,7 +538,7 @@ class LoopbackRefusalSettlementTest {
             store.prepareAt(generation, admission, id, "epoch-1", ContributionRetryCallerTestSupport.chunks(1600), meta, "a@x", 7L),
         )
         val recording = recordingIn(root, id)
-        val response = transport().upload(id, ContributionRetryCallerTestSupport.record(id), recording)
+        val response = transport().upload(id, ContributionRetryCallerTestSupport.record(id), ownedOf(recording))
 
         assertTrue(
             "capture_conflict must be classified TERMINAL - the same capture is already in flight and " +
@@ -575,3 +575,10 @@ private fun ByteArray.indexOfSlice(needle: ByteArray): Int {
     }
     return -1
 }
+
+/** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+    java.io.FileInputStream(file),
+    file.length(),
+    java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+)

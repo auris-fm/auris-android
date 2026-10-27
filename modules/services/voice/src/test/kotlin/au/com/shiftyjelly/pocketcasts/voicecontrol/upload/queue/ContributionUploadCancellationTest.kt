@@ -121,7 +121,7 @@ class ContributionUploadCancellationTest {
         val revoked = AtomicBoolean(false)
 
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
-            transport(budgetMs = 60_000).upload(id, record(id), wavFile(id), isCancelled = { revoked.get() })
+            transport(budgetMs = 60_000).upload(id, record(id), ownedOf(wavFile(id)), isCancelled = { revoked.get() })
         }
         assertTrue("the request reached the server", handlerEntered.await(10, TimeUnit.SECONDS))
         // The withdrawal lands HERE, on the test thread, while the upload thread is blocked on the response.
@@ -161,7 +161,7 @@ class ContributionUploadCancellationTest {
         val revoked = AtomicBoolean(false)
 
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit {
-            transport(budgetMs = 60_000).upload(id, record(id), wavFile(id), isCancelled = { revoked.get() })
+            transport(budgetMs = 60_000).upload(id, record(id), ownedOf(wavFile(id)), isCancelled = { revoked.get() })
         }
         assertTrue("the request reached the server", handlerEntered.await(10, TimeUnit.SECONDS))
         revoked.set(true)
@@ -188,7 +188,7 @@ class ContributionUploadCancellationTest {
 
         // The withdrawal is already in effect when upload() is entered: the caller's own check and this
         // call are not atomic, so the transport must re-check before the first byte.
-        val response = transport().upload(id, record(id), wavFile(id), isCancelled = { true })
+        val response = transport().upload(id, record(id), ownedOf(wavFile(id)), isCancelled = { true })
         revoked.set(true)
 
         assertEquals("an already-withdrawn attempt is Cancelled", ContributionUploadTransport.Response.Cancelled, response)
@@ -211,7 +211,7 @@ class ContributionUploadCancellationTest {
         val budgetMs = 2_000L
 
         val startedAt = System.nanoTime()
-        val response = transport(budgetMs = budgetMs).upload(id, record(id), wavFile(id))
+        val response = transport(budgetMs = budgetMs).upload(id, record(id), ownedOf(wavFile(id)))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         // The whole point: this returns. Without an enforceable write abort it blocks until the peer
@@ -240,7 +240,7 @@ class ContributionUploadCancellationTest {
             transport(budgetMs = 60_000).upload(
                 id,
                 record(id),
-                wavFile(id),
+                ownedOf(wavFile(id)),
                 isCancelled = {
                     entered.countDown()
                     revoked.get()
@@ -273,7 +273,7 @@ class ContributionUploadCancellationTest {
         val budgetMs = 2_000L
 
         val startedAt = System.nanoTime()
-        val response = transport(budgetMs = budgetMs).upload(id, record(id), wavFile(id))
+        val response = transport(budgetMs = budgetMs).upload(id, record(id), ownedOf(wavFile(id)))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue(
@@ -297,7 +297,7 @@ class ContributionUploadCancellationTest {
         }
         val id = UUID.randomUUID().toString()
 
-        val response = transport(budgetMs = 1_000).upload(id, record(id), wavFile(id))
+        val response = transport(budgetMs = 1_000).upload(id, record(id), ownedOf(wavFile(id)))
 
         assertTrue(
             "a body landing after the cutoff must not be classified: $response",
@@ -308,4 +308,11 @@ class ContributionUploadCancellationTest {
             response is ContributionUploadTransport.Response.Terminal,
         )
     }
+
+    /** Wraps a fixture file as the owned source the transport now requires; the caller keeps it open. */
+    private fun ownedOf(file: File): OwnedAudio = OwnedAudio(
+        java.io.FileInputStream(file),
+        file.length(),
+        java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) },
+    )
 }

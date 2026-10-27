@@ -68,37 +68,86 @@ class OwnedAudioTest {
     }
 
     @Test
-    fun `settlement waits for an active body writer before reporting drained`() {
+    fun `a second borrow is refused so it cannot rewind the running reader`() {
+        // Reviewer 9436742d finding 1: all borrows share ONE file position, so admitting a second reader
+        // would seek the descriptor away from the first and corrupt both bodies.
         val audio = ownedAudio()
-        val borrow = requireNotNull(audio.borrowForBody())
-        val settledEarly = AtomicReference<Boolean?>(null)
-        val released = CountDownLatch(1)
-        val waiter = Thread {
-            settledEarly.set(audio.awaitBorrowsSettled(5_000))
-            released.countDown()
-        }
-        waiter.isDaemon = true
-        waiter.start()
+        val first = requireNotNull(audio.borrowForBody())
+        val readSoFar = first.stream.read(ByteArray(100))
+        assertEquals("PREMISE: the first reader advanced", 100, readSoFar)
 
-        // While the borrow is out, settlement must NOT report drained.
-        Thread.sleep(150)
-        assertNull("settlement reported drained while a body writer was active", settledEarly.get())
-        borrow.close()
-        assertTrue("the waiter did not finish", released.await(10, TimeUnit.SECONDS))
-        assertTrue("settlement must report drained once the writer exits", settledEarly.get() == true)
+        assertNull("a second borrow was admitted while a body writer was active", audio.borrowForBody())
+
+        // And the first reader's position is untouched: it continues from where it was.
+        assertEquals("the active reader's position was moved", payload[100].toInt() and 0xFF, first.stream.read())
+        first.close()
         audio.close()
     }
 
     @Test
-    fun `settlement reports unresolved rather than claiming a drain it did not see`() {
+    fun `close does not yank the descriptor from a parked body writer`() {
+        // Reviewer 9436742d finding 2: close() closed immediately even with an active borrow.
+        val audio = ownedAudio()
+        val borrow = requireNotNull(audio.borrowForBody())
+        val read = java.util.concurrent.atomic.AtomicInteger(-1)
+        val parked = CountDownLatch(1)
+        val reader = Thread {
+            parked.await(10, TimeUnit.SECONDS)
+            read.set(if (borrow.isOpen()) borrow.stream.read() else -1)
+        }
+        reader.isDaemon = true
+        reader.start()
+
+        audio.close()
+        assertFalse("close() closed the descriptor under a live reader", audio.isClosed())
+        parked.countDown()
+        reader.join(10_000)
+        assertEquals("the parked reader lost its stream", payload[0].toInt() and 0xFF, read.get())
+
+        borrow.close()
+        // The terminal transition observed the drain; the descriptor is closed exactly once.
+        assertTrue("the descriptor was never closed after the writer exited", audio.isClosed())
+    }
+
+    @Test
+    fun `settle reports unresolved ownership on timeout and resolution once the writer exits`() {
         val audio = ownedAudio()
         val borrow = requireNotNull(audio.borrowForBody())
         assertFalse(
-            "an active borrow must settle as UNRESOLVED, never as complete",
-            audio.awaitBorrowsSettled(50),
+            "settle claimed completion while a body writer was still running",
+            audio.settle(50),
         )
+        assertFalse("the descriptor closed while the writer was live", audio.isClosed())
+
         borrow.close()
+        assertTrue("settlement was never observed", audio.awaitSettlement(5_000))
+        assertTrue(audio.isClosed())
+    }
+
+    @Test
+    fun `admission races settlement without admitting a borrow after the terminal transition`() {
+        val audio = ownedAudio()
+        val admittedAfterTerminal = java.util.concurrent.atomic.AtomicInteger(0)
+        val start = CountDownLatch(1)
+        val racers = (1..8).map {
+            Thread {
+                start.await(10, TimeUnit.SECONDS)
+                audio.borrowForBody()?.let { borrow ->
+                    admittedAfterTerminal.incrementAndGet()
+                    borrow.close()
+                }
+            }.also { t ->
+                t.isDaemon = true
+                t.start()
+            }
+        }
+        start.countDown()
         audio.close()
+        racers.forEach { it.join(10_000) }
+        // Whatever the interleaving, once close() has taken the terminal transition no NEW borrow is granted
+        // afterwards; a borrow already admitted before it must have been drained by close()'s own path.
+        assertTrue("a borrow survived the terminal transition", audio.awaitSettlement(5_000))
+        assertTrue("the descriptor was never closed", audio.isClosed())
     }
 
     @Test

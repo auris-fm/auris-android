@@ -1,8 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import java.io.FileInputStream
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * The validated audio bytes for one in-flight upload, held as an OPEN DESCRIPTOR.
@@ -18,6 +19,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * Closing per-body would leave the next replay with a closed descriptor and would leak whenever the call
  * failed before the body ever ran.
  *
+ * The class ENFORCES that lifetime rather than offering helpers a caller can race or omit (reviewer
+ * 9436742d). Borrows are exclusive, because all borrows share ONE file position: admitting a second reader
+ * would rewind the descriptor under the first and corrupt both bodies. Close is a terminal transition that
+ * refuses new borrows and then drains the one in flight; it is never a bare stream close that could pull the
+ * descriptor out from under a live reader.
+ *
  * The descriptor is immutable: a published WAV is never rewritten in place (the writer streams to
  * `<staging>.wav.part` and renames, and publication refuses to overwrite an existing final name), so the
  * inode this descriptor refers to cannot change under us. Sequential replay is therefore legal.
@@ -29,50 +36,74 @@ class OwnedAudio internal constructor(
     /** SHA-256 of the bytes this descriptor reads, established by hashing THIS descriptor. */
     val audioSha256: String,
 ) : AutoCloseable {
-    private val closed = AtomicBoolean(false)
+    /** Guards EVERY state transition: admission, cancellation, close, and borrow exit. */
+    private val state = ReentrantLock()
+    private val settledCondition = state.newCondition()
+
+    /** Borrows outstanding. At most one, enforced below: all borrows share one file position. */
     private val activeBorrows = AtomicInteger(0)
 
-    /** Serializes borrow admission with cancellation and rewind (reviewer 3cb8574f). */
-    private val borrowLock = Any()
-
-    /** Set before the descriptor is closed; a cancelled attempt must not begin another replay. */
     @Volatile
     private var cancelled = false
 
+    @Volatile
+    private var terminal = false
+
+    @Volatile
+    private var closed = false
+
     /**
-     * An ACTIVE body writer. Closing the attempt waits for this to be recycled, so a descriptor is never
-     * closed underneath a read that is still running.
+     * An ACTIVE body writer. Closing the attempt waits for this to exit, so a descriptor is never closed
+     * underneath a read that is still running.
      */
     inner class Borrow internal constructor() : AutoCloseable {
-        private val released = AtomicBoolean(false)
+        private val released = java.util.concurrent.atomic.AtomicBoolean(false)
         internal val stream: FileInputStream get() = source
 
         /** Reads are legal only until this borrow is dropped. */
-        fun isOpen(): Boolean = !released.get() && !closed.get()
+        fun isOpen(): Boolean = !released.get() && !closed
 
         override fun close() {
             if (!released.compareAndSet(false, true)) return
-            activeBorrows.decrementAndGet()
-            releaseBorrowWaiter()
+            state.lock()
+            try {
+                activeBorrows.decrementAndGet()
+                // A terminal transition that could not close because this writer was active completes
+                // HERE. Without this the deferral in close() would leak the descriptor forever.
+                if (terminal && activeBorrows.get() == 0) closeDescriptorLocked()
+                settledCondition.signalAll()
+            } finally {
+                state.unlock()
+            }
         }
     }
 
     /**
-     * Begins one body read, positioned at byte 0. Returns null when the attempt is cancelled or closed:
-     * a cancelled attempt must not start another replay (reviewer 3cb8574f, spec c12c569f).
+     * Begins the body read, positioned at byte 0.
+     *
+     * Returns null when the attempt is terminal, cancelled, or a body writer is ALREADY inside one: a
+     * second borrow would rewind the single shared file position and corrupt the running body, so it is
+     * refused rather than serialized (there is only ever one body write per call attempt).
      */
-    fun borrowForBody(): Borrow? = synchronized(borrowLock) {
-        if (cancelled || closed.get()) return null
+    fun borrowForBody(): Borrow? {
+        state.lock()
         try {
-            source.channel.position(0)
-        } catch (failure: java.io.IOException) {
-            return null
+            if (terminal || cancelled) return null
+            // EXCLUSIVE: a concurrent borrow would seek the shared descriptor away from the active reader.
+            if (activeBorrows.get() > 0) return null
+            try {
+                source.channel.position(0)
+            } catch (failure: java.io.IOException) {
+                return null
+            }
+            activeBorrows.incrementAndGet()
+            return Borrow()
+        } finally {
+            state.unlock()
         }
-        activeBorrows.incrementAndGet()
-        Borrow()
     }
 
-    /** True while any body writer is still reading. */
+    /** True while a body writer is still reading. */
     fun hasActiveBorrows(): Boolean = activeBorrows.get() > 0
 
     /**
@@ -80,47 +111,80 @@ class OwnedAudio internal constructor(
      * through the call itself, never by yanking the buffer away from a running writer.
      */
     fun cancelFurtherBorrows() {
-        synchronized(borrowLock) { cancelled = true }
-    }
-
-    /** Waits for active body writers to exit. Returns false when any is still running at the deadline. */
-    internal fun awaitBorrowsSettled(timeoutMs: Long): Boolean {
-        val deadline = System.nanoTime() + timeoutMs * 1_000_000
-        while (activeBorrows.get() > 0) {
-            if (System.nanoTime() >= deadline) return false
-            awaitBorrowSignal(remainingMs(deadline))
+        state.lock()
+        try {
+            cancelled = true
+        } finally {
+            state.unlock()
         }
-        return true
     }
 
-    /** Idempotent: the attempt-level finally may run more than once on some paths. */
+    /**
+     * The single terminal transition: refuse new borrows, then wait for the body writer to exit, then close
+     * exactly once.
+     *
+     * Returns true when the descriptor is closed and nothing is outstanding. Returns FALSE when a body
+     * writer is still running at the deadline - ownership is then UNRESOLVED, and the caller must report it
+     * as such rather than claiming cleanup completed (spec c12c569f). A later [awaitSettlement] can still
+     * observe the resolution.
+     */
+    fun settle(timeoutMs: Long): Boolean {
+        state.lock()
+        try {
+            terminal = true
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000
+            while (activeBorrows.get() > 0) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return false
+                settledCondition.await(remaining, TimeUnit.NANOSECONDS)
+            }
+            closeDescriptorLocked()
+            return true
+        } finally {
+            state.unlock()
+        }
+    }
+
+    /**
+     * Observes settlement without initiating it: true only once no borrow is outstanding. Used to report
+     * eventual resolution after [settle] timed out.
+     */
+    fun awaitSettlement(timeoutMs: Long): Boolean {
+        state.lock()
+        try {
+            val deadline = System.nanoTime() + timeoutMs * 1_000_000
+            while (activeBorrows.get() > 0) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) return false
+                settledCondition.await(remaining, TimeUnit.NANOSECONDS)
+            }
+            closeDescriptorLocked()
+            return true
+        } finally {
+            state.unlock()
+        }
+    }
+
+    /**
+     * Idempotent. Never closes the descriptor underneath a running body writer: it enters the same terminal
+     * transition as [settle] and leaves the close to whoever observes the drain, so a `use {}` block cannot
+     * yank the stream from a live reader.
+     */
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
+        state.lock()
+        try {
+            terminal = true
+            if (activeBorrows.get() == 0) closeDescriptorLocked()
+        } finally {
+            state.unlock()
+        }
+    }
+
+    fun isClosed(): Boolean = closed
+
+    private fun closeDescriptorLocked() {
+        if (closed) return
+        closed = true
         runCatching { source.close() }
     }
-
-    fun isClosed(): Boolean = closed.get()
-
-    private fun remainingMs(deadline: Long): Long = ((deadline - System.nanoTime()) / 1_000_000).coerceAtLeast(1)
-
-    private fun awaitBorrowSignal(millis: Long) {
-        borrowLock2.lock()
-        try {
-            borrowCondition.await(millis, java.util.concurrent.TimeUnit.MILLISECONDS)
-        } finally {
-            borrowLock2.unlock()
-        }
-    }
-
-    private fun releaseBorrowWaiter() {
-        borrowLock2.lock()
-        try {
-            borrowCondition.signalAll()
-        } finally {
-            borrowLock2.unlock()
-        }
-    }
-
-    private val borrowLock2 = java.util.concurrent.locks.ReentrantLock()
-    private val borrowCondition = borrowLock2.newCondition()
 }

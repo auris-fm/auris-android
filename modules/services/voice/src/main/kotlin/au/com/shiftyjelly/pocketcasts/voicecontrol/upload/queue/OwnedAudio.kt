@@ -182,9 +182,30 @@ class OwnedAudio internal constructor(
 
     fun isClosed(): Boolean = closed
 
+    /**
+     * Runs [action] once when the descriptor actually closes, or immediately if it already has. Used by the
+     * store to drop this source's pinned-byte charge at exactly the moment the bytes stop being retained.
+     */
+    fun onSettled(action: () -> Unit) {
+        state.lock()
+        try {
+            if (closed) {
+                return runCatching(action).let { }
+            }
+            settleCallbacks.add(action)
+        } finally {
+            state.unlock()
+        }
+    }
+
+    private val settleCallbacks = mutableListOf<() -> Unit>()
+
     private fun closeDescriptorLocked() {
         if (closed) return
         closed = true
         runCatching { source.close() }
+        val pending = settleCallbacks.toList()
+        settleCallbacks.clear()
+        pending.forEach { runCatching(it) }
     }
 }

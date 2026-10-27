@@ -37,6 +37,16 @@ interface DirectoryOwnership {
     fun unavailableReason(): String?
 
     /**
+     * Non-blocking teardown: invalidates on the caller's thread, drains and releases on [scope], and
+     * reports whether ownership was actually released. Used from lifecycle callbacks, where waiting for
+     * in-flight work could mean waiting on a network write.
+     */
+    fun closeAsync(
+        scope: java.util.concurrent.ExecutorService,
+        onUnresolved: (String) -> Unit = {},
+    ): java.util.concurrent.Future<Boolean>
+
+    /**
      * Releases the directory. Idempotent. After this returns the handle is INVALIDATED first (so no new
      * operation can pass) and the OS lock is dropped last.
      */
@@ -180,6 +190,44 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         }
     }
 
+    /**
+     * INVALIDATE NOW, RELEASE LATER (spec c12c569f). Returns immediately after the state transition that
+     * makes every late callback refuse; the drain and the OS release happen on [scope] and are reported
+     * through the returned handle.
+     *
+     * The blocking [close] may not be called from a lifecycle callback: it waits for in-flight operations,
+     * and an in-flight operation can be a network write, so waiting there would stall teardown on the
+     * network. This variant never waits on the caller's thread.
+     */
+    override fun closeAsync(scope: java.util.concurrent.ExecutorService, onUnresolved: (String) -> Unit): java.util.concurrent.Future<Boolean> {
+        // PHASE 1 on the CALLER's thread: invalidate first, so nothing new starts.
+        synchronized(this) {
+            closed = true
+            closeInProgress = true
+        }
+        val callerIsLeased = (leaseDepth.get() ?: 0) > 0
+        return scope.submit<Boolean> {
+            try {
+                if (!callerIsLeased) awaitIdle()
+                synchronized(this) {
+                    closed = true
+                    if (callerIsLeased || inFlight.get() > 0) {
+                        closeDeferred = true
+                        false
+                    } else {
+                        closeDeferred = false
+                        releaseLockLocked()
+                        true
+                    }
+                }
+            } catch (failure: Throwable) {
+                // A drain that never completed leaves ownership UNRESOLVED. Report it; never claim clean.
+                onUnresolved("drain withdrawn: ${failure.javaClass.simpleName}")
+                false
+            }
+        }
+    }
+
     /** Drops the OS lock; caller must hold the lifecycle monitor. */
     private fun releaseLockLocked() {
         runCatching { lock?.release() }
@@ -243,4 +291,10 @@ internal class UnavailableDirectoryOwnership(private val why: String) : Director
     override fun unavailableReason(): String? = why
 
     override fun close() = Unit
+
+    /** Nothing is held, so there is nothing to drain: already released. */
+    override fun closeAsync(
+        scope: java.util.concurrent.ExecutorService,
+        onUnresolved: (String) -> Unit,
+    ): java.util.concurrent.Future<Boolean> = java.util.concurrent.CompletableFuture.completedFuture(true)
 }

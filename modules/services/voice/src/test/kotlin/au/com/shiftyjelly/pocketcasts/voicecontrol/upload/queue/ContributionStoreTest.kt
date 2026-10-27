@@ -1894,6 +1894,73 @@ class ContributionStoreTest {
         store.close()
     }
 
+    @Test
+    fun `an unlinked-but-open source is counted against capacity and stops counting when it closes`() {
+        // Unlinking frees no bytes while a descriptor holds the inode, so the charge must follow the
+        // DESCRIPTOR, not the file. The pin window (file vanishes between validation and hand-down) is
+        // reached deterministically through the pre-pin seam rather than hoped for.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val audio = File(root, "contributions/$ID_A.recording.wav")
+        assertTrue("PREMISE: the audio exists", audio.isFile)
+        val audioBytes = audio.length()
+        assertTrue("PREMISE: the entry is charged while linked", store.totalQueuedBytes() >= audioBytes)
+
+        // Unlink INSIDE the window: after the store opened and hashed, before the pin decision.
+        store.beforePinForTest = {
+            if (audio.isFile) audio.delete()
+        }
+        val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store still vouches: it holds the bytes open" }
+        store.beforePinForTest = null
+        val owned = requireNotNull(capture.owned)
+
+        assertFalse("PREMISE: the file is gone", audio.isFile)
+        assertEquals("the unlinked but open audio is not counted", audioBytes, store.pinnedUnlinkedBytes())
+        assertTrue(
+            "capacity under-reports an open unlinked upload",
+            store.totalRetainedBytes() >= audioBytes,
+        )
+
+        // Closing the descriptor is what releases the retention.
+        owned.close()
+        assertEquals("the charge must drop when the descriptor closes", 0L, store.pinnedUnlinkedBytes())
+        store.close()
+    }
+
+    @Test
+    fun `a still-linked capture is charged ONCE, not once as an entry and again as a pin`() {
+        // Reviewer's constraint: account pinned physical bytes WITHOUT double-counting a still-linked file.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val linkedTotal = store.totalQueuedBytes()
+        assertTrue("PREMISE: the linked entry is charged", linkedTotal > 0)
+
+        // A normal hand-down with the file still present must not add a pin charge.
+        val capture = requireNotNull(store.durableCapture(ID_A))
+        assertEquals("a linked capture was ALSO pinned, charging its bytes twice", 0L, store.pinnedUnlinkedBytes())
+        assertEquals("total changed despite the file still being linked", linkedTotal, store.totalRetainedBytes())
+        capture.owned?.close()
+        store.close()
+    }
+
+    @Test
+    fun `closeAsync invalidates immediately and reports release without waiting on the caller`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val scope = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
+        try {
+            val released = store.closeAsync(scope).get(10, java.util.concurrent.TimeUnit.SECONDS)
+            assertTrue("ownership was not released", released)
+            // INVALIDATED: a later operation refuses rather than mutating someone else's directory.
+            assertNull("a closed store still served a capture", store.durableCapture(ID_A))
+        } finally {
+            scope.shutdownNow()
+        }
+    }
+
     private fun sha256HexOf(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun sha256Of(file: File): String = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }

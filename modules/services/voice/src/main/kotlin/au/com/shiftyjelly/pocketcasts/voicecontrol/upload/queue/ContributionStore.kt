@@ -266,6 +266,16 @@ class ContributionStore(
     fun close() = directoryOwnership.close()
 
     /**
+     * Non-blocking teardown for a LIFECYCLE callback (spec c12c569f): invalidates immediately so later
+     * callbacks refuse, and drains on [scope] because an in-flight operation may be a network write.
+     * Returns a future that is false when ownership could not be released yet.
+     */
+    fun closeAsync(
+        scope: java.util.concurrent.ExecutorService,
+        onUnresolved: (String) -> Unit = {},
+    ): java.util.concurrent.Future<Boolean> = directoryOwnership.closeAsync(scope, onUnresolved)
+
+    /**
      * Reserve room for one entry BEFORE any PCM copy/disk work: deny-by-default, bounded, and atomic
      * across concurrent callers (the count and byte budgets are claimed under [lock], not merely read).
      * Returns null when the entry does not fit; the caller must [Admission.discard] on every path that
@@ -520,6 +530,10 @@ class ContributionStore(
             runCatching { source.close() }
             return null
         }
+        // ACCOUNT THE PIN (spec ee31a3cc): if this capture's file is already gone, the open descriptor is
+        // retaining those bytes, so the charge moves from the linked entry to the pin. It is dropped only
+        // when the descriptor closes - never on cancellation, which does not free an open inode.
+        pinIfUnlinkedLocked(captureId, owned.audio)
         DurableCapture(owned.record, audio, entry.enrollmentEpoch, owned.ownerAccount, owned.ownerSession, owned.audio)
     }
 
@@ -1421,6 +1435,49 @@ class ContributionStore(
     }
 
     private var recovered = false
+
+    /**
+     * Pinned-but-UNLINKED audio still occupying the device, keyed by the descriptor that holds it.
+     *
+     * Unlinking frees no bytes: an open inode keeps its charge until the descriptor closes. So purge can
+     * legitimately report residue mid-upload, and capacity accounting must still count these bytes.
+     *
+     * COUNTED ONCE. While a capture is still linked, [readyEntries] already charges its bytes, so a pin is
+     * counted here only once its file is gone. [pinnedUnlinkedBytes] enforces that, and the pin is removed
+     * when the descriptor closes.
+     */
+    private val pinnedUnlinked = java.util.IdentityHashMap<OwnedAudio, Long>()
+
+    /**
+     * Bytes pinned by open descriptors whose file is no longer linked: retention that unlink did not free.
+     * Closes when the descriptor does, never before.
+     */
+    fun pinnedUnlinkedBytes(): Long = synchronized(lock) { pinnedUnlinked.values.sum() }
+
+    /**
+     * The bytes this queue actually occupies: linked entry bytes plus pinned unlinked bytes. This is the
+     * number capacity decisions should use; [totalQueuedBytes] alone under-reports during an upload whose
+     * file has been removed but whose descriptor is still open.
+     */
+    fun totalRetainedBytes(): Long = totalQueuedBytes() + pinnedUnlinkedBytes()
+
+    /** TEST SEAM: a hook that runs immediately BEFORE the pin decision, so the window is reachable. */
+    internal var beforePinForTest: (() -> Unit)? = null
+
+    /**
+     * Register a pin for [owned] when its capture is no longer linked. Idempotent, and never applied while
+     * the file is still present, so the same bytes are never counted twice.
+     */
+    private fun pinIfUnlinkedLocked(captureId: String, owned: OwnedAudio) {
+        if (pinnedUnlinked.containsKey(owned)) return
+        beforePinForTest?.invoke()
+        val audio = File(dir, "$captureId$SUFFIX_WAV")
+        if (audio.isFile) return // still linked: readyEntries already charges it
+        val bytes = owned.byteCount
+        if (bytes <= 0) return
+        pinnedUnlinked[owned] = bytes
+        owned.onSettled { synchronized(lock) { pinnedUnlinked.remove(owned) } }
+    }
 
     fun totalQueuedBytes(): Long = readyEntries().sumOf { it.audioBytes + it.metadataBytes }
 

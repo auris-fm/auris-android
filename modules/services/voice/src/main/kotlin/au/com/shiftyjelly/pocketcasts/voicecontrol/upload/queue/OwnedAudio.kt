@@ -118,6 +118,13 @@ class OwnedAudio internal constructor(
     /**
      * Refuses any FUTURE replay. The current borrow, if any, continues: cancellation must reach the socket
      * through the call itself, never by yanking the buffer away from a running writer.
+     *
+     * NO PRODUCTION CALLER, ON PURPOSE (reviewer 7c2f30e3 finding 3). Calling it from the attempt was tried
+     * and removed: an attempt always ends in [settle], which already makes this source terminal, so a later
+     * [borrowForBody] is refused whether or not this flag was set - a mutant that dropped the call survived
+     * even with a borrow granted mid-body. Wiring it would add a line no test can defend. It stays as the
+     * named expression of "no further replay" that [settle] enforces, and is NOT evidence that cancellation
+     * reaches a source.
      */
     fun cancelFurtherBorrows() {
         state.lock()

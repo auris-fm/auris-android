@@ -138,6 +138,7 @@ class ContributionUploadAssemblyTest {
         now: () -> Long,
         captures: MutableMap<String, ContributionUploadAssembly.Capture>,
         accepted: MutableList<String> = mutableListOf(),
+        unresolvedOwnership: MutableList<String> = mutableListOf(),
     ) = ContributionUploadAssembly(
         store = store,
         transport = ContributionUploadTransport(
@@ -149,6 +150,7 @@ class ContributionUploadAssemblyTest {
         policyAllows = { true },
         networkAvailable = { true },
         onAccepted = { _, captureId -> accepted += captureId },
+        onUnresolvedOwnership = { captureId, reason -> unresolvedOwnership += "$captureId:$reason" },
     )
 
     private fun receiptFor(store: ContributionStore, id: String, status: String = "accepted"): String {
@@ -187,6 +189,89 @@ class ContributionUploadAssemblyTest {
                 "the $label attempt left the descriptor open",
                 runCatching { owned.borrowForBody() ?: throw java.io.IOException("closed") }.isFailure,
             )
+        }
+    }
+
+    @Test
+    fun `an attempt settles its source so no replay is possible once it ends`() {
+        // Reviewer 7c2f30e3 finding 3 asked for cancelFurtherBorrows to have a production caller. Driving
+        // the real seam showed it would be REDUNDANT here: the attempt's settle() already makes the source
+        // terminal, so a later borrowForBody() is refused whether or not a cancellation flag is set - a
+        // "drop the cancel call" mutant survived even with the borrow granted mid-body. Adding an
+        // unkillable call would be cargo cult, so the guarantee is pinned at the property it actually rests
+        // on: END OF ATTEMPT => NO REPLAY, for a revoked attempt and an ordinary one alike.
+        for (revoked in listOf(true, false)) {
+            var now = 30_000_000L
+            val store = newStore { now }
+            val fixture = fixture(store, "assembly-no-replay-$revoked")
+            responseStatus = 201
+            responseBody = receiptFor(store, fixture.id, status = "accepted")
+
+            val capture = store.durableCapture(fixture.id)
+            val owned = requireNotNull(capture?.owned) { "PREMISE: the store hands down an owned source" }
+            val handed = mutableMapOf(
+                fixture.id to ContributionUploadAssembly.Capture(
+                    capture.record,
+                    capture.audio,
+                    capture.enrollmentEpoch,
+                    capture.enrollmentAccount,
+                    capture.enrollmentSession,
+                    owned,
+                ),
+            )
+            onRequest = { if (revoked) store.fence.revoke() }
+            val result = assembly(store, { now }, handed).poll()
+            assertTrue("PREMISE: the attempt reached the network (attempted=${result.attempted})", result.attempted > 0)
+
+            assertTrue(
+                "an ended attempt (revoked=$revoked) still handed out a replay of its bytes",
+                runCatching { owned.borrowForBody() ?: throw java.io.IOException("refused") }.isFailure,
+            )
+            assertTrue("PREMISE: the descriptor is closed at attempt end", owned.isClosed())
+        }
+    }
+
+    @Test
+    fun `an unresolved descriptor settlement is REPORTED, not treated as a clean one`() {
+        // Reviewer 7c2f30e3 finding 3: the attempt's finally discarded settle()'s false result, so a
+        // descriptor that never settled looked identical to one that did - hiding both a leak and a source
+        // lease still holding the directory. A writer that never exits makes the settle genuinely time out.
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-unresolved-settle")
+        val accepted = mutableListOf<String>()
+        val unresolved = mutableListOf<String>()
+        responseStatus = 201
+        responseBody = receiptFor(store, fixture.id, status = "accepted")
+
+        val capture = store.durableCapture(fixture.id)
+        val real = requireNotNull(capture?.owned) { "PREMISE: the store hands down an owned source" }
+        val handed = mutableMapOf(
+            fixture.id to ContributionUploadAssembly.Capture(
+                capture.record,
+                capture.audio,
+                capture.enrollmentEpoch,
+                capture.enrollmentAccount,
+                capture.enrollmentSession,
+                // A PARKED BODY WRITER: holding a borrow is exactly what makes settle() time out.
+                real,
+            ),
+        )
+        val borrow = requireNotNull(real.borrowForBody()) { "PREMISE: a borrow can be taken" }
+        try {
+            assembly(store, { now }, handed, accepted, unresolved).poll()
+            assertEquals(
+                "a settlement that timed out was not reported; ownership looked clean",
+                1,
+                unresolved.size,
+            )
+            assertTrue(
+                "the reported reason must name the unresolved descriptor, got ${unresolved.firstOrNull()}",
+                unresolved.first().contains("did not settle", ignoreCase = true),
+            )
+        } finally {
+            borrow.close()
+            real.close()
         }
     }
 

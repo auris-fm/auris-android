@@ -52,6 +52,16 @@ class ContributionUploadAssembly(
      * (retains), which is the only safe answer for a moved account.
      */
     private val launchIdentityCheck: ((admitted: UploadIdentityAuthority.AdmittedIdentity) -> Boolean)? = null,
+    /**
+     * Reports that an attempt could NOT prove its descriptor settled within the bounded timeout.
+     *
+     * Reviewer 7c2f30e3 finding 3: the attempt's `finally` discarded the false result, so an unresolved
+     * ownership looked exactly like a clean one. It is reported here instead of being swallowed: the
+     * descriptor may still be open, its bytes still retained, and its source lease still holding the
+     * directory. This is a diagnostic channel, not a recovery path - ownership stays unresolved until the
+     * descriptor actually closes.
+     */
+    private val onUnresolvedOwnership: (captureId: String, reason: String) -> Unit = { _, _ -> },
     /** Deterministic control seam: runs after acquisition, before launch validation. Tests only. */
     @Volatile var afterAcquisitionForTest: (() -> Unit)? = null,
 ) {
@@ -164,7 +174,12 @@ class ContributionUploadAssembly(
                 // Settle the descriptor on EVERY path above, including the thrown refusals. A bounded
                 // timeout is enough because a body writer exits when the call completes; if it does not,
                 // ownership stays unresolved rather than being declared clean (spec c12c569f).
-                owned.settle(DESCRIPTOR_SETTLE_TIMEOUT_MS)
+                // The RESULT IS REPORTED, never dropped (reviewer 7c2f30e3 finding 3): a false means the
+                // descriptor may still be open, its bytes still retained and its source lease still holding
+                // the directory. Treating that as success would hide a leak as well as a blocked teardown.
+                if (!owned.settle(DESCRIPTOR_SETTLE_TIMEOUT_MS)) {
+                    onUnresolvedOwnership(captureId, "descriptor did not settle within ${DESCRIPTOR_SETTLE_TIMEOUT_MS}ms")
+                }
             }
         },
         onSuccess = onAccepted,

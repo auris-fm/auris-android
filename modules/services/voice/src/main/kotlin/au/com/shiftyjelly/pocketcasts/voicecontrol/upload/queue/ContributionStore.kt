@@ -753,7 +753,10 @@ class ContributionStore(
     fun releaseForAdmittedAttempt(
         token: AdmittedAttempt,
         reason: TerminalReason = TerminalReason.UPLOAD_ACCEPTED,
-    ): Boolean {
+    ): Boolean = withLeaseResult(false) {
+        // THIS DELETES (deleteLocked), so it needs the same lifetime fence as every other mutation
+        // (found by the entry-point audit around reviewer e09f4cfc). Without it a stale ACCEPTED/TERMINAL
+        // ack delivered to a closed owner deleted the capture out of a successor's directory.
         val removed = synchronized(lock) {
             if (!attemptIdentityHoldsLocked(token.generation, token.captureId, token.attemptNumber)) {
                 null
@@ -762,7 +765,7 @@ class ContributionStore(
             }
         } != null
         if (removed) dropCounterOnly(reason)
-        return removed
+        removed
     }
 
     private val admittedGeneration = mutableMapOf<String, Long>()

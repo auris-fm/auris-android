@@ -1723,4 +1723,41 @@ class ContributionStoreTest {
         val successor = ContributionStore(root, QueueLimits.defaults())
         assertTrue("the successor acquires; got ${successor.unavailableReason()}", successor.isAvailable())
     }
+
+    @Test
+    fun `a closed owner cannot release an admitted attempt out of the successor's directory`() {
+        // Found by the entry-point audit reviewer e09f4cfc asked for: releaseForAdmittedAttempt() deletes
+        // via deleteLocked() with NO ownership check and NO lease, so a stale ACK callback on a closed
+        // owner can delete a successor's files. Every other mutating surface refuses; this one did not.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val token = store.admitForTest(8, meta(ID_A).size).let { admission ->
+            store.prepareAt(
+                store.fence.currentGeneration(),
+                admission,
+                ID_A,
+                "epoch-epoch",
+                chunks(8),
+                meta(ID_A),
+                "a@x",
+                7L,
+            )
+            val picked = store.pickupAttempt(store.fence.currentGeneration(), ID_A)
+            store.admittedAttemptForTest(ID_A) ?: error("no admitted attempt; pickup=$picked")
+        }
+        assertTrue("PREMISE: the attempt exists", File(root, "contributions/$ID_A.recording.wav").isFile)
+
+        store.close()
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the successor owns the directory", successor.isAvailable())
+
+        // The stale ack callback hits the CLOSED owner with a valid-looking token.
+        val released = store.releaseForAdmittedAttempt(token)
+
+        assertFalse("a closed owner released an admitted attempt", released)
+        assertTrue(
+            "the successor's file was deleted by the closed owner's late release",
+            File(root, "contributions/$ID_A.recording.wav").isFile,
+        )
+    }
 }

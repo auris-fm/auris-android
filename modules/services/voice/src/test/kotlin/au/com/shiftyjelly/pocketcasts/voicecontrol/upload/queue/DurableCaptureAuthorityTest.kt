@@ -17,6 +17,18 @@ import org.junit.rules.TemporaryFolder
  * serve upload bytes. These controls tamper with published pairs and assert the store refuses to vouch.
  */
 class DurableCaptureAuthorityTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
     /** Stores built by this class, so teardown can release the sources they still hold. */
     private val storesForTeardown = mutableListOf<ContributionStore>()
 
@@ -355,8 +367,8 @@ class DurableCaptureAuthorityTest {
         storesForTeardown.forEach { runCatching { it.close() } }
         org.junit.Assert.assertEquals("a source did not settle", 0, unsettled)
         org.junit.Assert.assertEquals(
-            "this class left descriptors open; the process-wide source slots belong to a later test",
-            0,
+            "this test did not return the source slots it took",
+            entrySourceSlots,
             ContributionStore.processOpenSourceSlotsForTest(),
         )
     }

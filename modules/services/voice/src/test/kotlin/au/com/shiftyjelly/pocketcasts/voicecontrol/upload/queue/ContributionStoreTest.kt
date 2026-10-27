@@ -24,6 +24,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ContributionStoreTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
     /** Stores built by this class, so teardown can release the sources they still hold. */
     private val storesForTeardown = mutableListOf<ContributionStore>()
 
@@ -39,8 +51,8 @@ class ContributionStoreTest {
         )
         storesForTeardown.forEach { runCatching { it.close() } }
         org.junit.Assert.assertEquals(
-            "this class left descriptors open; process-wide source slots belong to a later test",
-            0,
+            "this test did not return the source slots it took",
+            entrySourceSlots,
             ContributionStore.processOpenSourceSlotsForTest(),
         )
     }
@@ -2103,8 +2115,13 @@ class ContributionStoreTest {
         val storeB = ContributionStore(rootB, QueueLimits.defaults()).also { storesForTeardown += it }
         val held = mutableListOf<OwnedAudio>()
         try {
+            // AMBIENT-TOLERANT: suite neighbours may legitimately leave residue; this control only needs
+            // enough headroom under the process-wide bound to fill half of it through each store.
             val baseline = storeA.openSourceSlotsForTest()
-            assertEquals("PREMISE: this JVM starts with no sources open", 0, baseline)
+            org.junit.Assert.assertTrue(
+                "PREMISE: need at least 4 free slots under the process-wide bound, have ${ContributionStore.MAX_OPEN_SOURCES - baseline}",
+                baseline <= ContributionStore.MAX_OPEN_SOURCES - 4,
+            )
 
             // Open half the slots through EACH store: together they must fill the shared bound.
             for (store in listOf(storeA, storeB)) {

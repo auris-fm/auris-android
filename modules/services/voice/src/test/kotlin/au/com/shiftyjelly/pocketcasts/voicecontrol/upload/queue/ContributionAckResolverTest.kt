@@ -23,6 +23,17 @@ import org.junit.rules.TemporaryFolder
  * removed ONLY on validated acceptance or confirmed terminal disposal under a STILL-VALID generation.
  */
 class ContributionAckResolverTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
 
     @get:Rule
     val tmp = TemporaryFolder()

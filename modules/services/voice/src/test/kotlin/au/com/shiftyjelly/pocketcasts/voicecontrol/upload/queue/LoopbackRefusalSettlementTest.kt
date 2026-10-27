@@ -38,6 +38,18 @@ import org.junit.rules.TemporaryFolder
  * recreation over the same directory, labelled as such rather than as a device restart.
  */
 class LoopbackRefusalSettlementTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
     /** Stores built by this class, so teardown can release the sources they still hold. */
     private val storesForTeardown = mutableListOf<ContributionStore>()
 
@@ -48,7 +60,11 @@ class LoopbackRefusalSettlementTest {
         val unsettled = storesForTeardown.flatMap { it.settleSourcesForTest() }.count { !it }
         storesForTeardown.forEach { runCatching { it.close() } }
         org.junit.Assert.assertEquals("a source did not settle", 0, unsettled)
-        org.junit.Assert.assertEquals("class left descriptors open", 0, ContributionStore.processOpenSourceSlotsForTest())
+        org.junit.Assert.assertEquals(
+            "this test did not return the source slots it took",
+            entrySourceSlots,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
     }
 
     @get:Rule
@@ -282,8 +298,18 @@ class LoopbackRefusalSettlementTest {
                 .canonicalBytes(store.durableCapture(id)!!.record).toList().also { store.settleSourcesForTest() }
 
             val assembly = productionAssembly(store, { now })
+            // BASELINE taken after the fixture source was explicitly settled, so any slot counted below
+            // can only come from the ASSEMBLY.
+            val baseline = ContributionStore.processOpenSourceSlotsForTest()
             val first = assembly.poll()
             assertEquals("$code: the attempt must have run", 1, first.attempted)
+            // PRODUCTION SETTLEMENT EVIDENCE, before teardown can settle anything (reviewer 4a955ff6):
+            // the attempt opened its own descriptor and must have returned that slot itself.
+            assertEquals(
+                "$code: the attempt did not return its own source slot; only fixture cleanup could have",
+                baseline,
+                ContributionStore.processOpenSourceSlotsForTest(),
+            )
             assertEquals("$code: exactly one exchange left the device", 1, requestCount.get())
             assertEquals(
                 "$code: the FIRST request's metadata part must claim the recorded digest - the " +

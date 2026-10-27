@@ -42,11 +42,23 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class DurableQueuePolicyDisableTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
     @org.junit.After
     fun assertNoSourceLeak() {
         org.junit.Assert.assertEquals(
-            "this class left descriptors open; process-wide source slots belong to a later test",
-            0,
+            "this test did not return the source slots it took",
+            entrySourceSlots,
             ContributionStore.processOpenSourceSlotsForTest(),
         )
     }

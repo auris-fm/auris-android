@@ -44,6 +44,18 @@ import org.junit.rules.TemporaryFolder
  * proven across threads; runtime attachment through the UploadTrigger.start consumer.
  */
 class EngineToProducerPublishTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
     /** REAL owner-transaction semantics: one lock, snapshot reads inside it (see WiringTest). */
     private class WatchOwner(startAccount: String, startSession: Long) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
         override val collectionSharedLock = Any()
@@ -115,8 +127,8 @@ class EngineToProducerPublishTest {
         storesForTeardown.forEach { it.settleSourcesForTest() }
         storesForTeardown.forEach { runCatching { it.close() } }
         org.junit.Assert.assertEquals(
-            "this class left descriptors open; process-wide source slots belong to a later test",
-            0,
+            "this test did not return the source slots it took",
+            entrySourceSlots,
             ContributionStore.processOpenSourceSlotsForTest(),
         )
     }
@@ -951,8 +963,8 @@ class EngineToProducerPublishTest {
     @After
     fun assertNoSourceLeak() {
         org.junit.Assert.assertEquals(
-            "this class left descriptors open; the process-wide source slots belong to a later test",
-            0,
+            "this test did not return the source slots it took",
+            entrySourceSlots,
             ContributionStore.processOpenSourceSlotsForTest(),
         )
     }

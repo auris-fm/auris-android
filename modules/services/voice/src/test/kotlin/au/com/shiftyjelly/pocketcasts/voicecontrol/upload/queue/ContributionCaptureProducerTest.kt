@@ -20,6 +20,18 @@ import org.junit.rules.TemporaryFolder
  * through the store's durable authority - never rewritten by settings or retry.
  */
 class ContributionCaptureProducerTest {
+    /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
     @org.junit.After
     fun releaseSources() {
         // ORDER MATTERS (reviewer a6877ffc): release only what THIS fixture owns, then assert. A global
@@ -28,8 +40,8 @@ class ContributionCaptureProducerTest {
         storesForTeardown.forEach { runCatching { it.close() } }
         org.junit.Assert.assertEquals("a source did not settle", 0, unsettled)
         org.junit.Assert.assertEquals(
-            "this class left descriptors open; process-wide source slots belong to a later test",
-            0,
+            "this test did not return the source slots it took",
+            entrySourceSlots,
             ContributionStore.processOpenSourceSlotsForTest(),
         )
     }

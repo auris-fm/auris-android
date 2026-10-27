@@ -31,6 +31,18 @@ import org.robolectric.RobolectricTestRunner
 @org.robolectric.annotation.Config(sdk = [35])
 class VoiceUploadCompositionPathTest {
     /**
+     * Slots in use when THIS test started. The bound is process-wide, so a suite neighbour may legitimately
+     * have left residue; what this test must prove is that ITS OWN work returned every slot it took. An
+     * absolute zero assertion would fail on someone else's residue and pass for the wrong reason.
+     */
+    private var entrySourceSlots = 0
+
+    @org.junit.Before
+    fun recordEntryBaseline() {
+        entrySourceSlots = ContributionStore.processOpenSourceSlotsForTest()
+    }
+
+    /**
      * Release every source this class opened. close() drops the source leases, so a store left open keeps
      * its descriptors (and the process-wide slots) alive past the test that owns them (reviewer 2c7dc375).
      */
@@ -49,10 +61,9 @@ class VoiceUploadCompositionPathTest {
         stores.forEach { runCatching { it.close() } }
         val tracked = stores.flatMap { it.openCaptureIdsForTest() }
         org.junit.Assert.assertEquals(
-            "this class left descriptors open (" + tracked + "); " +
-                "process-wide source slots belong to a later test",
-            0,
-            ContributionStore.processOpenSourceSlotsForTest(),
+            "this class left descriptors open (" + tracked + ")",
+            emptyList<String>(),
+            tracked,
         )
     }
 

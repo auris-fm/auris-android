@@ -63,6 +63,12 @@ class ContributionUploadAssembly(
         /** Admitted ownership from the store's owner sidecar; null = epoch-only claim. */
         val enrollmentAccount: String? = null,
         val enrollmentSession: Long? = null,
+        /**
+         * The validated bytes as an OPEN DESCRIPTOR (spec ee31a3cc). Non-null means this attempt OWNS the
+         * descriptor and must settle it once the call finishes; [audio] is a pathname and must not be read
+         * for transmission, because a successor owner can replace it after validation.
+         */
+        val owned: OwnedAudio? = null,
     )
 
     /**
@@ -93,58 +99,69 @@ class ContributionUploadAssembly(
                 // attempt as ambiguous (retain), which is what a missing capture deserves.
                 throw CaptureUnavailable(captureId)
             }
-            // IDENTITY BINDING: an admitted epoch that is no longer the account's current epoch is a
-            // retired identity - the capture is RETAINED, never sent under it.
-            if (capture.enrollmentEpoch != null && identityHolds?.invoke(capture.enrollmentEpoch) == false) {
-                throw CaptureUnavailable(captureId)
+            // OWNERSHIP LIFETIME (reviewer 9a47123e, spec c12c569f): this attempt owns the open descriptor
+            // for exactly as long as the call runs. Every exit - refusal, cancellation, failure, or an
+            // accepted answer - settles it once. Leaking it here was the defect: captureFor built a Capture
+            // and silently dropped the descriptor, one per successful capture.
+            try {
+                // IDENTITY BINDING: an admitted epoch that is no longer the account's current epoch is a
+                // retired identity - the capture is RETAINED, never sent under it.
+                if (capture.enrollmentEpoch != null && identityHolds?.invoke(capture.enrollmentEpoch) == false) {
+                    throw CaptureUnavailable(captureId)
+                }
+                // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY (account/session/epoch): one
+                // owner-lock snapshot; any component mismatch retains.
+                val admitted = UploadIdentityAuthority.AdmittedIdentity(
+                    capture.enrollmentAccount,
+                    capture.enrollmentSession,
+                    capture.enrollmentEpoch,
+                )
+                var frozenBearer: String? = null
+                if (capture.enrollmentEpoch != null && credentialFor != null) {
+                    val live = credentialFor(admitted)
+                        ?: throw CaptureUnavailable(captureId) // identity moved or no credential in force
+                    frozenBearer = live.bearer
+                }
+                afterAcquisitionForTest?.invoke()
+                if (isRevoked()) {
+                    throw AttemptCancelled(captureId)
+                }
+                // The revocation signal now reaches INSIDE the upload: the transport checks it before the
+                // first byte, per request-body chunk, and around the response read, so a withdrawal stops a
+                // transfer already in flight instead of only being noticed after it finishes.
+                // The lease owns this attempt's authorization, so the live call is bound to it: a revocation
+                // then cancels the CALL rather than only flipping a flag the blocked writer cannot read.
+                val response = transport.upload(
+                    captureId,
+                    capture.record,
+                    capture.audio,
+                    isCancelled = isRevoked,
+                    authorizationOverride = frozenBearer,
+                    // LAUNCH OWNERSHIP at the network edge (reviewer 0081c95f): evaluated by the
+                    // transport after construction, before registration - the caller-side check alone
+                    // cannot close the acquisition→launch window.
+                    validateAtLaunch = if (capture.enrollmentEpoch != null && launchIdentityCheck != null) {
+                        { launchIdentityCheck(admitted) }
+                    } else {
+                        null
+                    },
+                    // The REAL chain: the transport reports the registered handle, and the abort that cancels
+                    // THAT call is installed on the lease which owns this attempt's authorization. A
+                    // revocation then reaches a transmitting Call without anyone polling a flag.
+                    onRegistered = { handle -> bindCancellation { transport.cancelRegistered(handle) } },
+                )
+                lastResponse[captureId] = response
+                // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.
+                if (response is ContributionUploadTransport.Response.Cancelled) throw AttemptCancelled(captureId)
+                // Cancellation observed again before settlement: the response may belong to a revoked owner.
+                if (isRevoked()) throw AttemptCancelled(captureId)
+                response is ContributionUploadTransport.Response.Accepted
+            } finally {
+                // Settle the descriptor on EVERY path above, including the thrown refusals. A bounded
+                // timeout is enough because a body writer exits when the call completes; if it does not,
+                // ownership stays unresolved rather than being declared clean (spec c12c569f).
+                capture.owned?.settle(DESCRIPTOR_SETTLE_TIMEOUT_MS)
             }
-            // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY (account/session/epoch): one
-            // owner-lock snapshot; any component mismatch retains.
-            val admitted = UploadIdentityAuthority.AdmittedIdentity(
-                capture.enrollmentAccount,
-                capture.enrollmentSession,
-                capture.enrollmentEpoch,
-            )
-            var frozenBearer: String? = null
-            if (capture.enrollmentEpoch != null && credentialFor != null) {
-                val live = credentialFor(admitted)
-                    ?: throw CaptureUnavailable(captureId) // identity moved or no credential in force
-                frozenBearer = live.bearer
-            }
-            afterAcquisitionForTest?.invoke()
-            if (isRevoked()) {
-                throw AttemptCancelled(captureId)
-            }
-            // The revocation signal now reaches INSIDE the upload: the transport checks it before the
-            // first byte, per request-body chunk, and around the response read, so a withdrawal stops a
-            // transfer already in flight instead of only being noticed after it finishes.
-            // The lease owns this attempt's authorization, so the live call is bound to it: a revocation
-            // then cancels the CALL rather than only flipping a flag the blocked writer cannot read.
-            val response = transport.upload(
-                captureId,
-                capture.record,
-                capture.audio,
-                isCancelled = isRevoked,
-                authorizationOverride = frozenBearer,
-                // LAUNCH OWNERSHIP at the network edge (reviewer 0081c95f): evaluated by the
-                // transport after construction, before registration - the caller-side check alone
-                // cannot close the acquisition→launch window.
-                validateAtLaunch = if (capture.enrollmentEpoch != null && launchIdentityCheck != null) {
-                    { launchIdentityCheck(admitted) }
-                } else {
-                    null
-                },
-                // The REAL chain: the transport reports the registered handle, and the abort that cancels
-                // THAT call is installed on the lease which owns this attempt's authorization. A
-                // revocation then reaches a transmitting Call without anyone polling a flag.
-                onRegistered = { handle -> bindCancellation { transport.cancelRegistered(handle) } },
-            )
-            lastResponse[captureId] = response
-            // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.
-            if (response is ContributionUploadTransport.Response.Cancelled) throw AttemptCancelled(captureId)
-            // Cancellation observed again before settlement: the response may belong to a revoked owner.
-            if (isRevoked()) throw AttemptCancelled(captureId)
-            response is ContributionUploadTransport.Response.Accepted
         },
         onSuccess = onAccepted,
         // The owning table's terminal family is the ONLY source of terminal disposal.
@@ -179,5 +196,14 @@ class ContributionUploadAssembly(
     private companion object {
         /** Bounded: this cache exists for the duration of one attempt's settlement, not as storage. */
         const val MAX_TRACKED = 32
+
+        /**
+         * How long an attempt waits for its descriptor to settle when the call returns.
+         *
+         * A received response means the body writer has already finished, so this normally returns at
+         * once. It is a deadline only for the pathological case; on expiry ownership stays UNRESOLVED
+         * rather than being declared clean, because the descriptor may still be open in a writer.
+         */
+        const val DESCRIPTOR_SETTLE_TIMEOUT_MS = 2_000L
     }
 }

@@ -157,6 +157,39 @@ class ContributionUploadAssemblyTest {
             """"receipt_id":"rcpt-1","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"2026-11-21T00:00:00Z"}"""
     }
 
+    @Test
+    fun `the attempt settles the capture's descriptor on both an acceptance and a refusal`() {
+        // Reviewer 9a47123e: captureFor built a Capture and dropped the owned descriptor, leaking one per
+        // successful capture. This drives the REAL seam and observes the descriptor's own fate.
+        for ((label, status) in listOf("accepted" to 201, "refused" to 500)) {
+            var now = 30_000_000L
+            val store = newStore { now }
+            val fixture = fixture(store, "assembly-settle-$label")
+            val accepted = mutableListOf<String>()
+            responseStatus = status
+            responseBody = if (status == 201) receiptFor(store, fixture.id, status = "accepted") else "{}"
+
+            val capture = store.durableCapture(fixture.id)
+            val owned = requireNotNull(capture?.owned) { "PREMISE: the store hands down an owned source" }
+            val handed = mutableMapOf(
+                fixture.id to ContributionUploadAssembly.Capture(
+                    capture.record,
+                    capture.audio,
+                    capture.enrollmentEpoch,
+                    capture.enrollmentAccount,
+                    capture.enrollmentSession,
+                    owned,
+                ),
+            )
+            assembly(store, { now }, handed, accepted).poll()
+
+            assertTrue(
+                "the $label attempt left the descriptor open",
+                runCatching { owned.borrowForBody() ?: throw java.io.IOException("closed") }.isFailure,
+            )
+        }
+    }
+
     private fun capturesFor(store: ContributionStore, fixture: Fixture): MutableMap<String, ContributionUploadAssembly.Capture> = mutableMapOf(fixture.id to ContributionUploadAssembly.Capture(record(fixture.id, sha256Hex(fixture.file.readBytes()), fixture.file.length()), fixture.file))
 
     @Test

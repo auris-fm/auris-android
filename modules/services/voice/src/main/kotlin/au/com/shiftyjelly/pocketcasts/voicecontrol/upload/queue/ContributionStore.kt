@@ -501,78 +501,97 @@ class ContributionStore(
         // hash would validate bytes that a successor owner could replace between validation and the
         // transport's later open; hashing the descriptor we then hand down makes the validated bytes and
         // the transmitted bytes the same file description. The descriptor is rewound to 0 on success.
+        // OWNERSHIP TRANSFER (reviewer 9a47123e): from the moment the descriptor opens, THIS function owns
+        // it. Hand-written closes on each refusal path missed the exceptional ones, so the whole
+        // validation runs in one try, and any failure - including header validation and an unexpected
+        // exception - closes the descriptor here. Ownership leaves only on the success return.
         val source = try {
             java.io.FileInputStream(audio)
         } catch (io: Throwable) {
             return null
         }
-        val actualAudioSha = try {
-            sha256HexBounded(source, limits.maxClipBytes) ?: run {
-                source.close()
-                return null
-            }
-        } catch (io: Throwable) {
-            source.close()
-            return null
-        }
-        if (actualAudioSha != declaredAudioSha) {
-            source.close()
-            return null
-        }
-        try {
-            source.channel.position(0)
-        } catch (io: Throwable) {
-            source.close()
-            return null
-        }
-        // The header is read from the SAME descriptor (rewound above), so it cannot come from a different
-        // file than the payload we just hashed.
-        val header = try {
-            source.channel.position(0)
-            val buffer = ByteArray(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.HEADER_BYTES)
-            var read = 0
-            while (read < buffer.size) {
-                val n = source.read(buffer, read, buffer.size - read)
-                if (n < 0) {
-                    source.close()
-                    return null
-                }
-                read += n
-            }
-            buffer
-        } catch (io: Throwable) {
-            source.close()
-            return null
-        }
-        if (WavHeaderValidator.validate(header, source.channel.size()) == null) {
-            source.close()
-            return null
-        }
-        // FAIL CLOSED (reviewer 0081c95f): the admitted ownership is REQUIRED. A missing or corrupt
-        // sidecar refuses to serve the capture at all - it retains on disk but can never be sent,
-        // because an unvouched identity must not silently degrade to an epoch-only check that a
-        // removed or damaged sidecar could bypass.
-        val owner = readOwnerSidecar(captureId) ?: run {
-            sidecarRefusals++
-            source.close()
-            return null
-        }
-        // EPOCH BINDING VERIFIED, not discarded (reviewer 2b67e016): a sidecar whose epoch disagrees
-        // with the admitted entry is a corruption - refuse the capture entirely.
-        if (owner.epoch != entry.enrollmentEpoch) {
-            sidecarRefusals++
-            source.close()
-            return null
-        }
-        // Ownership passes to the caller: it must close the owned source exactly once after the call
-        // settles (OwnedAudio's lifetime).
+        openedProbe.get()?.set(source)
         val owned = try {
-            OwnedAudio(source, source.channel.size(), actualAudioSha)
-        } catch (io: Throwable) {
+            validateOpenedAudioLocked(captureId, entry, record, source)
+        } catch (failure: Throwable) {
+            runCatching { source.close() }
+            return null
+        } ?: run {
             runCatching { source.close() }
             return null
         }
-        DurableCapture(record, audio, entry.enrollmentEpoch, owner.account, owner.session, owned)
+        DurableCapture(owned.record, audio, entry.enrollmentEpoch, owned.ownerAccount, owned.ownerSession, owned.audio)
+    }
+
+    /**
+     * TEST SEAM. Run `durableCapture` and also report the descriptor it opened, so a control can observe
+     * whether a refusal CLOSED it. Reviewer 9a47123e was right that an indirect count proves nothing; this
+     * exposes the exact object whose fate is in question.
+     */
+    internal data class RefusingDescriptorProbe(val capture: DurableCapture?, val descriptor: java.io.FileInputStream?)
+
+    internal fun durableCaptureRefusingDescriptorForTest(captureId: String): RefusingDescriptorProbe = withLeaseResult(RefusingDescriptorProbe(null, null)) {
+        synchronized(lock) {
+            val opened = java.util.concurrent.atomic.AtomicReference<java.io.FileInputStream?>(null)
+            val probe = object : Any() {}
+            openedProbe.set(opened)
+            try {
+                RefusingDescriptorProbe(durableCaptureLocked(captureId), opened.get())
+            } finally {
+                openedProbe.remove()
+            }
+        }
+    }
+
+    /** Thread-local sink the open site publishes its descriptor to, used only by the test seam above. */
+    private val openedProbe = ThreadLocal<java.util.concurrent.atomic.AtomicReference<java.io.FileInputStream?>>()
+
+    /** The validated outcome of one opened descriptor, before it is handed down as a [DurableCapture]. */
+    private class OpenedAudio(
+        val record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj,
+        val audio: OwnedAudio,
+        val ownerAccount: String?,
+        val ownerSession: Long?,
+    )
+
+    /**
+     * Validate the ALREADY-OPEN descriptor [source] against the record and sidecars.
+     *
+     * Returns null on any refusal. Ownership of [source] passes to the CALLER in every case: on success it
+     * is wrapped in the returned [OpenedAudio], and the caller closes it on refusal. Nothing here closes the
+     * descriptor, so there is exactly one place that decides its fate (reviewer 9a47123e).
+     */
+    private fun validateOpenedAudioLocked(
+        captureId: String,
+        entry: Entry,
+        record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj,
+        source: java.io.FileInputStream,
+    ): OpenedAudio? {
+        val declaredAudioSha = audioShaOf(record) ?: return null
+        val actualAudioSha = sha256HexBounded(source, limits.maxClipBytes) ?: return null
+        if (actualAudioSha != declaredAudioSha) return null
+        source.channel.position(0)
+        // The header is read from the SAME descriptor, so it cannot come from a different file than the
+        // payload just hashed.
+        val header = ByteArray(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.HEADER_BYTES)
+        var read = 0
+        while (read < header.size) {
+            val n = source.read(header, read, header.size - read)
+            if (n < 0) return null
+            read += n
+        }
+        if (WavHeaderValidator.validate(header, source.channel.size()) == null) return null
+        val owner = readOwnerSidecar(captureId) ?: run {
+            sidecarRefusals++
+            return null
+        }
+        if (owner.epoch != entry.enrollmentEpoch) {
+            sidecarRefusals++
+            return null
+        }
+        source.channel.position(0)
+        val owned = OwnedAudio(source, source.channel.size(), actualAudioSha)
+        return OpenedAudio(record, owned, owner.account, owner.session)
     }
 
     /**

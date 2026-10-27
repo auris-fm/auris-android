@@ -1845,27 +1845,41 @@ class ContributionStoreTest {
     }
 
     @Test
-    fun `a refused capture closes the descriptor instead of leaking it`() {
-        // Every refusal path after the open must close the descriptor. A corrupt owner sidecar is the
-        // cheapest reachable refusal that happens AFTER the open.
+    fun `a refused capture closes its descriptor, observed by the descriptor itself`() {
+        // REVIEWER 9a47123e: "repeating refusals followed by a successful open does not prove descriptors
+        // were closed; observe close or descriptor counts directly." Right on both counts. My first attempt
+        // counted /dev/fd entries under the queue root, and a mutant that leaked the descriptor SURVIVED it -
+        // because /dev/fd entries do not resolve to a path on this platform, so the count was always equal
+        // and the control was vacuous. This version observes the stream directly: a closed FileInputStream
+        // refuses to read, and a leaked one still reads.
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
-        val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches once" }
-        requireNotNull(capture.owned).close()
+        // A capture is served once, proving the entry is fresh; then the descriptor is closed by hand so
+        // the file is not pinned while we tamper.
+        requireNotNull(store.durableCapture(ID_A)?.owned).close()
 
-        // Corrupt the sidecar: the epoch no longer matches, so the next attempt refuses AFTER opening.
+        // Keep the SAME store (it already knows the entry, so validation reaches the open) and replace
+        // the audio with a SAME-LENGTH file whose declared sha256 still matches but whose WAV header is
+        // invalid. Validation then refuses at the HEADER check, after the descriptor is open - the window
+        // where a hand-written close can be missed.
+        val audio = File(root, "contributions/$ID_A.recording.wav")
+        assertTrue("PREMISE: the published audio exists", audio.isFile)
+        val tampered = audio.readBytes()
+        for (i in 0 until 12) tampered[i] = 0x00
+        val staged = File(root, "contributions/$ID_A.tampered.staged")
+        staged.writeBytes(tampered)
+        assertTrue("PREMISE: the tampered file replaces it", staged.renameTo(audio))
+        assertEquals("PREMISE: the length is unchanged", tampered.size.toLong(), audio.length())
+        val refusal = store.durableCaptureRefusingDescriptorForTest(ID_A)
+        assertNull("PREMISE: the corrupt header refuses the capture", refusal.capture)
+        val opened = requireNotNull(refusal.descriptor) { "PREMISE: the store opened a descriptor" }
+        val readAfterRefusal = runCatching { opened.read() }
+        assertTrue(
+            "durableCapture refused but left its descriptor open: $readAfterRefusal",
+            readAfterRefusal.isFailure,
+        )
         store.close()
-        val sidecar = File(root, "contributions/$ID_A.owner")
-        assertTrue("PREMISE: the sidecar exists", sidecar.isFile)
-        sidecar.writeText("""{"capture_id":"$ID_A","account":"a@x","session":7,"epoch":"WRONG"}""")
-        val fresh = ContributionStore(root, QueueLimits.defaults())
-        assertNull("a mismatched sidecar must refuse the capture", fresh.durableCapture(ID_A))
-        // If the refusal leaked, repeated refusals exhaust the process's descriptors. Prove it does not by
-        // refusing many times and still being able to open a file.
-        repeat(64) { assertNull(fresh.durableCapture(ID_A)) }
-        val probe = File(root, "contributions/$ID_A.recording.wav").inputStream()
-        probe.close()
     }
 
     @Test

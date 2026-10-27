@@ -134,6 +134,8 @@ object VoiceUploadModule {
                         it.enrollmentEpoch,
                         it.enrollmentAccount,
                         it.enrollmentSession,
+                        // Ownership of the open descriptor travels WITH the capture; the attempt settles it.
+                        it.owned,
                     )
                 }
             },

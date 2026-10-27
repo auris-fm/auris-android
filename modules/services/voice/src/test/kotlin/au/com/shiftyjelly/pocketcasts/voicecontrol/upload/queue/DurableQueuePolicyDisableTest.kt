@@ -165,6 +165,13 @@ class DurableQueuePolicyDisableTest {
         )
         premiseOwner.close()
 
+        // THE LIVE OWNER for the disable event. `store` was CLOSED above so the premise owner could take
+        // over, and a closed owner REFUSES every mutating surface - correctly, per spec c8f766fb, since
+        // its directory may already belong to a successor. Handing the closed store to the watcher made
+        // the purge a no-op and the control fail for a reason that had nothing to do with disable: it
+        // observed `purges=[] refusals=1`. The watcher gets a store that actually owns the directory now.
+        val liveStore = ContributionStore(root, QueueLimits.defaults())
+
         // THE LIVE EVENT: a disable on the provider's OWN published flow. A cancelled scope keeps
         // the provider's init refresh from overwriting the explicit fixture.
         val startup = VoiceUploadCompositionFixtures.startup(ApplicationProvider.getApplicationContext<Application>())
@@ -180,24 +187,38 @@ class DurableQueuePolicyDisableTest {
             accountState = startup.state,
             snapshot = { null },
             epoch = { null },
-            store = store,
+            store = liveStore,
             policyProvider = policyProvider,
         )
         scope.launch { watcher() }
         dispatcher.scheduler.runCurrent()
 
-        assertTrue("the entry survives until the disable is published", store.readyEntries().isNotEmpty())
+        // A fresh owner's index starts EMPTY; the pre-existing capture becomes servable only once this
+        // owner recovers. That is the production startup sequence, and it is also what makes the purge
+        // below meaningful - a store that never recovered anything would "purge" an empty index.
+        assertTrue("PREMISE: a fresh owner's index starts empty", liveStore.readyEntries().isEmpty())
+        val recoveredByLive = liveStore.recover()
+        assertTrue(
+            "PREMISE: the live owner recovers the pre-existing capture (got $recoveredByLive)",
+            recoveredByLive.any { it.captureId == id },
+        )
+        assertTrue("the entry survives until the disable is published", liveStore.readyEntries().isNotEmpty())
 
         policyProvider.applySnapshotForTest(disabled())
         dispatcher.scheduler.runCurrent()
 
-        assertTrue("no entry is queued after the observed disable", store.readyEntries().isEmpty())
+        assertTrue(
+            "no entry is queued after the observed disable (purges=${liveStore.purgeReasons} " +
+                "entries=${liveStore.readyEntries().size} files=${captureContentFiles(id).size} " +
+                "refusals=${liveStore.guardedRefusalsForTest()} unknown=${liveStore.unknownBreakdownForTest()})",
+            liveStore.readyEntries().isEmpty(),
+        )
         assertTrue(
             "no audio or metadata FILE is left on disk for the capture",
             captureContentFiles(id).isEmpty(),
         )
-        assertTrue("the purge reports no residue, so nothing survived it", store.purgeResidue.isEmpty())
-        assertTrue("the purge is attributed to the observed disable", store.purgeReasons.contains("policy-disable"))
+        assertTrue("the purge reports no residue, so nothing survived it", liveStore.purgeResidue.isEmpty())
+        assertTrue("the purge is attributed to the observed disable", liveStore.purgeReasons.contains("policy-disable"))
 
         // THE FRESH OWNER: a brand-new store over the same directory, explicitly RECOVERED. A fresh
         // store's index is empty until recover() reads disk, so asserting readyEntries() alone would

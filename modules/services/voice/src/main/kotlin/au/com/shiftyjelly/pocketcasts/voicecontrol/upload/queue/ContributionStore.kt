@@ -2244,6 +2244,14 @@ class ContributionStore(
             return
         }
         try {
+            // DISCOVER FROM DISK FIRST (reviewer 6456b2a5). revokeAndPurge deletes only what THIS store's
+            // index holds, and a freshly constructed store's index is EMPTY by construction - so a
+            // policy-disable observed at STARTUP purged nothing, leaving a previous owner's audio on disk
+            // after the user had asked for everything to be removed. Rebuilding the index here (same
+            // lease, before a single file is touched) is what makes the purge cover the whole directory.
+            // recoverLocked() holds no lock of its own beyond what this lease provides; a failed
+            // enumeration leaves the root UNKNOWN, and the purge below then retains rather than half-deletes.
+            recoverLocked()
             revokeAndPurgeLocked(reason)
         } finally {
             leaveOperation()

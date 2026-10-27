@@ -35,6 +35,14 @@ class OwnedAudio internal constructor(
     val byteCount: Long,
     /** SHA-256 of the bytes this descriptor reads, established by hashing THIS descriptor. */
     val audioSha256: String,
+    /**
+     * The directory's source lease, held for exactly as long as this descriptor is open.
+     *
+     * Reviewer 7c2f30e3 finding 2: the operation lease ends when the capture is handed down, so a close
+     * could release the directory while an upload still owned bytes. The source lease keeps the directory
+     * counted until THIS descriptor closes - which is the real lifetime of the retention.
+     */
+    private val sourceLease: AutoCloseable? = null,
 ) : AutoCloseable {
     /** Guards EVERY state transition: admission, cancellation, close, and borrow exit. */
     private val state = ReentrantLock()
@@ -214,6 +222,9 @@ class OwnedAudio internal constructor(
         if (closed) return
         closed = true
         runCatching { source.close() }
+        // The bytes are only really gone once the descriptor is closed, so the directory may be released
+        // only now. Idempotent, and safe to run under the monitor: it takes no store lock.
+        runCatching { sourceLease?.close() }
         notifyPending = settleCallbacks.toList()
         settleCallbacks.clear()
     }

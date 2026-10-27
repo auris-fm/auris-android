@@ -77,7 +77,10 @@ class DurableCaptureAuthorityTest {
         val id = UUID.randomUUID().toString()
         val store = newStore(root)
         prepare(store, root, id)
-        assertNotNull(store.durableCapture(id))
+        // SETTLE the source: an open descriptor holds a SOURCE LEASE that keeps the directory ours until it
+        // closes (reviewer 7c2f30e3 finding 2). Discarding the capture here would leak it and leave the
+        // restart owner unable to take over - which is exactly what this control must not do.
+        store.durableCapture(id)?.owned?.close()
         // RESTART: a fresh store instance over the same directory; recover() rebuilds the index.
         // The previous owner is GONE - in production the process died and the OS dropped the lock.
         store.close()

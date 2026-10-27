@@ -48,6 +48,20 @@ interface DirectoryOwnership {
     ): java.util.concurrent.Future<Boolean>
 
     /**
+     * Holds the directory open for as long as ONE owned source (an open descriptor) survives.
+     *
+     * This is a NON-THREAD-SCOPED lease: the descriptor is handed to a writer that may run on another
+     * thread, and it keeps retaining bytes after its file is unlinked, so the operation lease (which is
+     * thread-scoped and ends when the handing operation returns) cannot represent it.
+     *
+     * Why it exists (reviewer 7c2f30e3 finding 2): without it, a close could release the directory while an
+     * upload still owned bytes. Returns null when ownership is already unavailable - the caller must then
+     * not open a source nothing protects. Closing the returned handle is the ONLY way to drop it, and is
+     * idempotent.
+     */
+    fun acquireSourceLease(): AutoCloseable?
+
+    /**
      * Releases the directory. Idempotent. After this returns the handle is INVALIDATED first (so no new
      * operation can pass) and the OS lock is dropped last.
      */
@@ -143,19 +157,58 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         return false
     }
 
+    /**
+     * Source leases currently outstanding. Tracked IN ADDITION to [inFlight] so a close can distinguish "a
+     * writer is mid-operation" (transient) from "an upload still owns an open descriptor" (can outlive the
+     * close entirely, and must be reported as UNRESOLVED rather than waited on).
+     */
+    private val sourceLeases = java.util.concurrent.atomic.AtomicInteger()
+
+    override fun acquireSourceLease(): AutoCloseable? {
+        inFlight.incrementAndGet()
+        sourceLeases.incrementAndGet()
+        if (isHeld()) return SourceLease()
+        // Refused: undo the count exactly as a release would, without pretending a lease was granted.
+        releaseSource()
+        return null
+    }
+
+    /** One-shot guard so a double release cannot free a lease that still protects a descriptor. */
+    private inner class SourceLease : AutoCloseable {
+        private val released = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        override fun close() {
+            if (released.compareAndSet(false, true)) releaseSource()
+        }
+    }
+
+    private fun releaseSource() {
+        sourceLeases.decrementAndGet()
+        leaveInFlight()
+    }
+
     fun leave() {
         val depth = (leaseDepth.get() ?: 1) - 1
         leaseDepth.set(depth)
+        leaveInFlight()
+    }
+
+    /**
+     * The ONE place in-flight reaches zero, shared by operation and source leases.
+     *
+     * THE LAST LEASE IS GONE: this is the only place a deferred close may actually release, because there is
+     * no writer left to resurrect against a successor. The monitor is taken ONLY here, briefly, and never
+     * while waiting - that is what keeps this from deadlocking.
+     */
+    private fun leaveInFlight() {
         if (inFlight.decrementAndGet() == 0) {
-            // THE LAST LEASE IS GONE: this is the only place a deferred self-close may actually release,
-            // because there is no writer left to resurrect against a successor. The monitor is taken ONLY
-            // here, briefly, and never while waiting - that is what keeps this from deadlocking.
             synchronized(this) {
                 if (closeDeferred) {
                     closeDeferred = false
                     releaseLockLocked()
                 }
             }
+
             drained.lock()
             try {
                 drainSignal.signalAll()
@@ -176,11 +229,15 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         // deadlocks any leased operation that needs acquire() or releaseLock(): its lease keeps inFlight
         // above zero, so neither side can proceed. The drain must run outside the lifecycle lock.
         val callerIsLeased = (leaseDepth.get() ?: 0) > 0
-        if (!callerIsLeased) awaitIdle()
+        // A SOURCE LEASE IS NOT A TRANSIENT OPERATION. An open descriptor can legitimately outlive this
+        // close - that is the whole point of the lease - so draining on it would block a shutdown on the
+        // network. Wait only for OPERATION leases, then DEFER the release to the last source release.
+        val sourceStillOpen = sourceLeases.get() > 0
+        if (!callerIsLeased && !sourceStillOpen) awaitIdle()
         // PHASE 3 - FINALIZE UNDER THE MONITOR, as ONE consistent transition.
         synchronized(this) {
             closed = true
-            if (callerIsLeased || inFlight.get() > 0) {
+            if (callerIsLeased || sourceStillOpen || inFlight.get() > 0) {
                 // A self-close, or other leases still running: DEFER the release to the last leave().
                 // Releasing now would hand the directory to a successor while a writer is still inside.
                 closeDeferred = true
@@ -209,6 +266,19 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         val callerIsLeased = (leaseDepth.get() ?: 0) > 0
         return scope.submit<Boolean> {
             try {
+                // A SOURCE LEASE IS NOT A TRANSIENT OPERATION (reviewer 7c2f30e3 finding 2). An upload can
+                // hold an open descriptor for as long as the network takes, so draining on it would stall
+                // teardown indefinitely. Report ownership as UNRESOLVED instead - and still DEFER the
+                // release, because this path returns without releasing and nothing else would ever drop the
+                // directory: the last source-lease release must find closeDeferred == true.
+                if (!callerIsLeased && sourceLeases.get() > 0) {
+                    synchronized(this) {
+                        closed = true
+                        closeDeferred = true
+                    }
+                    onUnresolved("source still open: ${sourceLeases.get()} lease(s)")
+                    return@submit false
+                }
                 if (!callerIsLeased) awaitIdle()
                 synchronized(this) {
                     closed = true
@@ -292,6 +362,9 @@ internal class UnavailableDirectoryOwnership(private val why: String) : Director
     override fun unavailableReason(): String? = why
 
     override fun close() = Unit
+
+    /** No ownership, so no source may be protected by one: refuse rather than invent a lease. */
+    override fun acquireSourceLease(): AutoCloseable? = null
 
     /** Nothing is held, so there is nothing to drain: already released. */
     override fun closeAsync(

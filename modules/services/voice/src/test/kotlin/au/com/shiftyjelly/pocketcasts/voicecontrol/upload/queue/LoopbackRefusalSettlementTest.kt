@@ -263,8 +263,11 @@ class LoopbackRefusalSettlementTest {
 
             // The expected canonical bytes, from the store's OWN durable record read back from disk
             // (not the in-memory fixture object): this is the identity every exchange must carry.
+            // SETTLE the source immediately: an open descriptor holds a SOURCE LEASE that keeps the
+            // directory until it closes (reviewer 7c2f30e3 finding 2), so leaking it would block the fresh
+            // owner below. Only the RECORD is needed here.
             val expectedCanonical = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
-                .canonicalBytes(store.durableCapture(id)!!.record).toList()
+                .canonicalBytes(store.durableCapture(id)!!.record).toList().also { store.settleSourcesForTest() }
 
             val assembly = productionAssembly(store, { now })
             val first = assembly.poll()
@@ -317,6 +320,9 @@ class LoopbackRefusalSettlementTest {
                 "$code: the recovered audio must be byte-identical",
                 recovered.audio.readBytes().contentEquals(recordedBytes),
             )
+            // Release the fresh owner's own source lease before the re-attempt, so the descriptor this
+            // assertion opened cannot keep the directory from the store that has to retry.
+            recovered.owned?.close()
 
             // The recovered immutable record must canonicalize to the SAME bytes the first exchange
             // sent - recovery preserved identity.

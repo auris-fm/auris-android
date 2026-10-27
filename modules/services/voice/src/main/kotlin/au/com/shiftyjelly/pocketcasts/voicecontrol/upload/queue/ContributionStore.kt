@@ -522,19 +522,28 @@ class ContributionStore(
         // it. Hand-written closes on each refusal path missed the exceptional ones, so the whole
         // validation runs in one try, and any failure - including header validation and an unexpected
         // exception - closes the descriptor here. Ownership leaves only on the success return.
+        // SOURCE LEASE BEFORE THE OPEN (reviewer 7c2f30e3 finding 2): the operation lease ends when this
+        // function returns, and the descriptor outlives it. Taking the source lease FIRST means a refused
+        // lease creates NO descriptor, and a granted one keeps the directory counted as in use until the
+        // descriptor actually closes - which is the real lifetime of the retained bytes.
+        val sourceLease = directoryOwnership.acquireSourceLease()
+            ?: return null // ownership unavailable: do not open a source nothing protects
         val source = try {
             java.io.FileInputStream(audio)
         } catch (io: Throwable) {
+            runCatching { sourceLease.close() }
             return null
         }
         openedProbe.get()?.set(source)
         val owned = try {
-            validateOpenedAudioLocked(captureId, entry, record, source)
+            validateOpenedAudioLocked(captureId, entry, record, source, sourceLease)
         } catch (failure: Throwable) {
             runCatching { source.close() }
+            runCatching { sourceLease.close() }
             return null
         } ?: run {
             runCatching { source.close() }
+            runCatching { sourceLease.close() }
             return null
         }
         // REGISTER EVERY OPEN SOURCE (reviewer 7c2f30e3): the file is normally still linked here, so a
@@ -588,6 +597,7 @@ class ContributionStore(
         entry: Entry,
         record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj,
         source: java.io.FileInputStream,
+        sourceLease: AutoCloseable,
     ): OpenedAudio? {
         val declaredAudioSha = audioShaOf(record) ?: return null
         val actualAudioSha = sha256HexBounded(source, limits.maxClipBytes) ?: return null
@@ -612,7 +622,9 @@ class ContributionStore(
             return null
         }
         source.channel.position(0)
-        val owned = OwnedAudio(source, source.channel.size(), actualAudioSha)
+        // The source lease travels INSIDE the owned source, so the directory cannot be released before the
+        // descriptor closes - and nothing can forget to release it.
+        val owned = OwnedAudio(source, source.channel.size(), actualAudioSha, sourceLease)
         return OpenedAudio(record, owned, owner.account, owner.session)
     }
 
@@ -1473,6 +1485,14 @@ class ContributionStore(
      * file has been removed but whose descriptor is still open.
      */
     fun totalRetainedBytes(): Long = totalQueuedBytes() + pinnedUnlinkedBytes()
+
+    /**
+     * TEST SEAM: close every source this store handed down, so a fixture that only needed a RECORD cannot
+     * leave a descriptor (and its source lease) holding the directory.
+     */
+    fun settleSourcesForTest() = synchronized(lock) {
+        for (owned in openSources.keys.toList()) runCatching { owned.close() }
+    }
 
     /** TEST SEAM: proves the settle callback actually ran, so a pin that never drops cannot pass. */
     internal val settleCallbacksForTest = java.util.concurrent.atomic.AtomicInteger(0)

@@ -1770,11 +1770,21 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
-        assertNotNull("PREMISE: the mounted owner can validate its own bytes", store.durableCapture(ID_A))
+        // KEEP the capture: it carries an open descriptor, and an open source holds a SOURCE LEASE that
+        // rightly keeps the directory ours until it closes (reviewer 7c2f30e3 finding 2). Dropping it here
+        // would leak the descriptor and leave the successor unable to take over.
+        val validated = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the mounted owner can validate its own bytes" }
+        val owned = requireNotNull(validated.owned) { "PREMISE: the capture carries an owned source" }
 
         store.close()
+        assertFalse(
+            "the directory was released while an open source still held it",
+            ContributionStore(root, QueueLimits.defaults()).isAvailable(),
+        )
+        owned.close()
+
         val successor = ContributionStore(root, QueueLimits.defaults())
-        assertTrue("the successor owns the directory", successor.isAvailable())
+        assertTrue("the successor owns the directory once the source closed", successor.isAvailable())
 
         assertNull(
             "a closed owner vouchsafed bytes inside a successor's directory",
@@ -1800,10 +1810,29 @@ class ContributionStoreTest {
         assertEquals("PREMISE: the on-disk bytes match the record", validatedSha, sha256Of(capture.audio))
         assertEquals("PREMISE: the descriptor hashed its own bytes", validatedSha, owned.audioSha256)
 
-        // The directory changes hands and the new owner publishes DIFFERENT bytes at the same path.
+        // THE DIRECTORY CANNOT CHANGE HANDS YET (reviewer 7c2f30e3 finding 2): the open descriptor holds a
+        // SOURCE LEASE, so closing the store must not release the directory - even though the operation
+        // lease that handed this capture down has long ended. Assert that, so the ordering below cannot
+        // silently regress into "the successor took over while bytes were still owned".
         store.close()
+        assertFalse(
+            "the directory was released while an upload still owned bytes",
+            ContributionStore(root, QueueLimits.defaults()).isAvailable(),
+        )
+
+        // Close the owned source: only NOW may the directory be released.
+        val borrow = requireNotNull(owned.borrowForBody()) { "PREMISE: the source is borrowable" }
+        val transmitted = try {
+            sha256HexOf(borrow.stream.readBytes())
+        } finally {
+            borrow.close()
+        }
+        assertEquals("the transport sent bytes the store never validated", validatedSha, transmitted)
+        owned.close()
+
+        // The directory changes hands and the new owner publishes DIFFERENT bytes at the same path.
         val successor = ContributionStore(root, QueueLimits.defaults())
-        assertTrue("the successor owns the directory", successor.isAvailable())
+        assertTrue("the successor owns the directory after the source closed", successor.isAvailable())
         val replaced = java.util.UUID.randomUUID().toString()
         assertNotNull(successor.prepare(replaced, "epoch-epoch", chunks(40), meta(replaced), "a@x", 7L))
         val replacementBytes = File(root, "contributions/$replaced.recording.wav").readBytes()
@@ -1823,16 +1852,6 @@ class ContributionStoreTest {
             sha256HexOf(replacementBytes),
             sha256Of(capture.audio),
         )
-
-        // The owned source still serves the validated bytes, which is what the transport now reads.
-        val borrow = requireNotNull(owned.borrowForBody()) { "PREMISE: the source is borrowable" }
-        val transmitted = try {
-            sha256HexOf(borrow.stream.readBytes())
-        } finally {
-            borrow.close()
-            owned.close()
-        }
-        assertEquals("the transport sent bytes the store never validated", validatedSha, transmitted)
     }
 
     @Test
@@ -2002,6 +2021,49 @@ class ContributionStoreTest {
         store.close()
     }
 
+    @Test
+    fun `closing the store does not release the directory while an upload still owns bytes`() {
+        // Reviewer 7c2f30e3 finding 2: the operation lease ends when durableCapture returns, so closeAsync
+        // could release the directory while an upload still held an open source. A SOURCE LEASE keeps the
+        // directory counted until that descriptor closes.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val capture = requireNotNull(store.durableCapture(ID_A))
+        val owned = requireNotNull(capture.owned)
+        val audio = File(root, "contributions/$ID_A.recording.wav")
+        assertTrue("PREMISE: the file is linked", audio.isFile)
+
+        // A second owner must not be able to take the directory while the descriptor is open.
+        val scope = java.util.concurrent.Executors.newSingleThreadExecutor()
+        try {
+            var unresolved = 0
+            val released = store.closeAsync(scope) { unresolved++ }.get(120, java.util.concurrent.TimeUnit.SECONDS)
+            assertEquals("PREMISE: the close could not release while a source lease was held", false, released)
+            assertEquals("PREMISE: unresolved ownership was reported, not silently declared clean", 1, unresolved)
+            // The directory is still ours: a competing owner must still be refused.
+            val competitor = FileDirectoryOwnership(File(root, "contributions")).acquire()
+            assertEquals(
+                "the directory was released while an upload still owned bytes",
+                false,
+                competitor.isHeld(),
+            )
+            assertNotEquals("PREMISE: the competitor saw a live owner", null, competitor.unavailableReason())
+            competitor.close()
+
+            // Closing the descriptor is what releases the directory, and only then.
+            owned.close()
+            val after = FileDirectoryOwnership(File(root, "contributions")).acquire()
+            assertEquals("the directory was never released after the source closed", true, after.isHeld())
+            after.close()
+        } finally {
+            scope.shutdownNow()
+            // Release anything this test left deferred, or a later test using the same tree could block on a
+            // lock this one still holds.
+            store.close()
+        }
+    }
+
     /** Sample count whose WAV is the largest that fits within [byteBudget]. */
     private fun sampleCountFor(byteBudget: Long): Long = ((byteBudget - 44) / 2).coerceAtLeast(0)
 
@@ -2035,6 +2097,9 @@ class ContributionStoreTest {
             assertNull("a closed store still served a capture", store.durableCapture(ID_A))
         } finally {
             scope.shutdownNow()
+            // Release anything this test left deferred, or a later test using the same tree could block on a
+            // lock this one still holds.
+            store.close()
         }
     }
 

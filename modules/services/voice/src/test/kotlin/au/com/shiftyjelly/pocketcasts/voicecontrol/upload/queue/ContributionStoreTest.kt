@@ -31,7 +31,7 @@ class ContributionStoreTest {
     fun releaseSources() {
         // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
         // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
-        val unsettled = ContributionStore.settleAllLiveSourcesForTest()
+        val unsettled = storesForTeardown.flatMap { it.settleSourcesForTest() }.count { !it }
         org.junit.Assert.assertEquals(
             "a source did not settle; its descriptor and pin charge outlive this test",
             0,

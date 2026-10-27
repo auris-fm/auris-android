@@ -45,7 +45,7 @@ class VoiceUploadCompositionPathTest {
         // the counter: a reset would hide the descriptors, leases and pin charges this is meant to find.
         // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
         // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
-        ContributionStore.settleAllLiveSourcesForTest()
+        stores.forEach { it.settleSourcesForTest() }
         stores.forEach { runCatching { it.close() } }
         val tracked = stores.flatMap { it.openCaptureIdsForTest() }
         org.junit.Assert.assertEquals(

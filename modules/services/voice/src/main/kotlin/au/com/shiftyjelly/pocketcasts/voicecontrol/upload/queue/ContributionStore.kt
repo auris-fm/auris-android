@@ -2106,7 +2106,6 @@ class ContributionStore(
     }
 
     init {
-        synchronized(LIVE_STORES) { LIVE_STORES.add(this) }
         // A fence-level revocation must also cancel in-flight launches (reviewer 4d72e463).
         fence.pendingLaunchCancellation = { cancelLiveLaunchesLocked() }
     }
@@ -3359,23 +3358,6 @@ class ContributionStore(
          * captures while the queue looks idle.
          */
         internal const val MAX_OPEN_SOURCES = 8
-
-        /**
-         * TEST-ONLY: every store this process has constructed, weakly held.
-         *
-         * The source bound is process-wide, so a teardown that only knows about the stores a test happened
-         * to keep a reference to can miss one and leave a descriptor holding a slot for the rest of the
-         * JVM (reviewer 2c7dc375). This registry lets teardown settle ALL of them instead of resetting the
-         * counter, which would hide exactly the leak it is meant to find.
-         */
-        private val LIVE_STORES = java.util.Collections.newSetFromMap(java.util.WeakHashMap<ContributionStore, Boolean>())
-
-        /** TEST-ONLY: settles every live store's sources and returns how many failed to settle. */
-        @JvmStatic
-        fun settleAllLiveSourcesForTest(): Int {
-            val stores = synchronized(LIVE_STORES) { LIVE_STORES.toList() }
-            return stores.sumOf { store -> store.settleSourcesForTest().count { !it } }
-        }
 
         /** Teardown settle deadline: long enough for a live writer to drain, short enough to fail fast. */
         private const val SOURCE_SETTLE_TIMEOUT_MS = 2_000L

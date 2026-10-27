@@ -349,10 +349,11 @@ class DurableCaptureAuthorityTest {
 
     @After
     fun releaseSources() {
-        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
-        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
-        ContributionStore.settleAllLiveSourcesForTest()
+        // ORDER MATTERS (reviewer a6877ffc): release only what THIS fixture owns, then assert. A global
+        // sweep placed before the assertion could repair a production leak and then report clean.
+        val unsettled = storesForTeardown.flatMap { it.settleSourcesForTest() }.count { !it }
         storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals("a source did not settle", 0, unsettled)
         org.junit.Assert.assertEquals(
             "this class left descriptors open; the process-wide source slots belong to a later test",
             0,

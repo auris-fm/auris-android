@@ -52,6 +52,13 @@ class ContributionUploadTransport(
      * wait for REAL transmission progress instead of guessing that a sleep reached backpressure.
      */
     private val onBodyProgressForTest: (() -> Unit)? = null,
+    /**
+     * Test seam only: invoked INSIDE writeTo's finally, AFTER the body borrow is released and BEFORE the
+     * call returns - the interval in which a retry asks for a second body while the descriptor is still
+     * open and no writer is running. Lets a control park the real attempt there and revoke. No-op in
+     * production.
+     */
+    private val onAfterFirstBodyExitForTest: (() -> Unit)? = null,
 ) {
 
     sealed class Response {
@@ -273,6 +280,12 @@ class ContributionUploadTransport(
                 } finally {
                     // Drops the borrow only. The attempt owns the descriptor's lifetime.
                     borrow.close()
+                    // REVIEWER 2fc378c6: this is the interval that decides whether source cancellation is
+                    // LOAD-BEARING. Exclusive borrowing protects an active writer, but not the gap between
+                    // this borrow exiting and the call/attempt settling: a retry (OkHttp re-invokes
+                    // writeTo after a cut-short body) arrives HERE, with no writer running and the
+                    // descriptor still open. parked interval only; a no-op in production.
+                    onAfterFirstBodyExitForTest?.invoke()
                 }
             }
         }

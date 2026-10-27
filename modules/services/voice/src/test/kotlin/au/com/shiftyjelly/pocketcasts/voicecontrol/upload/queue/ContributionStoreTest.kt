@@ -13,6 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
+import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -105,6 +106,13 @@ class ContributionStoreTest {
     private fun sha256HexForTest(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun chunks(vararg sizes: Int) = sizes.map { ShortArray(it) { i -> i.toShort() } to it }
+
+    @After
+    fun releaseProcessWideSourceSlots() {
+        // The source bound is PROCESS-WIDE by design (reviewer 4e8592ba), so a test that deliberately keeps
+        // a descriptor open would starve every later test in this JVM. Isolate after each test.
+        ContributionStore.resetSourceSlotsForTest()
+    }
 
     @Test
     fun `ready marker is the commit point - interrupted preparation never becomes ready`() {
@@ -2064,6 +2072,79 @@ class ContributionStoreTest {
         held.drop(1).forEach { it.close() }
         assertEquals("all slots were not returned", 0, store.openSourceSlotsForTest())
         store.close()
+    }
+
+    @Test
+    fun `the source-slot bound is PROCESS-WIDE, shared across two live stores`() {
+        // Reviewer 4e8592ba: openSourceSlots was an instance field, so the "global" claim was false - two
+        // stores could each hold the full bound. Every open descriptor anywhere in the process retains
+        // device bytes, so the bound must be shared.
+        //
+        // The counter is now process-wide, which makes this control HAZARDOUS: anything it fails to close
+        // starves every later test in the JVM. It therefore closes what it holds in a finally, and asserts
+        // the counter is back to zero at the end - a leak here must fail THIS test rather than 30 others.
+        val half = ContributionStore.MAX_OPEN_SOURCES / 2
+        val rootA = tempRoot()
+        val rootB = tempRoot()
+        val storeA = ContributionStore(rootA, QueueLimits.defaults())
+        val storeB = ContributionStore(rootB, QueueLimits.defaults())
+        val held = mutableListOf<OwnedAudio>()
+        try {
+            val baseline = storeA.openSourceSlotsForTest()
+            assertEquals("PREMISE: this JVM starts with no sources open", 0, baseline)
+
+            // Open half the slots through EACH store: together they must fill the shared bound.
+            for (store in listOf(storeA, storeB)) {
+                repeat(half) {
+                    val id = java.util.UUID.randomUUID().toString()
+                    assertNotNull(store.prepare(id, "epoch-epoch", chunks(8), meta(id), "a@x", 7L))
+                    val capture = requireNotNull(store.durableCapture(id)) { "PREMISE: capture opens" }
+                    held += requireNotNull(capture.owned)
+                }
+            }
+            assertEquals(
+                "PREMISE: the two stores together fill the shared bound",
+                ContributionStore.MAX_OPEN_SOURCES,
+                storeA.openSourceSlotsForTest(),
+            )
+
+            // NEITHER store may open another descriptor: the bound is shared, not per instance.
+            val idA = java.util.UUID.randomUUID().toString()
+            assertNotNull(storeA.prepare(idA, "epoch-epoch", chunks(8), meta(idA), "a@x", 7L))
+            assertNull(
+                "store A exceeded the process-wide bound on its own",
+                storeA.durableCapture(idA),
+            )
+            val idB = java.util.UUID.randomUUID().toString()
+            assertNotNull(storeB.prepare(idB, "epoch-epoch", chunks(8), meta(idB), "a@x", 7L))
+            assertNull(
+                "store B opened a descriptor past the bound filled through store A",
+                storeB.durableCapture(idB),
+            )
+
+            held.first().close()
+            assertEquals(
+                "a closed descriptor released no shared slot",
+                ContributionStore.MAX_OPEN_SOURCES - 1,
+                storeB.openSourceSlotsForTest(),
+            )
+        } finally {
+            // CLOSE EVERYTHING BEFORE THE STORES: the slots are process-wide, so a source left open here
+            // refuses every later open in this JVM.
+            held.forEach { runCatching { it.close() } }
+            runCatching { storeA.close() }
+            runCatching { storeB.close() }
+        }
+        val residue = ContributionStore(rootA, QueueLimits.defaults())
+        try {
+            assertEquals(
+                "the control leaked shared source slots into the rest of the JVM",
+                0,
+                residue.openSourceSlotsForTest(),
+            )
+        } finally {
+            residue.close()
+        }
     }
 
     @Test

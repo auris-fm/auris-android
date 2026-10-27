@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -190,6 +191,83 @@ class ContributionUploadAssemblyTest {
                 runCatching { owned.borrowForBody() ?: throw java.io.IOException("closed") }.isFailure,
             )
         }
+    }
+
+    @Test
+    fun `a retry AFTER the first body exits is refused, and by revocation not by settlement`() {
+        // Reviewer 2fc378c6, and this supersedes two earlier attempts of mine that both passed against the
+        // mutant and were therefore worthless:
+        //   - a probe taken MID-BODY is refused by activeBorrows > 0 (exclusive borrowing), not by
+        //     revocation;
+        //   - a probe taken AFTER poll() is refused by settle(), not by revocation.
+        // The window that decides whether the binding is load-bearing is exactly this one: the first
+        // body's borrow has EXITED, the descriptor is still OPEN, the call has NOT returned, and a retry
+        // asks for a second body. Only the source's cancellation flag can refuse it there.
+        val store = newStore { 30_000_000L }
+        val f = fixture(store, "assembly-retry-window")
+        responseStatus = 201
+        responseBody = receiptFor(store, f.id, status = "accepted")
+
+        val durable = requireNotNull(store.durableCapture(f.id)) { "PREMISE: durable capture opens" }
+        val owned = requireNotNull(durable.owned) { "PREMISE: an owned source is handed down" }
+
+        // PREMISE: a fresh source in this state IS borrowable, so a later refusal is attributable.
+        val idle = requireNotNull(owned.borrowForBody()) { "PREMISE: an idle open source is borrowable" }
+        idle.close()
+
+        val handed = mutableMapOf(
+            f.id to ContributionUploadAssembly.Capture(
+                durable.record,
+                durable.audio,
+                durable.enrollmentEpoch,
+                durable.enrollmentAccount,
+                durable.enrollmentSession,
+                owned,
+            ),
+        )
+
+        var pausedInWindow = false
+        var terminalInWindow = true
+        var retryRefused: Boolean? = null
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer test-token" },
+                // PARKED IN THE RETRY WINDOW: borrow released, call not returned, descriptor open.
+                onAfterFirstBodyExitForTest = {
+                    if (!pausedInWindow) {
+                        pausedInWindow = true
+                        // Revoke through the REAL fence: this is what production does.
+                        store.fence.revoke()
+                        // The source must NOT be terminal here - otherwise settle() would be doing the
+                        // work and the assertion below would prove nothing about cancellation.
+                        terminalInWindow = owned.isClosed()
+                        // Now request the SECOND body, the way OkHttp re-invokes writeTo.
+                        retryRefused = owned.borrowForBody() == null
+                    }
+                },
+            ),
+            captureFor = { handed[it] },
+            clock = { 30_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            onAccepted = { _, _ -> },
+        )
+        assembly.poll()
+
+        assertTrue("PREMISE: the attempt was parked in the retry window", pausedInWindow)
+        assertEquals(
+            "the source was already terminal in the window, so this control cannot distinguish " +
+                "revocation from settlement",
+            false,
+            terminalInWindow,
+        )
+        assertEquals(
+            "a retry borrowed the source after revocation: the second body would resend withdrawn bytes",
+            true,
+            retryRefused,
+        )
     }
 
     @Test

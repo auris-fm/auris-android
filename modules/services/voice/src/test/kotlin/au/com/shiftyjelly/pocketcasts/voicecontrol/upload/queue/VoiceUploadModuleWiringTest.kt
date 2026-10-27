@@ -21,6 +21,8 @@ import org.junit.rules.TemporaryFolder
  * bytes intact.
  */
 class VoiceUploadModuleWiringTest {
+    @get:org.junit.Rule
+    val sourceSlots = ProcessWideSourceSlotsRule()
 
     @get:Rule
     val tmp = TemporaryFolder()

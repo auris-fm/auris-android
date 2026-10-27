@@ -1514,6 +1514,10 @@ class ContributionStore(
         for (owned in openSources.keys.toList()) runCatching { owned.close() }
     }
 
+    /** TEST SEAM: runs AFTER purge discovery, so a control can observe the promotion boundary itself. */
+    @Volatile
+    internal var onAfterPurgeDiscoveryForTest: (() -> Unit)? = null
+
     /** TEST SEAM: proves the settle callback actually ran, so a pin that never drops cannot pass. */
     internal val settleCallbacksForTest = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -1521,18 +1525,22 @@ class ContributionStore(
     internal var beforePinForTest: (() -> Unit)? = null
 
     /**
-     * THE GLOBAL SOURCE SLOT (reviewer 6456b2a5 finding 3).
+     * THE SOURCE SLOT, SHARED BY EVERY STORE IN THE PROCESS (reviewer 6456b2a5 finding 3; corrected after
+     * reviewer 4e8592ba pointed out an instance field cannot bound the app).
      *
-     * At most [MAX_OPEN_SOURCES] descriptors may be open at once, and the slot is taken BEFORE the open so
-     * a refused slot creates no descriptor at all. It is released only when the descriptor actually closes -
-     * not when the handing call returns and not on cancellation - so the bound is on REAL open descriptors
-     * rather than on attempts. The transport's semaphore bounds calls; this bounds SOURCES, which outlive a
-     * call whenever a writer is parked.
+     * At most [MAX_OPEN_SOURCES] descriptors may be open at once ACROSS ALL STORES, and the slot is taken
+     * BEFORE the open so a refused slot creates no descriptor at all. It is released only when the
+     * descriptor actually closes - not when the handing call returns and not on cancellation - so the bound
+     * is on REAL open descriptors rather than on attempts. The transport's semaphore bounds calls; this
+     * bounds SOURCES, which outlive a call whenever a writer is parked.
      *
-     * Why the bound exists: every open descriptor retains its bytes after an unlink, so an unbounded source
-     * population would let a chain of captures hold unbounded retained bytes while looking idle.
+     * Why it is PROCESS-WIDE and not per instance: a store can be constructed more than once over different
+     * directories (a successor after a handover, a diagnostics store, a test fixture), and descriptors from
+     * all of them retain device bytes. A per-instance counter would let N stores hold N x the bound while
+     * each looked correct. Every open descriptor retains its bytes after an unlink, so an unbounded source
+     * population holds unbounded retained bytes while every individual queue looks idle.
      */
-    private val openSourceSlots = java.util.concurrent.atomic.AtomicInteger(0)
+    private val openSourceSlots: java.util.concurrent.atomic.AtomicInteger get() = PROCESS_OPEN_SOURCE_SLOTS
 
     /** Take a source slot, or null when the global bound is reached. Pair with [releaseSourceSlot]. */
     private fun tryAcquireSourceSlot(): Boolean {
@@ -2244,15 +2252,17 @@ class ContributionStore(
             return
         }
         try {
-            // DISCOVER FROM DISK FIRST (reviewer 6456b2a5). revokeAndPurge deletes only what THIS store's
-            // index holds, and a freshly constructed store's index is EMPTY by construction - so a
-            // policy-disable observed at STARTUP purged nothing, leaving a previous owner's audio on disk
-            // after the user had asked for everything to be removed. Rebuilding the index here (same
-            // lease, before a single file is touched) is what makes the purge cover the whole directory.
-            // recoverLocked() holds no lock of its own beyond what this lease provides; a failed
-            // enumeration leaves the root UNKNOWN, and the purge below then retains rather than half-deletes.
-            recoverLocked()
-            revokeAndPurgeLocked(reason)
+            // REVOKE FIRST, THEN DISCOVER WITHOUT RE-ADMISSION (reviewer 4e8592ba, and the agreed
+            // discovery-without-re-admission contract).
+            //
+            // revokeAndPurge deletes only what THIS store's index holds, and a freshly constructed store's
+            // index is EMPTY - so a policy-disable observed at STARTUP purged nothing and a previous owner's
+            // audio survived a disable. The fix must NOT be recoverLocked(): that routine PROMOTES entries
+            // into the serving index (ready/retryable) and performs recovery mutations, which re-admits a
+            // capture during the very withdrawal that is meant to dispose of it. Discovery here only
+            // MEASURES and CHARGES what is on disk (establishCoverage), which is what the purge needs: an
+            // ownership list to delete from, with nothing made servable.
+            revokeAndPurgeLocked(reason, discoverBeforeDelete = true)
         } finally {
             leaveOperation()
         }
@@ -2286,7 +2296,7 @@ class ContributionStore(
      *
      * Enforced by [revokeAndPurge], which holds the ownership lease around this body (reviewer 72a35e19).
      */
-    private fun revokeAndPurgeLocked(reason: String) {
+    private fun revokeAndPurgeLocked(reason: String, discoverBeforeDelete: Boolean = false) {
         // The public revokeAndPurge() holds the ownership lease around this body, so a closed owner can
         // never reach here (spec c8f766fb). Measured before that guard existed: a closed owner's late purge
         // ran to completion, which none of the other mutating surfaces allowed.
@@ -2294,6 +2304,21 @@ class ContributionStore(
         synchronized(lock) {
             ownership.revokeUnderLock()
             cancelLiveLaunchesLocked() // ONE authoritative transition: a purge also withdraws launches
+            if (discoverBeforeDelete) {
+                // DISCOVERY INSIDE THE REVOCATION, WITHOUT RE-ADMISSION: establishCoverage() lists the
+                // directory and CLAIMS ownership of every capture it finds (so the purge below can delete
+                // them), but it never writes memoryEntries and never marks anything ready or retryable -
+                // so no attempt can acquire a discovered capture during the purge boundary. It also runs
+                // AFTER the generation advanced and launches were withdrawn, so a capture a PUT is already
+                // streaming is covered by the revocation rather than by this call.
+                establishCoverage()
+                // The measured, unowned captures are now in ownedCharges; join them WITH the index below.
+                val chargeIds = ownedCharges.keys.toList()
+                chargeIds.forEach { id -> unmeasuredIds -= id }
+                // TEST SEAM: observes the state AFTER discovery, which is the boundary the contract is
+                // about. onPurgeOrRecoverMutation fires BEFORE discovery, so it cannot see a promotion.
+                onAfterPurgeDiscoveryForTest?.invoke()
+            }
             // OWNERSHIP IS INDEPENDENT OF READINESS. An uncertain entry was removed from memoryEntries so
             // it could not be exposed as ready, but that must not drop it from the owner's accounting: an
             // account purge that skipped it would leave the user's audio on disk after they asked for
@@ -3320,6 +3345,25 @@ class ContributionStore(
          * captures while the queue looks idle.
          */
         internal const val MAX_OPEN_SOURCES = 8
+
+        /**
+         * The PROCESS-WIDE source-slot count. Deliberately a companion-object field, not per instance: every
+         * open descriptor anywhere in this process consumes device bytes, so one bound must cover them all.
+         */
+        private val PROCESS_OPEN_SOURCE_SLOTS = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /**
+         * TEST-ONLY isolation for the PROCESS-WIDE source bound.
+         *
+         * The counter is deliberately process-wide, so a test that holds a source open by design (several do,
+         * to prove unlink/retention behaviour) starves every LATER test in the JVM. That is a real
+         * consequence of the bound being global, not a flaw in it: production has one process and one owner.
+         * Test classes call this from @After so one test's deliberate hold cannot fail another's. It asserts
+         * nothing - it exists so the blast radius of a leak is a test, not a suite.
+         */
+        fun resetSourceSlotsForTest() {
+            PROCESS_OPEN_SOURCE_SLOTS.set(0)
+        }
         private const val STAGING_PREFIX = "gen$"
         private const val ADMISSION_HELD = 0
         private const val ADMISSION_RELEASED = 1

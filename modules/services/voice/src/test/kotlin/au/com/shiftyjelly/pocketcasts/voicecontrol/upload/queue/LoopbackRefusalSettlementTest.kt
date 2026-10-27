@@ -38,6 +38,8 @@ import org.junit.rules.TemporaryFolder
  * recreation over the same directory, labelled as such rather than as a device restart.
  */
 class LoopbackRefusalSettlementTest {
+    @get:org.junit.Rule
+    val sourceSlots = ProcessWideSourceSlotsRule()
 
     @get:Rule
     val tmp = TemporaryFolder()

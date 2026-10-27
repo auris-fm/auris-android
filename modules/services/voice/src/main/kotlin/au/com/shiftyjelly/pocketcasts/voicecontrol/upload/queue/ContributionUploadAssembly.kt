@@ -162,7 +162,20 @@ class ContributionUploadAssembly(
                     // The REAL chain: the transport reports the registered handle, and the abort that cancels
                     // THAT call is installed on the lease which owns this attempt's authorization. A
                     // revocation then reaches a transmitting Call without anyone polling a flag.
-                    onRegistered = { handle -> bindCancellation { transport.cancelRegistered(handle) } },
+                    // SOURCE CANCELLATION IS BOUND TOGETHER WITH CALL CANCELLATION (reviewer 4e8592ba).
+                    // Binding only the Call left `cancelFurtherBorrows` with no production caller: the flag
+                    // refused future borrows in TESTS while production never set it. Both now happen in the
+                    // ONE action the lease installs, so a withdrawal that cancels the transmitting call
+                    // ALSO refuses the next replay - including a retry OkHttp asks for after the body was
+                    // cut short, which is the case the Call alone cannot cover.
+                    onRegistered = { handle ->
+                        bindCancellation {
+                            // Refuse further borrows FIRST: a body must not be handed out after withdrawal
+                            // even if the Call is already finishing.
+                            runCatching { owned.cancelFurtherBorrows() }
+                            transport.cancelRegistered(handle)
+                        }
+                    },
                 )
                 lastResponse[captureId] = response
                 // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.

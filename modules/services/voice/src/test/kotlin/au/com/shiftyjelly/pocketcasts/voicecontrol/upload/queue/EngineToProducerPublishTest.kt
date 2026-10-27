@@ -43,6 +43,8 @@ import org.junit.rules.TemporaryFolder
  * proven across threads; runtime attachment through the UploadTrigger.start consumer.
  */
 class EngineToProducerPublishTest {
+    @get:org.junit.Rule
+    val sourceSlots = ProcessWideSourceSlotsRule()
 
     /** REAL owner-transaction semantics: one lock, snapshot reads inside it (see WiringTest). */
     private class WatchOwner(startAccount: String, startSession: Long) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {

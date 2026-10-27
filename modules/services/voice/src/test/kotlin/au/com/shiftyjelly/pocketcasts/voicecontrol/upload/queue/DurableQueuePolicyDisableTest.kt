@@ -129,6 +129,50 @@ class DurableQueuePolicyDisableTest {
         .toList()
 
     @Test
+    fun `a purge never re-admits a discovered capture into the serving index`() {
+        // Reviewer 4e8592ba: calling the FULL recovery routine from a purge contradicted the agreed
+        // discovery-without-re-admission contract - recovery PROMOTES entries (ready/retryable), so a
+        // capture could be acquired during the very withdrawal that is disposing of it. Discovery must
+        // measure and delete, never publish.
+        val previousOwner = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        val metadata = validRecord(id, 1600)
+        assertTrue(
+            previousOwner.prepare(id, "epoch-1", chunks(1600), metadata, "me@example.com", 1L) != null,
+        )
+        previousOwner.close()
+
+        // OBSERVE the boundary: sample the serving index from INSIDE the purge, after discovery has run.
+        // If discovery promoted anything, it is visible here.
+        var readyDuringPurge = -1
+        var servableDuringPurge = false
+        lateinit var store: ContributionStore
+        store = ContributionStore(root, QueueLimits.defaults())
+        // Sample AFTER discovery: onPurgeOrRecoverMutation fires BEFORE it and so cannot see a promotion.
+        store.onAfterPurgeDiscoveryForTest = {
+            readyDuringPurge = store.readyEntries().size
+            // The acquisition surface an attempt would use must ALSO be closed.
+            servableDuringPurge = store.durableCapture(id) != null
+        }
+        assertTrue("PREMISE: a fresh owner's index starts empty", store.readyEntries().isEmpty())
+
+        store.revokeAndPurge("policy-disable")
+
+        assertEquals(
+            "the purge re-admitted a discovered capture into the serving index",
+            0,
+            readyDuringPurge,
+        )
+        assertEquals(
+            "an attempt could still acquire a capture during the purge boundary",
+            false,
+            servableDuringPurge,
+        )
+        assertTrue("the purge still removed the capture's files", captureContentFiles(id).isEmpty())
+        store.close()
+    }
+
+    @Test
     fun `a published disable purges the durable entry and a fresh owner cannot recover it`() {
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()

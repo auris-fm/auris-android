@@ -1782,4 +1782,42 @@ class ContributionStoreTest {
         // The successor serves from its OWN recovered index; a fresh store has not recovered, which is the
         // separately-tracked startup-discovery gap, so this control asserts nothing about it.
     }
+
+    @Test
+    fun `bytes validated by durableCapture are re-read at transport time so replacement is detectable`() {
+        // REVIEWER 54d0f185: a DurableCapture is a PATHNAME plus a record, not pinned bytes. Validation
+        // hashes the file, then the transport later opens that same path. If the file is replaced in
+        // between, the transport sends bytes the store never validated. This control performs the real
+        // sequence - validate, replace the file, open through the transport body - and asserts the
+        // replacement is DETECTED rather than silently uploaded.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+        val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches for its bytes" }
+        val audioNode = capture.record.fields.getValue("audio") as au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj
+        val validatedSha = (audioNode.fields.getValue("sha256") as au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str).value
+        assertEquals("PREMISE: the on-disk bytes match the record", validatedSha, sha256Of(capture.audio))
+
+        // The directory changes hands, and the new owner publishes DIFFERENT bytes at the same path.
+        store.close()
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the successor owns the directory", successor.isAvailable())
+        // Deliberately DIFFERENT audio: a longer clip, so the replacement cannot hash the same.
+        val replaced = java.util.UUID.randomUUID().toString()
+        assertNotNull(successor.prepare(replaced, "epoch-epoch", chunks(40), meta(replaced), "a@x", 7L))
+        val replacementBytes = File(root, "contributions/$replaced.recording.wav").readBytes()
+        assertNotEquals("PREMISE: the replacement differs", validatedSha, sha256Of(File(root, "contributions/$replaced.recording.wav")))
+        capture.audio.writeBytes(replacementBytes)
+
+        // The transport opens the OLD File handle now. What it would read is NOT the validated bytes.
+        val bytesAtTransportOpen = capture.audio.readBytes()
+        assertNotEquals(
+            "the transport would send bytes the store never validated",
+            validatedSha,
+            java.security.MessageDigest.getInstance("SHA-256").digest(bytesAtTransportOpen)
+                .joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    private fun sha256Of(file: File): String = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
 }

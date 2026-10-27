@@ -444,11 +444,18 @@ class ContributionStore(
      * successor cannot replace the bytes mid-check and a closed owner cannot vouch for someone else's
      * namespace.
      *
-     * WHAT IT DOES NOT COVER: the returned [DurableCapture.audio] File outlives this call. Transport reads it
-     * afterwards, OUTSIDE any store critical section - deliberately, because network work must not hold the
-     * queue's lock. The handoff is safe because this store owned the directory and vouched for these exact
-     * bytes at handoff time; if a purge or takeover lands afterwards the upload's own authorization
-     * revalidates, and the byte-survival guarantees are scoped to ids this owner held.
+     * WHAT IT DOES NOT COVER, stated exactly (reviewer 54d0f185): a [DurableCapture] is a PATHNAME plus a
+     * record, not pinned bytes. [DurableCapture.audio] outlives this call, and the transport re-opens that
+     * path much later, in `ContributionUploadTransport.multipartFor` (`audio.inputStream()` inside
+     * `writeTo`), OUTSIDE any store critical section - deliberately, because network work must not hold the
+     * queue lock.
+     *
+     * Between validation and that open the path can be replaced by a new owner publishing at the same id,
+     * and a control in the suite demonstrates it: validated bytes and bytes-at-transport-open can differ.
+     * Validation therefore establishes what the store vouched for AT HANDOFF, not what the socket will
+     * send. Ownership at handoff does NOT by itself prove the transmitted bytes are the validated ones;
+     * that requires pinning (open the stream under the lease and hand the stream down) or re-hashing at
+     * open. Neither is implemented here, so this must not be read as a guarantee.
      */
     private fun durableCaptureLocked(captureId: String): DurableCapture? = synchronized(lock) {
         val entry = memoryEntries[captureId] ?: return null

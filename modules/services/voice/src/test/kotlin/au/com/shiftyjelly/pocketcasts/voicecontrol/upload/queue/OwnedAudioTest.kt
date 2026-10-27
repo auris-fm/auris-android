@@ -245,4 +245,38 @@ class OwnedAudioTest {
             audio.close()
         }
     }
+
+    @Test
+    fun `a sequential replay after a first body sends the SAME bytes, and a cancelled replay is refused`() {
+        // Reviewer 6456b2a5: the retry path. `isOneShot=false` with `retryOnConnectionFailure` enabled means
+        // OkHttp CAN ask for the body a second time after the first attempt was cut short, so a body must be
+        // replayable from byte 0 - and must stop being replayable the moment the attempt is withdrawn.
+        // Driving OkHttp's internal retry directly is not deterministic, so the CONTRACT the retry relies on
+        // is pinned here: replay returns byte-identical content, and cancellation refuses the next body.
+        val payload = ByteArray(2048) { (it * 7).toByte() }
+        val file = temp.newFile("clip.recording.wav").apply { writeBytes(payload) }
+        val audio = OwnedAudio(FileInputStream(file), file.length(), "sha-of-test-bytes")
+        try {
+            // FIRST body: read part of it, as a cut-short attempt would.
+            val first = requireNotNull(audio.borrowForBody()) { "PREMISE: the first body is admitted" }
+            val partial = ByteArray(512)
+            assertEquals("PREMISE: the first body is cut short", 512, first.stream.read(partial))
+            first.close()
+
+            // REPLAY, before any settle: must start at byte 0 and carry the same bytes.
+            val replay = requireNotNull(audio.borrowForBody()) { "PREMISE: a replay is admitted before settle" }
+            val replayed = replay.stream.readBytes()
+            replay.close()
+            assertArrayEquals("a replay did not resend the SAME bytes from byte 0", payload, replayed)
+
+            // CANCEL, then replay again: refused. Cancellation is what stops a retry loop.
+            audio.cancelFurtherBorrows()
+            assertNull(
+                "a cancelled attempt was granted another body",
+                audio.borrowForBody()?.also { it.close() },
+            )
+        } finally {
+            audio.close()
+        }
+    }
 }

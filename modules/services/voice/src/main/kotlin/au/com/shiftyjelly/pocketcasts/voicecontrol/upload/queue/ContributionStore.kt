@@ -206,12 +206,14 @@ class ContributionStore(
             logGuardedRefusal()
             return false
         }
-        leaseDepth.set(1)
+        // NESTING COUNTS, never a bare flag: an inner fenced call must not reset the depth an outer one
+        // still owns, or the outer operation stops being recognised as in-flight by close().
+        leaseDepth.set((leaseDepth.get() ?: 0) + 1)
         try {
             block()
             return true
         } finally {
-            leaseDepth.set(0)
+            leaseDepth.set((leaseDepth.get() ?: 1) - 1)
             leaveOperation()
         }
     }

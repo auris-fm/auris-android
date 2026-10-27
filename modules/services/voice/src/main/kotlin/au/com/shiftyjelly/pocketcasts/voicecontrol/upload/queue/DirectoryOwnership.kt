@@ -122,15 +122,21 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
      */
     fun enter(): Boolean {
         inFlight.incrementAndGet()
-        leaseThreads.add(Thread.currentThread())
+        // PER-THREAD DEPTH, not mere membership: an inner enter/leave pair must not remove the thread while
+        // an outer lease is still held, or a later self-close would try to drain against itself again.
+        leaseDepth.set((leaseDepth.get() ?: 0) + 1)
         if (isHeld()) return true
         leave()
         return false
     }
 
     fun leave() {
-        leaseThreads.remove(Thread.currentThread())
+        val depth = (leaseDepth.get() ?: 1) - 1
+        leaseDepth.set(depth)
         if (inFlight.decrementAndGet() == 0) {
+            // THE LAST LEASE IS GONE: this is the only place a deferred self-close may actually release,
+            // because there is no writer left to resurrect against a successor.
+            if (closeDeferred) releaseLock()
             drained.lock()
             try {
                 drainSignal.signalAll()
@@ -140,29 +146,46 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         }
     }
 
+    @Synchronized
     override fun close() {
         // INVALIDATE FIRST: a delayed callback observing isHeld()==false must refuse before the directory
         // becomes someone else's. Releasing first would leave a window in which a stale writer passes the
         // guard and mutates a directory a new owner already holds.
         closed = true
-        // THEN DRAIN. Invalidating fences new entrants; it does NOT stop an operation that already passed
-        // the guard from resuming after a successor owns the directory. Waiting for in-flight work to reach
-        // zero is what makes close a real handover boundary.
-        awaitDrained()
+        // THEN DRAIN, and release only when it is safe to hand the directory over. A self-close (a hook
+        // tearing the store down mid-write) cannot wait for its own lease, so it DEFERS the release to
+        // leave() instead of releasing early: otherwise a successor acquires while the old writer resumes.
+        if (!awaitDrained()) {
+            closeDeferred = true
+            return
+        }
+        releaseLock()
+    }
+
+    /** Drops the OS lock. Only reached when no writer may still touch the directory. */
+    @Synchronized
+    private fun releaseLock() {
         runCatching { lock?.release() }
         runCatching { channel?.close() }
         lock = null
         channel = null
     }
 
-    /** Threads currently inside [enter]; used so a self-close never waits on its own lease. */
-    private val leaseThreads = java.util.concurrent.ConcurrentHashMap.newKeySet<Thread>()
+    /** Per-thread lease nesting depth, so a self-close can recognise its OWN lease precisely. */
+    private val leaseDepth = ThreadLocal.withInitial { 0 }
 
-    private fun awaitDrained() {
-        // A close() issued from INSIDE an operation - a hook that tears the store down mid-write - must not
-        // wait for its own lease. The in-flight count includes the caller, so waiting would deadlock against
-        // itself forever. The caller's operation is abandoned with the directory as before.
-        if (Thread.currentThread() in leaseThreads) return
+    /** Set when a self-close could not release because its own writer (or another) was still inside. */
+    @Volatile
+    private var closeDeferred = false
+
+    /**
+     * Waits for in-flight operations to finish. Returns false when the CALLER is itself inside a lease, in
+     * which case waiting would deadlock against its own count - the caller then defers the release instead
+     * of skipping it (reviewer 52ee7e91: skipping the drain and releasing immediately lets a successor take
+     * the directory while the old writer is still running).
+     */
+    private fun awaitDrained(): Boolean {
+        if ((leaseDepth.get() ?: 0) > 0) return false
         drained.lock()
         try {
             while (inFlight.get() > 0) {
@@ -172,6 +195,7 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         } finally {
             drained.unlock()
         }
+        return true
     }
 
     companion object {

@@ -336,15 +336,19 @@ class ContributionStoreTest {
                 // holds the directory - the old fixture published into a live owner's namespace, which is
                 // the concurrency the contract removes. The purge above happens first (unchanged), then the
                 // owner releases, then the successor publishes. Every survival assertion below is kept.
+                // The close is DEFERRED here (reviewer 52ee7e91): this hook is inside the guarded write,
+                // so the directory is released only when the write exits. The successor publishes below,
+                // after the stale preparation returns - a successor cannot publish into a live owner.
                 theStore.close()
-                successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-                successor.prepare(SUCC, "epoch-B", chunks(8), meta(SUCC), "a@x", 7L)
             }),
         )
         val store = theStore
         val staleGen = fence.currentGeneration()
         assertNull(store.prepareAt(staleGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
+        // The write has exited, so the deferred release has happened and the successor can take over.
+        successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        successor.prepare(SUCC, "epoch-B", chunks(8), meta(SUCC), "a@x", 7L)
         // The successor's COMMITTED files must survive the stale preparation's cleanup untouched: purge is
         // scoped to ids this owner held, never a blanket directory sweep.
         assertTrue("successor WAV deleted by stale purge", File(root, "contributions/$SUCC.recording.wav").isFile)
@@ -1454,5 +1458,78 @@ class ContributionStoreTest {
         assertTrue("the successor takes the directory; nothing was re-acquired", successor.isAvailable())
         assertEquals(null, successor.unavailableReason())
         assertNotNull(successor.prepare(java.util.UUID.randomUUID().toString(), "epoch-epoch", chunks(8), meta(java.util.UUID.randomUUID().toString()), "a@x", 7L))
+    }
+
+    @Test
+    fun `a self-close does not release the directory to a successor until the writer exits`() {
+        // REVIEWER 52ee7e91: a self-close must NOT release the OS lock while its own writer is still
+        // running, or a successor acquires and the old writer resumes against it. The release is DEFERRED
+        // to the last lease leaving, not skipped.
+        val root = tempRoot()
+        val successorAcquired = java.util.concurrent.atomic.AtomicReference<Boolean?>(null)
+        val probed = java.util.concurrent.CountDownLatch(1)
+        lateinit var store: ContributionStore
+        store = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            hooks = StoreHooks(onWavPartWrite = { _ ->
+                store.close()
+                // Still inside the guarded write: the directory must NOT be handed over yet.
+                successorAcquired.set(ContributionStore(root, QueueLimits.defaults()).isAvailable())
+                probed.countDown()
+            }),
+        )
+        // The write itself is abandoned because the store closed mid-flight; that is not the assertion.
+        store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L)
+        assertTrue("the hook ran", probed.await(30, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(
+            "a successor acquired the directory while the old writer was still inside its guarded section",
+            false,
+            successorAcquired.get(),
+        )
+
+        // AFTER the writer exits the deferred release must actually happen, or the directory is wedged.
+        val afterExit = ContributionStore(root, QueueLimits.defaults())
+        assertTrue(
+            "the deferred release must complete once the last lease leaves; got ${afterExit.unavailableReason()}",
+            afterExit.isAvailable(),
+        )
+        assertNotNull(
+            "and a successor can publish",
+            afterExit.prepare(java.util.UUID.randomUUID().toString(), "epoch-epoch", chunks(8), meta(java.util.UUID.randomUUID().toString()), "a@x", 7L)
+                ?: error("successor publication refused"),
+        )
+    }
+
+    @Test
+    fun `a nested fenced call keeps the outer operation in flight so self-close still defers`() {
+        // REVIEWER 52ee7e91: nesting must be a DEPTH, not a flag. If an inner enter/leave cleared the
+        // thread's depth, a self-close inside the outer operation would treat itself as untouched and
+        // release the directory while the outer writer is still running.
+        val root = tempRoot()
+        val successorAcquired = java.util.concurrent.atomic.AtomicReference<Boolean?>(null)
+        val probed = java.util.concurrent.CountDownLatch(1)
+        lateinit var store: ContributionStore
+        store = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            hooks = StoreHooks(onWavPartWrite = { _ ->
+                // An INNER fenced operation completes and leaves its lease while the outer one continues.
+                store.expireOlderThan()
+                store.close()
+                successorAcquired.set(ContributionStore(root, QueueLimits.defaults()).isAvailable())
+                probed.countDown()
+            }),
+        )
+        // Bounded: a broken nesting model deadlocks here, and a hang is a worse signal than a failure.
+        val writer = Thread { runCatching { store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L) } }
+        writer.isDaemon = true
+        writer.start()
+        assertTrue("the hook ran (a false here means nesting deadlocked)", probed.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(
+            "a successor acquired the directory after an inner lease left but the outer writer was still running",
+            false,
+            successorAcquired.get(),
+        )
     }
 }

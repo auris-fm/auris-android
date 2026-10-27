@@ -70,7 +70,7 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         // CLOSED IS TERMINAL. A late callback must not be able to take the OS lock again: isHeld() would
         // still report false (closed stays true), so the handle would hold the directory while reporting
         // that it does not - denying every legitimate owner that tries to take over.
-        if (closed) {
+        if (closed || closeInProgress) {
             reason = reason ?: "closed"
             return this
         }
@@ -104,6 +104,8 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
 
     override fun isHeld(): Boolean = !closed && lock?.isValid == true
 
+    private fun isHeldLocked(): Boolean = !closed && lock?.isValid == true
+
     override fun unavailableReason(): String? = if (isHeld()) null else reason ?: "closed"
 
     /** Operations that passed the guard and have not finished; see [enter]/[leave]. */
@@ -135,8 +137,14 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         leaseDepth.set(depth)
         if (inFlight.decrementAndGet() == 0) {
             // THE LAST LEASE IS GONE: this is the only place a deferred self-close may actually release,
-            // because there is no writer left to resurrect against a successor.
-            if (closeDeferred) releaseLock()
+            // because there is no writer left to resurrect against a successor. The monitor is taken ONLY
+            // here, briefly, and never while waiting - that is what keeps this from deadlocking.
+            synchronized(this) {
+                if (closeDeferred) {
+                    closeDeferred = false
+                    releaseLockLocked()
+                }
+            }
             drained.lock()
             try {
                 drainSignal.signalAll()
@@ -146,25 +154,34 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         }
     }
 
-    @Synchronized
     override fun close() {
-        // INVALIDATE FIRST: a delayed callback observing isHeld()==false must refuse before the directory
-        // becomes someone else's. Releasing first would leave a window in which a stale writer passes the
-        // guard and mutates a directory a new owner already holds.
-        closed = true
-        // THEN DRAIN, and release only when it is safe to hand the directory over. A self-close (a hook
-        // tearing the store down mid-write) cannot wait for its own lease, so it DEFERS the release to
-        // leave() instead of releasing early: otherwise a successor acquires while the old writer resumes.
-        if (!awaitDrained()) {
-            closeDeferred = true
-            return
+        // PHASE 1 - MARK, UNDER THE MONITOR. Invalidate first so a delayed callback observing isHeld()==false
+        // refuses before the directory becomes someone else's, and publish that a close is in progress.
+        synchronized(this) {
+            closed = true
+            closeInProgress = true
         }
-        releaseLock()
+        // PHASE 2 - DRAIN WITHOUT THE MONITOR (reviewer 7f1bfeb0/487d6967). Holding it while waiting
+        // deadlocks any leased operation that needs acquire() or releaseLock(): its lease keeps inFlight
+        // above zero, so neither side can proceed. The drain must run outside the lifecycle lock.
+        val callerIsLeased = (leaseDepth.get() ?: 0) > 0
+        if (!callerIsLeased) awaitIdle()
+        // PHASE 3 - FINALIZE UNDER THE MONITOR, as ONE consistent transition.
+        synchronized(this) {
+            closed = true
+            if (callerIsLeased || inFlight.get() > 0) {
+                // A self-close, or other leases still running: DEFER the release to the last leave().
+                // Releasing now would hand the directory to a successor while a writer is still inside.
+                closeDeferred = true
+            } else {
+                closeDeferred = false
+                releaseLockLocked()
+            }
+        }
     }
 
-    /** Drops the OS lock. Only reached when no writer may still touch the directory. */
-    @Synchronized
-    private fun releaseLock() {
+    /** Drops the OS lock; caller must hold the lifecycle monitor. */
+    private fun releaseLockLocked() {
         runCatching { lock?.release() }
         runCatching { channel?.close() }
         lock = null
@@ -178,14 +195,15 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
     @Volatile
     private var closeDeferred = false
 
+    /** True from the moment close() begins; makes a second close a no-op instead of a second release. */
+    @Volatile
+    private var closeInProgress = false
+
     /**
-     * Waits for in-flight operations to finish. Returns false when the CALLER is itself inside a lease, in
-     * which case waiting would deadlock against its own count - the caller then defers the release instead
-     * of skipping it (reviewer 52ee7e91: skipping the drain and releasing immediately lets a successor take
-     * the directory while the old writer is still running).
+     * Waits until no operation holds a lease. MUST be called WITHOUT the lifecycle monitor held: a leased
+     * operation that needs that monitor would otherwise keep inFlight above zero forever.
      */
-    private fun awaitDrained(): Boolean {
-        if ((leaseDepth.get() ?: 0) > 0) return false
+    private fun awaitIdle() {
         drained.lock()
         try {
             while (inFlight.get() > 0) {
@@ -195,7 +213,6 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         } finally {
             drained.unlock()
         }
-        return true
     }
 
     companion object {

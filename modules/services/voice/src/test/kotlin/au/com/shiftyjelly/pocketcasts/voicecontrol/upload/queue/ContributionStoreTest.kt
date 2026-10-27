@@ -1532,4 +1532,109 @@ class ContributionStoreTest {
             successorAcquired.get(),
         )
     }
+
+    @Test
+    fun `an external close must not deadlock a leased operation that needs the lifecycle monitor`() {
+        // REVIEWER 487d6967's CORRECTED interleaving, and the one that really blocks: an ACTIVE leased
+        // operation calls back into the ownership object and needs the lifecycle monitor, while an external
+        // close() holds that monitor waiting for the same operation's lease. inFlight can never reach zero,
+        // and acquire() cannot return, so neither thread can finish.
+        //
+        // A polling drain does NOT save this case, which is why the fix is to stop holding the monitor.
+        val ownership = FileDirectoryOwnership(ownedDir("reentrant-close"))
+        ownership.acquire()
+        assertTrue("PREMISE: the owner holds the directory", ownership.isHeld())
+
+        val insideLease = java.util.concurrent.CountDownLatch(1)
+        val closeStarted = java.util.concurrent.CountDownLatch(1)
+        val opDone = java.util.concurrent.CountDownLatch(1)
+        val operation = Thread {
+            if (ownership.enter()) {
+                try {
+                    insideLease.countDown()
+                    // Wait until the external close is definitely inside close().
+                    closeStarted.await(30, java.util.concurrent.TimeUnit.SECONDS)
+                    // A nested lifecycle call that needs the SAME monitor close() may be holding.
+                    ownership.acquire()
+                } finally {
+                    ownership.leave()
+                    opDone.countDown()
+                }
+            }
+        }
+        operation.isDaemon = true
+        operation.start()
+        assertTrue("PREMISE: the operation holds a lease", insideLease.await(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        val closer = Thread {
+            // Signal BEFORE close() returns: the operation is waiting for close to be IN PROGRESS, and
+            // closing the latch afterwards made this fixture wait on itself.
+            closeStarted.countDown()
+            ownership.close()
+        }
+        closer.isDaemon = true
+        closer.start()
+
+        assertTrue(
+            "the leased operation finished (a false here means close() held the monitor it needed)",
+            opDone.await(15, java.util.concurrent.TimeUnit.SECONDS),
+        )
+    }
+
+    private fun ownedDir(name: String): File = tempRoot().resolve(name).also { it.mkdirs() }
+
+    @Test
+    fun `a deferred self-close followed by an external close does not deadlock the last writer`() {
+        // REVIEWER 7f1bfeb0: synchronized close() held the lifecycle monitor while awaiting inFlight==0;
+        // the last leave() then called synchronized releaseLock() and blocked on that same monitor.
+        val root = tempRoot()
+        val writerInside = java.util.concurrent.CountDownLatch(1)
+        val releaseWriter = java.util.concurrent.CountDownLatch(1)
+        lateinit var store: ContributionStore
+        store = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            hooks = StoreHooks(onWavPartWrite = { _ ->
+                // DEFERRED SELF-CLOSE: our own lease is active, so the release must be deferred.
+                store.close()
+                writerInside.countDown()
+                releaseWriter.await(30, java.util.concurrent.TimeUnit.SECONDS)
+            }),
+        )
+        val writer = Thread { runCatching { store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L) } }
+        writer.isDaemon = true
+        writer.start()
+        assertTrue("PREMISE: the writer is inside the guarded section", writerInside.await(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        // EXTERNAL CLOSE from another thread, while the deferred self-close is still pending.
+        val externalDone = java.util.concurrent.CountDownLatch(1)
+        val external = Thread {
+            store.close()
+            externalDone.countDown()
+        }
+        external.isDaemon = true
+        external.start()
+
+        // Let the writer exit: this is the last leave(), which must release without blocking on a monitor.
+        releaseWriter.countDown()
+        assertTrue(
+            "the writer exited (a false here means the last leave() deadlocked)",
+            awaitThread(writer, 15_000),
+        )
+        assertTrue(
+            "the external close completed (a false here means close() deadlocked on the drain)",
+            awaitLatch(externalDone, 15_000),
+        )
+
+        // And the directory is genuinely free afterwards.
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("a successor acquires after both closes settle; got ${successor.unavailableReason()}", successor.isAvailable())
+    }
+
+    private fun awaitThread(thread: Thread, timeoutMs: Long): Boolean {
+        thread.join(timeoutMs)
+        return !thread.isAlive
+    }
+
+    private fun awaitLatch(latch: java.util.concurrent.CountDownLatch, timeoutMs: Long): Boolean = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
 }

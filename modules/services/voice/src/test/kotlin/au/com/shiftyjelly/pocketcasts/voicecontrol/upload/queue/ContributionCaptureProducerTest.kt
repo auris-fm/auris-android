@@ -20,16 +20,30 @@ import org.junit.rules.TemporaryFolder
  * through the store's durable authority - never rewritten by settings or retry.
  */
 class ContributionCaptureProducerTest {
+    @org.junit.After
+    fun releaseSources() {
+        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
+        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
+        ContributionStore.settleAllLiveSourcesForTest()
+        storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
+    }
 
     @get:Rule
     val tmp = TemporaryFolder()
+
+    private val storesForTeardown = mutableListOf<ContributionStore>()
 
     private fun newStore(root: java.io.File, now: Long = 61_000_000L) = ContributionStore(
         root,
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
         clock = { now },
         jitter = { it - 1 },
-    )
+    ).also { storesForTeardown += it }
 
     private val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
 
@@ -86,7 +100,10 @@ class ContributionCaptureProducerTest {
         // Through the SAME authority the uploader reads: provenance is intact and the audio matches.
         val capture = store.durableCapture(id)
         assertNotNull("the store vouches for what the producer published", capture)
-        val audio = capture!!.record.fields["audio"] as RecordNode.Obj
+        // Release the descriptor: this test reads only the RECORD, and the source bound is process-wide,
+        // so an abandoned descriptor starves a later test (reviewer 2c7dc375).
+        capture!!.owned?.settle(1_000L)
+        val audio = capture.record.fields["audio"] as RecordNode.Obj
         assertEquals("pcm_s16le", (audio.fields["original_format"] as RecordNode.Str).value)
         assertEquals("v2", (audio.fields["conversion_version"] as RecordNode.Str).value)
         assertEquals("the record's audio sha matches the WAV on disk", 0L, 0L)

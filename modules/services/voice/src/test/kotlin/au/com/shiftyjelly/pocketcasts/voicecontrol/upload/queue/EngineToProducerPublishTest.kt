@@ -22,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -43,9 +44,6 @@ import org.junit.rules.TemporaryFolder
  * proven across threads; runtime attachment through the UploadTrigger.start consumer.
  */
 class EngineToProducerPublishTest {
-    @get:org.junit.Rule
-    val sourceSlots = ProcessWideSourceSlotsRule()
-
     /** REAL owner-transaction semantics: one lock, snapshot reads inside it (see WiringTest). */
     private class WatchOwner(startAccount: String, startSession: Long) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
         override val collectionSharedLock = Any()
@@ -96,12 +94,32 @@ class EngineToProducerPublishTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    private val storesForTeardown = mutableListOf<ContributionStore>()
+
     private fun newStore(root: java.io.File, now: Long = 61_000_000L) = ContributionStore(
         root,
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
         clock = { now },
         jitter = { it - 1 },
-    )
+    ).also { storesForTeardown += it }
+
+    /**
+     * This class reads captures only for their RECORD, so it never held the descriptor deliberately - it
+     * simply dropped it. The source bound is process-wide, so an abandoned descriptor starves every later
+     * test in this JVM (reviewer 2c7dc375). Release what was opened and assert nothing survives.
+     */
+    @org.junit.After
+    fun releaseSources() {
+        // Release the descriptors this store is still holding. Re-opening a capture to settle it would
+        // open ANOTHER descriptor, so use the store's own tracked set.
+        storesForTeardown.forEach { it.settleSourcesForTest() }
+        storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
+    }
 
     private val issued = IssuedAuthority(
         accountName = "a@x",
@@ -927,6 +945,15 @@ class EngineToProducerPublishTest {
         assertTrue(
             "every producer identity read saw the frozen owner (saw=$seenAccounts)",
             seenAccounts.all { it == "a@x" },
+        )
+    }
+
+    @After
+    fun assertNoSourceLeak() {
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; the process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
         )
     }
 }

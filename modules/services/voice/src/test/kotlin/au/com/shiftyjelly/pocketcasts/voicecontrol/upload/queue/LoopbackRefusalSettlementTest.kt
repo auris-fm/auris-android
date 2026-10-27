@@ -38,8 +38,17 @@ import org.junit.rules.TemporaryFolder
  * recreation over the same directory, labelled as such rather than as a device restart.
  */
 class LoopbackRefusalSettlementTest {
-    @get:org.junit.Rule
-    val sourceSlots = ProcessWideSourceSlotsRule()
+    /** Stores built by this class, so teardown can release the sources they still hold. */
+    private val storesForTeardown = mutableListOf<ContributionStore>()
+
+    @org.junit.After
+    fun releaseSources() {
+        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
+        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
+        ContributionStore.settleAllLiveSourcesForTest()
+        storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals("class left descriptors open", 0, ContributionStore.processOpenSourceSlotsForTest())
+    }
 
     @get:Rule
     val tmp = TemporaryFolder()
@@ -104,7 +113,7 @@ class LoopbackRefusalSettlementTest {
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
         clock = clock,
         jitter = { it - 1 },
-    )
+    ).also { storesForTeardown += it }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 

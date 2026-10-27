@@ -6,6 +6,7 @@ import java.net.InetSocketAddress
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.cancel
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -21,9 +22,6 @@ import org.junit.rules.TemporaryFolder
  * bytes intact.
  */
 class VoiceUploadModuleWiringTest {
-    @get:org.junit.Rule
-    val sourceSlots = ProcessWideSourceSlotsRule()
-
     @get:Rule
     val tmp = TemporaryFolder()
 
@@ -152,7 +150,12 @@ class VoiceUploadModuleWiringTest {
         responseBody = receiptFor(store, id, "accepted")
         val port = startServer()
 
+        // PREMISE ONLY: prove the capture opens. Its descriptor is released at once - the assembly opens
+        // its own source below, and the source bound is process-wide, so abandoning this one starves a
+        // later test rather than failing this one (reviewer 2c7dc375).
+        store.durableCapture(id)!!.owned?.settle(1_000L)
         val capture = store.durableCapture(id)!!
+        capture.owned?.settle(1_000L)
         val assembly = ContributionUploadAssembly(
             store = store,
             transport = ContributionUploadTransport(
@@ -898,5 +901,14 @@ class VoiceUploadModuleWiringTest {
         val generation = store.fence.currentGeneration()
         assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, "a@x", 7L))
         assertEquals(1, store.recordAttempt(generation, id))
+    }
+
+    @After
+    fun assertNoSourceLeak() {
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; the process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
     }
 }

@@ -42,6 +42,14 @@ import org.robolectric.RobolectricTestRunner
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 class DurableQueuePolicyDisableTest {
+    @org.junit.After
+    fun assertNoSourceLeak() {
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
+    }
 
     private val dispatcher = UnconfinedTestDispatcher()
     private lateinit var scope: CoroutineScope

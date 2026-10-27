@@ -1510,8 +1510,12 @@ class ContributionStore(
      * TEST SEAM: close every source this store handed down, so a fixture that only needed a RECORD cannot
      * leave a descriptor (and its source lease) holding the directory.
      */
-    fun settleSourcesForTest() = synchronized(lock) {
-        for (owned in openSources.keys.toList()) runCatching { owned.close() }
+    fun settleSourcesForTest(): List<Boolean> = synchronized(lock) {
+        // SETTLE, not close. close() is the lifecycle-notification path: it marks the source terminal and
+        // lets whoever observes the drain perform the close, so a body writer still running at that moment
+        // leaves the descriptor (and its PROCESS-WIDE source slot) open. Only settle() completes the
+        // terminal transition and reports whether it did, which is what teardown must assert.
+        openSources.keys.toList().map { owned -> runCatching { owned.settle(SOURCE_SETTLE_TIMEOUT_MS) }.getOrDefault(false) }
     }
 
     /** TEST SEAM: runs AFTER purge discovery, so a control can observe the promotion boundary itself. */
@@ -1561,6 +1565,15 @@ class ContributionStore(
 
     /** TEST SEAM: how many source slots are currently held, to prove the bound is real and released. */
     fun openSourceSlotsForTest(): Int = openSourceSlots.get()
+
+    /**
+     * TEST SEAM: the capture ids whose descriptors this store was handed and has not seen closed.
+     *
+     * Lets a test's teardown assert it released everything, instead of erasing the bound's state: a reset
+     * would leave descriptors, leases and pin charges alive while zeroing the counter that is supposed to
+     * notice them (reviewer 2c7dc375). Empty means nothing leaked.
+     */
+    fun openCaptureIdsForTest(): List<String> = synchronized(lock) { openSources.values.toList() }
 
     /**
      * Every open source this store has handed down, with the capture it belongs to.
@@ -2093,6 +2106,7 @@ class ContributionStore(
     }
 
     init {
+        synchronized(LIVE_STORES) { LIVE_STORES.add(this) }
         // A fence-level revocation must also cancel in-flight launches (reviewer 4d72e463).
         fence.pendingLaunchCancellation = { cancelLiveLaunchesLocked() }
     }
@@ -3347,23 +3361,38 @@ class ContributionStore(
         internal const val MAX_OPEN_SOURCES = 8
 
         /**
+         * TEST-ONLY: every store this process has constructed, weakly held.
+         *
+         * The source bound is process-wide, so a teardown that only knows about the stores a test happened
+         * to keep a reference to can miss one and leave a descriptor holding a slot for the rest of the
+         * JVM (reviewer 2c7dc375). This registry lets teardown settle ALL of them instead of resetting the
+         * counter, which would hide exactly the leak it is meant to find.
+         */
+        private val LIVE_STORES = java.util.Collections.newSetFromMap(java.util.WeakHashMap<ContributionStore, Boolean>())
+
+        /** TEST-ONLY: settles every live store's sources and returns how many failed to settle. */
+        @JvmStatic
+        fun settleAllLiveSourcesForTest(): Int {
+            val stores = synchronized(LIVE_STORES) { LIVE_STORES.toList() }
+            return stores.sumOf { store -> store.settleSourcesForTest().count { !it } }
+        }
+
+        /** Teardown settle deadline: long enough for a live writer to drain, short enough to fail fast. */
+        private const val SOURCE_SETTLE_TIMEOUT_MS = 2_000L
+
+        /**
+         * TEST SEAM: process-wide slots currently held. Read WITHOUT constructing a store, because a store
+         * created by a teardown would itself establish coverage and could mask the leak being asserted.
+         */
+        @JvmStatic
+        fun processOpenSourceSlotsForTest(): Int = PROCESS_OPEN_SOURCE_SLOTS.get()
+
+        /**
          * The PROCESS-WIDE source-slot count. Deliberately a companion-object field, not per instance: every
          * open descriptor anywhere in this process consumes device bytes, so one bound must cover them all.
          */
         private val PROCESS_OPEN_SOURCE_SLOTS = java.util.concurrent.atomic.AtomicInteger(0)
 
-        /**
-         * TEST-ONLY isolation for the PROCESS-WIDE source bound.
-         *
-         * The counter is deliberately process-wide, so a test that holds a source open by design (several do,
-         * to prove unlink/retention behaviour) starves every LATER test in the JVM. That is a real
-         * consequence of the bound being global, not a flaw in it: production has one process and one owner.
-         * Test classes call this from @After so one test's deliberate hold cannot fail another's. It asserts
-         * nothing - it exists so the blast radius of a leak is a test, not a suite.
-         */
-        fun resetSourceSlotsForTest() {
-            PROCESS_OPEN_SOURCE_SLOTS.set(0)
-        }
         private const val STAGING_PREFIX = "gen$"
         private const val ADMISSION_HELD = 0
         private const val ADMISSION_RELEASED = 1

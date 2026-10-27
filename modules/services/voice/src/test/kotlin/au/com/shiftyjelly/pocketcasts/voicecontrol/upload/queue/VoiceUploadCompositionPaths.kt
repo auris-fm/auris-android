@@ -180,6 +180,10 @@ internal object VoiceUploadCompositionPaths {
         val served = checkNotNull(store.durableCapture(captureId.toString())) {
             "the joined path left no servable durable capture"
         }
+        // RELEASE THE DESCRIPTOR IMMEDIATELY. This object is JVM-wide, so a descriptor left open here
+        // outlives every test class and holds a source slot for the whole run - it starved unrelated
+        // classes with "left descriptors open" (reviewer 2c7dc375). Only the RECORD is needed below.
+        served.owned?.settle(1_000L)
         val bytes = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
             .canonicalBytes(served.record).toString(Charsets.UTF_8)
         val sha = java.security.MessageDigest.getInstance("SHA-256")

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import java.io.File
 import java.util.UUID
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -16,6 +17,8 @@ import org.junit.rules.TemporaryFolder
  * serve upload bytes. These controls tamper with published pairs and assert the store refuses to vouch.
  */
 class DurableCaptureAuthorityTest {
+    /** Stores built by this class, so teardown can release the sources they still hold. */
+    private val storesForTeardown = mutableListOf<ContributionStore>()
 
     @get:Rule
     val tmp = TemporaryFolder()
@@ -27,7 +30,7 @@ class DurableCaptureAuthorityTest {
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
         clock = { now },
         jitter = { it - 1 },
-    )
+    ).also { storesForTeardown += it }
 
     private fun prepare(store: ContributionStore, root: File, id: String): Long {
         // The declared audio sha must be over EXACTLY the bytes the store's WavWriter will produce, so
@@ -87,9 +90,15 @@ class DurableCaptureAuthorityTest {
         val reopened = newStore(root)
         assertEquals(listOf(id), reopened.recover().map { it.captureId })
         val recapture = reopened.durableCapture(id)!!
-        assertEquals("a@x", recapture.enrollmentAccount)
-        assertEquals(7L, recapture.enrollmentSession)
-        assertEquals("epoch-1", recapture.enrollmentEpoch)
+        try {
+            assertEquals("a@x", recapture.enrollmentAccount)
+            assertEquals(7L, recapture.enrollmentSession)
+            assertEquals("epoch-1", recapture.enrollmentEpoch)
+        } finally {
+            // Release the descriptor: the source bound is PROCESS-WIDE, so abandoning it here starves
+            // every later test in this JVM (reviewer 2c7dc375).
+            recapture.owned?.settle(1_000L)
+        }
     }
 
     @Test
@@ -98,7 +107,7 @@ class DurableCaptureAuthorityTest {
         val id = UUID.randomUUID().toString()
         val store = newStore(root)
         prepare(store, root, id)
-        assertNotNull(store.durableCapture(id))
+        assertNotNull(store.durableCapture(id)?.owned?.also { it.settle(1_000L) })
         ownerFile(root, id).writeText("{\"account\":\"a@x\",\"session\"") // truncated/corrupt
         assertNull("corrupt ownership fails CLOSED", store.durableCapture(id))
     }
@@ -109,7 +118,7 @@ class DurableCaptureAuthorityTest {
         val id = UUID.randomUUID().toString()
         val store = newStore(root)
         prepare(store, root, id)
-        assertNotNull(store.durableCapture(id))
+        assertNotNull(store.durableCapture(id)?.owned?.also { it.settle(1_000L) })
         assertTrue(ownerFile(root, id).delete())
         assertNull("absent ownership fails CLOSED", store.durableCapture(id))
     }
@@ -125,7 +134,11 @@ class DurableCaptureAuthorityTest {
         // silently "fixes" it.
         ownerFile(root, id).writeText("{\"capture_id\":\"$id\",\"account\":\"attacker@x\",\"session\":7,\"epoch\":\"epoch-1\"}")
         val capture = store.durableCapture(id)!!
-        assertEquals("attacker@x", capture.enrollmentAccount)
+        try {
+            assertEquals("attacker@x", capture.enrollmentAccount)
+        } finally {
+            capture.owned?.settle(1_000L)
+        }
     }
 
     @Test
@@ -169,7 +182,11 @@ class DurableCaptureAuthorityTest {
         val generation = store.fence.currentGeneration()
         assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, tricky, 7L))
         val capture = store.durableCapture(id)!!
-        assertEquals(tricky, capture.enrollmentAccount)
+        try {
+            assertEquals(tricky, capture.enrollmentAccount)
+        } finally {
+            capture.owned?.settle(1_000L)
+        }
         // And the tamper shape: an account containing \"session\" cannot forge a second field.
         ownerFile(root, id).writeText("{\"account\":\"x\\\"},\"session\":1,\"b\":\"\",\"session\":7,\"epoch\":\"e\"}")
         assertNull("forged structure refuses", store.durableCapture(id))
@@ -237,7 +254,7 @@ class DurableCaptureAuthorityTest {
         assertTrue("each refusal is accounted", store.sidecarRefusals >= bad.size)
         // Restore: the capture is servable again - the refusals never mutated anything.
         ownerF.writeText(original)
-        assertNotNull(store.durableCapture(id))
+        assertNotNull(store.durableCapture(id)?.owned?.also { it.settle(1_000L) })
     }
 
     @Test
@@ -259,7 +276,11 @@ class DurableCaptureAuthorityTest {
 
         val capture = store.durableCapture(id)
         assertNotNull("an intact pair is servable", capture)
-        assertEquals("epoch-1", capture!!.enrollmentEpoch)
+        try {
+            assertEquals("epoch-1", capture!!.enrollmentEpoch)
+        } finally {
+            capture?.owned?.settle(1_000L)
+        }
     }
 
     @Test
@@ -324,5 +345,18 @@ class DurableCaptureAuthorityTest {
         val root = tmp.newFolder("authority-unknown")
         val store = newStore(root)
         assertNull(store.durableCapture(UUID.randomUUID().toString()))
+    }
+
+    @After
+    fun releaseSources() {
+        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
+        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
+        ContributionStore.settleAllLiveSourcesForTest()
+        storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; the process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
     }
 }

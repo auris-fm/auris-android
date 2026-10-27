@@ -30,6 +30,35 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 @org.robolectric.annotation.Config(sdk = [35])
 class VoiceUploadCompositionPathTest {
+    /**
+     * Release every source this class opened. close() drops the source leases, so a store left open keeps
+     * its descriptors (and the process-wide slots) alive past the test that owns them (reviewer 2c7dc375).
+     */
+    @org.junit.After
+    fun releaseSources() {
+        stores.forEach { store ->
+            store.settleSourcesForTest()
+            runCatching { store.close() }
+        }
+        // The JVM-wide producer store ([VoiceUploadCompositionPaths.emitOnce]) is shared by every control in
+        // this class, so its descriptors outlive individual tests. Release them here rather than resetting
+        // the counter: a reset would hide the descriptors, leases and pin charges this is meant to find.
+        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
+        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
+        ContributionStore.settleAllLiveSourcesForTest()
+        stores.forEach { runCatching { it.close() } }
+        val tracked = stores.flatMap { it.openCaptureIdsForTest() }
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open (" + tracked + "); " +
+                "process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
+    }
+
+    /** Every store this class builds, so teardown can release the sources each one holds. */
+    private val stores = mutableListOf<ContributionStore>()
+
     private fun moduleStartup(): VoiceSharingAccountStartup = VoiceUploadCompositionFixtures.startup(androidx.test.core.app.ApplicationProvider.getApplicationContext())
     private fun authenticatedProjection(epoch: String): String = VoiceUploadCompositionFixtures.authenticatedProjection(epoch)
 
@@ -70,7 +99,7 @@ class VoiceUploadCompositionPathTest {
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
         try {
             val root = tmp.newFolder("compiled-off")
-            val store = ContributionStore(root, QueueLimits.defaults(), clock = System::currentTimeMillis)
+            val store = ContributionStore(root, QueueLimits.defaults(), clock = System::currentTimeMillis).also { stores += it }
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
             // The module's OWN policy provider, composed with the real modules (the published
@@ -209,7 +238,7 @@ class VoiceUploadCompositionPathTest {
                 QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
                 clock = System::currentTimeMillis,
                 jitter = { 0L },
-            )
+            ).also { stores += it }
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
             // Publish the admitted identity exactly as the real account stack would: epoch projection
@@ -266,7 +295,7 @@ class VoiceUploadCompositionPathTest {
                 "the module-built path reached the transport (poll=$firstPoll, hits=${hits.get()})",
                 hits.get() >= 1,
             )
-            org.junit.Assert.assertNotNull("an invalid receipt never settles", store.durableCapture(id))
+            org.junit.Assert.assertNotNull("an invalid receipt never settles", store.durableCapture(id)?.owned?.also { it.settle(1_000L) })
             org.junit.Assert.assertTrue("policy stays open after an invalid receipt: ${policy.publishedPolicy.value}", policy.publishedPolicy.value.enabled)
 
             // 2. VALID receipt echoing the store's own digest: the entry settles and is removed.
@@ -368,7 +397,7 @@ class VoiceUploadCompositionPathTest {
                 QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
                 clock = System::currentTimeMillis,
                 jitter = { 0L },
-            )
+            ).also { stores += it }
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
             val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
@@ -436,7 +465,7 @@ class VoiceUploadCompositionPathTest {
             // (2) The invalid receipt retained the entry. The network gate (owner-published
             //     credential) now CLOSES: the drain defers. It reopens: the same durable entry
             //     resumes and settles.
-            org.junit.Assert.assertNotNull(store.durableCapture(id))
+            org.junit.Assert.assertNotNull(store.durableCapture(id)?.owned?.also { it.settle(1_000L) })
             startup.credentials.publish(null)
             val closed = assembly.poll()
             assertEquals("gate closed: deferred, not attempted", 1, closed.deferredNetwork)
@@ -473,7 +502,7 @@ class VoiceUploadCompositionPathTest {
                 QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
                 clock = System::currentTimeMillis,
                 jitter = { 0L },
-            )
+            ).also { stores += it }
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
             val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
@@ -551,7 +580,7 @@ class VoiceUploadCompositionPathTest {
                 QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
                 clock = System::currentTimeMillis,
                 jitter = { 0L },
-            )
+            ).also { stores += it }
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
             val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner

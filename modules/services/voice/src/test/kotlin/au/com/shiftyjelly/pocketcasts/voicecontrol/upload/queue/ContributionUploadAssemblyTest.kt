@@ -34,6 +34,21 @@ import org.junit.rules.TemporaryFolder
  * the QUEUE: released, retained, or left alone. Settlement, not classification, is the observable.
  */
 class ContributionUploadAssemblyTest {
+    /** Stores built by this class, so teardown can release the sources they still hold. */
+    private val storesForTeardown = mutableListOf<ContributionStore>()
+
+    @org.junit.After
+    fun releaseSources() {
+        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
+        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
+        ContributionStore.settleAllLiveSourcesForTest()
+        storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
+    }
 
     @get:Rule
     val tmp = TemporaryFolder()
@@ -132,7 +147,7 @@ class ContributionUploadAssemblyTest {
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
         clock = now,
         jitter = { it - 1 },
-    )
+    ).also { storesForTeardown += it }
 
     private fun assembly(
         store: ContributionStore,

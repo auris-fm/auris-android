@@ -24,6 +24,26 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ContributionStoreTest {
+    /** Stores built by this class, so teardown can release the sources they still hold. */
+    private val storesForTeardown = mutableListOf<ContributionStore>()
+
+    @org.junit.After
+    fun releaseSources() {
+        // Settle EVERY live store, not just the ones this test kept a reference to: the source bound is
+        // process-wide, so a missed descriptor holds a slot for the rest of the JVM (reviewer 2c7dc375).
+        val unsettled = ContributionStore.settleAllLiveSourcesForTest()
+        org.junit.Assert.assertEquals(
+            "a source did not settle; its descriptor and pin charge outlive this test",
+            0,
+            unsettled,
+        )
+        storesForTeardown.forEach { runCatching { it.close() } }
+        org.junit.Assert.assertEquals(
+            "this class left descriptors open; process-wide source slots belong to a later test",
+            0,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
+    }
 
     private val idB = "bbbbbbbb-1111-4111-8111-111111111101"
     private val idC = "cccccccc-1111-4111-8111-111111111102"
@@ -107,17 +127,10 @@ class ContributionStoreTest {
 
     private fun chunks(vararg sizes: Int) = sizes.map { ShortArray(it) { i -> i.toShort() } to it }
 
-    @After
-    fun releaseProcessWideSourceSlots() {
-        // The source bound is PROCESS-WIDE by design (reviewer 4e8592ba), so a test that deliberately keeps
-        // a descriptor open would starve every later test in this JVM. Isolate after each test.
-        ContributionStore.resetSourceSlotsForTest()
-    }
-
     @Test
     fun `ready marker is the commit point - interrupted preparation never becomes ready`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // Simulate a kill MID-PREPARATION of a second entry: only .part debris exists.
@@ -126,7 +139,7 @@ class ContributionStoreTest {
         File(root, "contributions/$id2.wav.part").writeBytes(ByteArray(10))
         // A restart implies the previous owner released the directory (spec c8f766fb).
         store.close()
-        val recovered = ContributionStore(root, QueueLimits.defaults()).recover()
+        val recovered = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }.recover()
         assertEquals(listOf(id), recovered.map { it.captureId })
         assertFalse(File(root, "contributions/$id2.wav.part").exists())
     }
@@ -135,7 +148,7 @@ class ContributionStoreTest {
     fun `admission denies on record and byte caps without touching disk`() {
         val root = tempRoot()
         val limits = QueueLimits.defaults().copy(maxQueueRecords = 1)
-        val store = ContributionStore(root, limits)
+        val store = ContributionStore(root, limits).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         store.admit(16, 100)!!.let {
             assertTrue(it.isHeld())
@@ -154,7 +167,7 @@ class ContributionStoreTest {
         // UNDER max_clip_bytes (2 MiB); only max_clip_ms = 30_000 makes it inadmissible. Enforcing this
         // bound is required: without it a device could queue an arbitrarily long recording whose byte
         // size still slips under the cap.
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults()).also { storesForTeardown += it }
         assertNull(store.admit(16_000L * 31, 100))
         // Boundary stays admissible: exactly 30 s of audio is within max_clip_ms.
         assertNotNull(store.admit(16_000L * 30, 100))
@@ -165,7 +178,7 @@ class ContributionStoreTest {
         var now = 1_000_000L
         val root = tempRoot()
         val limits = QueueLimits.defaults().copy(maxQueueAgeSeconds = 100)
-        val store = ContributionStore(root, limits, clock = { now })
+        val store = ContributionStore(root, limits, clock = { now }).also { storesForTeardown += it }
         val idA = UUID.randomUUID().toString()
         val idB = UUID.randomUUID().toString()
         assertNotNull(store.prepare(idA, "epoch-1", chunks(8), meta(idA), "a@x", 7L))
@@ -175,7 +188,7 @@ class ContributionStoreTest {
         // RESTART: fresh store recovers durable state including attempt counts.
         // A restart implies the previous owner released the directory (spec c8f766fb).
         store.close()
-        val store2 = ContributionStore(root, limits, clock = { now })
+        val store2 = ContributionStore(root, limits, clock = { now }).also { storesForTeardown += it }
         val recovered = store2.recover()
         assertEquals(2, recovered.size)
         assertEquals(1, recovered.first { it.captureId == idA }.attempts)
@@ -189,7 +202,7 @@ class ContributionStoreTest {
     @Test
     fun `full revocation purges everything while partial loss keeps ready entries`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // In-progress debris from another capture.
@@ -210,7 +223,7 @@ class ContributionStoreTest {
     @Test
     fun `recovery validates complete entries and drops corrupt ones with content-free counter`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val good = UUID.randomUUID().toString()
         val bad = UUID.randomUUID().toString()
         assertNotNull(store.prepare(good, "epoch-1", chunks(8), meta(good), "a@x", 7L))
@@ -220,7 +233,7 @@ class ContributionStoreTest {
         wav.writeBytes(wav.readBytes().copyOf(wav.readBytes().size - 2))
         // A restart implies the previous owner released the directory (spec c8f766fb).
         store.close()
-        val store2 = ContributionStore(root, QueueLimits.defaults())
+        val store2 = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val recovered = store2.recover()
         assertEquals(listOf(good), recovered.map { it.captureId })
         assertEquals(1L, store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY))
@@ -231,7 +244,7 @@ class ContributionStoreTest {
     @Test
     fun `wav bytes include header and match declared byte count exactly`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         store.prepare(id, "epoch-1", chunks(8, 4), meta(id), "a@x", 7L)
         val entry = store.readyEntries().single()
@@ -267,7 +280,7 @@ class ContributionStoreTest {
         // committed entries may appear in readyEntries(). Refusing on an over-length clip writes no
         // files and publishes nothing.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNull(store.prepare(id, "epoch-1", chunks(16_000 * 45), meta(id), "a@x", 7L)) // 45 s > max_clip_ms
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
@@ -282,7 +295,7 @@ class ContributionStoreTest {
         // can both pass the check and publish, silently exceeding max_queue_records.
         val root = tempRoot()
         val limits = QueueLimits.defaults().copy(maxQueueRecords = 1)
-        val store = ContributionStore(root, limits)
+        val store = ContributionStore(root, limits).also { storesForTeardown += it }
         val ids = (1..8).map { UUID.randomUUID().toString() }
         val results = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
         val start = java.util.concurrent.CountDownLatch(1)
@@ -308,7 +321,7 @@ class ContributionStoreTest {
         // Purge removes everything; a subsequent attempt-bookkeeping call for the removed capture must
         // not bring the entry back. Uses only the current public API so the behavior is observable now.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id), "a@x", 7L))
         store.purgeQueue("account-change")
@@ -350,13 +363,13 @@ class ContributionStoreTest {
                 // after the stale preparation returns - a successor cannot publish into a live owner.
                 theStore.close()
             }),
-        )
+        ).also { storesForTeardown += it }
         val store = theStore
         val staleGen = fence.currentGeneration()
         assertNull(store.prepareAt(staleGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
         // The write has exited, so the deferred release has happened and the successor can take over.
-        successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         successor.prepare(SUCC, "epoch-B", chunks(8), meta(SUCC), "a@x", 7L)
         // The successor's COMMITTED files must survive the stale preparation's cleanup untouched: purge is
         // scoped to ids this owner held, never a blanket directory sweep.
@@ -379,7 +392,7 @@ class ContributionStoreTest {
     fun `every non-publication path releases its own reservation`() {
         // Direct, deterministic coverage of finding 1: each refusal/failure path must give back EXACTLY
         // its own slot+bytes. No purge involved, so nothing can mask a leak.
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults().copy(maxQueueRecords = 2))
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults().copy(maxQueueRecords = 2)).also { storesForTeardown += it }
         // (a) refused before writing: over-length clip
         assertNull(store.admit(16_000L * 45, 100))
         assertEquals("refused admission must hold no budget", 0, store.reservedRecordsForTest())
@@ -424,7 +437,7 @@ class ContributionStoreTest {
                 hooked = true
                 fence.revoke() // stale at the publication instant; deliberately NO purgeQueue() call
             }),
-        )
+        ).also { storesForTeardown += it }
         val store = theStore
         val gen = fence.currentGeneration()
         assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
@@ -454,7 +467,7 @@ class ContributionStoreTest {
                 fence.revoke() // makes our captured generation stale while we are mid-write
                 theStore.purgeQueue("account-change")
             }),
-        )
+        ).also { storesForTeardown += it }
         val store = theStore
         assertNull(store.prepareAt(fence.currentGeneration(), store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
@@ -481,7 +494,7 @@ class ContributionStoreTest {
                 fence.revoke()
                 theStore.purgeQueue("account-change")
             }),
-        )
+        ).also { storesForTeardown += it }
         val store = theStore
         // Revocation lands at the publication instant, so this preparation publishes nothing and the
         // generation captured by an in-flight callback is now stale.
@@ -495,7 +508,7 @@ class ContributionStoreTest {
         // DIRECTORY OWNERSHIP (spec c8f766fb): the store below takes over only after the first releases;
         // the stale callback the assertions deliver is unchanged.
         store.close()
-        val victim = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val victim = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull(victim.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertEquals(1, victim.readyEntries().size)
         assertNull("stale recordAttempt must be refused", victim.recordAttempt(inflightGen, ID_A))
@@ -514,7 +527,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
-        val oldStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val oldStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull(oldStore.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
         val staleGen = fence.currentGeneration()
         fence.revoke()
@@ -524,7 +537,7 @@ class ContributionStoreTest {
         // releases it. The stale callback below is still delivered to the OLD instance exactly as before -
         // that is what this control is about; only the simultaneous-writable-store setup is removed.
         oldStore.close()
-        val newStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val newStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull(newStore.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A), "a@x", 7L))
         val succAttempts = newStore.recordAttempt(newStore.fence.currentGeneration(), ID_A)
         assertEquals(1, succAttempts)
@@ -548,7 +561,7 @@ class ContributionStoreTest {
     fun `discarded reused foreign and undersized handles cannot publish`() {
         // Reviewer ee26880c finding 2: the transferred handle must be validated as THIS store's, still HELD,
         // sized for the ACTUAL chunks+metadata, and not already settled. Each refusal has one isolated reason.
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults()).also { storesForTeardown += it }
         // (a) already discarded
         val discarded = store.admit(8, meta(ID_A).size)!!
         discarded.discard()
@@ -567,7 +580,7 @@ class ContributionStoreTest {
         )
         assertEquals("reuse must not add an entry", 1, store.readyEntries().size)
         // (c) foreign: created by a DIFFERENT store's reservation registry
-        val other = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val other = ContributionStore(tempRoot(), QueueLimits.defaults()).also { storesForTeardown += it }
         val foreign = other.admit(8, meta(idD).size)!!
         assertNull(
             "foreign handle must not publish into this store",
@@ -589,7 +602,7 @@ class ContributionStoreTest {
     fun `concurrent reuse of one handle cannot share its staging`() {
         // Reviewer ee26880c finding 2, concurrency half: two attempts racing with the SAME handle must produce
         // exactly one writer; the transfer is single-winner under the shared monitor.
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults()).also { storesForTeardown += it }
         val gen = store.fence.currentGeneration()
         val handle = store.admit(8, meta(ID_A).size)!!
         val gate = java.util.concurrent.CountDownLatch(1)
@@ -620,7 +633,7 @@ class ContributionStoreTest {
         // staging or writing bytes, and settles the caller's reservation.
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         val gen = fence.currentGeneration()
         val handle = store.admit(8, meta(ID_A).size)!!
         fence.revoke()
@@ -642,7 +655,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
-        val oldOwner = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val oldOwner = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull(oldOwner.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
         fence.revoke()
         oldOwner.revokeAndPurge("account-change")
@@ -651,7 +664,7 @@ class ContributionStoreTest {
         // what the assertions below still prove is unchanged - a successor's identical-id files survive the
         // old owner's LATE purge, because purge is scoped to ids that owner actually held.
         oldOwner.close()
-        val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull(successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A, "epoch-new"), "a@x", 7L))
         // The closed owner refuses every mutation, so its late purge cannot reach the directory at all -
         // a strictly stronger outcome than the old "scoped so it does not delete" one.
@@ -676,7 +689,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
-        val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         val dir = store.dirForTest()
         repeat(20) { round ->
             // A FRESH entry per round: no cross-round carry-over can poison the baseline.
@@ -732,7 +745,7 @@ class ContributionStoreTest {
         // Reviewer 195845cb finding 5: the PUBLIC entry point must take the ORIGINAL validated handle.
         // A one-slot queue plus one pre-PCM admission must publish successfully; if prepare admitted a
         // second time, the slot it already occupies would make its own admission fail.
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults().copy(maxQueueRecords = 1))
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults().copy(maxQueueRecords = 1)).also { storesForTeardown += it }
         val admission = store.admit(8, meta(ID_A).size)
         assertNotNull(admission)
         // The caller (retention sink) reserved before copying PCM; the worker now does the disk work.
@@ -748,7 +761,7 @@ class ContributionStoreTest {
     @Test
     fun `early-return invalid size releases the transferred admission`() {
         // Finding 4: an invalid audioBytes / over-cap return must not leak the caller's reservation.
-        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults()).also { storesForTeardown += it }
         val admission = store.admit(8, meta(ID_A).size)!!
         // Invalid per-chunk range makes sampleCount refuse AFTER the handle was handed over.
         val refused = store.prepareAt(store.fence.currentGeneration(), admission, ID_A, "epoch-A", listOf(ShortArray(4) to 9), meta(ID_A), "a@x", 7L)
@@ -818,7 +831,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
-        val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         val stop = java.util.concurrent.atomic.AtomicBoolean(false)
         val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
         val publishers = (1..4).map { i ->
@@ -885,7 +898,7 @@ class ContributionStoreTest {
                     holdFirstOpen.acquire()
                 }
             }),
-        )
+        ).also { storesForTeardown += it }
         val store = theStore
         val gen = store.fence.currentGeneration()
         val large = chunks(4096) // 8236 B payload
@@ -951,7 +964,7 @@ class ContributionStoreTest {
             ownership = ownership,
             fence = fence,
             hooks = StoreHooks(beforePublication = { _ -> theStore.purgeQueue("account-change") }),
-        )
+        ).also { storesForTeardown += it }
         val store = theStore
         val gen = fence.currentGeneration()
         assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
@@ -963,7 +976,7 @@ class ContributionStoreTest {
     @Test
     fun `duplicate prepare for an owned capture does not clobber its immutable ready files`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         val first = store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L)
         assertNotNull(first)
@@ -978,7 +991,7 @@ class ContributionStoreTest {
     fun `single slot queue admits one prepare without double charging`() {
         // prepare() must CONSUME the Admission it validated, not re-admit and demand a second slot.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults().copy(maxQueueRecords = 1))
+        val store = ContributionStore(root, QueueLimits.defaults().copy(maxQueueRecords = 1)).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         assertEquals(1, store.readyEntries().size)
@@ -987,13 +1000,13 @@ class ContributionStoreTest {
     @Test
     fun `retry preserves exact identity - metadata digest stable across reload`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         val bytes = meta(id)
         val created = store.prepare(id, "epoch-1", chunks(8), bytes, "a@x", 7L)!!
         // A restart implies the previous owner released the directory (spec c8f766fb).
         store.close()
-        val reloaded = ContributionStore(root, QueueLimits.defaults()).recover().single()
+        val reloaded = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }.recover().single()
         assertEquals(created.recordSha256, reloaded.recordSha256)
         assertEquals(id, reloaded.captureId)
         assertEquals("epoch-1", reloaded.enrollmentEpoch)
@@ -1003,7 +1016,7 @@ class ContributionStoreTest {
     @Test
     fun `account change invalidates the whole queue - entries never survive an identity switch`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val dir = File(root, "contributions")
         // Two ready entries prepared under account A's enrollment epoch.
         val idA = UUID.randomUUID().toString()
@@ -1026,13 +1039,13 @@ class ContributionStoreTest {
         // A later recover() must not resurrect purged entries (recovered latch). Each restart below takes
         // the directory only after the previous owner RELEASES it (spec c8f766fb: one live owner).
         store.close()
-        val restarted = ContributionStore(root, QueueLimits.defaults())
+        val restarted = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue(restarted.recover().isEmpty())
 
         // A NEW store instance on the same directory models the controller restart after the switch:
         // still nothing. Then a fresh admission under account B works normally.
         restarted.close()
-        val storeB = ContributionStore(root, QueueLimits.defaults())
+        val storeB = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue(storeB.recover().isEmpty())
         val idC = UUID.randomUUID().toString()
         assertNotNull(storeB.prepare(idC, "epoch-B", chunks(64), meta(idC, "epoch-B"), "a@x", 7L))
@@ -1047,7 +1060,7 @@ class ContributionStoreTest {
         // The bound must FIT a conforming record (all six stages + five model keys), otherwise
         // prepare() would refuse before the oversized case ever arises.
         val limits = QueueLimits.defaults().copy(maxMetadataBytes = 4096)
-        val store = ContributionStore(root, limits)
+        val store = ContributionStore(root, limits).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(64), meta(id), "a@x", 7L))
         // Inflate the metadata far past the bound: recovery must refuse it, not allocate it.
@@ -1057,14 +1070,14 @@ class ContributionStoreTest {
         // it: the ONLY remaining reason to refuse is the size bound itself.
         File(root, "contributions/$id.sha256").writeText(sha256HexForTest(oversized))
         File(root, "contributions/$id.ready").writeBytes(ByteArray(0))
-        val recovered = ContributionStore(root, limits).recover()
+        val recovered = ContributionStore(root, limits).also { storesForTeardown += it }.recover()
         assertTrue("oversized metadata admitted on recovery", recovered.isEmpty())
     }
 
     @Test
     fun `digesting metadata is bound to the exact retained metadata bytes`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         val prepared = store.prepare(id, "epoch-1", chunks(64), meta(id), "a@x", 7L)
         assertNotNull(prepared)
@@ -1107,7 +1120,7 @@ class ContributionStoreTest {
     @Test
     fun `a missing digest sidecar refuses the entry - no legacy fallback`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // Delete the digest sidecar AND change the metadata: without a mandatory digest the changed
@@ -1120,7 +1133,7 @@ class ContributionStoreTest {
     @Test
     fun `malformed sidecars refuse the entry instead of defaulting attempts or renewing age`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         // Malformed attempts: must refuse, not default to 0 and hand back a spent retry budget.
         val id1 = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1), "a@x", 7L))
@@ -1141,7 +1154,7 @@ class ContributionStoreTest {
     @Test
     fun `audio tampering is refused - the record binds the actual WAV bytes`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val wav = File(root, "contributions/$id.recording.wav")
@@ -1157,7 +1170,7 @@ class ContributionStoreTest {
     @Test
     fun `record pointing at a different capture is refused`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // Replace the metadata with a valid record for a DIFFERENT capture id, and update the digest
@@ -1172,7 +1185,7 @@ class ContributionStoreTest {
     @Test
     fun `record declaring a wrong byte_count or sample format is refused`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val valid = meta(id).toString(Charsets.UTF_8)
@@ -1197,7 +1210,7 @@ class ContributionStoreTest {
     @Test
     fun `a fractional byte_count is refused rather than truncated to an integer`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val valid = meta(id).toString(Charsets.UTF_8)
@@ -1211,7 +1224,7 @@ class ContributionStoreTest {
     @Test
     fun `an empty enrollment_epoch is refused`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val valid = meta(id).toString(Charsets.UTF_8)
@@ -1224,7 +1237,7 @@ class ContributionStoreTest {
     @Test
     fun `unknown fields at root and inside stages are refused`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         // Unknown ROOT field.
         val id1 = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1), "a@x", 7L))
@@ -1330,7 +1343,7 @@ class ContributionStoreTest {
     @Test
     fun `a malformed WAV header is refused even though its digest matches`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val wav = File(root, "contributions/$id.recording.wav")
@@ -1349,7 +1362,7 @@ class ContributionStoreTest {
     @Test
     fun `a WAV with an odd data length is refused`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val wav = File(root, "contributions/$id.recording.wav")
@@ -1371,14 +1384,14 @@ class ContributionStoreTest {
         val root = tempRoot()
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
-        val old = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val old = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull(old.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
         val staleGen = fence.currentGeneration()
         fence.revoke()
         old.revokeAndPurge("account-change")
         old.close()
 
-        val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence).also { storesForTeardown += it }
         assertNotNull("PREMISE: the successor publishes the same id", successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A), "a@x", 7L))
         val wavBefore = File(root, "contributions/$ID_A.recording.wav").readBytes()
 
@@ -1422,7 +1435,7 @@ class ContributionStoreTest {
                 parked.countDown()
                 release.await(30, java.util.concurrent.TimeUnit.SECONDS)
             }),
-        )
+        ).also { storesForTeardown += it }
         val writer = Thread {
             runCatching { store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L) }
         }
@@ -1445,7 +1458,7 @@ class ContributionStoreTest {
         writer.join()
 
         // And after the drain, the directory is genuinely free for a successor.
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("a successor acquires the drained directory", successor.isAvailable())
         assertNotNull("the successor can publish", successor.prepare(java.util.UUID.randomUUID().toString(), "epoch-epoch", chunks(8), meta(java.util.UUID.randomUUID().toString()), "a@x", 7L))
     }
@@ -1455,7 +1468,7 @@ class ContributionStoreTest {
         // REVIEWER 7db01cd9 finding 3: close() cleared lock/reason, so acquire() would happily take the OS
         // lock again while isHeld() still reported false - holding the directory and denying every owner.
         val root = tempRoot()
-        val abandoned = ContributionStore(root, QueueLimits.defaults())
+        val abandoned = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("PREMISE: it starts as the owner", abandoned.isAvailable())
         abandoned.close()
 
@@ -1463,7 +1476,7 @@ class ContributionStoreTest {
         assertNull("closed handle refuses admission", abandoned.admit(8, meta(ID_A).size))
         assertEquals("and says why", "closed", abandoned.unavailableReason())
 
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("the successor takes the directory; nothing was re-acquired", successor.isAvailable())
         assertEquals(null, successor.unavailableReason())
         assertNotNull(successor.prepare(java.util.UUID.randomUUID().toString(), "epoch-epoch", chunks(8), meta(java.util.UUID.randomUUID().toString()), "a@x", 7L))
@@ -1487,7 +1500,7 @@ class ContributionStoreTest {
                 successorAcquired.set(ContributionStore(root, QueueLimits.defaults()).isAvailable())
                 probed.countDown()
             }),
-        )
+        ).also { storesForTeardown += it }
         // The write itself is abandoned because the store closed mid-flight; that is not the assertion.
         store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L)
         assertTrue("the hook ran", probed.await(30, java.util.concurrent.TimeUnit.SECONDS))
@@ -1498,7 +1511,7 @@ class ContributionStoreTest {
         )
 
         // AFTER the writer exits the deferred release must actually happen, or the directory is wedged.
-        val afterExit = ContributionStore(root, QueueLimits.defaults())
+        val afterExit = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue(
             "the deferred release must complete once the last lease leaves; got ${afterExit.unavailableReason()}",
             afterExit.isAvailable(),
@@ -1529,7 +1542,7 @@ class ContributionStoreTest {
                 successorAcquired.set(ContributionStore(root, QueueLimits.defaults()).isAvailable())
                 probed.countDown()
             }),
-        )
+        ).also { storesForTeardown += it }
         // Bounded: a broken nesting model deadlocks here, and a hang is a worse signal than a failure.
         val writer = Thread { runCatching { store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L) } }
         writer.isDaemon = true
@@ -1609,7 +1622,7 @@ class ContributionStoreTest {
                 writerInside.countDown()
                 releaseWriter.await(30, java.util.concurrent.TimeUnit.SECONDS)
             }),
-        )
+        ).also { storesForTeardown += it }
         val writer = Thread { runCatching { store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L) } }
         writer.isDaemon = true
         writer.start()
@@ -1636,7 +1649,7 @@ class ContributionStoreTest {
         )
 
         // And the directory is genuinely free afterwards.
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("a successor acquires after both closes settle; got ${successor.unavailableReason()}", successor.isAvailable())
     }
 
@@ -1663,7 +1676,7 @@ class ContributionStoreTest {
                     release.await(30, java.util.concurrent.TimeUnit.SECONDS)
                 }
             }),
-        )
+        ).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
 
         val purge = Thread { store.revokeAndPurge("policy-disable") }
@@ -1690,7 +1703,7 @@ class ContributionStoreTest {
 
         // The purge really did its work, and only then did the successor take over.
         assertFalse("the purged capture must be gone", File(root, "contributions/$ID_A.recording.wav").isFile)
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("the successor acquires; got ${successor.unavailableReason()}", successor.isAvailable())
     }
 
@@ -1708,7 +1721,7 @@ class ContributionStoreTest {
                     release.await(30, java.util.concurrent.TimeUnit.SECONDS)
                 }
             }),
-        )
+        ).also { storesForTeardown += it }
         val recoverer = Thread { store.recover() }
         recoverer.isDaemon = true
         recoverer.start()
@@ -1729,7 +1742,7 @@ class ContributionStoreTest {
         release.countDown()
         assertTrue("recovery finished", awaitThread(recoverer, 30_000))
         assertTrue("and close() then completed", closeReturned.await(15, java.util.concurrent.TimeUnit.SECONDS))
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("the successor acquires; got ${successor.unavailableReason()}", successor.isAvailable())
     }
 
@@ -1739,7 +1752,7 @@ class ContributionStoreTest {
         // via deleteLocked() with NO ownership check and NO lease, so a stale ACK callback on a closed
         // owner can delete a successor's files. Every other mutating surface refuses; this one did not.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val token = store.admitForTest(8, meta(ID_A).size).let { admission ->
             store.prepareAt(
                 store.fence.currentGeneration(),
@@ -1757,7 +1770,7 @@ class ContributionStoreTest {
         assertTrue("PREMISE: the attempt exists", File(root, "contributions/$ID_A.recording.wav").isFile)
 
         store.close()
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("the successor owns the directory", successor.isAvailable())
 
         // The stale ack callback hits the CLOSED owner with a valid-looking token.
@@ -1776,7 +1789,7 @@ class ContributionStoreTest {
         // is filesystem work, not an in-memory read. It must sit inside the lease like any other surface that
         // touches the directory: a closed owner must not validate bytes out of a successor's namespace.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         // KEEP the capture: it carries an open descriptor, and an open source holds a SOURCE LEASE that
         // rightly keeps the directory ours until it closes (reviewer 7c2f30e3 finding 2). Dropping it here
@@ -1791,7 +1804,7 @@ class ContributionStoreTest {
         )
         owned.close()
 
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("the successor owns the directory once the source closed", successor.isAvailable())
 
         assertNull(
@@ -1809,7 +1822,7 @@ class ContributionStoreTest {
         // transport reads the OWNED descriptor instead of re-opening the pathname. What it sends is what the
         // store hashed, because it is the same file description.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches for its bytes" }
         val owned = requireNotNull(capture.owned) { "PREMISE: the store hands down an owned source" }
@@ -1839,7 +1852,7 @@ class ContributionStoreTest {
         owned.close()
 
         // The directory changes hands and the new owner publishes DIFFERENT bytes at the same path.
-        val successor = ContributionStore(root, QueueLimits.defaults())
+        val successor = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertTrue("the successor owns the directory after the source closed", successor.isAvailable())
         val replaced = java.util.UUID.randomUUID().toString()
         assertNotNull(successor.prepare(replaced, "epoch-epoch", chunks(40), meta(replaced), "a@x", 7L))
@@ -1865,7 +1878,7 @@ class ContributionStoreTest {
     @Test
     fun `a capture that cannot open its descriptor is refused rather than served by path`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         // Remove the audio: validation cannot open a descriptor, so no capture may be served.
         assertTrue(File(root, "contributions/$ID_A.recording.wav").delete())
@@ -1881,7 +1894,7 @@ class ContributionStoreTest {
         // and the control was vacuous. This version observes the stream directly: a closed FileInputStream
         // refuses to read, and a leaked one still reads.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         // A capture is served once, proving the entry is fresh; then the descriptor is closed by hand so
         // the file is not pinned while we tamper.
@@ -1913,7 +1926,7 @@ class ContributionStoreTest {
     @Test
     fun `a capture whose descriptor is closed cannot be replayed`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val capture = requireNotNull(store.durableCapture(ID_A))
         val owned = requireNotNull(capture.owned)
@@ -1928,7 +1941,7 @@ class ContributionStoreTest {
         // pin-if-unlinked-at-handoff decision never fires. The bytes become retained only when a later
         // purge/drop unlinks them. This exercises handoff -> unlink -> close, with no pre-pin seam.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val capture = requireNotNull(store.durableCapture(ID_A)) { "PREMISE: the store vouches for its bytes" }
         val owned = requireNotNull(capture.owned)
@@ -1956,7 +1969,7 @@ class ContributionStoreTest {
     fun `an upload started after its file is unlinked is accounted from handoff`() {
         // The other ordering: the file is already gone when the store hands the source down.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val audio = File(root, "contributions/$ID_A.recording.wav")
         val audioBytes = audio.length()
@@ -1986,7 +1999,7 @@ class ContributionStoreTest {
             maxClipMs = 120_000L,
         )
         val root = tempRoot()
-        val store = ContributionStore(root, limits)
+        val store = ContributionStore(root, limits).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val capture = requireNotNull(store.durableCapture(ID_A))
         val owned = requireNotNull(capture.owned)
@@ -2035,7 +2048,7 @@ class ContributionStoreTest {
         // apply to REAL OPEN DESCRIPTORS, not attempts - a descriptor keeps retaining bytes after unlink, so
         // an unbounded source population would hold unbounded retained bytes while the queue looked idle.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val ids = (1..(ContributionStore.MAX_OPEN_SOURCES + 1)).map { java.util.UUID.randomUUID().toString() }
         for (id in ids.take(ContributionStore.MAX_OPEN_SOURCES)) {
             assertNotNull(store.prepare(id, "epoch-epoch", chunks(8), meta(id), "a@x", 7L))
@@ -2086,8 +2099,8 @@ class ContributionStoreTest {
         val half = ContributionStore.MAX_OPEN_SOURCES / 2
         val rootA = tempRoot()
         val rootB = tempRoot()
-        val storeA = ContributionStore(rootA, QueueLimits.defaults())
-        val storeB = ContributionStore(rootB, QueueLimits.defaults())
+        val storeA = ContributionStore(rootA, QueueLimits.defaults()).also { storesForTeardown += it }
+        val storeB = ContributionStore(rootB, QueueLimits.defaults()).also { storesForTeardown += it }
         val held = mutableListOf<OwnedAudio>()
         try {
             val baseline = storeA.openSourceSlotsForTest()
@@ -2135,7 +2148,7 @@ class ContributionStoreTest {
             runCatching { storeA.close() }
             runCatching { storeB.close() }
         }
-        val residue = ContributionStore(rootA, QueueLimits.defaults())
+        val residue = ContributionStore(rootA, QueueLimits.defaults()).also { storesForTeardown += it }
         try {
             assertEquals(
                 "the control leaked shared source slots into the rest of the JVM",
@@ -2153,7 +2166,7 @@ class ContributionStoreTest {
         // could release the directory while an upload still held an open source. A SOURCE LEASE keeps the
         // directory counted until that descriptor closes.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val capture = requireNotNull(store.durableCapture(ID_A))
         val owned = requireNotNull(capture.owned)
@@ -2197,7 +2210,7 @@ class ContributionStoreTest {
     fun `a still-linked capture is charged ONCE, not once as an entry and again as a pin`() {
         // Reviewer's constraint: account pinned physical bytes WITHOUT double-counting a still-linked file.
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val linkedTotal = store.totalQueuedBytes()
         assertTrue("PREMISE: the linked entry is charged", linkedTotal > 0)
@@ -2213,7 +2226,7 @@ class ContributionStoreTest {
     @Test
     fun `closeAsync invalidates immediately and reports release without waiting on the caller`() {
         val root = tempRoot()
-        val store = ContributionStore(root, QueueLimits.defaults())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
         val scope = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
         try {

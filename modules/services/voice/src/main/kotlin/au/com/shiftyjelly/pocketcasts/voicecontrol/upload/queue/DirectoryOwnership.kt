@@ -195,7 +195,11 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
     @Volatile
     private var closeDeferred = false
 
-    /** True from the moment close() begins; makes a second close a no-op instead of a second release. */
+    /**
+     * True from the moment close() begins. Read by [acquire] only, so a late callback cannot take the OS
+     * lock once a teardown is under way. It does NOT make a second close a no-op: close() has no such guard,
+     * and a second call re-runs the drain and may release again.
+     */
     @Volatile
     private var closeInProgress = false
 
@@ -207,7 +211,9 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
         drained.lock()
         try {
             while (inFlight.get() > 0) {
-                // A stuck writer must not hang teardown forever; the bound is a poll, not a policy change.
+                // This poll does NOT bound the wait: the enclosing while re-checks and simply waits again.
+                // It only lets the loop re-observe inFlight when the signal is missed, so a stuck writer
+                // delays the handover indefinitely rather than failing it.
                 drainSignal.await(DRAIN_POLL_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
             }
         } finally {
@@ -225,7 +231,7 @@ class FileDirectoryOwnership(root: File) : DirectoryOwnership {
          */
         const val OWNER_LOCK_SUFFIX = ".owner.lock"
 
-        /** Bound on each drain wait; a stuck writer must not hang teardown forever. */
+        /** Re-observation interval inside the drain loop, not an overall teardown deadline. */
         private const val DRAIN_POLL_MS = 50L
     }
 }

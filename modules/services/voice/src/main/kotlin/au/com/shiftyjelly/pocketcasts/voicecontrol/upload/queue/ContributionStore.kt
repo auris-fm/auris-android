@@ -1919,6 +1919,39 @@ class ContributionStore(
     fun purgeQueue(reason: String) = revokeAndPurge(reason)
 
     /**
+     * LEASED PURGE (reviewer 72a35e19). [acquireOwnership] alone is a point-in-time check: the purge could
+     * pass it, pause, and finish deleting after close() released the directory to a successor. The lease
+     * keeps close()'s drain waiting for this whole mutation.
+     */
+    fun revokeAndPurge(reason: String) {
+        if (!acquireOwnership() || !enterOperation()) {
+            logGuardedRefusal()
+            return
+        }
+        try {
+            revokeAndPurgeLocked(reason)
+        } finally {
+            leaveOperation()
+        }
+    }
+
+    /**
+     * LEASED RECOVERY (reviewer 72a35e19). Recovery enumerates and sweeps OUTSIDE the store monitor, so a
+     * check-then-mutate hole here would let it delete in a directory a successor already owns.
+     */
+    fun recover(): List<Entry> {
+        if (!acquireOwnership() || !enterOperation()) {
+            logGuardedRefusal()
+            return emptyList()
+        }
+        try {
+            return recoverLocked()
+        } finally {
+            leaveOperation()
+        }
+    }
+
+    /**
      * ONE ownership transaction for a full revocation (reviewer ee26880c finding 4): the generation bump,
      * the ownership snapshot, the index clear AND the deletion of this owner's committed files all happen
      * while holding the shared monitor. Previously the per-capture deletes ran after releasing it, so a
@@ -1927,15 +1960,14 @@ class ContributionStore(
      * Deleting under the monitor is safe because publication also runs under it and refuses to claim names
      * that already exist: either we hold the lock and delete before any successor claims, or the successor
      * claims first and our scoped snapshot (ids we actually owned) simply does not include that id.
+     *
+     * Enforced by [revokeAndPurge], which holds the ownership lease around this body (reviewer 72a35e19).
      */
-    fun revokeAndPurge(reason: String) {
-        // A CLOSED or non-owning instance must not mutate: it may be a stale callback into an owner whose
-        // directory a successor now holds (spec c8f766fb). Measured before this guard existed: a closed
-        // owner's late purge ran to completion, which none of the other mutating surfaces allowed.
-        if (!acquireOwnership()) {
-            logGuardedRefusal()
-            return
-        }
+    private fun revokeAndPurgeLocked(reason: String) {
+        // The public revokeAndPurge() holds the ownership lease around this body, so a closed owner can
+        // never reach here (spec c8f766fb). Measured before that guard existed: a closed owner's late purge
+        // ran to completion, which none of the other mutating surfaces allowed.
+        hooks.onPurgeOrRecoverMutation?.invoke("purge")
         synchronized(lock) {
             ownership.revokeUnderLock()
             cancelLiveLaunchesLocked() // ONE authoritative transition: a purge also withdraws launches
@@ -2076,13 +2108,10 @@ class ContributionStore(
         return found
     }
 
-    fun recover(): List<Entry> {
-        // Recovery MUTATES (sweeps partials, deletes unmarked files), so it is ownership-guarded like any
-        // other mutation: a closed owner must not sweep a successor's directory.
-        if (!acquireOwnership()) {
-            logGuardedRefusal()
-            return emptyList()
-        }
+    private fun recoverLocked(): List<Entry> {
+        // The public recover() holds the ownership lease around this body, so a closed owner cannot sweep
+        // a successor's directory.
+        hooks.onPurgeOrRecoverMutation?.invoke("recover")
         dir.mkdirs()
         val files = try {
             boundedRootListing()

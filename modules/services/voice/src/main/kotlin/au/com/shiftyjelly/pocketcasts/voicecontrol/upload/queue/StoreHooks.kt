@@ -54,6 +54,14 @@ class StoreHooks(
      * on resume. Production wiring passes [NONE].
      */
     val onLeaseWindow: ((generation: Long, captureId: String) -> Unit)? = null,
+
+    /**
+     * Invoked while a purge or a recovery is actually mutating, AFTER it passed the ownership check and
+     * while its lease is held (reviewer 72a35e19). A hook that blocks here proves close() waits for the
+     * whole mutation instead of only fencing its entry: without the lease, the mutation would resume after
+     * a successor took the directory. Production wiring passes [NONE].
+     */
+    val onPurgeOrRecoverMutation: ((String) -> Unit)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

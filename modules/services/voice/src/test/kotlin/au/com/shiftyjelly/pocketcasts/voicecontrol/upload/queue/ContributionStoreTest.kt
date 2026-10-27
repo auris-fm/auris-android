@@ -1637,4 +1637,90 @@ class ContributionStoreTest {
     }
 
     private fun awaitLatch(latch: java.util.concurrent.CountDownLatch, timeoutMs: Long): Boolean = latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+
+    @Test
+    fun `a parked purge blocks close until it finishes and the successor then owns the directory`() {
+        // REVIEWER 72a35e19: revokeAndPurge() checked ownership but never entered a lease, so it could pass
+        // the check, pause, and finish deleting after close() released the directory to a successor.
+        val root = tempRoot()
+        val parked = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val store = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            hooks = StoreHooks(onPurgeOrRecoverMutation = { what ->
+                if (what == "purge") {
+                    parked.countDown()
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS)
+                }
+            }),
+        )
+        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
+
+        val purge = Thread { store.revokeAndPurge("policy-disable") }
+        purge.isDaemon = true
+        purge.start()
+        assertTrue("PREMISE: the purge is parked inside its mutation", parked.await(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        // close() from another thread MUST wait: the purge still holds the lease.
+        val closeReturned = java.util.concurrent.CountDownLatch(1)
+        val closer = Thread {
+            store.close()
+            closeReturned.countDown()
+        }
+        closer.isDaemon = true
+        closer.start()
+        assertFalse(
+            "close() returned while the purge was still mutating - it did not drain the purge",
+            closeReturned.await(1, java.util.concurrent.TimeUnit.SECONDS),
+        )
+
+        release.countDown()
+        assertTrue("the purge finished", awaitThread(purge, 30_000))
+        assertTrue("and close() then completed", closeReturned.await(15, java.util.concurrent.TimeUnit.SECONDS))
+
+        // The purge really did its work, and only then did the successor take over.
+        assertFalse("the purged capture must be gone", File(root, "contributions/$ID_A.recording.wav").isFile)
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the successor acquires; got ${successor.unavailableReason()}", successor.isAvailable())
+    }
+
+    @Test
+    fun `a parked recovery blocks close until it finishes and the successor then owns the directory`() {
+        val root = tempRoot()
+        val parked = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val store = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            hooks = StoreHooks(onPurgeOrRecoverMutation = { what ->
+                if (what == "recover") {
+                    parked.countDown()
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS)
+                }
+            }),
+        )
+        val recoverer = Thread { store.recover() }
+        recoverer.isDaemon = true
+        recoverer.start()
+        assertTrue("PREMISE: recovery is parked inside its mutation", parked.await(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        val closeReturned = java.util.concurrent.CountDownLatch(1)
+        val closer = Thread {
+            store.close()
+            closeReturned.countDown()
+        }
+        closer.isDaemon = true
+        closer.start()
+        assertFalse(
+            "close() returned while recovery was still mutating - it did not drain recovery",
+            closeReturned.await(1, java.util.concurrent.TimeUnit.SECONDS),
+        )
+
+        release.countDown()
+        assertTrue("recovery finished", awaitThread(recoverer, 30_000))
+        assertTrue("and close() then completed", closeReturned.await(15, java.util.concurrent.TimeUnit.SECONDS))
+        val successor = ContributionStore(root, QueueLimits.defaults())
+        assertTrue("the successor acquires; got ${successor.unavailableReason()}", successor.isAvailable())
+    }
 }

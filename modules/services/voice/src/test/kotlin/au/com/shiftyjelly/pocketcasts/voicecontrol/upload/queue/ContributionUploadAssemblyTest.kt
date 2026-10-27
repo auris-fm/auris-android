@@ -362,6 +362,8 @@ class ContributionUploadAssemblyTest {
         responseStatus = 201
         responseBody = receiptFor(store, fixture.id, status = "accepted")
 
+        // Baseline BEFORE the capture opens, so the slot the source holds is attributable to this control.
+        val baseline = ContributionStore.processOpenSourceSlotsForTest()
         val capture = store.durableCapture(fixture.id)
         val real = requireNotNull(capture?.owned) { "PREMISE: the store hands down an owned source" }
         val handed = mutableMapOf(
@@ -387,9 +389,19 @@ class ContributionUploadAssemblyTest {
                 "the reported reason must name the unresolved descriptor, got ${unresolved.firstOrNull()}",
                 unresolved.first().contains("did not settle", ignoreCase = true),
             )
-        } finally {
+            // Reviewer ade65c96: the TIMED-OUT settle is itself the terminal transition. Releasing the
+            // borrow must complete the deferred close - slot, descriptor, directory lease - with NO
+            // further settle/awaitSettlement/close call. (This test's earlier finally called real.close()
+            // here, which repaired the leak and made the control vacuous.)
             borrow.close()
-            real.close()
+            assertEquals(
+                "the timed-out attempt's source never returned its slot after the last borrow exited",
+                baseline,
+                ContributionStore.processOpenSourceSlotsForTest(),
+            )
+            assertTrue("the descriptor did not close after the last borrow exited", real.isClosed())
+        } finally {
+            runCatching { real.close() }
         }
     }
 

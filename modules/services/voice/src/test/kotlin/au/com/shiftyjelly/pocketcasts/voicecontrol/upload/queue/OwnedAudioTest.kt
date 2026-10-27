@@ -153,6 +153,37 @@ class OwnedAudioTest {
     }
 
     @Test
+    fun `a TIMED-OUT settle still refuses later borrows and completes closure when the last borrow exits`() {
+        // Reviewer ade65c96: settle() that times out with a live borrow returned "unresolved" WITHOUT
+        // making the source terminal. The borrow's later close only completes a deferred close when
+        // terminal is true, so the descriptor, slot and lease stayed held forever - and new borrows
+        // stayed admissible after the timeout. The timeout transition must itself be terminal.
+        var descriptorClosed = 0
+        var leaseClosed = 0
+        val file = temp.newFile("clip-timeout.recording.wav").apply { writeBytes(payload) }
+        val audio = OwnedAudio(
+            java.io.FileInputStream(file),
+            payload.size.toLong(),
+            java.security.MessageDigest.getInstance("SHA-256").digest(payload).joinToString("") { "%02x".format(it) },
+            sourceLease = AutoCloseable { leaseClosed++ },
+            onDescriptorClosed = { descriptorClosed++ },
+        )
+        val borrow = requireNotNull(audio.borrowForBody()) { "PREMISE: an idle source is borrowable" }
+
+        val settled = audio.settle(50L)
+        assertFalse("PREMISE: a live borrow must time out a 50ms settle", settled)
+
+        // The timeout is terminal: no further replay may be admitted.
+        assertNull("a borrows-admissible source after a timed-out settle", audio.borrowForBody())
+
+        // Releasing the last borrow must complete the deferred close WITHOUT any further settle call.
+        borrow.close()
+        assertTrue("the descriptor never closed after the last borrow exited", audio.isClosed())
+        assertEquals("the descriptor close callback did not run", 1, descriptorClosed)
+        assertEquals("the source lease was never released", 1, leaseClosed)
+    }
+
+    @Test
     fun `a borrow that exits does not close the attempt for the next replay`() {
         // The defect reviewer e2bae48b caught in the first design: closing per-body leaves the next
         // replay with a closed descriptor.

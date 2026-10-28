@@ -208,6 +208,7 @@ class VoiceUploadModulePolicyGateTest {
         // Hoisted for the finally cleanup (assigned inside the try).
         var root: File? = null
         var store: ContributionStore? = null
+        val slotsBaseline = ContributionStore.processOpenSourceSlotsForTest()
         try {
             // ONE owner fixture shared by the account stack and the provider's collection lock: the
             // module requires the SAME primitive (reviewer 23cae70e b1).
@@ -225,12 +226,12 @@ class VoiceUploadModulePolicyGateTest {
                 startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L),
             )
 
-            val root = File.createTempFile("gate3", null).let { f ->
+            root = File.createTempFile("gate3", null).let { f ->
                 f.delete()
                 f.mkdirs()
                 f
             }
-            val store = ContributionStore(
+            store = ContributionStore(
                 root,
                 QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
                 clock = { 51_000_000L },
@@ -323,8 +324,6 @@ class VoiceUploadModulePolicyGateTest {
             // leaving the store entirely (attempts -1 = gone, not retried), not a settled 201.
             await({ store.stateAttemptsForTest(idA) == -1 }, "A's attempt terminally cancelled and revoked")
             await({ handlerCompleted!!.await(0, java.util.concurrent.TimeUnit.MILLISECONDS) }, "the server handler finished")
-            val attemptsAfterSettle = store.stateAttemptsForTest(idA)
-            assertEquals("no retransmission of A after settle", attemptsAfterSettle, store.stateAttemptsForTest(idA))
 
             // GUARD 2 (the GATE READ): an entry prepared AFTER the flip is never admitted. The gate
             // read lives in the assembly, so the same poll the loop runs is driven DIRECTLY here,

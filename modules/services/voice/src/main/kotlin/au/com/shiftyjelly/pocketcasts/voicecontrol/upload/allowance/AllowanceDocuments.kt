@@ -1,89 +1,125 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
 
 /**
- * STRICT, BOUNDED accounting documents (reviewer 82cdd583 #4).
+ * The canonical flat accounting documents (reviewer 82cdd583 #4, 8b5fc0c9 #2).
  *
- * The previous reader was an unbounded `readText` plus regex extraction, which accepted duplicate
- * fields, extra fields, and silently took the first numeric value it saw. Accounting must never be
- * inferred from a lenient parse: a document is either EXACTLY the canonical form we wrote, or it is
- * damaged and admission closes. Nothing here rewrites a damaged document back to zero.
+ * Each document is a FLAT object with an EXACT key set: a duplicate key, an extra field, a
+ * non-numeric numeric, a control character or quoted value is damage. That strictness is the point -
+ * a lenient reader would accept a rewritten counter or an injected field and then treat damaged
+ * accounting as valid usage. [MAX_BYTES] bounds every read so a large file cannot be parsed at all.
  */
-internal object AllowanceDocuments {
-    /** No accounting artifact may ever exceed this; a larger one is damaged, not parsed. */
-    const val MAX_BYTES = 4 * 1024
+object AllowanceDocuments {
+    const val MAX_BYTES: Int = 4_096
+    const val SCHEMA: Int = 1
 
-    /**
-     * Parses a flat JSON object whose keys are exactly [required] (no extras, no duplicates) and
-     * whose values are strings or non-negative integers. Returns null for anything else.
-     */
-    fun parseObject(text: String, required: Set<String>): Map<String, String>? {
-        if (text.isEmpty() || text.length > MAX_BYTES) return null
-        if (!text.startsWith("{") || !text.endsWith("}")) return null
-        val body = text.substring(1, text.length - 1)
-        if (body.isEmpty()) return null
-        val result = LinkedHashMap<String, String>()
-        var i = 0
-        while (i < body.length) {
-            if (body[i] != '"') return null
-            val keyEnd = body.indexOf('"', i + 1)
-            if (keyEnd < 0) return null
-            val key = body.substring(i + 1, keyEnd)
-            // A duplicate key means two writers disagreed: damaged, never "last one wins".
-            if (result.containsKey(key)) return null
-            if (keyEnd + 1 >= body.length || body[keyEnd + 1] != ':') return null
-            var v = keyEnd + 2
-            val value: String
-            if (v < body.length && body[v] == '"') {
-                val end = body.indexOf('"', v + 1)
-                if (end < 0) return null
-                value = body.substring(v + 1, end)
-                v = end + 1
-            } else {
-                val start = v
-                while (v < body.length && body[v] != ',') {
-                    if (!body[v].isDigit()) return null
-                    v++
-                }
-                value = body.substring(start, v)
-                if (value.isEmpty()) return null
-            }
-            result[key] = value
-            if (v < body.length) {
-                if (body[v] != ',') return null
-                i = v + 1
-                if (i >= body.length) return null
-            } else {
-                i = v
-            }
-        }
-        return result.takeIf { it.keys == required }
-    }
-
-    fun genesisDocs(): Set<String> = setOf("schema", "state", "id", "binding", "equality", "window")
-    fun ledgerDocs(): Set<String> = setOf("schema", "id", "window", "chargedRecords", "chargedBytes")
-    fun intentDocs(): Set<String> = setOf("schema", "state", "transaction", "account", "window", "preRecords", "preBytes", "targetRecords", "targetBytes")
-
-    fun genesis(id: String, binding: String, equality: String, window: String, established: Boolean): String = "{\"schema\":$SCHEMA,\"state\":\"${if (established) STATE_ESTABLISHED else STATE_INITIALIZING}\"," +
-        "\"id\":\"$id\",\"binding\":\"$binding\",\"equality\":\"$equality\",\"window\":\"$window\"}"
-
-    fun ledger(id: String, window: String, records: Int, bytes: Long): String = "{\"schema\":$SCHEMA,\"id\":\"$id\",\"window\":\"$window\",\"chargedRecords\":$records,\"chargedBytes\":$bytes}"
-
-    fun intent(
-        state: String,
-        transaction: String,
-        account: String,
-        window: String,
-        preRecords: Int,
-        preBytes: Long,
-        targetRecords: Int,
-        targetBytes: Long,
-    ): String = "{\"schema\":$SCHEMA,\"state\":\"$state\",\"transaction\":\"$transaction\",\"account\":\"$account\"," +
-        "\"window\":\"$window\",\"preRecords\":$preRecords,\"preBytes\":$preBytes," +
-        "\"targetRecords\":$targetRecords,\"targetBytes\":$targetBytes}"
-
-    const val SCHEMA = 1
     const val STATE_INITIALIZING = "INITIALIZING"
     const val STATE_ESTABLISHED = "ESTABLISHED"
     const val STATE_PENDING = "PENDING"
     const val STATE_SETTLED = "SETTLED"
+
+    private val NUMERIC_KEYS = setOf("schema", "preRecords", "preBytes", "targetRecords", "targetBytes", "chargedRecords", "chargedBytes")
+    private val STRING_KEYS = setOf("state", "id", "binding", "equality", "window", "transaction", "incarnation")
+
+    fun genesisDocs(): Set<String> = setOf("schema", "state", "id", "binding", "equality", "window")
+
+    fun ledgerDocs(): Set<String> = setOf("schema", "id", "window", "chargedRecords", "chargedBytes")
+
+    fun intentDocs(): Set<String> = setOf("schema", "state", "transaction", "binding", "window", "incarnation", "preRecords", "preBytes", "targetRecords", "targetBytes")
+
+    /** The canonical ledger a control starts from, so mutations are applied to a real document. */
+    fun ledgerDocument(id: String, window: String, chargedRecords: Int, chargedBytes: Long): String = ledger(id, window, chargedRecords, chargedBytes)
+
+    fun genesis(id: String, binding: String, equality: String, window: String, state: String): String = join(
+        "schema" to SCHEMA.toString(),
+        "state" to state,
+        "id" to id,
+        "binding" to binding,
+        "equality" to equality,
+        "window" to window,
+    )
+
+    fun ledger(id: String, window: String, chargedRecords: Int, chargedBytes: Long): String = join(
+        "schema" to SCHEMA.toString(),
+        "id" to id,
+        "window" to window,
+        "chargedRecords" to chargedRecords.toString(),
+        "chargedBytes" to chargedBytes.toString(),
+    )
+
+    fun intent(
+        state: String,
+        transaction: String,
+        binding: String,
+        window: String,
+        incarnation: String,
+        preRecords: Int,
+        preBytes: Long,
+        targetRecords: Int,
+        targetBytes: Long,
+    ): String = join(
+        "schema" to SCHEMA.toString(),
+        "state" to state,
+        "transaction" to transaction,
+        "binding" to binding,
+        "window" to window,
+        "incarnation" to incarnation,
+        "preRecords" to preRecords.toString(),
+        "preBytes" to preBytes.toString(),
+        "targetRecords" to targetRecords.toString(),
+        "targetBytes" to targetBytes.toString(),
+    )
+
+    private fun join(vararg pairs: Pair<String, String>): String = pairs.joinToString(prefix = "{", postfix = "}", separator = ",") { (key, value) -> "\"$key\":\"$value\"" }
+
+    /**
+     * Strict flat-object parse. Returns null for anything that is not EXACTLY [required]: wrong
+     * length, unbalanced braces, duplicate keys, extra or missing keys, non-numeric numerics, unsafe
+     * value characters.
+     */
+    fun parseObject(text: String?, required: Set<String>): Map<String, String>? {
+        if (text == null) return null
+        if (text.length > MAX_BYTES) return null
+        // A control may mutate a document after its trailing brace; trim the RESULT, never a
+        // substring taken before it, or a duplicate appended at the end would be silently dropped.
+        val trimmed = text.trim()
+        if (trimmed.length < 2 || trimmed.first() != '{' || trimmed.last() != '}') return null
+        val body = trimmed.substring(1, trimmed.length - 1)
+        if (body.isEmpty()) return null
+        val result = LinkedHashMap<String, String>(required.size)
+        var index = 0
+        while (index < body.length) {
+            if (index > 0) {
+                if (body[index] != ',') return null
+                index += 1
+            }
+            if (index >= body.length || body[index] != '"') return null
+            val keyEnd = body.indexOf('"', index + 1)
+            if (keyEnd < 0) return null
+            val key = body.substring(index + 1, keyEnd)
+            if (key !in required) return null
+            // A duplicate key means two writers or a rewrite: damage, never last-one-wins.
+            if (result.containsKey(key)) return null
+            index = keyEnd + 1
+            if (index >= body.length || body[index] != ':') return null
+            index += 1
+            if (index >= body.length || body[index] != '"') return null
+            val valueStart = index + 1
+            val valueEnd = body.indexOf('"', valueStart)
+            if (valueEnd < 0) return null
+            val value = body.substring(valueStart, valueEnd)
+            if (!isSafeValue(key, value)) return null
+            result[key] = value
+            index = valueEnd + 1
+        }
+        return result.takeIf { it.keys == required }
+    }
+
+    private fun isSafeValue(key: String, value: String): Boolean {
+        if (value.any { it < ' ' || it == '"' || it == '\\' }) return false
+        return when (key) {
+            in NUMERIC_KEYS -> value.isNotEmpty() && value.all { it in '0'..'9' }
+            in STRING_KEYS -> value.isNotEmpty() && value.all { it.isLetterOrDigit() || it in "-_.:@" }
+            else -> false
+        }
+    }
 }

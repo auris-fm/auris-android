@@ -59,21 +59,33 @@ class CaptureAllowanceLedgerTest {
     @Test fun `refuses when window authority is unestablished and charges nothing`() {
         val l = ledger(win = noWindow)
         assertFalse(l.chargeForCapture())
-        assertEquals(0, l.snapshot().chargedRecords)
+        assertEquals("a closed ledger reports -1, never an empty allowance", -1, l.snapshotRecordCount())
         assertTrue("an unestablished window must not even establish accounting", l.isClosed())
     }
 
     @Test fun `first use under an established window initializes and charges`() {
         val l = ledger(win = window)
         assertTrue(l.chargeForCapture())
-        assertEquals(1, l.snapshot().chargedRecords)
-        assertEquals(100_000L, l.snapshot().chargedBytes)
+        assertEquals(1, l.snapshotRecordCount())
+        assertEquals(100_000L, l.snapshotByteCount())
     }
 
     @Test fun `invalid limits cannot be constructed and therefore never charge`() {
         val refused = runCatching { AllowanceLimits(maxDailyRecords = 0, maxDailyBytes = 1_000, maxClipBytes = 10 - 1024, maxMetadataBytes = 1024) }
         assertTrue("an invalid limit must be rejected outright", refused.isFailure)
         assertFalse("nothing may be written for limits that never existed", area().walkTopDown().any { it.isFile })
+    }
+
+    @Test fun `admission arithmetic cannot wrap at the byte ceiling`() {
+        // A clip bound whose reservation cannot be represented must not be constructible at all.
+        assertTrue(
+            "a reservation that overflows Long must be rejected, not wrapped",
+            runCatching { AllowanceLimits(10, Long.MAX_VALUE, maxClipBytes = Long.MAX_VALUE - 1, maxMetadataBytes = 2_000) }.isFailure,
+        )
+        val huge = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = Long.MAX_VALUE, maxClipBytes = Long.MAX_VALUE - 1_000, maxMetadataBytes = 500)
+        assertFalse("a wrapping reservation must not admit", huge.admits(chargedRecords = 1, chargedBytes = Long.MAX_VALUE - 500))
+        assertFalse("a negative total must not admit", huge.admits(chargedRecords = 0, chargedBytes = -1))
+        assertTrue("a reservation that genuinely fits is still admitted", huge.admits(0, 0))
     }
 
     @Test fun `a daily ceiling smaller than one reservation cannot be constructed`() {
@@ -86,17 +98,17 @@ class CaptureAllowanceLedgerTest {
     @Test fun `usage survives a fresh instance and restart`() {
         assertTrue(ledger(win = window).chargeForCapture())
         val reopened = ledger(win = window)
-        assertEquals(1, reopened.snapshot().chargedRecords)
-        assertEquals(100_000L, reopened.snapshot().chargedBytes)
+        assertEquals(1, reopened.snapshotRecordCount())
+        assertEquals(100_000L, reopened.snapshotByteCount())
     }
 
     @Test fun `accounts never share usage`() {
         assertTrue(ledger(win = window).chargeForCapture())
         val otherLedger = CaptureAllowanceLedger(area(), other, limits(), window, provisioning = AllowanceProvisioning.TestOnly)
-        assertEquals(0, otherLedger.snapshot().chargedRecords)
+        assertEquals("a second account starts with no accounting of its own", -1, otherLedger.snapshotRecordCount())
         assertTrue(otherLedger.chargeForCapture())
-        assertEquals(1, otherLedger.snapshot().chargedRecords)
-        assertEquals("first account keeps its own charge", 1, ledger(win = window).snapshot().chargedRecords)
+        assertEquals(1, otherLedger.snapshotRecordCount())
+        assertEquals("first account keeps its own charge", 1, ledger(win = window).snapshotRecordCount())
     }
 
     @Test fun `the account name is never written to disk in any artifact`() {
@@ -113,14 +125,14 @@ class CaptureAllowanceLedgerTest {
         val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(1, 1_000_000, maxClipBytes = 10_000 - 1024, maxMetadataBytes = 1024), window, provisioning = AllowanceProvisioning.TestOnly)
         assertTrue(l.chargeForCapture())
         assertFalse(l.chargeForCapture())
-        assertEquals(1, l.snapshot().chargedRecords)
+        assertEquals(1, l.snapshotRecordCount())
     }
 
     @Test fun `exhausted bytes refuse while keeping the existing charge`() {
         val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(10, 150_000, maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024), window, provisioning = AllowanceProvisioning.TestOnly)
         assertTrue(l.chargeForCapture())
         assertFalse(l.chargeForCapture())
-        assertEquals(1, l.snapshot().chargedRecords)
+        assertEquals(1, l.snapshotRecordCount())
     }
 
     @Test fun `a deleted ledger under established genesis closes instead of re-creating zero usage`() {

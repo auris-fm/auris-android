@@ -26,7 +26,15 @@ class CaptureAllowanceOwner(
 ) {
     private val ledger = CaptureAllowanceLedger(area, account, limits, window, provisioning)
     private val limitsBinding = limits.binding()
+
     private val windowBinding = window.binding()
+
+    /**
+     * Entered exactly when preparation reaches storage, so a control can hold it deterministically
+     * instead of racing a thread that "may" be running. Off-path only.
+     */
+    @Volatile
+    internal var onStorageEntered: (() -> Unit)? = null
 
     /** The admission decision's only lock: field access, never I/O. */
     private val lock = Any()
@@ -48,6 +56,7 @@ class CaptureAllowanceOwner(
         synchronized(preparing) {
             if (pending != null) return false // at most one pending refill, never a second charge
             val mintedFrom = generation
+            onStorageEntered?.invoke()
             val charged = ledger.chargeForCapture()
             if (!charged) return false
             return publish(mintedFrom)
@@ -94,7 +103,10 @@ class CaptureAllowanceOwner(
         true
     }
 
-    fun ledgerChargesForTest(): Int = ledger.snapshot().chargedRecords
+    fun ledgerChargesForTest(): Int = when (val snap = ledger.snapshot()) {
+        is AllowanceSnapshot.Entry -> snap.chargedRecords
+        AllowanceSnapshot.Closed -> -1
+    }
 }
 
 /** A prepaid, single-use admission. Its existence means one durable charge is already recorded. */

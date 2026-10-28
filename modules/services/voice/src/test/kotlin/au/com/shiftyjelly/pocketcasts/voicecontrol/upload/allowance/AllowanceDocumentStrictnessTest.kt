@@ -33,14 +33,20 @@ class AllowanceDocumentStrictnessTest {
     @Test fun `a duplicate field is damage, not last-one-wins`() {
         assertTrue(owner().prepareToken())
         val original = ledgerFile().readText()
-        ledgerFile().writeText(original.replace("\"chargedRecords\":1", "\"chargedRecords\":1,\"chargedRecords\":0"))
+        // A genuinely duplicated KEY: the reader must reject it outright, before any semantic check.
+        val duplicated = original.replace("\"chargedRecords\":\"1\"", "\"chargedRecords\":\"1\",\"chargedRecords\":\"0\"")
+        assertNull(
+            "a duplicate key must be rejected by the reader",
+            AllowanceDocuments.parseObject(duplicated, AllowanceDocuments.ledgerDocs()),
+        )
+        ledgerFile().writeText(duplicated)
         assertFalse("a duplicated counter must close admission", owner().prepareToken())
     }
 
     @Test fun `an extra field is damage`() {
         // Asserted on the PARSER first: a lenient reader accepts this, and the downstream failure
         // would then be attributed to the wrong cause.
-        val canonical = AllowanceDocuments.ledger("id", "established:window-1", 1, 100)
+        val canonical = AllowanceDocuments.ledgerDocument("id", "established:window-1", 1, 100)
         assertNull(
             "an unrecognised field must be rejected by the reader itself",
             AllowanceDocuments.parseObject(canonical.removeSuffix("}") + ",\"bonus\":0}", AllowanceDocuments.ledgerDocs()),
@@ -54,7 +60,7 @@ class AllowanceDocumentStrictnessTest {
         assertTrue(owner().prepareToken())
         // 0 is the recorded PRE-charge end of the settled intent and 1 the target, so a rewrite must
         // land outside both to be detectable; anything else is a legitimate reconciliation outcome.
-        ledgerFile().writeText(ledgerFile().readText().replace("\"chargedRecords\":1", "\"chargedRecords\":7"))
+        ledgerFile().writeText(ledgerFile().readText().replace("\"chargedRecords\":\"1\"", "\"chargedRecords\":\"7\""))
         assertFalse("a counter outside both intent ends must close admission", owner().prepareToken())
     }
 
@@ -63,7 +69,7 @@ class AllowanceDocumentStrictnessTest {
         val before = ledgerFile().readText()
         // Landing on the recorded pre-charge end is a LOSS of one charge. It must never be treated as
         // fresh allowance: the next admission either charges once more or stays closed, never free.
-        ledgerFile().writeText(before.replace("\"chargedRecords\":1", "\"chargedRecords\":0"))
+        ledgerFile().writeText(before.replace("\"chargedRecords\":\"1\"", "\"chargedRecords\":\"0\""))
         val next = owner()
         val charged = next.prepareToken()
         assertTrue(
@@ -76,7 +82,7 @@ class AllowanceDocumentStrictnessTest {
         assertTrue(owner().prepareToken())
         val intentFile = area().walkTopDown().first { it.isFile && it.name == "intent.json" }
         intentFile.writeText(intentFile.readText().replace("\"state\":\"SETTLED\"", "\"state\":\"PENDING\""))
-        ledgerFile().writeText(ledgerFile().readText().replace("\"chargedRecords\":1", "\"chargedRecords\":7"))
+        ledgerFile().writeText(ledgerFile().readText().replace("\"chargedRecords\":\"1\"", "\"chargedRecords\":\"7\""))
         val reopened = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly)
         assertFalse("an ambiguous intent must stay closed", reopened.reconcileForTest())
         assertTrue(reopened.isClosed())
@@ -88,6 +94,33 @@ class AllowanceDocumentStrictnessTest {
         ledgerFile().writeText(padding)
         assertFalse("an oversized ledger must close admission", owner().prepareToken())
         assertNull(AllowanceDocuments.parseObject(padding, AllowanceDocuments.ledgerDocs()))
+    }
+
+    @Test fun `a read never consumes more than the cap`() {
+        assertTrue(owner().prepareToken())
+        // The marker sits far past the cap, so a bounded read cannot see it at all.
+        val marker = "\"chargedBytes\":\"999999\""
+        val oversized = ledgerFile().readText().removeSuffix("}") +
+            ",\"discarded\":\"" + "0".repeat(AllowanceDocuments.MAX_BYTES * 3) + marker + "\"}"
+        ledgerFile().writeText(oversized)
+        val reread = ledgerFile().readText()
+        assertTrue("the marker is beyond the cap", reread.indexOf(marker) > AllowanceDocuments.MAX_BYTES)
+        assertFalse("a bounded read must refuse this ledger", owner().prepareToken())
+    }
+
+    @Test fun `a document larger than the cap is never read as valid accounting`() {
+        assertTrue(owner().prepareToken())
+        // Keep it a VALID document whose only problem is its size: leading zeros are still digits, and
+        // the numeric value is unchanged, so only a bounded read can refuse it.
+        val original = ledgerFile().readText()
+        val padded = original.replace("\"chargedBytes\":\"101024\"", "\"chargedBytes\":\"" + "0".repeat(AllowanceDocuments.MAX_BYTES) + "101024\"")
+        assertTrue("the padded document is still syntactically valid", padded.length > AllowanceDocuments.MAX_BYTES)
+        assertNull(
+            "the reader must refuse an oversized document by size, not by content",
+            AllowanceDocuments.parseObject(padded, AllowanceDocuments.ledgerDocs()),
+        )
+        ledgerFile().writeText(padded)
+        assertFalse("an oversized ledger must close admission", owner().prepareToken())
     }
 
     @Test fun `a truncated or non-object document is damage`() {

@@ -1,46 +1,60 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
 
 /**
- * Capture-admission allowance limits for one contributor account (spec delta b768de49).
+ * Capture-admission allowance limits for one contributor account (spec b768de49).
  *
  * These bound CAPTURE admission, never measured network throughput. A capture is charged the FULL
- * reservation — one record plus [wavesReservationBytes] — and that charge is never refunded for
+ * reservation - one record plus [wavesReservationBytes] - and that charge is never refunded for
  * unused capacity, cancellation, expiry, delivery or queue removal. Retries reuse the capture charge
  * and stay subject to their own body/attempt/age limits.
  *
- * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE (reviewer 82cdd583 #5). The daily ceilings are
- * explicit constructor inputs validated only for internal consistency, and the single-record
- * reservation is DERIVED structurally from the WAV header plus the maximum encoded clip plus the
- * canonical metadata bound, so it cannot be set to an arbitrary value like 1. A caller that cannot
- * supply a real ceiling cannot construct limits at all, and admission stays unavailable.
+ * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE. Every ceiling is an explicit injected input
+ * validated for internal consistency, and the reservation is DERIVED structurally from the WAV
+ * header plus the maximum encoded clip plus the canonical metadata bound, so an arbitrary value like
+ * 1 is not expressible. Arithmetic is checked: a combination whose reservation or running total
+ * would overflow is rejected rather than wrapping negative.
  */
 data class AllowanceLimits(
     val maxDailyRecords: Int,
     val maxDailyBytes: Long,
-    /** Maximum encoded WAV clip size including its 44-byte header (the `max_clip_bytes` bound). */
+    /** Maximum encoded WAV clip size INCLUDING its 44-byte header (the `max_clip_bytes` bound). */
     val maxClipBytes: Long,
     /** Complete canonical record/digest envelope bound (the `max_metadata_bytes` bound). */
     val maxMetadataBytes: Int,
 ) {
+    private val reservation: Long = checkedReservation(maxClipBytes, maxMetadataBytes)
+
     init {
         require(maxDailyRecords >= 1) { "max_daily_records must be positive" }
-        require(maxClipBytes > WAV_HEADER_BYTES) { "max_clip_bytes must exceed the WAV header" }
         require(maxMetadataBytes >= 1) { "max_metadata_bytes must be positive" }
-        require(maxDailyBytes >= wavesReservationBytes()) { "max_daily_bytes must admit one reservation" }
+        require(maxClipBytes > WAV_HEADER_BYTES) { "max_clip_bytes must exceed the WAV header" }
+        // An inadmissible ceiling cannot express a single capture, so it must not be constructible.
+        require(maxDailyBytes >= reservation) { "max_daily_bytes must admit one reservation" }
     }
 
-    /** One record's FULL reservation: max encoded WAV including its 44-byte header + metadata bound. */
-    fun wavesReservationBytes(): Long = maxClipBytes + maxMetadataBytes.toLong()
+    /** One record's FULL reservation: max encoded WAV including its header + metadata bound. */
+    fun wavesReservationBytes(): Long = reservation
 
-    /** True when this capture's full reservation still fits the remaining allowance. */
-    fun admits(chargedRecords: Int, chargedBytes: Long): Boolean = chargedRecords < maxDailyRecords && chargedBytes + wavesReservationBytes() <= maxDailyBytes
+    /** True when a capture's full reservation still fits the remaining allowance. */
+    fun admits(chargedRecords: Int, chargedBytes: Long): Boolean {
+        if (chargedRecords < 0 || chargedBytes < 0) return false
+        if (chargedRecords >= maxDailyRecords) return false
+        // Subtraction avoids the wrap that `chargedBytes + reservation` can produce.
+        return chargedBytes <= maxDailyBytes - reservation
+    }
 
-    /** Identity of the limits this charge was made against; a change retires a prepaid handoff. */
+    /** Identity of the limits a charge was made against; a change retires a prepaid handoff. */
     fun binding(): String = "$maxDailyRecords/$maxDailyBytes/$maxClipBytes/$maxMetadataBytes"
 
     companion object {
         /** RIFF header + fmt + data chunk headers: the fixed part of the encoded clip. */
         const val WAV_HEADER_BYTES = 44L
+
+        private fun checkedReservation(maxClipBytes: Long, maxMetadataBytes: Int): Long {
+            val reservation = Math.addExact(maxClipBytes, maxMetadataBytes.toLong())
+            require(reservation > WAV_HEADER_BYTES) { "reservation must exceed the WAV header" }
+            return reservation
+        }
     }
 }
 

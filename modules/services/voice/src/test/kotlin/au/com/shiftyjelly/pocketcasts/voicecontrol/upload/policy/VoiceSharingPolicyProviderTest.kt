@@ -1,11 +1,11 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy
 
 import app.cash.turbine.test
+import au.com.shiftyjelly.pocketcasts.sharedtest.JvmTask
+import au.com.shiftyjelly.pocketcasts.sharedtest.JvmTaskSource
 import au.com.shiftyjelly.pocketcasts.utils.config.FirebaseConfig
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.providers.FirebaseRemoteFeatureProvider
 import com.google.android.gms.tasks.Task
-import com.google.android.gms.tasks.TaskCompletionSource
-import com.google.android.gms.tasks.Tasks
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigInfo
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigValue
@@ -77,11 +77,11 @@ class VoiceSharingPolicyProviderTest {
         Dispatchers.resetMain()
     }
 
-    private var fetchGateOverride: com.google.android.gms.tasks.Task<Void>? = null
+    private var fetchGateOverride: JvmTask<Unit>? = null
     private var throwFirstInfoRead = false
     private var infoReads = 0
 
-    private fun restubWithFetchGate(gate: com.google.android.gms.tasks.Task<Void>?) {
+    private fun restubWithFetchGate(gate: JvmTask<Unit>?) {
         fetchGateOverride = gate
         restub()
     }
@@ -107,22 +107,32 @@ class VoiceSharingPolicyProviderTest {
         whenever(value.source).thenAnswer { valueSource }
         whenever(config.getValue(FirebaseConfig.VOICE_SHARING_ENABLED)).thenReturn(value)
 
+        // FirebaseRemoteFeatureProvider's init ALSO collects configUpdates (the firebase ktx
+        // extension registers a ConfigUpdateListener via addOnConfigUpdateListener). An unstubbed
+        // mock returns NULL for the registration and the NPE escapes the unguarded init launch as
+        // an uncaught exception that the NEXT runTest in this JVM reports - the order-dependent
+        // suite flake VoiceSharingSettingsViewModelTest kept absorbing. Mockito cannot stub the
+        // ktx EXTENSION property, so stub the underlying registration call instead.
+        whenever(config.addOnConfigUpdateListener(org.mockito.kotlin.any())).thenAnswer {
+            org.mockito.Mockito.mock(com.google.firebase.remoteconfig.ConfigUpdateListenerRegistration::class.java)
+        }
+
         whenever(config.fetch()).thenAnswer {
             fetchGateOverride?.let { return@thenAnswer it }
             if (fetchOutcome == null) {
-                Tasks.forException<Void>(IllegalStateException("scripted fetch failure"))
+                JvmTask(Result.failure(IllegalStateException("scripted fetch failure")))
             } else {
                 // Advancing bookkeeping is a SIDE EFFECT of the fetch itself: the provider must
                 // capture the pre-request timestamp before this runs and observe it move after.
                 if (fetchAdvancesBookkeeping) fetchTimeMs += 1_000
-                Tasks.forResult<Void>(null)
+                JvmTask(Result.success(Unit))
             }
         }
         whenever(config.activate()).thenAnswer {
             if (activateOutcome == null) {
-                Tasks.forException<Boolean>(IllegalStateException("scripted activation failure"))
+                JvmTask<Boolean>(Result.failure(IllegalStateException("scripted activation failure")))
             } else {
-                Tasks.forResult(true)
+                JvmTask<Boolean>(Result.success(true))
             }
         }
     }
@@ -223,7 +233,7 @@ class VoiceSharingPolicyProviderTest {
         val provider = provider(refreshTimeoutMs = 10 * VoiceSharingPolicyProvider.DEFAULT_LEASE_MS)
         assertTrue(provider.snapshot().enabled) // init: enabled, timer A due at the init lease
 
-        val fetchGate = TaskCompletionSource<Boolean>()
+        val fetchGate = JvmTaskSource<Boolean>()
         whenever(config.fetch()).thenAnswer { fetchGate.task } // park renewal B inside its fetch
 
         val seen = mutableListOf<String>()
@@ -253,7 +263,7 @@ class VoiceSharingPolicyProviderTest {
         // The lifecycle init must SUCCEED first (enabled); only the explicit renewal hangs.
         val provider = provider(refreshTimeoutMs = 500)
         assertTrue(provider.snapshot().enabled)
-        val fetchGate = TaskCompletionSource<Boolean>()
+        val fetchGate = JvmTaskSource<Boolean>()
         whenever(config.fetch()).thenAnswer { fetchGate.task } // renewal B never completes
 
         val seen = mutableListOf<String>()
@@ -307,7 +317,7 @@ class VoiceSharingPolicyProviderTest {
 
     @Test
     fun `pending fetch task hits the whole-refresh deadline and fails closed`() {
-        val fetchGate = TaskCompletionSource<Boolean>()
+        val fetchGate = JvmTaskSource<Boolean>()
         whenever(config.fetch()).thenAnswer { fetchGate.task }
         val provider = provider(refreshTimeoutMs = 50)
         val result = runBlocking { provider.refresh() }
@@ -317,7 +327,7 @@ class VoiceSharingPolicyProviderTest {
 
     @Test
     fun `pending activation task hits the whole-refresh deadline and fails closed`() {
-        val activationGate = TaskCompletionSource<Boolean>()
+        val activationGate = JvmTaskSource<Boolean>()
         whenever(config.activate()).thenAnswer { activationGate.task }
         val provider = provider(refreshTimeoutMs = 50)
         val result = runBlocking { provider.refresh() }
@@ -331,7 +341,7 @@ class VoiceSharingPolicyProviderTest {
 
         // Refresh A runs on a REAL second thread against the SAME instance and parks inside its
         // fetch on an unresolved task. The lifecycle init refresh already consumed fetch call #1.
-        val fetchGate = TaskCompletionSource<Boolean>()
+        val fetchGate = JvmTaskSource<Boolean>()
         val firstExplicitFetch = java.util.concurrent.atomic.AtomicBoolean(true)
         val aReachedFetch = java.util.concurrent.CountDownLatch(1)
         whenever(config.fetch()).thenAnswer {
@@ -339,7 +349,7 @@ class VoiceSharingPolicyProviderTest {
                 aReachedFetch.countDown()
                 fetchGate.task
             } else {
-                Tasks.forException<Void>(IllegalStateException("scripted fetch failure"))
+                JvmTask(Result.failure(IllegalStateException("scripted fetch failure")))
             }
         }
         // Releasing A's gate must present A as OTHERWISE VALID AND ENABLING: bookkeeping
@@ -358,7 +368,7 @@ class VoiceSharingPolicyProviderTest {
         org.junit.Assert.assertTrue("A never reached its fetch", aReachedFetch.await(2, java.util.concurrent.TimeUnit.SECONDS))
 
         // Refresh B on THIS thread, same instance: fetch fails → B is the newer disabled.
-        whenever(config.fetch()).thenAnswer { Tasks.forException<Void>(IllegalStateException("scripted fetch failure")) }
+        whenever(config.fetch()).thenAnswer { JvmTask(Result.failure(IllegalStateException("scripted fetch failure"))) }
         val resultB = runBlocking { provider.refresh() }
         assertFalse(resultB.enabled)
 
@@ -394,11 +404,18 @@ class VoiceSharingPolicyProviderTest {
             override fun publishCredentials(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false
         }
 
+        // The composed provider's init LAUNCHES a refresh, and the module hardcodes
+        // nowMs = SystemClock.elapsedRealtime() - not mocked on the JVM. Scope the composition to
+        // a dispatcher this test never advances so the refresh body deterministically never runs;
+        // these controls prove DI IDENTITY wiring, not refresh behavior. A shared/advanced
+        // scheduler made the SystemClock throw escape as an uncaught exception attributed to
+        // whichever runTest ran next (order-dependent suite flake, probe-captured).
+        val composedScope = CoroutineScope(kotlinx.coroutines.test.StandardTestDispatcher())
         val composed = VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
             remoteConfig = config,
-            featureProvider = FirebaseRemoteFeatureProvider(config, featureScope),
+            featureProvider = FirebaseRemoteFeatureProvider(config, CoroutineScope(kotlinx.coroutines.test.StandardTestDispatcher())),
             ownership = ownership,
-            scope = scope,
+            scope = composedScope,
         )
         // Identity chain: owner primitive === module argument === provider field (reflection on
         // the ACTUAL composed object — proves the module wired the EXACT lock, not a default).
@@ -454,11 +471,18 @@ class VoiceSharingPolicyProviderTest {
             override fun reconcileExternalState() = snap
             override fun publishCredentials(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false
         }
+        // The composed provider's init LAUNCHES a refresh, and the module hardcodes
+        // nowMs = SystemClock.elapsedRealtime() - not mocked on the JVM. Scope the composition to
+        // a dispatcher this test never advances so the refresh body deterministically never runs;
+        // these controls prove DI IDENTITY wiring, not refresh behavior. A shared/advanced
+        // scheduler made the SystemClock throw escape as an uncaught exception attributed to
+        // whichever runTest ran next (order-dependent suite flake, probe-captured).
+        val composedScope = CoroutineScope(kotlinx.coroutines.test.StandardTestDispatcher())
         val composed = VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
             remoteConfig = config,
-            featureProvider = FirebaseRemoteFeatureProvider(config, featureScope),
+            featureProvider = FirebaseRemoteFeatureProvider(config, CoroutineScope(kotlinx.coroutines.test.StandardTestDispatcher())),
             ownership = ownership,
-            scope = scope,
+            scope = composedScope,
         )
         // The actual composition entry instantiates and owns the fail-closed provider. (The
         // seed state is disabled before any refresh; snapshot() would call SystemClock, which is
@@ -526,7 +550,7 @@ class VoiceSharingPolicyProviderTest {
         val provider = provider()
 
         // Refresh A: fetch succeeds but activation hangs on an unresolved task.
-        val activationGate = TaskCompletionSource<Boolean>()
+        val activationGate = JvmTaskSource<Boolean>()
         fetchTimeMs += 1_000
         restub()
         whenever(config.activate()).thenAnswer { activationGate.task }

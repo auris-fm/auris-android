@@ -66,8 +66,16 @@ object RealServiceReplacements {
                 val type = invocation.method.returnType
                 when {
                     com.google.android.gms.tasks.Task::class.java.isAssignableFrom(type) ->
+                        // A JVM fake, NOT Tasks.forResult: the real task's addOnCompleteListener
+                        // routes through gms TaskExecutors, which needs the Android runtime - on
+                        // the plain JVM it throws inside an unguarded coroutine and the uncaught
+                        // exception is attributed to whichever test class runs next.
                         @Suppress("UNCHECKED_CAST")
-                        com.google.android.gms.tasks.Tasks.forResult(null as Any?) as com.google.android.gms.tasks.Task<Any>
+                        // The success VALUE is never read by the suspendCancellableCoroutine
+                        // bridges - only completion matters - so a placeholder instance is safe.
+                        au.com.shiftyjelly.pocketcasts.sharedtest.JvmTask<Any>(
+                            Result.success(Any()),
+                        ) as com.google.android.gms.tasks.Task<Any>
 
                     type == java.lang.Boolean.TYPE -> false
 

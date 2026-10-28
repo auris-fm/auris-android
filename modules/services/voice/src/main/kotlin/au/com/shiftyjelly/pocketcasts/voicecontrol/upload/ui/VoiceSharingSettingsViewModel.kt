@@ -49,7 +49,7 @@ data class VoiceSharingSettingsUiState(
     val disclosureDetail: String,
 )
 
-enum class SettingsOperationStatus { NONE, CONFLICT, FAILED }
+enum class SettingsOperationStatus { NONE, CONFLICT, FAILED, RELEASE_FAILED }
 
 /** The operation a visible failure refers to; the copy differs per operation's honest state. */
 enum class FailedOperation { NONE, ENROLL, WITHDRAW }
@@ -68,6 +68,12 @@ class VoiceSharingSettingsViewModel(
     private val projection: StateFlow<VoiceSharingAccountProjection?>,
     private val enrollmentController: EnrollmentController,
     private val withdrawalIntent: LocalWithdrawalIntentStore,
+    /**
+     * THE shared owner-session source (the same authority snapshot the controller fences with).
+     * The ViewModel is a process-wide singleton, so operation PRESENTATION must retire at the
+     * account boundary too: account B must never see account A's failure copy (reviewer a2136dd9).
+     */
+    private val ownerSession: () -> Long,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
 ) {
 
@@ -77,6 +83,18 @@ class VoiceSharingSettingsViewModel(
     // until the NEXT action; the pending label lasts until the outcome settles.
     private var lastFailedOperation = FailedOperation.NONE
     private var pendingOperation = PendingOperation.NONE
+    private var renderedSession: Long = ownerSession()
+
+    /** Identifies the CURRENT action; a stale (superseded) outcome may not touch presentation. */
+    private var actionGeneration = 0L
+
+    /**
+     * THE status the screen shows, as durable UI state. Deriving it from the controller state on
+     * every render was the bug: the controller keeps the LAST operation's settled state (Failed,
+     * Applied), so a session-boundary retire or a local-release failure was immediately
+     * overwritten by the next combine-driven re-render (reviewer a2136dd9).
+     */
+    private var presentationStatus = SettingsOperationStatus.NONE
 
     // Declaration order matters: these initializers run render(), so the durable fields above
     // must already be initialized (reviewer-turned-self-inflicted NPE: Kotlin initializes in
@@ -87,7 +105,20 @@ class VoiceSharingSettingsViewModel(
     init {
         scope.launch {
             kotlinx.coroutines.flow.combine(policy, projection, enrollmentController.state) { _, _, _ -> }
-                .collect { mutableState.value = render() }
+                .collect {
+                    // The account boundary retires operation presentation (reviewer a2136dd9):
+                    // an account switch emits through the projection, so checking the shared
+                    // session here catches it. An unrelated refresh within the SAME session
+                    // leaves the failure copy untouched.
+                    val session = ownerSession()
+                    if (session != renderedSession) {
+                        renderedSession = session
+                        lastFailedOperation = FailedOperation.NONE
+                        pendingOperation = PendingOperation.NONE
+                        presentationStatus = SettingsOperationStatus.NONE
+                    }
+                    mutableState.value = render()
+                }
         }
     }
 
@@ -97,9 +128,11 @@ class VoiceSharingSettingsViewModel(
         // next action, not wiped by an unrelated emission but not carried into a fresh attempt).
         lastFailedOperation = FailedOperation.NONE
         pendingOperation = PendingOperation.ENROLL
+        presentationStatus = SettingsOperationStatus.NONE
+        val generation = ++actionGeneration
         mutableState.value = render()
         scope.launch {
-            consume(enrollmentController.enroll(EnrollmentDisclosure.VERSION), FailedOperation.ENROLL)
+            consume(enrollmentController.enroll(EnrollmentDisclosure.VERSION), FailedOperation.ENROLL, generation)
         }
     }
 
@@ -107,61 +140,83 @@ class VoiceSharingSettingsViewModel(
     fun withdraw() {
         lastFailedOperation = FailedOperation.NONE
         pendingOperation = PendingOperation.WITHDRAW
+        presentationStatus = SettingsOperationStatus.NONE
+        val generation = ++actionGeneration
         withdrawalIntent.recordWithdrawalRequested()
         mutableState.value = render()
         scope.launch {
-            consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW)
+            consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW, generation)
         }
     }
 
-    private suspend fun consume(outcome: EnrollmentOutcome, operation: FailedOperation) {
+    private suspend fun consume(outcome: EnrollmentOutcome, operation: FailedOperation, generation: Long) {
         when (outcome) {
             is EnrollmentOutcome.Applied -> {
                 // A SUCCESSFUL re-enrollment releases the durable stop, atomically with the
                 // outcome: the clear runs inside the fence/owner transaction via applyForOutcome,
                 // so a superseded or cross-account outcome releases nothing (reviewer ae7922f9).
-                // A failed, refused or superseded enrollment keeps the stop. A withdrawal's
-                // Applied deliberately does NOT clear: opting out must stay opted out.
+                // A withdrawal's Applied deliberately does NOT clear: opting out must stay opted
+                // out. The DURABLE effect is attempted even for a stale generation - the fence
+                // makes the call a no-op there - but PRESENTATION only the current action may
+                // touch: a superseded outcome must not clear the newer action's pending label
+                // (reviewer a2136dd9).
                 if (operation == FailedOperation.ENROLL) {
-                    enrollmentController.applyForOutcome(outcome) {
+                    val released = enrollmentController.applyForOutcome(outcome) {
                         withdrawalIntent.clearOnUserEnrollment()
                     }
+                    // false = the effect RAN and durable clearing FAILED: collection stays
+                    // stopped while the server says enrolled. That is a distinct state from a
+                    // server rejection and is surfaced as one (reviewer a2136dd9).
+                    if (released == false && generation == actionGeneration) {
+                        presentationStatus = SettingsOperationStatus.RELEASE_FAILED
+                        mutableState.value = render(SettingsOperationStatus.RELEASE_FAILED)
+                        return
+                    }
                 }
+                if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.NONE
                 mutableState.value = render(SettingsOperationStatus.NONE)
             }
 
             is EnrollmentOutcome.Conflict -> {
+                if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.CONFLICT
                 mutableState.value = render(SettingsOperationStatus.CONFLICT)
             }
 
             is EnrollmentOutcome.Failed -> {
+                if (generation != actionGeneration) return
                 lastFailedOperation = operation
                 pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.FAILED
                 mutableState.value = render(SettingsOperationStatus.FAILED)
             }
 
             is EnrollmentOutcome.DeletionRequested -> {
+                if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.NONE
                 mutableState.value = render(SettingsOperationStatus.NONE)
             }
 
             is EnrollmentOutcome.Refused -> {
+                if (generation != actionGeneration) return
                 lastFailedOperation = operation
                 pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.FAILED
                 mutableState.value = render(SettingsOperationStatus.FAILED)
             }
 
             EnrollmentOutcome.Superseded -> {
-                // Nothing settled; the superseding action's own rendering takes over.
-                pendingOperation = PendingOperation.NONE
-                mutableState.value = render()
+                // Nothing settled; the superseding action owns rendering. The stale outcome does
+                // not touch pending/failure/status AT ALL (reviewer a2136dd9).
             }
         }
     }
 
-    private fun render(status: SettingsOperationStatus = currentStatus()) = VoiceSharingSettingsUiState(
+    private fun render(status: SettingsOperationStatus = presentationStatus) = VoiceSharingSettingsUiState(
         settingAvailable = policy.value.enabled,
         enrolled = isEnrolled(),
         pending = enrollmentController.state.value == EnrollmentState.Pending,
@@ -185,11 +240,5 @@ class VoiceSharingSettingsViewModel(
         return p.voiceSharingEnrolled &&
             p.withdrawalState == WithdrawalState.ACTIVE &&
             withdrawalIntent.collectionPermittedByLocalIntent(p)
-    }
-
-    private fun currentStatus(): SettingsOperationStatus = when (enrollmentController.state.value) {
-        EnrollmentState.Conflict -> SettingsOperationStatus.CONFLICT
-        EnrollmentState.Failed -> SettingsOperationStatus.FAILED
-        else -> SettingsOperationStatus.NONE
     }
 }

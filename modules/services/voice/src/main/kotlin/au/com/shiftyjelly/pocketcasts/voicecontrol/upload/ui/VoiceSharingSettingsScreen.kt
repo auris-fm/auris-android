@@ -87,6 +87,14 @@ fun VoiceSharingSettingsScreen(
 
             FailedOperation.NONE -> Unit
         }
+        if (state.status == SettingsOperationStatus.RELEASE_FAILED) {
+            Text(
+                // The server accepted the enrollment but the durable local stop could not be
+                // released: collection stays paused and the user is told why (reviewer a2136dd9).
+                text = stringResource(R.string.voice_sharing_local_stop_failed),
+                style = MaterialTheme.typography.caption,
+            )
+        }
         if (state.status == SettingsOperationStatus.CONFLICT) {
             Text(
                 text = stringResource(R.string.voice_sharing_conflict),

@@ -1806,6 +1806,7 @@
     <string name="voice_sharing_withdraw_failed">Auris could not reach the server to finish turning sharing off. Sharing is already off on this device and no new recordings will be sent.</string>
     <string name="voice_sharing_enroll_pending">Turning sharing on for your account…</string>
     <string name="voice_sharing_withdraw_pending">Turning sharing off on your account…</string>
+    <string name="voice_sharing_local_stop_failed">Sharing is on for your account, but this device could not release its local pause, so sharing stays paused here. Try turning the setting off and on again.</string>
     <string name="voice_sharing_conflict">Your account changed while updating. Review the current setting and try again.</string>
     <string name="voice_sharing_delete_action">Delete shared recordings</string>
     <string name="voice_sharing_delete_confirm_title">Delete shared recordings?</string>

@@ -67,9 +67,14 @@ class VoiceSharingSettingsViewModelTest {
         }
     }
 
-    private class RecordingPersistence(var stopped: Boolean = false) : WithdrawalIntentPersistence {
+    private class RecordingPersistence(
+        var stopped: Boolean = false,
+        /** When true, writes that would CLEAR the stop fail (durable storage refuses). */
+        var failClear: Boolean = false,
+    ) : WithdrawalIntentPersistence {
         override fun read(): Boolean = stopped
         override fun write(requested: Boolean): Boolean {
+            if (!requested && failClear) return false
             stopped = requested
             return true
         }
@@ -109,6 +114,7 @@ class VoiceSharingSettingsViewModelTest {
         withdrawGate: Gate = Gate(),
         scope: kotlinx.coroutines.CoroutineScope? = null,
         persistence: RecordingPersistence = RecordingPersistence(),
+        ownerSession: () -> Long = { 1L },
     ): VoiceSharingSettingsViewModel {
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
@@ -121,13 +127,14 @@ class VoiceSharingSettingsViewModelTest {
             withdrawOperation = { withdrawGate.await() },
             deleteOperation = { null },
             clearLocalPending = {},
-            ownerSession = { 1L },
+            ownerSession = ownerSession,
         )
         return VoiceSharingSettingsViewModel(
             policy = policy,
             projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistence),
+            ownerSession = ownerSession,
             scope = effective,
         )
     }
@@ -320,6 +327,97 @@ class VoiceSharingSettingsViewModelTest {
             "an in-flight WITHDRAWAL renders withdrawal-pending copy",
             PendingOperation.WITHDRAW,
             vm.state.value.pendingOperation,
+        )
+    }
+
+    // --- Reviewer a2136dd9: a stale outcome must not mutate the CURRENT action's presentation.
+
+    @Test
+    fun `a superseded outcome does not disturb the current action's pending label`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val enrollGate = Gate()
+        val withdrawGate = Gate()
+        val vm = viewModel(enrollGate = enrollGate, withdrawGate = withdrawGate)
+
+        // Enrollment A parks; the withdrawal B supersedes it and parks too.
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        vm.withdraw()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals("PREMISE: withdrawal B owns the pending label", PendingOperation.WITHDRAW, vm.state.value.pendingOperation)
+
+        // A returns (it WOULD have succeeded) while B is still in flight - A comes back Superseded.
+        enrollGate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        enrollGate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            "a stale outcome must NOT clear the current action's pending label",
+            PendingOperation.WITHDRAW,
+            vm.state.value.pendingOperation,
+        )
+        // The stale consume may poison DURABLE fields that only a later re-render exposes; force
+        // one with an unrelated projection emission and assert again (timeline-probed: the stale
+        // consume settles at advance #3, this render at #4 exposes any poison).
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-mid")
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(
+            "the stale outcome must not have poisoned the durable pending label",
+            PendingOperation.WITHDRAW,
+            vm.state.value.pendingOperation,
+        )
+        assertTrue("the current action is still pending", vm.state.value.pending)
+    }
+
+    // --- Reviewer a2136dd9: the failure presentation retires at the OWNER-SESSION boundary.
+
+    @Test
+    fun `an account session change retires the failure presentation`() = runTest(mainDispatcher) {
+        var session = 1L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, ownerSession = { session })
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.Failure
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals("PREMISE: the failure is shown for account A", SettingsOperationStatus.FAILED, vm.state.value.status)
+
+        // A DIFFERENT account signs in; the projection switches.
+        session = 2L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B")
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            "account B must not see account A's failure copy",
+            SettingsOperationStatus.NONE,
+            vm.state.value.status,
+        )
+        assertEquals(FailedOperation.NONE, vm.state.value.failedOperation)
+    }
+
+    // --- Reviewer a2136dd9: a failed LOCAL stop release is distinct from a server rejection.
+
+    @Test
+    fun `a failed local stop release surfaces distinctly and keeps the stop`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val persistence = RecordingPersistence(stopped = true, failClear = true)
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, persistence = persistence)
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue("the stop survives: durable clearing failed, collection stays paused", persistence.stopped)
+        assertEquals(
+            "the local release failure is surfaced, not rendered as a settled success",
+            SettingsOperationStatus.RELEASE_FAILED,
+            vm.state.value.status,
         )
     }
 }

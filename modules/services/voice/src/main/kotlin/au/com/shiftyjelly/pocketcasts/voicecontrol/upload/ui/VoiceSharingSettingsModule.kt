@@ -42,6 +42,9 @@ object VoiceSharingSettingsModule {
             projection = accountStartup.state.projection,
             enrollmentController = controller,
             withdrawalIntent = withdrawalIntent,
+            // THE SAME shared session source the controller fences with: the presentation
+            // boundary and the correctness boundary must move together (reviewer a2136dd9).
+            ownerSession = { accountStartup.authoritySnapshot().session },
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
     }

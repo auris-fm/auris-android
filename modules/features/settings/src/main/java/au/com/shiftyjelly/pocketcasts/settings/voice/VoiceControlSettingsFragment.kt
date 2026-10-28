@@ -125,22 +125,21 @@ class VoiceControlSettingsFragment : BaseFragment() {
             // The section only renders when it can be truthful: policy available AND an account
             // projection actually observed (no switch without a projection to read it against).
             val sharing = if (sharingState.settingAvailable && sharingState.projectionObserved) sharingState else null
-            var confirmDelete by remember { mutableStateOf(false) }
-            if (confirmDelete) {
+            // The destructive confirmation is OWNED BY THE VIEWMODEL and bound to the session that
+            // opened it (reviewer 20b681f0): confirming after an account switch is rejected, never
+            // silently re-owned by the new account.
+            if (sharingState.deleteConfirmationOpen) {
                 AlertDialog(
-                    onDismissRequest = { confirmDelete = false },
+                    onDismissRequest = { voiceSharingSettings.dismissDelete() },
                     title = { Text(stringResource(LR.string.voice_sharing_delete_confirm_title)) },
                     text = { Text(stringResource(LR.string.voice_sharing_delete_confirm_body)) },
                     confirmButton = {
-                        TextButton(
-                            onClick = {
-                                confirmDelete = false
-                                voiceSharingSettings.deleteSharedData()
-                            },
-                        ) { Text(stringResource(LR.string.voice_sharing_delete_action)) }
+                        TextButton(onClick = { voiceSharingSettings.confirmDelete() }) {
+                            Text(stringResource(LR.string.voice_sharing_delete_action))
+                        }
                     },
                     dismissButton = {
-                        TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+                        TextButton(onClick = { voiceSharingSettings.dismissDelete() }) { Text("Cancel") }
                     },
                 )
             }
@@ -165,7 +164,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
                     // (before any request) and enrolls release the stop only inside the fence.
                     if (checked) voiceSharingSettings.enroll() else voiceSharingSettings.withdraw()
                 },
-                onDeleteSharedData = { confirmDelete = true },
+                onDeleteSharedData = { voiceSharingSettings.requestDelete() },
                 onBackPress = { activity?.onBackPressedDispatcher?.onBackPressed() },
                 bottomInset = bottomInset.value.pxToDp(LocalContext.current).dp,
             )
@@ -263,9 +262,10 @@ private fun VoiceControlSettingsPage(
                         indent = false,
                     )
                 }
-                // Deleting already-accepted data is a separate, available operation while enrolled.
-                // Its pending state is 202-processing honesty, never "deleted" (202 ≠ done).
-                if (sharing.enrolled) {
+                // Deleting already-accepted data survives a withdrawal: eligibility is enrolled OR
+                // a recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
+                // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
+                if (sharing.deleteAvailable) {
                     item {
                         val deleteSecondary = VoiceSharingSettingsRowCopy.deleteSecondary(sharing, copyResolver)
                         SettingRow(

@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingTaggedProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentDisclosure
@@ -55,6 +56,13 @@ data class VoiceSharingSettingsUiState(
      * deleted, and a failure is visible until the next action.
      */
     val deletionRequested: Boolean = false,
+    /**
+     * Historical-data eligibility, carried separately from [enrolled] (reviewer 20b681f0): a
+     * withdrawal clears membership, not the user's right to delete data already accepted.
+     */
+    val deleteAvailable: Boolean = false,
+    /** The destructive-confirmation dialog; bound to the session that opened it. */
+    val deleteConfirmationOpen: Boolean = false,
     val deletionReceiptPending: Boolean = false,
     val deletionFailed: Boolean = false,
     val disclosureVersion: String,
@@ -79,7 +87,11 @@ enum class PendingOperation { NONE, ENROLL, WITHDRAW }
  */
 class VoiceSharingSettingsViewModel(
     private val policy: StateFlow<PolicySnapshot>,
-    private val projection: StateFlow<VoiceSharingAccountProjection?>,
+    /**
+     * The projection WITH its authoritative owner session (reviewer 20b681f0): the tag is
+     * published under the account fence, never inferred from collection time.
+     */
+    private val taggedProjection: StateFlow<VoiceSharingTaggedProjection>,
     private val enrollmentController: EnrollmentController,
     private val withdrawalIntent: LocalWithdrawalIntentStore,
     /**
@@ -117,10 +129,11 @@ class VoiceSharingSettingsViewModel(
     private var deletionGeneration = 0L
 
     /**
-     * The session whose projection render() last saw; 0 = none observed yet. A projection present
-     * at construction belongs to the CURRENT session: nothing has switched yet.
+     * The open delete confirmation and the session that opened it: confirming under a different
+     * authority would capture THAT session as the tap owner (reviewer 20b681f0).
      */
-    private var projectionSession = if (projection.value != null) ownerSession() else 0L
+    private var deleteConfirmationOpen = false
+    private var confirmationSession = 0L
 
     /**
      * THE status the screen shows, as durable UI state. Deriving it from the controller state on
@@ -141,9 +154,8 @@ class VoiceSharingSettingsViewModel(
         // an unrelated emission (policy flip, controller state) under the new session must not
         // re-label a retained foreign-session projection as current (reviewer 578bb62a).
         scope.launch {
-            projection.collect { p ->
+            taggedProjection.collect {
                 retireForeignSessionPresentation()
-                projectionSession = if (p != null) ownerSession() else 0L
                 mutableState.value = render()
             }
         }
@@ -171,6 +183,8 @@ class VoiceSharingSettingsViewModel(
         deletionRequested = false
         deletionReceiptPending = false
         deletionFailed = false
+        deleteConfirmationOpen = false
+        confirmationSession = 0L
     }
 
     /** Enrolls with the exact disclosure version whose copy this screen renders. */
@@ -196,12 +210,36 @@ class VoiceSharingSettingsViewModel(
         }
     }
 
+    /** Opens the destructive-confirmation dialog, bound to the CURRENT session. */
+    fun requestDelete() {
+        deleteConfirmationOpen = true
+        confirmationSession = ownerSession()
+        mutableState.value = render()
+    }
+
+    fun dismissDelete() {
+        deleteConfirmationOpen = false
+        confirmationSession = 0L
+        mutableState.value = render()
+    }
+
     /**
-     * Deletes already-accepted data (a separate operation from withdrawal; the server returns a
-     * processing receipt, so PENDING is honest and never means deleted). Presentation follows the
-     * same durable/session-retired rules as the membership operations.
+     * Confirming runs the deletion ONLY under the authority that opened the dialog: a
+     * confirmation opened under A and confirmed after a switch to B is REJECTED, not silently
+     * re-owned by B (reviewer 20b681f0).
      */
-    fun deleteSharedData() {
+    fun confirmDelete() {
+        if (!deleteConfirmationOpen) return
+        if (ownerSession() != confirmationSession) {
+            dismissDelete()
+            return
+        }
+        deleteConfirmationOpen = false
+        confirmationSession = 0L
+        startDeletion()
+    }
+
+    private fun startDeletion() {
         deletionFailed = false
         deletionReceiptPending = false
         deletionRequested = true
@@ -234,8 +272,6 @@ class VoiceSharingSettingsViewModel(
             mutableState.value = render()
         }
     }
-
-    private fun generation() = actionGeneration
 
     /** Records the local stop FIRST, then withdraws; a failure keeps the stop. */
     fun withdraw() {
@@ -373,10 +409,13 @@ class VoiceSharingSettingsViewModel(
         // last operation's Pending state even after it settles as Superseded (its own lifecycle
         // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
         pending = pendingOperation != PendingOperation.NONE,
-        projectionObserved = projectionSession == ownerSession() && projection.value != null,
+        projectionObserved = taggedProjection.value.projection != null &&
+            taggedProjection.value.ownerSession == ownerSession(),
         deletionRequested = deletionRequested,
         deletionReceiptPending = deletionReceiptPending,
         deletionFailed = deletionFailed,
+        deleteAvailable = isDeleteAvailable(),
+        deleteConfirmationOpen = deleteConfirmationOpen,
         status = status,
         failedOperation = lastFailedOperation,
         pendingOperation = pendingOperation,
@@ -387,16 +426,31 @@ class VoiceSharingSettingsViewModel(
     )
 
     /**
-     * The server projection read through the local intent: enrolled requires a projection that
-     * says enrolled AND no recorded withdrawal intent. The intent store's own collection gate
-     * already encodes the fail-closed combination; the UI reads the same rule so a failed
-     * withdrawal cannot render as enrolled.
+     * The current session's projection, or null when none is observed FOR THIS session. Enrolled
+     * requires a projection that says enrolled AND no recorded withdrawal intent: the intent
+     * store's own collection gate already encodes the fail-closed combination, and the UI reads
+     * the same rule so a failed withdrawal cannot render as enrolled.
      */
+    private fun currentProjection(): VoiceSharingAccountProjection? {
+        val tagged = taggedProjection.value
+        if (tagged.ownerSession != ownerSession()) return null
+        return tagged.projection
+    }
+
     private fun isEnrolled(): Boolean {
-        if (projectionSession != ownerSession()) return false
-        val p = projection.value ?: return false
+        val p = currentProjection() ?: return false
         return p.voiceSharingEnrolled &&
             p.withdrawalState == WithdrawalState.ACTIVE &&
             withdrawalIntent.collectionPermittedByLocalIntent(p)
+    }
+
+    /**
+     * A withdrawal clears MEMBERSHIP, not the right to delete data the server already accepted
+     * (reviewer 20b681f0): the historical-data eligibility is the OLD screen's rule — enrolled
+     * OR a recorded enrollment epoch — evaluated against the current session's projection.
+     */
+    private fun isDeleteAvailable(): Boolean {
+        val p = currentProjection() ?: return false
+        return p.voiceSharingEnrolled || p.enrollmentEpoch != null
     }
 }

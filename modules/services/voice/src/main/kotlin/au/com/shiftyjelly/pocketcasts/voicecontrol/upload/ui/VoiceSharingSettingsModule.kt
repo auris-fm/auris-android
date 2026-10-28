@@ -39,7 +39,7 @@ object VoiceSharingSettingsModule {
         )
         return VoiceSharingSettingsViewModel(
             policy = policyProvider.policy,
-            projection = accountStartup.state.projection,
+            taggedProjection = accountStartup.state.taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = withdrawalIntent,
             // THE SAME shared session source the controller fences with: the presentation

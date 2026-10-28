@@ -42,6 +42,21 @@ class VoiceSharingAccountState {
     }
     private val state = MutableStateFlow<VoiceSharingAccountProjection?>(null)
 
+    /**
+     * The projection WITH its authoritative owner session, published under the same fence as
+     * [state] (reviewer 20b681f0): consumers must not infer a projection's owner from their own
+     * collection time - a singleton constructed under session A, switching to B before its
+     * collector first runs, replays A's value and would stamp it as B's.
+     */
+    private val tagged =
+        MutableStateFlow(VoiceSharingTaggedProjection(ownerSession = Long.MIN_VALUE, projection = null))
+
+    val taggedProjection: StateFlow<VoiceSharingTaggedProjection> = tagged
+
+    private fun publish(projection: VoiceSharingAccountProjection?) {
+        tagged.value = VoiceSharingTaggedProjection(currentSessionGeneration, projection)
+    }
+
     /** Observed under [fence]; guards the issued session and revision currency. */
     private var currentToken: SessionToken? = null
     private var currentSessionGeneration: Long = Long.MIN_VALUE
@@ -61,6 +76,7 @@ class VoiceSharingAccountState {
     fun sessionStarted(sessionGeneration: Long = Long.MIN_VALUE): SessionToken = synchronized(fence) {
         operationGeneration.incrementAndGet() // outstanding tickets die with the old session
         state.value = null
+        publish(null)
         notifyProjection(null, sessionGeneration)
         currentSessionGeneration = sessionGeneration
         SessionToken().also { currentToken = it }
@@ -71,6 +87,7 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+        publish(null)
         notifyProjection(null, currentSessionGeneration)
     }
 
@@ -85,6 +102,7 @@ class VoiceSharingAccountState {
             operationGeneration.incrementAndGet()
             currentToken = null
             state.value = null
+            publish(null)
             notifyProjection(null, currentSessionGeneration)
             true
         } else {
@@ -141,6 +159,7 @@ class VoiceSharingAccountState {
         if (token !== currentToken || ticket.generation != operationGeneration.get() || ticket.session != ownerSession) return false
         val projection = parseProjection(json) ?: return false
         state.value = projection
+        publish(projection)
         onProjectionApplied?.invoke(projection, ownerSession)
         notifyProjection(projection, ownerSession)
         true
@@ -152,6 +171,7 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+        publish(null)
         notifyProjection(null, currentSessionGeneration)
         true
     }
@@ -175,6 +195,7 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+        publish(null)
         notifyProjection(null, ticket.session)
         true
     }
@@ -330,3 +351,9 @@ data class VoiceSharingAccountProjection(
 enum class VoiceSharingPlan { FREE, PRO }
 
 enum class WithdrawalState { ACTIVE, WITHDRAWN, NOT_ENROLLED }
+
+/** A membership projection and the authoritative owner session it was published under. */
+data class VoiceSharingTaggedProjection(
+    val ownerSession: Long,
+    val projection: VoiceSharingAccountProjection?,
+)

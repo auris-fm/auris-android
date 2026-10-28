@@ -25,7 +25,7 @@ class CaptureAllowanceHeldStorageTest {
 
     private val account = "a@example.com"
     private val window = AllowanceWindow.Established("window-1")
-    private val limits = AllowanceLimits(Ceilings(10, 1_000_000), maxClipBytes = 100_000, maxMetadataBytes = 1_024)
+    private val limits = AllowanceLimits(10, 1_000_000, maxClipBytes = 100_000, maxMetadataBytes = 1_024, ceilings = Ceilings(10, 1_000_000, 1_000_000L, 8_192))
 
     private fun area(): File = File(tmp.root, "collection-usage").also { it.mkdirs() }
 

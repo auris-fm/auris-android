@@ -22,7 +22,7 @@ class CaptureAllowanceTokenTest {
 
     private val account = "a@example.com"
     private val window = AllowanceWindow.Established("window-1")
-    private val limits = AllowanceLimits(Ceilings(10, 1_000_000), maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024)
+    private val limits = AllowanceLimits(10, 1_000_000, maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024, ceilings = Ceilings(10, 1_000_000, 1_000_000L, 8_192))
 
     private fun area(): File = File(tmp.root, "collection-usage").also { it.mkdirs() }
 
@@ -48,20 +48,20 @@ class CaptureAllowanceTokenTest {
     }
 
     @Test fun `invalid limits cannot exist, so no token can be prepared against them`() {
-        val refused = runCatching { AllowanceLimits(Ceilings(0, 1), maxClipBytes = 1 - 1024, maxMetadataBytes = 1024) }
+        val refused = runCatching { AllowanceLimits(0, 1, maxClipBytes = 1 - 1024, maxMetadataBytes = 1024, ceilings = Ceilings(0, 1, 1_000_000L, 8_192)) }
         assertTrue("an invalid limit must be rejected outright", refused.isFailure)
         assertFalse("nothing may be written for limits that never existed", area().walkTopDown().any { it.isFile })
     }
 
     @Test fun `limits whose daily ceiling cannot admit one reservation cannot exist`() {
         val refused = runCatching {
-            AllowanceLimits(Ceilings(10, 1_000_000), maxClipBytes = 1_000_001 - 1024, maxMetadataBytes = 1024)
+            AllowanceLimits(10, 1_000_000, maxClipBytes = 1_000_001 - 1024, maxMetadataBytes = 1024, ceilings = Ceilings(10, 1_000_000, 1_000_000L, 8_192))
         }
         assertTrue("an inadmissible ceiling must be rejected at construction", refused.isFailure)
     }
 
     @Test fun `the reservation is derived from clip and metadata bounds, not supplied`() {
-        val l = AllowanceLimits(Ceilings(4, 1_000_000), maxClipBytes = 500_000, maxMetadataBytes = 4_096)
+        val l = AllowanceLimits(4, 1_000_000, maxClipBytes = 500_000, maxMetadataBytes = 4_096, ceilings = Ceilings(4, 1_000_000, 1_000_000L, 8_192))
         assertEquals("WAV header is included in the clip bound by contract", 504_096L, l.wavesReservationBytes())
         assertTrue("a reservation of 1 byte is not expressible", l.wavesReservationBytes() > 1)
     }

@@ -21,7 +21,7 @@ class AllowanceBarrierTest {
 
     private val account = "a@example.com"
     private val window = AllowanceWindow.Established("window-1")
-    private val limits = AllowanceLimits(Ceilings(10, 1_000_000), maxClipBytes = 100_000, maxMetadataBytes = 1_024)
+    private val limits = AllowanceLimits(10, 1_000_000, maxClipBytes = 100_000, maxMetadataBytes = 1_024, ceilings = Ceilings(10, 1_000_000, 1_000_000L, 8_192))
 
     /** The accounting root may not exist yet, which is a first-run condition, not a test artifact. */
     private fun area(): File = File(tmp.root, "collection-usage")
@@ -90,12 +90,29 @@ class AllowanceBarrierTest {
 
         // Reopening must confirm the ledger durably BEFORE claiming settlement, and never mint a token
         // for the previous process's charge.
-        val reopened = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly, observer)
+        val phases = mutableListOf<AllowanceWrite>()
+        val recording = object : (AllowanceWrite) -> Unit {
+            override fun invoke(phase: AllowanceWrite) {
+                phases += phase
+            }
+        }
+        val reopened = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly, recording)
         val owner = CaptureAllowanceOwner(area(), account, limits, window, AllowanceProvisioning.TestOnly)
         assertNull("recovery must not mint a token for the previous charge", owner.takeToken())
-        reopened.reconcileForTest()
+        // The recovery must actually SUCCEED: a mutation that refuses everything must fail here.
+        assertTrue("recovery must settle the visible target", reopened.reconcileForTest())
         val after = artifacts()
-        assertTrue("the visible charge must survive recovery, not be discarded", after.values.any { it.contains("\"chargedRecords\":\"1\"") })
+        assertTrue("the charge must survive recovery, not be discarded", after.values.any { it.contains("\"chargedRecords\":\"1\"") })
+        val intent = after.entries.first { it.key == "intent.json" }.value
+        assertTrue("the intent must END SETTLED, not left pending", intent.contains("\"state\":\"SETTLED\""))
+        assertTrue("the settled intent must carry the exact pre counters", intent.contains("\"preRecords\":\"0\"") && intent.contains("\"preBytes\":\"0\""))
+        assertTrue("and the exact target counters", intent.contains("\"targetRecords\":\"1\"") && intent.contains("\"targetBytes\":\"101024\""))
+        // The ledger must be made durable BEFORE the intent may claim so.
+        val ledgerPhase = phases.indexOf(AllowanceWrite.RECOVERY_LEDGER)
+        val settlePhase = phases.indexOf(AllowanceWrite.RECOVERY_INTENT_SETTLED)
+        assertTrue("recovery must write the ledger first: $phases", ledgerPhase >= 0)
+        assertTrue("recovery must settle the intent second: $phases", settlePhase >= 0)
+        assertTrue("RECOVERY_LEDGER must precede RECOVERY_INTENT_SETTLED: $phases", ledgerPhase < settlePhase)
         assertNull("and still no token is minted by recovery", owner.takeToken())
     }
 
@@ -150,16 +167,28 @@ class AllowanceBarrierTest {
         assertTrue(warm.chargeForCapture())
         order.clear()
         assertTrue(warm.chargeForCapture())
+        // The EXACT interleaving, not just relative ordering: each hook must be the immediate
+        // successor of the sync it names, so moving both after all syncs cannot pass.
         val entryBarrier = order.indexOf("barrier:${AllowanceBarrier.EntrySynced}")
         val parentBarrier = order.indexOf("barrier:${AllowanceBarrier.ParentSynced}")
-        val firstSync = order.indexOfFirst { it.startsWith("sync:") }
-        assertTrue("EntrySynced must be observed", entryBarrier >= 0)
-        assertTrue("ParentSynced must be observed", parentBarrier >= 0)
+        assertTrue("EntrySynced must be observed: $order", entryBarrier >= 0)
+        assertTrue("ParentSynced must be observed: $order", parentBarrier >= 0)
         assertTrue(
-            "EntrySynced must fire AFTER the first sync it names, not before it: $order",
-            entryBarrier > firstSync,
+            "EntrySynced must IMMEDIATELY follow the entry sync: $order",
+            entryBarrier >= 1 && order[entryBarrier - 1].startsWith("sync:"),
         )
-        assertTrue("ParentSynced must fire after EntrySynced: $order", parentBarrier > entryBarrier)
+        assertTrue(
+            "ParentSynced must IMMEDIATELY follow the parent sync: $order",
+            parentBarrier >= 1 && order[parentBarrier - 1].startsWith("sync:"),
+        )
+        assertTrue("ParentSynced must come after EntrySynced: $order", parentBarrier > entryBarrier)
+        // And exactly one sync separates them: the entry's own sync precedes EntrySynced, the parent's
+        // precedes ParentSynced, so there is no "all syncs then all hooks" ordering.
+        assertEquals(
+            "exactly one sync must sit between the two hooks: $order",
+            1,
+            order.subList(entryBarrier + 1, parentBarrier).count { it.startsWith("sync:") },
+        )
     }
 
     @Test fun `a failed barrier leaves no half-published temporary artifact`() {
@@ -188,9 +217,12 @@ class AllowanceBarrierTest {
         assertFalse("no charge may be admitted from an unsettled target", reopened.chargeForCapture())
     }
 
-    /** A CONSTRUCTED pre-charge state: documents are edited directly, no runtime interruption occurs. */
+    /**
+     * A CONSTRUCTED pre-charge state: documents are edited directly, so NO runtime interruption is
+     * exercised here. It asserts only that recovery refuses without rewriting the constructed state.
+     */
     @Test fun `an interruption before the ledger write is refused without rewriting the history`() {
-        // A real interruption at CHARGE_LEDGER: the intent is durable and PENDING, the ledger unchanged.
+        // Constructed, not executed: the PENDING intent and unchanged ledger are written by hand.
         var failLedgerWrite = false
         val barrier = object : (AllowanceBarrier) -> Unit {
             override fun invoke(step: AllowanceBarrier) {

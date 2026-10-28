@@ -11,37 +11,43 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
  * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE (reviewer 82cdd583 #5, 8b5fc0c9 #4, f64bd7ad #2,
  * spec dc4c1105). Two KINDS of number are separately supplied and must not be confused:
  *
- *  - [Ceilings] are the resource-limit paragraph's independent upper bounds on this client: how much
- *    a day may ever admit. They are supplied by policy and cannot be derived from anything here.
- *  - The clip and metadata bounds describe ONE record's shape. They are validated AGAINST the
- *    ceilings, so a limit set that could not admit a single record cannot be constructed.
+ *  - [Ceilings] are the resource-limit paragraph's independent upper bounds on this client: the most
+ *    a day may ever admit, and the largest clip and metadata envelope policy permits. They are
+ *    supplied by policy and cannot be derived from anything here.
+ *  - The SELECTED values describe this installation's operational limits. Each of the four must be
+ *    A POLICY VALUE VALIDATED AGAINST ITS OWN CEILING - a daily byte total that merely fits one clip
+ *    is not a maximum clip size, so the two kinds of number are checked pairwise.
  *
  * This type performs no defaulting - no constants, no copy-defaults, no "reasonable" fallback - so a
  * caller without real ceilings cannot construct limits, and [ProductionLimits] stays unavailable.
  */
 data class AllowanceLimits(
-    /** Independent upper bounds supplied by policy; never derived from the clip/metadata bounds. */
-    val ceilings: Ceilings,
-    /** Maximum encoded WAV clip size INCLUDING its 44-byte header (`max_clip_bytes`). */
+    /** SELECTED ceiling on captures charged per accounting window. */
+    val maxDailyRecords: Int,
+    /** SELECTED ceiling on charged bytes per accounting window. */
+    val maxDailyBytes: Long,
+    /** SELECTED maximum encoded WAV clip size INCLUDING its 44-byte header. */
     val maxClipBytes: Long,
-    /** Complete canonical record/digest envelope bound (`max_metadata_bytes`). */
+    /** SELECTED complete canonical record/digest envelope bound. */
     val maxMetadataBytes: Int,
+    /** Independent policy upper bounds; each selected value must not exceed its counterpart. */
+    val ceilings: Ceilings,
 ) {
-    /** Ceiling on captures charged per accounting window. */
-    val maxDailyRecords: Int get() = ceilings.maxDailyRecords
-
-    /** Ceiling on charged bytes per accounting window. */
-    val maxDailyBytes: Long get() = ceilings.maxDailyBytes
 
     private val reservation: Long = checkedReservation(maxClipBytes, maxMetadataBytes)
 
     init {
+        require(maxDailyRecords >= 1) { "max_daily_records must be positive" }
         require(maxMetadataBytes >= 1) { "max_metadata_bytes must be positive" }
         require(maxClipBytes > WAV_HEADER_BYTES) { "max_clip_bytes must exceed the WAV header" }
-        // Selected per-record bounds must fit INSIDE the independent ceilings, so an inadmissible
-        // combination is unconstructible rather than failing at the first capture.
+        // Each SELECTED value is validated against ITS OWN ceiling. Checking only that a day fits one
+        // reservation would let an over-policy clip or metadata bound through.
+        require(maxDailyRecords <= ceilings.maxDailyRecords) { "max_daily_records exceeds its ceiling" }
+        require(maxDailyBytes <= ceilings.maxDailyBytes) { "max_daily_bytes exceeds its ceiling" }
+        require(maxClipBytes <= ceilings.maxClipBytes) { "max_clip_bytes exceeds its ceiling" }
+        require(maxMetadataBytes <= ceilings.maxMetadataBytes) { "max_metadata_bytes exceeds its ceiling" }
+        // Structural checks still apply in addition to the policy ones.
         require(maxDailyBytes >= reservation) { "max_daily_bytes must admit one reservation" }
-        require(ceilings.maxDailyRecords >= 1) { "ceilings must admit one record" }
     }
 
     /** One record's FULL reservation: max encoded WAV including its header + metadata bound. */
@@ -56,7 +62,7 @@ data class AllowanceLimits(
     }
 
     /** Identity of the limits a charge was made against; a change retires a prepaid handoff. */
-    fun binding(): String = "${ceilings.binding()}/$maxClipBytes/$maxMetadataBytes"
+    fun binding(): String = "$maxDailyRecords/$maxDailyBytes/$maxClipBytes/$maxMetadataBytes"
 
     companion object {
         /** RIFF header + fmt + data chunk headers: the fixed part of the encoded clip. */
@@ -82,13 +88,19 @@ data class Ceilings(
     val maxDailyRecords: Int,
     /** Upper bound on charged bytes per accounting window. */
     val maxDailyBytes: Long,
+    /** Upper bound on the selected maximum encoded clip size. */
+    val maxClipBytes: Long,
+    /** Upper bound on the selected canonical metadata envelope bound. */
+    val maxMetadataBytes: Int,
 ) {
     init {
         require(maxDailyRecords >= 1) { "max_daily_records ceiling must be positive" }
         require(maxDailyBytes >= 1) { "max_daily_bytes ceiling must be positive" }
+        require(maxClipBytes > AllowanceLimits.WAV_HEADER_BYTES) { "max_clip_bytes ceiling must exceed the WAV header" }
+        require(maxMetadataBytes >= 1) { "max_metadata_bytes ceiling must be positive" }
     }
 
-    fun binding(): String = "$maxDailyRecords/$maxDailyBytes"
+    fun binding(): String = "$maxDailyRecords/$maxDailyBytes/$maxClipBytes/$maxMetadataBytes"
 }
 
 /**
@@ -96,13 +108,15 @@ data class Ceilings(
  * ceiling has been selected, so there is no production value to hand out and no default to fall back
  * on. A caller must handle unavailability rather than receiving an invented allowance.
  *
- * [Selected] is not constructible anywhere in this module either: its constructor is private to this
- * file and only [withSuppliedPolicy] - whose only implementation is test-local - can build one.
+ * Nothing in this change constructs [Selected]: no production caller supplies policy values yet, and
+ * the constructor is merely `internal`, so this is an UNAVAILABLE-BY-CONVENTION state rather than a
+ * type-level guarantee. Explicitly: the compiler does not prevent a same-module caller from building
+ * one, and no such caller exists.
  */
 sealed interface ProductionLimits {
     data object Unavailable : ProductionLimits
 
-    /** Only reachable through an explicitly supplied policy; nothing in this change can build one. */
+    /** Represents selected policy values; no caller in this change constructs it. */
     class Selected internal constructor(internal val limits: AllowanceLimits) : ProductionLimits
 }
 

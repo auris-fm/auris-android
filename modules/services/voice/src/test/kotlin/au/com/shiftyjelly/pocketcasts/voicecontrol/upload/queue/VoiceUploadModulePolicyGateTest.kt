@@ -319,9 +319,10 @@ class VoiceUploadModulePolicyGateTest {
             // Release the parked call AFTER the flip and await its attempt's ACTUAL completion (the
             // handler finishing the response), not merely three manual polls, before the settled claims.
             holdRequests!!.countDown()
-            // The parked attempt's TERMINAL outcome under the flip is CANCELLATION: the tail's
-            // revokeAndPurge closes the in-flight call, so the honest completion signal is the entry
-            // leaving the store entirely (attempts -1 = gone, not retried), not a settled 201.
+            // Under the flip the tail's revokeAndPurge cancels the in-flight call: index removal
+            // (attempts -1) proves REVOCATION and the handler finishing proves SERVER completion,
+            // but this control does not observe the client attempt coroutine's own settlement —
+            // that is established later by the required joins plus the slot baseline in cleanup.
             await({ store.stateAttemptsForTest(idA) == -1 }, "A's attempt terminally cancelled and revoked")
             await({ handlerCompleted!!.await(0, java.util.concurrent.TimeUnit.MILLISECONDS) }, "the server handler finished")
 

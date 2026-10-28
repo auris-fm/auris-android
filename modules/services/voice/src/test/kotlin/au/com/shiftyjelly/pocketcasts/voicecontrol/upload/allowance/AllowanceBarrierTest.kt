@@ -4,6 +4,7 @@ import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -20,7 +21,7 @@ class AllowanceBarrierTest {
 
     private val account = "a@example.com"
     private val window = AllowanceWindow.Established("window-1")
-    private val limits = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, maxClipBytes = 100_000, maxMetadataBytes = 1_024)
+    private val limits = AllowanceLimits(Ceilings(10, 1_000_000), maxClipBytes = 100_000, maxMetadataBytes = 1_024)
 
     /** The accounting root may not exist yet, which is a first-run condition, not a test artifact. */
     private fun area(): File = File(tmp.root, "collection-usage")
@@ -56,26 +57,46 @@ class AllowanceBarrierTest {
     }
 
     @Test fun `a renamed-but-unsynced ledger is not treated as a durable charge`() {
-        // Allow initialization to complete, then fail the charge's own rename barrier.
-        var charging = false
+        // The barrier is selected by the NAMED phase of the write it occurs in, so this fails the
+        // CHARGE_LEDGER rename - never an initialization write.
+        var currentPhase: AllowanceWrite? = null
+        var fired = false
+        var targetVisibleWhenFired = false
+        var intentPendingWhenFired = false
         val fail = object : (AllowanceBarrier) -> Unit {
             override fun invoke(step: AllowanceBarrier) {
-                if (charging && step == AllowanceBarrier.Renamed) throw java.io.IOException("injected rename barrier failure")
+                if (currentPhase != AllowanceWrite.CHARGE_LEDGER || step != AllowanceBarrier.Renamed) return
+                // At this instant the target HAS been renamed into place and NOT yet synced.
+                fired = true
+                targetVisibleWhenFired = area().walkTopDown().any {
+                    it.isFile && it.name == "ledger.json" && it.readText().contains("\"chargedRecords\":\"1\"")
+                }
+                intentPendingWhenFired = area().walkTopDown().any {
+                    it.isFile && it.name == "intent.json" && it.readText().contains("\"state\":\"PENDING\"")
+                }
+                throw java.io.IOException("injected CHARGE_LEDGER rename barrier failure")
             }
         }
-        val ledger = ledger(fail)
-        charging = true
+        val observer = object : (AllowanceWrite) -> Unit {
+            override fun invoke(phase: AllowanceWrite) {
+                currentPhase = phase
+            }
+        }
+        val ledger = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly, observer, null, fail)
         assertFalse("a rename without its directory sync is not durable", ledger.chargeForCapture())
+        assertTrue("the CHARGE_LEDGER rename barrier must actually fire", fired)
+        assertTrue("the target ledger must be VISIBLE when the failure fires", targetVisibleWhenFired)
+        assertTrue("the intent must still be PENDING when the failure fires", intentPendingWhenFired)
+
+        // Reopening must confirm the ledger durably BEFORE claiming settlement, and never mint a token
+        // for the previous process's charge.
+        val reopened = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly, observer)
+        val owner = CaptureAllowanceOwner(area(), account, limits, window, AllowanceProvisioning.TestOnly)
+        assertNull("recovery must not mint a token for the previous charge", owner.takeToken())
+        reopened.reconcileForTest()
         val after = artifacts()
-        // Whether the visible ledger advanced or not, a FRESH owner must never read a free allowance
-        // from it: it must either refuse or charge again from the durable state.
-        val fresh = ledger(fail)
-        charging = false
-        val recovered = fresh.chargeForCapture()
-        assertTrue(
-            "a fresh owner must not grant admission from an unsynced rename",
-            !recovered || (artifacts() != after).not() || (fresh.recordsForTest() >= 1),
-        )
+        assertTrue("the visible charge must survive recovery, not be discarded", after.values.any { it.contains("\"chargedRecords\":\"1\"") })
+        assertNull("and still no token is minted by recovery", owner.takeToken())
     }
 
     @Test fun `an initially absent accounting root initializes and charges`() {
@@ -87,20 +108,58 @@ class AllowanceBarrierTest {
         assertTrue(area().isDirectory)
     }
 
-    @Test fun `every ancestor created by the first run is synced`() {
+    @Test fun `every newly created directory and its containing parent is synced`() {
         val synced = mutableListOf<String>()
         val recorder = object : (File) -> Unit {
             override fun invoke(dir: File) {
-                synced += dir.name
+                synced += dir.absolutePath
             }
         }
-        // Three levels deep and initially ABSENT, so mkdirs creates each one here.
-        val deepRoot = File(tmp.root, "a/b/collection-usage")
+        // Each level is ABSENT, so mkdirs creates a, b and collection-usage during the first charge.
+        val a = File(tmp.root, "a")
+        val b = File(a, "b")
+        val deepRoot = File(b, "collection-usage")
         val ledger = CaptureAllowanceLedger(deepRoot, account, limits, window, AllowanceProvisioning.TestOnly, null, recorder)
         assertTrue(ledger.chargeForCapture())
-        assertTrue("the accounting root itself must be synced", synced.contains("collection-usage"))
-        assertTrue("the root's parent created by mkdirs must be synced", synced.contains("b"))
-        assertTrue("deeper created ancestors must be synced too", synced.contains("a"))
+        // ABSOLUTE paths: a name-only check cannot tell tmp/ from a/ and would hide an omitted parent.
+        assertTrue("the accounting root must be synced: $synced", synced.contains(deepRoot.absolutePath))
+        assertTrue("its containing parent b must be synced: $synced", synced.contains(b.absolutePath))
+        assertTrue("its containing parent a must be synced: $synced", synced.contains(a.absolutePath))
+        // The OUTERMOST created directory's containing parent (tmp.root) names `a`; without syncing it
+        // a crash could still lose the whole chain.
+        assertTrue(
+            "the outermost created directory's parent must be synced: $synced",
+            synced.contains(tmp.root.absolutePath),
+        )
+    }
+
+    @Test fun `each named barrier fires immediately after the sync it names`() {
+        val order = mutableListOf<String>()
+        val recorder = object : (File) -> Unit {
+            override fun invoke(dir: File) {
+                order += "sync:${dir.name}"
+            }
+        }
+        val barrier = object : (AllowanceBarrier) -> Unit {
+            override fun invoke(step: AllowanceBarrier) {
+                order += "barrier:$step"
+            }
+        }
+        // Initialization so the directory already exists, then one charge to observe its ordering.
+        val warm = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly, null, recorder, barrier)
+        assertTrue(warm.chargeForCapture())
+        order.clear()
+        assertTrue(warm.chargeForCapture())
+        val entryBarrier = order.indexOf("barrier:${AllowanceBarrier.EntrySynced}")
+        val parentBarrier = order.indexOf("barrier:${AllowanceBarrier.ParentSynced}")
+        val firstSync = order.indexOfFirst { it.startsWith("sync:") }
+        assertTrue("EntrySynced must be observed", entryBarrier >= 0)
+        assertTrue("ParentSynced must be observed", parentBarrier >= 0)
+        assertTrue(
+            "EntrySynced must fire AFTER the first sync it names, not before it: $order",
+            entryBarrier > firstSync,
+        )
+        assertTrue("ParentSynced must fire after EntrySynced: $order", parentBarrier > entryBarrier)
     }
 
     @Test fun `a failed barrier leaves no half-published temporary artifact`() {
@@ -129,6 +188,7 @@ class AllowanceBarrierTest {
         assertFalse("no charge may be admitted from an unsettled target", reopened.chargeForCapture())
     }
 
+    /** A CONSTRUCTED pre-charge state: documents are edited directly, no runtime interruption occurs. */
     @Test fun `an interruption before the ledger write is refused without rewriting the history`() {
         // A real interruption at CHARGE_LEDGER: the intent is durable and PENDING, the ledger unchanged.
         var failLedgerWrite = false

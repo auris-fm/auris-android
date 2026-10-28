@@ -8,30 +8,40 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
  * unused capacity, cancellation, expiry, delivery or queue removal. Retries reuse the capture charge
  * and stay subject to their own body/attempt/age limits.
  *
- * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE (reviewer 82cdd583 #5, 8b5fc0c9 #4, f64bd7ad #2).
- * Every number is a SEPARATELY SUPPLIED, VALIDATED input: the daily record and byte ceilings, the
- * maximum encoded clip and the canonical metadata bound. This type performs no defaulting - it has no
- * companion constants, no copy-defaults and no "reasonable" fallback - so a caller without real
- * ceilings cannot construct limits, and [ProductionLimits] stays unavailable until they are selected.
+ * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE (reviewer 82cdd583 #5, 8b5fc0c9 #4, f64bd7ad #2,
+ * spec dc4c1105). Two KINDS of number are separately supplied and must not be confused:
+ *
+ *  - [Ceilings] are the resource-limit paragraph's independent upper bounds on this client: how much
+ *    a day may ever admit. They are supplied by policy and cannot be derived from anything here.
+ *  - The clip and metadata bounds describe ONE record's shape. They are validated AGAINST the
+ *    ceilings, so a limit set that could not admit a single record cannot be constructed.
+ *
+ * This type performs no defaulting - no constants, no copy-defaults, no "reasonable" fallback - so a
+ * caller without real ceilings cannot construct limits, and [ProductionLimits] stays unavailable.
  */
 data class AllowanceLimits(
-    /** Ceiling on captures charged per accounting window. Supplied, never defaulted. */
-    val maxDailyRecords: Int,
-    /** Ceiling on charged bytes per accounting window. Supplied, never defaulted. */
-    val maxDailyBytes: Long,
+    /** Independent upper bounds supplied by policy; never derived from the clip/metadata bounds. */
+    val ceilings: Ceilings,
     /** Maximum encoded WAV clip size INCLUDING its 44-byte header (`max_clip_bytes`). */
     val maxClipBytes: Long,
     /** Complete canonical record/digest envelope bound (`max_metadata_bytes`). */
     val maxMetadataBytes: Int,
 ) {
+    /** Ceiling on captures charged per accounting window. */
+    val maxDailyRecords: Int get() = ceilings.maxDailyRecords
+
+    /** Ceiling on charged bytes per accounting window. */
+    val maxDailyBytes: Long get() = ceilings.maxDailyBytes
+
     private val reservation: Long = checkedReservation(maxClipBytes, maxMetadataBytes)
 
     init {
-        require(maxDailyRecords >= 1) { "max_daily_records must be positive" }
         require(maxMetadataBytes >= 1) { "max_metadata_bytes must be positive" }
         require(maxClipBytes > WAV_HEADER_BYTES) { "max_clip_bytes must exceed the WAV header" }
-        // An inadmissible ceiling cannot express a single capture, so it must not be constructible.
+        // Selected per-record bounds must fit INSIDE the independent ceilings, so an inadmissible
+        // combination is unconstructible rather than failing at the first capture.
         require(maxDailyBytes >= reservation) { "max_daily_bytes must admit one reservation" }
+        require(ceilings.maxDailyRecords >= 1) { "ceilings must admit one record" }
     }
 
     /** One record's FULL reservation: max encoded WAV including its header + metadata bound. */
@@ -46,7 +56,7 @@ data class AllowanceLimits(
     }
 
     /** Identity of the limits a charge was made against; a change retires a prepaid handoff. */
-    fun binding(): String = "$maxDailyRecords/$maxDailyBytes/$maxClipBytes/$maxMetadataBytes"
+    fun binding(): String = "${ceilings.binding()}/$maxClipBytes/$maxMetadataBytes"
 
     companion object {
         /** RIFF header + fmt + data chunk headers: the fixed part of the encoded clip. */
@@ -61,14 +71,38 @@ data class AllowanceLimits(
 }
 
 /**
+ * The independent resource-limit ceilings for one contributor account (spec dc4c1105).
+ *
+ * These are policy inputs: an upper bound on how many captures and how many bytes a day may admit.
+ * They are NOT derivable from the clip or metadata bounds, so they must be supplied explicitly and
+ * are validated only for internal consistency. No production value exists in this change.
+ */
+data class Ceilings(
+    /** Upper bound on captures charged per accounting window. */
+    val maxDailyRecords: Int,
+    /** Upper bound on charged bytes per accounting window. */
+    val maxDailyBytes: Long,
+) {
+    init {
+        require(maxDailyRecords >= 1) { "max_daily_records ceiling must be positive" }
+        require(maxDailyBytes >= 1) { "max_daily_bytes ceiling must be positive" }
+    }
+
+    fun binding(): String = "$maxDailyRecords/$maxDailyBytes"
+}
+
+/**
  * Where production limits would come from. UNAVAILABLE by construction in this change: no daily
  * ceiling has been selected, so there is no production value to hand out and no default to fall back
  * on. A caller must handle unavailability rather than receiving an invented allowance.
+ *
+ * [Selected] is not constructible anywhere in this module either: its constructor is private to this
+ * file and only [withSuppliedPolicy] - whose only implementation is test-local - can build one.
  */
 sealed interface ProductionLimits {
     data object Unavailable : ProductionLimits
 
-    /** Only constructible once real ceilings are selected; nothing in this change can build it. */
+    /** Only reachable through an explicitly supplied policy; nothing in this change can build one. */
     class Selected internal constructor(internal val limits: AllowanceLimits) : ProductionLimits
 }
 

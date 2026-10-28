@@ -54,7 +54,7 @@ class CaptureAllowanceLedgerTest {
     /** Tests opt in to first provisioning explicitly; production has no such authority. */
     private fun ledger(dir: File = area(), win: AllowanceWindow = noWindow) = CaptureAllowanceLedger(dir, account, limits(), win, provisioning = AllowanceProvisioning.TestOnly)
 
-    private fun limits() = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024)
+    private fun limits() = AllowanceLimits(Ceilings(10, 1_000_000), maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024)
 
     @Test fun `refuses when window authority is unestablished and charges nothing`() {
         val l = ledger(win = noWindow)
@@ -71,18 +71,34 @@ class CaptureAllowanceLedgerTest {
     }
 
     @Test fun `invalid limits cannot be constructed and therefore never charge`() {
-        val refused = runCatching { AllowanceLimits(maxDailyRecords = 0, maxDailyBytes = 1_000, maxClipBytes = 10 - 1024, maxMetadataBytes = 1024) }
+        val refused = runCatching { AllowanceLimits(Ceilings(0, 1_000), maxClipBytes = 10 - 1024, maxMetadataBytes = 1024) }
         assertTrue("an invalid limit must be rejected outright", refused.isFailure)
         assertFalse("nothing may be written for limits that never existed", area().walkTopDown().any { it.isFile })
+    }
+
+    @Test fun `selected bounds are validated against the independent ceilings`() {
+        // The ceilings are the policy upper bound; the clip/metadata bounds must fit inside them.
+        assertTrue(
+            "a ceiling below one reservation must be rejected",
+            runCatching { AllowanceLimits(Ceilings(10, 50_000), maxClipBytes = 100_000, maxMetadataBytes = 1_024) }.isFailure,
+        )
+        assertTrue(
+            "a record ceiling of zero must be rejected",
+            runCatching { Ceilings(0, 1_000_000) }.isFailure,
+        )
+        // Ceilings are independent inputs, not derived from the clip bound.
+        val tight = AllowanceLimits(Ceilings(1, 101_024), maxClipBytes = 100_000, maxMetadataBytes = 1_024)
+        assertTrue(tight.admits(0, 0))
+        assertFalse("one record only", tight.admits(1, 0))
     }
 
     @Test fun `admission arithmetic cannot wrap at the byte ceiling`() {
         // A clip bound whose reservation cannot be represented must not be constructible at all.
         assertTrue(
             "a reservation that overflows Long must be rejected, not wrapped",
-            runCatching { AllowanceLimits(10, Long.MAX_VALUE, maxClipBytes = Long.MAX_VALUE - 1, maxMetadataBytes = 2_000) }.isFailure,
+            runCatching { AllowanceLimits(Ceilings(10, Long.MAX_VALUE), maxClipBytes = Long.MAX_VALUE - 1, maxMetadataBytes = 2_000) }.isFailure,
         )
-        val huge = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = Long.MAX_VALUE, maxClipBytes = Long.MAX_VALUE - 1_000, maxMetadataBytes = 500)
+        val huge = AllowanceLimits(Ceilings(10, Long.MAX_VALUE), maxClipBytes = Long.MAX_VALUE - 1_000, maxMetadataBytes = 500)
         assertFalse("a wrapping reservation must not admit", huge.admits(chargedRecords = 1, chargedBytes = Long.MAX_VALUE - 500))
         assertFalse("a negative total must not admit", huge.admits(chargedRecords = 0, chargedBytes = -1))
         assertTrue("a reservation that genuinely fits is still admitted", huge.admits(0, 0))
@@ -90,7 +106,7 @@ class CaptureAllowanceLedgerTest {
 
     @Test fun `a daily ceiling smaller than one reservation cannot be constructed`() {
         val refused = runCatching {
-            AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000, maxClipBytes = 2_000, maxMetadataBytes = 1_024)
+            AllowanceLimits(Ceilings(10, 1_000), maxClipBytes = 2_000, maxMetadataBytes = 1_024)
         }
         assertTrue("a ceiling that admits no capture must be rejected", refused.isFailure)
     }
@@ -122,14 +138,14 @@ class CaptureAllowanceLedgerTest {
     }
 
     @Test fun `exhausted records refuse while keeping the existing charge`() {
-        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(1, 1_000_000, maxClipBytes = 10_000 - 1024, maxMetadataBytes = 1024), window, provisioning = AllowanceProvisioning.TestOnly)
+        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(Ceilings(1, 1_000_000), maxClipBytes = 10_000 - 1024, maxMetadataBytes = 1024), window, provisioning = AllowanceProvisioning.TestOnly)
         assertTrue(l.chargeForCapture())
         assertFalse(l.chargeForCapture())
         assertEquals(1, l.snapshotRecordCount())
     }
 
     @Test fun `exhausted bytes refuse while keeping the existing charge`() {
-        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(10, 150_000, maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024), window, provisioning = AllowanceProvisioning.TestOnly)
+        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(Ceilings(10, 150_000), maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024), window, provisioning = AllowanceProvisioning.TestOnly)
         assertTrue(l.chargeForCapture())
         assertFalse(l.chargeForCapture())
         assertEquals(1, l.snapshotRecordCount())

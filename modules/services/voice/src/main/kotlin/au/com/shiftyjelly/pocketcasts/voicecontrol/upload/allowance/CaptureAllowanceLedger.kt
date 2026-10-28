@@ -55,8 +55,13 @@ class CaptureAllowanceLedger(
     /** Each account owns its own area: one account can never read, share or overwrite another's. */
     private val area: File = File(root, digest(DOMAIN_AREA, account).take(AREA_KEY_CHARS))
 
-    /** Ancestors created by this instance, so every one of them gets its own directory sync. */
-    private val createdAncestors = mutableListOf<File>()
+    /**
+     * Every directory whose ENTRY was created by this instance, i.e. each created directory AND the
+     * parent that contains it. For a fresh `.../a/b/collection-usage` that is `collection-usage`, `b`,
+     * `a` and `a`'s containing parent: without the last one, a crash can lose the whole chain even
+     * though each inner directory was itself synced.
+     */
+    private val createdEntries = mutableListOf<File>()
 
     private val genesisFile = File(area, GENESIS_FILE)
     private val ledgerFile = File(area, LEDGER_FILE)
@@ -393,7 +398,7 @@ class CaptureAllowanceLedger(
         if (!area.isDirectory && !area.mkdirs() && !area.isDirectory) return false
         noteCreatedAncestors()
         if (!lockFile.isFile && !lockFile.createNewFile() && !lockFile.isFile) return false
-        return syncEntryAndParent(area, createdAncestors.toList())
+        return syncEntryAndParent(area, createdEntries.toList())
     }
 
     /**
@@ -404,11 +409,11 @@ class CaptureAllowanceLedger(
     private fun syncEntryAndParent(target: File, created: List<File> = emptyList()): Boolean = try {
         val sync = directorySync ?: ::syncDirectoryOrThrow
         sync(target)
+        // Each barrier runs IMMEDIATELY after the sync it names, so a failure exercises that ordering.
+        writeBarrier?.invoke(AllowanceBarrier.EntrySynced)
         target.parentFile?.let { sync(it) }
+        writeBarrier?.invoke(AllowanceBarrier.ParentSynced)
         created.forEach { sync(it) }
-        for (step in listOf(AllowanceBarrier.EntrySynced, AllowanceBarrier.ParentSynced)) {
-            writeBarrier?.invoke(step)
-        }
         true
     } catch (failure: java.io.IOException) {
         false
@@ -459,19 +464,38 @@ class CaptureAllowanceLedger(
         false
     }
 
-    /** Ancestors that did not exist before this operation created them. */
+    /**
+     * Records EVERY directory this instance created, plus the parent entry of the outermost one.
+     * The path is derived structurally from [area], so no directory listing (which may not exist yet)
+     * is needed: each component of the chain is recorded, and the chain's containing parent with it.
+     */
     private fun noteCreatedAncestors(): List<File> {
-        var current: File? = area.parentFile
+        // The chain from the area up to (excluding) the outermost existing directory, outermost first.
+        val chain = ArrayDeque<File>()
+        var current: File? = area
         while (current != null && !current.exists()) {
-            val candidate = current
-            if (createdAncestors.none { it.absolutePath == candidate.absolutePath }) createdAncestors += candidate
-            current = candidate.parentFile
+            chain.addFirst(current)
+            current = current.parentFile
         }
-        return createdAncestors.toList()
+        // `current` is now the first EXISTING ancestor: its own entry names the outermost created dir.
+        if (chain.isEmpty()) {
+            // Nothing new was created, so only the area and its parent are ever synced.
+            addEntry(area)
+            area.parentFile?.let { addEntry(it) }
+            return createdEntries.toList()
+        }
+        current?.let { addEntry(it) }
+        chain.forEach { addEntry(it) }
+        return createdEntries.toList()
     }
 
-    /** Every ancestor this instance created, in discovery order. */
-    internal fun createdAncestorsForTest(): List<File> = createdAncestors.toList()
+    private fun addEntry(dir: File?) {
+        if (dir == null) return
+        if (createdEntries.none { it.absolutePath == dir.absolutePath }) createdEntries += dir
+    }
+
+    /** Every directory entry this instance created, in discovery order. */
+    internal fun createdEntriesForTest(): List<File> = createdEntries.toList()
 
     /**
      * Bounded read: the byte count READ is capped at MAX_BYTES + 1, so an oversized document costs a

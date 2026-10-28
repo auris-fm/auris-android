@@ -324,12 +324,15 @@ class VoiceUploadModulePolicyGateTest {
             await({ store.stateAttemptsForTest(idA) == -1 }, "A's attempt terminally cancelled and revoked")
             await({ handlerCompleted!!.await(0, java.util.concurrent.TimeUnit.MILLISECONDS) }, "the server handler finished")
             val attemptsAfterSettle = store.stateAttemptsForTest(idA)
-            repeat(3) { org.junit.Assert.assertEquals("the closed gate admits nothing", 0, assembly.poll().attempted) }
             assertEquals("no retransmission of A after settle", attemptsAfterSettle, store.stateAttemptsForTest(idA))
 
-            // GUARD 2 (the GATE READ): an entry prepared AFTER the flip is never admitted.
+            // GUARD 2 (the GATE READ): an entry prepared AFTER the flip is never admitted. The gate
+            // read lives in the assembly, so the same poll the loop runs is driven DIRECTLY here,
+            // deterministically (the module cadence is 60s and would never poll within the test).
             val idC = UUID.randomUUID().toString()
             prepareCapture(store, idC)
+            assertTrue("C is queued", store.readyEntries().any { it.captureId == idC })
+            repeat(3) { org.junit.Assert.assertEquals("the closed gate admits nothing", 0, assembly.poll().attempted) }
 
             assertEquals("nothing further may arrive after the disable", 1, requests.get())
             assertTrue("C stays owned by the queue", store.readyEntries().any { it.captureId == idC })

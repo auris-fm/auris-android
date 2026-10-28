@@ -212,6 +212,9 @@ class VoiceSharingSettingsViewModel(
 
     /** Opens the destructive-confirmation dialog, bound to the CURRENT session. */
     fun requestDelete() {
+        // ACTION BOUNDARY: adopt the session FIRST, so a controller emission triggered by the
+        // queued action cannot retire the new session's own state (reviewer 278e595f).
+        presentedSession = ownerSession()
         deleteConfirmationOpen = true
         confirmationSession = ownerSession()
         mutableState.value = render()
@@ -240,6 +243,7 @@ class VoiceSharingSettingsViewModel(
     }
 
     private fun startDeletion() {
+        presentedSession = ownerSession()
         deletionFailed = false
         deletionReceiptPending = false
         deletionRequested = true

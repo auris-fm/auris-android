@@ -905,6 +905,46 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue(vm.state.value.enrolled)
     }
 
+    @Test
+    fun `a confirmation opened under the new session before the collector runs survives the retire`() = runTest(mainDispatcher) {
+        var session = 1L
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            policy = policy,
+            taggedProjection = taggedProjection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { session },
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        // A→B switch (no emission yet), THEN B opens a confirmation before the queued
+        // collector runs. The collector's retire must adopt B, not close B's dialog.
+        session = 2L
+        vm.requestDelete()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue(
+            "B's own confirmation must survive the queued retire",
+            vm.state.value.deleteConfirmationOpen,
+        )
+
+        // Same ordering for the deletion-in-flight state after confirmation.
+        vm.confirmDelete()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue(
+            "B's deletion request must survive the queued retire",
+            vm.state.value.deletionRequested,
+        )
+    }
+
     // --- Reviewer b7ad7c92: a retired tap must have NO presentation effects on a newer action.
 
     @Test

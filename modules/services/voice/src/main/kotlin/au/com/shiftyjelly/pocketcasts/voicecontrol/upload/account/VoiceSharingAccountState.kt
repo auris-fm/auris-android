@@ -76,9 +76,12 @@ class VoiceSharingAccountState {
     fun sessionStarted(sessionGeneration: Long = Long.MIN_VALUE): SessionToken = synchronized(fence) {
         operationGeneration.incrementAndGet() // outstanding tickets die with the old session
         state.value = null
+        // The NULL projection published for the new session must already carry the NEW session's
+        // generation, so the tag identifies the authoritative session even while empty
+        // (reviewer 278e595f).
+        currentSessionGeneration = sessionGeneration
         publish(null)
         notifyProjection(null, sessionGeneration)
-        currentSessionGeneration = sessionGeneration
         SessionToken().also { currentToken = it }
     }
 

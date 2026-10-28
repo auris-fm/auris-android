@@ -458,7 +458,7 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.pending,
         )
         assertEquals("no stale pending label either", PendingOperation.NONE, vm.state.value.pendingOperation)
-        assertTrue("the setting must be usable on account B", vm.state.value.settingAvailable || true)
+        assertTrue("the setting must remain available on account B", vm.state.value.settingAvailable)
     }
 
     // --- Reviewer 66ae7752: a queued tap from a dead session must never issue against the NEW account.

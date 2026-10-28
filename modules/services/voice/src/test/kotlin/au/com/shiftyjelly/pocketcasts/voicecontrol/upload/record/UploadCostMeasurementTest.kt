@@ -111,23 +111,27 @@ class UploadCostMeasurementTest {
 
         val server = okhttp3.mockwebserver.MockWebServer()
         server.start()
-        server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(201).setBody("{}"))
-        val transport = ContributionUploadTransport(
-            endpoint = server.url("/api/v1/voice/contributions").toString(),
-            authorization = { "Bearer receipt-token" },
-        )
-        val sha = java.security.MessageDigest.getInstance("SHA-256").digest(wav.readBytes()).joinToString("") { "%02x".format(it) }
-        val owned = OwnedAudio(java.io.FileInputStream(wav), wav.length(), sha)
-        val uploadResult = owned.use { kotlinx.coroutines.runBlocking { transport.upload(id, record, it) } }
-        assertTrue("PREMISE: the measured upload is accepted", uploadResult is ContributionUploadTransport.Response.Accepted)
+        // Shutdown in finally: an assertion failure must also release the socket (reviewer note).
+        try {
+            server.enqueue(okhttp3.mockwebserver.MockResponse().setResponseCode(201).setBody("{}"))
+            val transport = ContributionUploadTransport(
+                endpoint = server.url("/api/v1/voice/contributions").toString(),
+                authorization = { "Bearer receipt-token" },
+            )
+            val sha = java.security.MessageDigest.getInstance("SHA-256").digest(wav.readBytes()).joinToString("") { "%02x".format(it) }
+            val owned = OwnedAudio(java.io.FileInputStream(wav), wav.length(), sha)
+            val uploadResult = owned.use { kotlinx.coroutines.runBlocking { transport.upload(id, record, it) } }
+            assertTrue("PREMISE: the measured upload is accepted", uploadResult is ContributionUploadTransport.Response.Accepted)
 
-        val recorded = server.takeRequest()
-        val body = recorded.body.readByteArray()
-        val overhead = body.size - wavBytes
-        // REPORT (asserted ceiling: envelope+metadata must stay under 16 KiB over the audio):
-        println("B10-TRANSFER: wav_bytes=$wavBytes record_json_bytes=$recordBytes multipart_body_bytes=${body.size} envelope_overhead_bytes=$overhead")
-        assertTrue("envelope overhead must stay under 16 KiB (measured $overhead)", overhead < 16 * 1024)
-        server.shutdown()
+            val recorded = server.takeRequest()
+            val body = recorded.body.readByteArray()
+            val overhead = body.size - wavBytes
+            // REPORT (asserted ceiling: envelope+metadata must stay under 16 KiB over the audio):
+            println("B10-TRANSFER: wav_bytes=$wavBytes record_json_bytes=$recordBytes multipart_body_bytes=${body.size} envelope_overhead_bytes=$overhead")
+            assertTrue("envelope overhead must stay under 16 KiB (measured $overhead)", overhead < 16 * 1024)
+        } finally {
+            server.shutdown()
+        }
     }
 
     // --- Storage cost: the durable per-segment footprint the store retains. ---

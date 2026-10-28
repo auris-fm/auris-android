@@ -23,6 +23,26 @@ class CaptureAllowanceLedgerTest {
     private val account = "a@example.com"
     private val other = "b@example.com"
 
+    @Test fun `an empty area is not permission to create accounting without provisioning authority`() {
+        val l = CaptureAllowanceLedger(area(), account, limits(), window, AllowanceProvisioning.Unavailable)
+        assertFalse("no trusted first-provisioning authority exists in production", l.chargeForCapture())
+        assertTrue(l.isClosed())
+        assertFalse(
+            "no accounting artifact may be created without authority",
+            area().walkTopDown().any { it.isFile && it.name !in setOf("usage.lock") },
+        )
+    }
+
+    @Test fun `total loss of the ledger and its claim refuses instead of re-provisioning`() {
+        assertTrue(ledger(win = window).chargeForCapture())
+        // Wipe the ENTIRE area: usage counters, genesis and the lock artifact all disappear, which is
+        // indistinguishable from a machine that was never provisioned.
+        area().walkTopDown().filter { it.isFile }.toList().forEach { it.delete() }
+        val reopened = CaptureAllowanceLedger(area(), account, limits(), window, AllowanceProvisioning.Unavailable)
+        assertFalse("a wiped area must not re-derive zero usage", reopened.chargeForCapture())
+        assertTrue(reopened.isClosed())
+    }
+
     // Production has NO established accounting window, so no charge may ever be authorized.
     private val noWindow: AllowanceWindow = AllowanceWindow.Unestablished
     private val window = AllowanceWindow.Established("window-1")
@@ -31,7 +51,8 @@ class CaptureAllowanceLedgerTest {
 
     private fun area(): File = File(tmp.root, "collection-usage").also { it.mkdirs() }
 
-    private fun ledger(dir: File = area(), win: AllowanceWindow = noWindow) = CaptureAllowanceLedger(dir, account, limits(), win)
+    /** Tests opt in to first provisioning explicitly; production has no such authority. */
+    private fun ledger(dir: File = area(), win: AllowanceWindow = noWindow) = CaptureAllowanceLedger(dir, account, limits(), win, provisioning = AllowanceProvisioning.TestOnly)
 
     private fun limits() = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, reservationBytes = 100_000)
 
@@ -58,7 +79,7 @@ class CaptureAllowanceLedgerTest {
     @Test fun `a reservation larger than the daily byte ceiling refuses before writing`() {
         val l = ledger(win = window)
         assertTrue(l.chargeForCapture())
-        val tooBig = CaptureAllowanceLedger(area(), account, AllowanceLimits(10, 1_000_000, 1_000_001), window)
+        val tooBig = CaptureAllowanceLedger(area(), account, AllowanceLimits(10, 1_000_000, 1_000_001), window, provisioning = AllowanceProvisioning.TestOnly)
         assertFalse(tooBig.chargeForCapture())
         assertEquals("refusal must not consume allowance", 1, l.snapshot().chargedRecords)
     }
@@ -72,7 +93,7 @@ class CaptureAllowanceLedgerTest {
 
     @Test fun `accounts never share usage`() {
         assertTrue(ledger(win = window).chargeForCapture())
-        val otherLedger = CaptureAllowanceLedger(area(), other, limits(), window)
+        val otherLedger = CaptureAllowanceLedger(area(), other, limits(), window, provisioning = AllowanceProvisioning.TestOnly)
         assertEquals(0, otherLedger.snapshot().chargedRecords)
         assertTrue(otherLedger.chargeForCapture())
         assertEquals(1, otherLedger.snapshot().chargedRecords)
@@ -90,14 +111,14 @@ class CaptureAllowanceLedgerTest {
     }
 
     @Test fun `exhausted records refuse while keeping the existing charge`() {
-        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(1, 1_000_000, 10_000), window)
+        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(1, 1_000_000, 10_000), window, provisioning = AllowanceProvisioning.TestOnly)
         assertTrue(l.chargeForCapture())
         assertFalse(l.chargeForCapture())
         assertEquals(1, l.snapshot().chargedRecords)
     }
 
     @Test fun `exhausted bytes refuse while keeping the existing charge`() {
-        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(10, 150_000, 100_000), window)
+        val l = CaptureAllowanceLedger(area(), account, AllowanceLimits(10, 150_000, 100_000), window, provisioning = AllowanceProvisioning.TestOnly)
         assertTrue(l.chargeForCapture())
         assertFalse(l.chargeForCapture())
         assertEquals(1, l.snapshot().chargedRecords)

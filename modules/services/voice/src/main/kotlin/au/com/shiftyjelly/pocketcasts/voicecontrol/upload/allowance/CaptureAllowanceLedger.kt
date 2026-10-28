@@ -32,6 +32,13 @@ class CaptureAllowanceLedger(
     private val limits: AllowanceLimits,
     private val window: AllowanceWindow,
     /**
+     * FIRST-PROVISIONING AUTHORITY (spec 97864780). Ordinary open/recover NEVER creates accounting: an
+     * empty area is indistinguishable from a completely lost ledger, and wiping the directory must not
+     * reset usage. Only an explicit provisioning authority may establish zero usage, production has
+     * none, and tests supply [AllowanceProvisioning.TestOnly].
+     */
+    private val provisioning: AllowanceProvisioning = AllowanceProvisioning.Unavailable,
+    /**
      * Records every durable write's target name, in order. Test-only observation of the write protocol:
      * the intent must be durable before the charge it describes.
      */
@@ -136,7 +143,12 @@ class CaptureAllowanceLedger(
                 }
 
                 LedgerState.Fresh -> {
-                    if (initialize()) {
+                    if (provisioning !is AllowanceProvisioning.TestOnly) {
+                        // No trusted first-provisioning authority: an empty area proves nothing about
+                        // whether accounting existed, so admission stays closed rather than zeroed.
+                        closed = true
+                        false
+                    } else if (initialize()) {
                         chargeUnderLock()
                     } else {
                         closed = true
@@ -316,6 +328,19 @@ enum class AllowanceWrite {
     CHARGE_LEDGER,
     CHARGE_INTENT_SETTLED,
     RECONCILE_INTENT_SETTLED,
+}
+
+/**
+ * Authority to establish a never-before-provisioned ledger.
+ *
+ * Production has NO such authority in this change: the only production value is [Unavailable], so a
+ * first run, a wiped directory and a total ledger loss are all refused identically. Tests may opt in
+ * explicitly with [TestOnly]; nothing in production code path may construct it.
+ */
+sealed interface AllowanceProvisioning {
+    data object Unavailable : AllowanceProvisioning
+
+    data object TestOnly : AllowanceProvisioning
 }
 
 data class AllowanceSnapshot(val chargedRecords: Int, val chargedBytes: Long)

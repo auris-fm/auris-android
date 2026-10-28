@@ -22,8 +22,9 @@ class CaptureAllowanceOwner(
     account: String,
     limits: AllowanceLimits,
     window: AllowanceWindow,
+    provisioning: AllowanceProvisioning = AllowanceProvisioning.Unavailable,
 ) {
-    private val ledger = CaptureAllowanceLedger(area, account, limits, window)
+    private val ledger = CaptureAllowanceLedger(area, account, limits, window, provisioning)
     private val generation: String = "${ledger.bindingAndEqualityForTest()}|${limits.binding()}|${window.binding()}"
 
     private val lock = Any()

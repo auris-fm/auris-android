@@ -23,10 +23,10 @@ class CaptureAllowanceRecoveryTest {
 
     private fun area(): File = File(tmp.root, "collection-usage").also { it.mkdirs() }
 
-    private fun owner() = CaptureAllowanceOwner(area(), account, limits, window)
+    private fun owner() = CaptureAllowanceOwner(area(), account, limits, window, AllowanceProvisioning.TestOnly)
 
     /** Recovery drives the LEDGER's reconciliation; the owner adds the admission half. */
-    private fun ledger() = CaptureAllowanceLedger(area(), account, limits, window)
+    private fun ledger() = CaptureAllowanceLedger(area(), account, limits, window, provisioning = AllowanceProvisioning.TestOnly)
 
     private fun File.artifacts(): List<File> = walkTopDown().filter { it.isFile }.toList()
 
@@ -43,7 +43,7 @@ class CaptureAllowanceRecoveryTest {
 
     @Test fun `the intent is written before the ledger, so a recovered owner always has evidence`() {
         val observer = RecordingAreaObserver()
-        val l = CaptureAllowanceLedger(area(), account, limits, window, observer)
+        val l = CaptureAllowanceLedger(area(), account, limits, window, AllowanceProvisioning.TestOnly, observer)
         assertTrue(l.chargeForCapture())
         // Initialization writes its own AREA (a different account area), so this area's writes are the
         // charge's alone: PENDING intent, then the ledger, then the settled intent.

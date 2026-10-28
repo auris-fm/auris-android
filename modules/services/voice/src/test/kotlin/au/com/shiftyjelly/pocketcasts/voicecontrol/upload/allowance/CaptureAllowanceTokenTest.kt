@@ -26,7 +26,8 @@ class CaptureAllowanceTokenTest {
 
     private fun area(): File = File(tmp.root, "collection-usage").also { it.mkdirs() }
 
-    private fun owner(name: String = account, win: AllowanceWindow = window, l: AllowanceLimits = limits) = CaptureAllowanceOwner(area(), name, l, win)
+    /** Tests opt in to first provisioning explicitly; production has no such authority. */
+    private fun owner(name: String = account, win: AllowanceWindow = window, l: AllowanceLimits = limits) = CaptureAllowanceOwner(area(), name, l, win, AllowanceProvisioning.TestOnly)
 
     @Test fun `no token exists before a prepay completes`() {
         val o = owner()

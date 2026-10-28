@@ -336,28 +336,35 @@ class VoiceUploadModulePolicyGateTest {
             assertEquals("nothing further may arrive after the disable", 1, requests.get())
             assertTrue("C stays owned by the queue", store.readyEntries().any { it.captureId == idC })
         } finally {
-            // Lifecycle completion: unblock the handler first, then stop the server, join the
-            // trigger's scope (a cancelled-but-still-running loop could race the store close),
-            // cancel the provider scope, and only then close the store and remove the root.
+            // Lifecycle completion, in dependency order: unblock the handler, stop the server,
+            // CANCEL the trigger/provider work, then REQUIRE bounded successful joins of each
+            // scope's children - a missed join fails here instead of passing silently - so nothing
+            // can race the store close or the root removal. handlerCompleted stays an observation
+            // of the HANDLER's own completion and is never counted from cleanup.
             holdRequests?.countDown()
-            handlerCompleted?.countDown()
             server?.stop(0)
-            runCatching {
-                kotlinx.coroutines.runBlocking {
-                    kotlinx.coroutines.withTimeoutOrNull(5_000) {
-                        scope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.forEach { it.join() }
-                    }
-                }
-            }
             scope.cancel()
-            runCatching {
-                kotlinx.coroutines.runBlocking {
-                    kotlinx.coroutines.withTimeoutOrNull(2_000) {
-                        providerScope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.forEach { it.join() }
-                    }
-                }
+            val triggerJoined = kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    scope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.forEach { it.join() }
+                    true
+                } ?: false
             }
+            org.junit.Assert.assertTrue("trigger scope children must terminate before cleanup", triggerJoined)
             providerScope.cancel()
+            val providerJoined = kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    providerScope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.forEach { it.join() }
+                    true
+                } ?: false
+            }
+            org.junit.Assert.assertTrue("provider scope children must terminate before cleanup", providerJoined)
+            // The cancelled attempt's borrowed descriptor must be back before the store closes.
+            org.junit.Assert.assertEquals(
+                "no source slots may leak past settlement",
+                slotsBaseline,
+                ContributionStore.processOpenSourceSlotsForTest(),
+            )
             runCatching { store?.close() }
             root?.deleteRecursively()
         }

@@ -130,8 +130,16 @@ class VoiceSharingSettingsViewModel(
         pendingOperation = PendingOperation.ENROLL
         presentationStatus = SettingsOperationStatus.NONE
         val generation = ++actionGeneration
+        // THE SESSION IS CAPTURED AT THE TAP, not when the queued coroutine starts (reviewer
+        // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
+        // never reach the new account's controller.
+        val tappedSession = ownerSession()
         mutableState.value = render()
         scope.launch {
+            if (ownerSession() != tappedSession) {
+                retireTapPresentation()
+                return@launch
+            }
             consume(enrollmentController.enroll(EnrollmentDisclosure.VERSION), FailedOperation.ENROLL, generation)
         }
     }
@@ -142,9 +150,16 @@ class VoiceSharingSettingsViewModel(
         pendingOperation = PendingOperation.WITHDRAW
         presentationStatus = SettingsOperationStatus.NONE
         val generation = ++actionGeneration
+        // Same tap-time session capture as enroll() (reviewer 66ae7752). The LOCAL stop is still
+        // recorded first: stopping collection on the old account is correct the instant of the tap.
+        val tappedSession = ownerSession()
         withdrawalIntent.recordWithdrawalRequested()
         mutableState.value = render()
         scope.launch {
+            if (ownerSession() != tappedSession) {
+                retireTapPresentation()
+                return@launch
+            }
             consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW, generation)
         }
     }
@@ -216,10 +231,20 @@ class VoiceSharingSettingsViewModel(
         }
     }
 
+    /** A retired (dead-session) tap cleans up its own pending presentation without settling. */
+    private fun retireTapPresentation() {
+        pendingOperation = PendingOperation.NONE
+        presentationStatus = SettingsOperationStatus.NONE
+        mutableState.value = render()
+    }
+
     private fun render(status: SettingsOperationStatus = presentationStatus) = VoiceSharingSettingsUiState(
         settingAvailable = policy.value.enabled,
         enrolled = isEnrolled(),
-        pending = enrollmentController.state.value == EnrollmentState.Pending,
+        // Pending is PRESENTATION state, not the shared controller's: the controller keeps the
+        // last operation's Pending state even after it settles as Superseded (its own lifecycle
+        // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
+        pending = pendingOperation != PendingOperation.NONE,
         status = status,
         failedOperation = lastFailedOperation,
         pendingOperation = pendingOperation,

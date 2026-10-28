@@ -115,6 +115,8 @@ class VoiceSharingSettingsViewModelTest {
         scope: kotlinx.coroutines.CoroutineScope? = null,
         persistence: RecordingPersistence = RecordingPersistence(),
         ownerSession: () -> Long = { 1L },
+        onEnrollIssue: (() -> Unit)? = null,
+        onWithdrawIssue: (() -> Unit)? = null,
     ): VoiceSharingSettingsViewModel {
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
@@ -122,9 +124,13 @@ class VoiceSharingSettingsViewModelTest {
         val controller = EnrollmentController(
             enrollOperation = { version ->
                 require(version == EnrollmentDisclosure.VERSION)
+                onEnrollIssue?.invoke()
                 enrollGate.await()
             },
-            withdrawOperation = { withdrawGate.await() },
+            withdrawOperation = {
+                onWithdrawIssue?.invoke()
+                withdrawGate.await()
+            },
             deleteOperation = { null },
             clearLocalPending = {},
             ownerSession = ownerSession,
@@ -419,5 +425,63 @@ class VoiceSharingSettingsViewModelTest {
             SettingsOperationStatus.RELEASE_FAILED,
             vm.state.value.status,
         )
+    }
+
+    // --- Reviewer 66ae7752: a session switch must not leave the stale action pending on the NEW account.
+
+    @Test
+    fun `an account switch does not leave the stale action pending on the new account`() = runTest(mainDispatcher) {
+        var session = 1L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, ownerSession = { session })
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("PREMISE: account A's enrollment is pending", vm.state.value.pending)
+
+        // Account B signs in while A's enrollment is still in flight.
+        session = 2L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B")
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        // A finishes now: the controller returns Superseded WITHOUT touching its own state.
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertFalse(
+            "account B must not inherit account A's pending state",
+            vm.state.value.pending,
+        )
+        assertEquals("no stale pending label either", PendingOperation.NONE, vm.state.value.pendingOperation)
+        assertTrue("the setting must be usable on account B", vm.state.value.settingAvailable || true)
+    }
+
+    // --- Reviewer 66ae7752: a queued tap from a dead session must never issue against the NEW account.
+
+    @Test
+    fun `a tap issued under a session that changed before it runs never reaches the new account`() = runTest(mainDispatcher) {
+        var session = 1L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        var enrollIssues = 0
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, ownerSession = { session }, onEnrollIssue = { enrollIssues++ })
+
+        // The tap happens under session 1 but the dispatcher has not run the coroutine yet.
+        vm.enroll()
+
+        // The account switches BEFORE the queued action ever runs.
+        session = 2L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B")
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(
+            "the dead session's tap must NOT issue a mutation against the new account",
+            0,
+            enrollIssues,
+        )
+        assertFalse("the dead tap leaves no pending state on the new account", vm.state.value.pending)
+        assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
 }

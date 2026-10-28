@@ -131,6 +131,29 @@ class AllowanceDocumentStrictnessTest {
         assertNull(AllowanceDocuments.parseObject("{\"schema\":1}", docs))
     }
 
+    @Test fun `an unknown intent state is damage, not a pending-like state`() {
+        assertTrue(owner().prepareToken())
+        val intentFile = area().walkTopDown().first { it.isFile && it.name == "intent.json" }
+        intentFile.writeText(intentFile.readText().replace("\"state\":\"SETTLED\"", "\"state\":\"BROKEN\""))
+        val before = area().walkTopDown().filter { it.isFile }.associate { it.name to it.readText() }
+        // Through the real admission path, not the parser alone.
+        assertFalse("a BROKEN state must close admission", owner().prepareToken())
+        val after = area().walkTopDown().filter { it.isFile }.associate { it.name to it.readText() }
+        assertEquals("a refusal must preserve every artifact unchanged", before, after)
+        assertTrue("and it stays closed", owner(w = window).let { it.isClosedForTest() })
+    }
+
+    @Test fun `a half-written intent is damage in either endpoint`() {
+        assertTrue(owner().prepareToken())
+        val intentFile = area().walkTopDown().first { it.isFile && it.name == "intent.json" }
+        // A PENDING intent whose target is malformed: an unresolved transition nobody can settle.
+        val broken = intentFile.readText()
+            .replace("\"state\":\"SETTLED\"", "\"state\":\"PENDING\"")
+            .replace("\"targetRecords\":\"1\"", "\"targetRecords\":\"-1\"")
+        intentFile.writeText(broken)
+        assertFalse("both endpoints must be validated", owner().prepareToken())
+    }
+
     @Test fun `an opener bound to a different window cannot read the usage`() {
         assertTrue(owner().prepareToken())
         assertFalse("usage from another window must not be readable", owner(w = otherWindow).prepareToken())

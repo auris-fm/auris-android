@@ -36,8 +36,17 @@ class CaptureAllowanceOwner(
     @Volatile
     internal var onStorageEntered: (() -> Unit)? = null
 
-    /** The admission decision's only lock: field access, never I/O. */
-    private val lock = Any()
+    /** Entered while the decision lock is held, so a control can prove admission does not queue on it. */
+    @Volatile
+    internal var onDecisionLockHeldForTest: (() -> Unit)? = null
+
+    /**
+     * The admission decision's lock. NON-WAITING for admission: [takeToken] and [hasUsableToken] use
+     * `tryLock`, so a capture is never queued behind an in-progress retirement or publication - it is
+     * refused instead, which is what the collector requires. Only [publish] and [retire] wait, and
+     * they hold this monitor for a handful of field writes with no I/O.
+     */
+    private val lock = java.util.concurrent.locks.ReentrantLock()
 
     /** Serializes off-path preparations so at most ONE refill is ever pending. */
     private val preparing = Any()
@@ -67,14 +76,20 @@ class CaptureAllowanceOwner(
      * The admission call. Non-blocking and IO-free: one atomic check-and-take. Null means the capture
      * is refused and nothing was allocated or drained.
      */
-    fun takeToken(): CaptureAllowanceToken? = synchronized(lock) {
-        val token = pending ?: return null
-        if (token.generation != generation || token.limitsBinding != limitsBinding || token.windowBinding != windowBinding) {
+    fun takeToken(): CaptureAllowanceToken? {
+        // tryLock: never waits. A capture that arrives during a publication is refused, not queued.
+        if (!lock.tryLock()) return null
+        try {
+            val token = pending ?: return null
+            if (token.generation != generation || token.limitsBinding != limitsBinding || token.windowBinding != windowBinding) {
+                pending = null
+                return null
+            }
             pending = null
-            return null
+            return token
+        } finally {
+            lock.unlock()
         }
-        pending = null
-        token
     }
 
     /**
@@ -82,26 +97,42 @@ class CaptureAllowanceOwner(
      * no longer publish, and any token already minted becomes unusable.
      */
     fun retire() {
-        synchronized(lock) {
+        lock.lock()
+        try {
             generation += 1
             pending = null
+        } finally {
+            lock.unlock()
         }
     }
 
     /** True when a prepared token exists for the CURRENT generation, limits and window. */
-    fun hasUsableToken(): Boolean = synchronized(lock) {
-        val token = pending ?: return false
-        token.generation == generation && token.limitsBinding == limitsBinding && token.windowBinding == windowBinding
+    fun hasUsableToken(): Boolean {
+        if (!lock.tryLock()) return false
+        try {
+            onDecisionLockHeldForTest?.invoke()
+            val token = pending ?: return false
+            return token.generation == generation && token.limitsBinding == limitsBinding && token.windowBinding == windowBinding
+        } finally {
+            lock.unlock()
+        }
     }
 
-    private fun publish(mintedFrom: Long): Boolean = synchronized(lock) {
-        // A generation change during the charge must not mint: the charge stays consumed, no refund.
-        if (mintedFrom != generation) return false
-        if (pending != null) return false
-        pending = CaptureAllowanceToken(generation, limitsBinding, windowBinding)
-        preparedGeneration = generation
-        true
+    private fun publish(mintedFrom: Long): Boolean {
+        lock.lock()
+        try {
+            // A generation change during the charge must not mint: the charge stays consumed, no refund.
+            if (mintedFrom != generation) return false
+            if (pending != null) return false
+            pending = CaptureAllowanceToken(generation, limitsBinding, windowBinding)
+            preparedGeneration = generation
+            return true
+        } finally {
+            lock.unlock()
+        }
     }
+
+    internal fun isClosedForTest(): Boolean = ledger.isClosed()
 
     fun ledgerChargesForTest(): Int = when (val snap = ledger.snapshot()) {
         is AllowanceSnapshot.Entry -> snap.chargedRecords

@@ -1,25 +1,27 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
 
 /**
- * Capture-admission allowance limits for one contributor account (spec b768de49).
+ * Capture-admission allowance limits for ONE contributor account (spec b768de49).
  *
  * These bound CAPTURE admission, never measured network throughput. A capture is charged the FULL
  * reservation - one record plus [wavesReservationBytes] - and that charge is never refunded for
  * unused capacity, cancellation, expiry, delivery or queue removal. Retries reuse the capture charge
  * and stay subject to their own body/attempt/age limits.
  *
- * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE. Every ceiling is an explicit injected input
- * validated for internal consistency, and the reservation is DERIVED structurally from the WAV
- * header plus the maximum encoded clip plus the canonical metadata bound, so an arbitrary value like
- * 1 is not expressible. Arithmetic is checked: a combination whose reservation or running total
- * would overflow is rejected rather than wrapping negative.
+ * NO CEILING AND NO PRODUCTION VALUE IS CHOSEN HERE (reviewer 82cdd583 #5, 8b5fc0c9 #4, f64bd7ad #2).
+ * Every number is a SEPARATELY SUPPLIED, VALIDATED input: the daily record and byte ceilings, the
+ * maximum encoded clip and the canonical metadata bound. This type performs no defaulting - it has no
+ * companion constants, no copy-defaults and no "reasonable" fallback - so a caller without real
+ * ceilings cannot construct limits, and [ProductionLimits] stays unavailable until they are selected.
  */
 data class AllowanceLimits(
+    /** Ceiling on captures charged per accounting window. Supplied, never defaulted. */
     val maxDailyRecords: Int,
+    /** Ceiling on charged bytes per accounting window. Supplied, never defaulted. */
     val maxDailyBytes: Long,
-    /** Maximum encoded WAV clip size INCLUDING its 44-byte header (the `max_clip_bytes` bound). */
+    /** Maximum encoded WAV clip size INCLUDING its 44-byte header (`max_clip_bytes`). */
     val maxClipBytes: Long,
-    /** Complete canonical record/digest envelope bound (the `max_metadata_bytes` bound). */
+    /** Complete canonical record/digest envelope bound (`max_metadata_bytes`). */
     val maxMetadataBytes: Int,
 ) {
     private val reservation: Long = checkedReservation(maxClipBytes, maxMetadataBytes)
@@ -56,6 +58,18 @@ data class AllowanceLimits(
             return reservation
         }
     }
+}
+
+/**
+ * Where production limits would come from. UNAVAILABLE by construction in this change: no daily
+ * ceiling has been selected, so there is no production value to hand out and no default to fall back
+ * on. A caller must handle unavailability rather than receiving an invented allowance.
+ */
+sealed interface ProductionLimits {
+    data object Unavailable : ProductionLimits
+
+    /** Only constructible once real ceilings are selected; nothing in this change can build it. */
+    class Selected internal constructor(internal val limits: AllowanceLimits) : ProductionLimits
 }
 
 /**

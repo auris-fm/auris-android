@@ -47,15 +47,31 @@ class CaptureAllowanceProcessLockTest {
             lockPath().absolutePath,
         ).redirectErrorStream(true).start()
         try {
-            val held = holder.inputStream.bufferedReader().readLine()
-            assertEquals("the helper process must confirm it holds the lock", "HELD", held)
+            // Bounded read: a helper that fails to start must fail the test, never hang it.
+            val reader = holder.inputStream.bufferedReader()
+            val confirmation = boundedRead(reader, 30_000)
+            assertEquals("the helper process must confirm it holds the lock (got: $confirmation)", "HELD", confirmation)
 
             val contender = owner()
             assertFalse("a lock held by another process must refuse the charge", contender.prepareToken())
             assertEquals("no artifact may change while another process holds the lock", before, artifacts())
         } finally {
-            holder.waitFor(30, TimeUnit.SECONDS)
             holder.destroyForcibly()
+            // Join AFTER forced termination so no helper outlives teardown.
+            holder.waitFor(30, TimeUnit.SECONDS)
+        }
+    }
+
+    /** Reads one line with a deadline, so startup failure cannot block the test indefinitely. */
+    private fun boundedRead(reader: java.io.BufferedReader, ms: Long): String? {
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val future = pool.submit<String?> { reader.readLine() }
+        return try {
+            future.get(ms, TimeUnit.MILLISECONDS)
+        } catch (timeout: java.util.concurrent.TimeoutException) {
+            "TIMEOUT after ${ms}ms"
+        } finally {
+            pool.shutdownNow()
         }
     }
 

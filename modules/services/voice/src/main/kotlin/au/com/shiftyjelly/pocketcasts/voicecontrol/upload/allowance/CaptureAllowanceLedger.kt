@@ -42,14 +42,21 @@ class CaptureAllowanceLedger(
     private val writeObserver: ((AllowanceWrite) -> Unit)? = null,
     /** Injectable directory barrier; a control fails it to prove the failure is reported. */
     private val directorySync: ((File) -> Unit)? = null,
-    /** Injectable write barrier for a NAMED phase, so a control can fail exactly one transition. */
-    private val writeBarrier: ((AllowanceWrite) -> Unit)? = null,
+    /**
+     * Injectable barrier at a NAMED boundary, so a control can fail exactly one durability step.
+     * [AllowanceBarrier.FileWritten], [.FileSynced] and [.Renamed] happen BEFORE the directory sync,
+     * which is what makes "visible but not durable" testable; [.EntrySynced]/[.ParentSynced] follow it.
+     */
+    private val writeBarrier: ((AllowanceBarrier) -> Unit)? = null,
 ) {
     private val binding: String = digest(DOMAIN_BINDING, account)
     private val equality: String = digest(DOMAIN_EQUALITY, account)
 
     /** Each account owns its own area: one account can never read, share or overwrite another's. */
     private val area: File = File(root, digest(DOMAIN_AREA, account).take(AREA_KEY_CHARS))
+
+    /** Ancestors created by this instance, so every one of them gets its own directory sync. */
+    private val createdAncestors = mutableListOf<File>()
 
     private val genesisFile = File(area, GENESIS_FILE)
     private val ledgerFile = File(area, LEDGER_FILE)
@@ -124,7 +131,13 @@ class CaptureAllowanceLedger(
         if (doc["binding"] != binding) return null
         if (doc["window"] != boundWindow) return null
         if (doc["incarnation"] != incarnation) return null
-        val state = doc["state"] ?: return null
+        // Exactly two states exist. Anything else is a document we did not write, and treating it as
+        // "pending-like" would let admission overwrite an unresolved transition.
+        val state = when (doc["state"]) {
+            AllowanceDocuments.STATE_PENDING -> AllowanceDocuments.STATE_PENDING
+            AllowanceDocuments.STATE_SETTLED -> AllowanceDocuments.STATE_SETTLED
+            else -> return null
+        }
         val transaction = doc["transaction"]?.takeIf { it.isNotEmpty() } ?: return null
         val preRecords = doc["preRecords"]?.toIntOrNull() ?: return null
         val preBytes = doc["preBytes"]?.toLongOrNull() ?: return null
@@ -133,6 +146,7 @@ class CaptureAllowanceLedger(
         // A transition is exactly one reservation forward, or the zero genesis state. Anything else is
         // not a document we wrote.
         if (preRecords < 0 || preBytes < 0) return null
+        if (targetRecords < 0 || targetBytes < 0) return null
         if (targetRecords < preRecords || targetBytes < preBytes) return null
         if (targetRecords == preRecords) {
             if (preRecords != 0 || targetBytes != preBytes) return null
@@ -317,33 +331,12 @@ class CaptureAllowanceLedger(
             if (intent.state == AllowanceDocuments.STATE_SETTLED) return@withFileLock ChargeOutcome.CHARGED
             when {
                 state.records == intent.preRecords && state.bytes == intent.preBytes -> {
-                    // The ledger write never landed: discard the intent so the next charge is clean.
-                    val discarded = writeDurably(
-                        intentFile,
-                        AllowanceDocuments.intent(
-                            AllowanceDocuments.STATE_SETTLED,
-                            intent.transaction,
-                            binding,
-                            boundWindow,
-                            state.id,
-                            intent.preRecords,
-                            intent.preBytes,
-                            intent.targetRecords,
-                            intent.targetBytes,
-                        ),
-                        AllowanceWrite.RECOVERY_INTENT_SETTLED,
-                    )
-                    if (discarded != WriteOutcome.DURABLE) {
-                        closed = true
-                        ChargeOutcome.BARRIER_SETTLE_FAILED
-                    } else if (readState(holdingLock = true) !is LedgerState.Established) {
-                        // The recovered history must READ BACK as consistent, or the accounting is
-                        // damaged and must stay closed rather than report a clean settlement.
-                        closed = true
-                        ChargeOutcome.REFUSED
-                    } else {
-                        ChargeOutcome.CHARGED
-                    }
+                    // The ledger never advanced. Settling now would publish a document claiming a
+                    // charge the ledger denies, i.e. rewrite a valid interrupted history into damage;
+                    // applying the target would grant allowance the interrupted capture never spent.
+                    // Neither is safe, so recovery REFUSES and leaves every artifact untouched.
+                    closed = true
+                    ChargeOutcome.REFUSED
                 }
 
                 state.records == intent.targetRecords && state.bytes == intent.targetBytes -> {
@@ -396,20 +389,29 @@ class CaptureAllowanceLedger(
 
     /** Creates the area and its lock artifact, syncing the PARENT entry that records them. */
     private fun ensureAreaAndLockArtifact(): Boolean {
+        noteCreatedAncestors()
         if (!area.isDirectory && !area.mkdirs() && !area.isDirectory) return false
+        noteCreatedAncestors()
         if (!lockFile.isFile && !lockFile.createNewFile() && !lockFile.isFile) return false
-        return syncEntryAndParent(area)
+        return syncEntryAndParent(area, createdAncestors.toList())
     }
 
-    private fun syncEntryAndParent(target: File): Boolean {
+    /**
+     * Syncs the entry and its parent, plus EVERY ancestor this operation created: `mkdirs` can create
+     * the accounting root itself, and that root's own parent entry must be durable too or a crash can
+     * lose the whole directory.
+     */
+    private fun syncEntryAndParent(target: File, created: List<File> = emptyList()): Boolean = try {
         val sync = directorySync ?: ::syncDirectoryOrThrow
-        return try {
-            sync(target)
-            target.parentFile?.let { sync(it) }
-            true
-        } catch (failure: java.io.IOException) {
-            false
+        sync(target)
+        target.parentFile?.let { sync(it) }
+        created.forEach { sync(it) }
+        for (step in listOf(AllowanceBarrier.EntrySynced, AllowanceBarrier.ParentSynced)) {
+            writeBarrier?.invoke(step)
         }
+        true
+    } catch (failure: java.io.IOException) {
+        false
     }
 
     /** Directory durability: a failure PROPAGATES, so a writer reports it rather than passing. */
@@ -421,13 +423,12 @@ class CaptureAllowanceLedger(
 
     private fun writeDurably(target: File, content: String, phase: AllowanceWrite): WriteOutcome {
         writeObserver?.invoke(phase)
-        try {
-            writeBarrier?.invoke(phase)
-        } catch (failure: java.io.IOException) {
-            return WriteOutcome.FAILED
-        }
+        // The directory containing the temporary file must itself be durable before the rename can be
+        // relied on, and it may not EXIST yet (a first run creates the whole root).
         val tmp = File(area, "${target.name}.tmp")
         try {
+            // The stream creates the area if it does not exist yet: note what that created BEFORE it.
+            noteCreatedAncestors()
             FileOutputStream(tmp).use { stream ->
                 stream.write(content.toByteArray(Charsets.UTF_8))
                 stream.flush()
@@ -437,13 +438,40 @@ class CaptureAllowanceLedger(
             tmp.delete()
             return WriteOutcome.FAILED
         }
+        if (barrier(AllowanceBarrier.FileWritten).not()) {
+            tmp.delete()
+            return WriteOutcome.FAILED
+        }
         if (!tmp.renameTo(target)) {
             tmp.delete()
             return WriteOutcome.FAILED
         }
-        if (!syncEntryAndParent(area)) return WriteOutcome.FAILED
+        // Renamed but NOT yet durable: exactly the window a failed directory sync leaves behind.
+        if (barrier(AllowanceBarrier.Renamed).not()) return WriteOutcome.FAILED
+        if (!syncEntryAndParent(area, noteCreatedAncestors())) return WriteOutcome.FAILED
         return WriteOutcome.DURABLE
     }
+
+    private fun barrier(step: AllowanceBarrier): Boolean = try {
+        writeBarrier?.invoke(step)
+        true
+    } catch (failure: java.io.IOException) {
+        false
+    }
+
+    /** Ancestors that did not exist before this operation created them. */
+    private fun noteCreatedAncestors(): List<File> {
+        var current: File? = area.parentFile
+        while (current != null && !current.exists()) {
+            val candidate = current
+            if (createdAncestors.none { it.absolutePath == candidate.absolutePath }) createdAncestors += candidate
+            current = candidate.parentFile
+        }
+        return createdAncestors.toList()
+    }
+
+    /** Every ancestor this instance created, in discovery order. */
+    internal fun createdAncestorsForTest(): List<File> = createdAncestors.toList()
 
     /**
      * Bounded read: the byte count READ is capped at MAX_BYTES + 1, so an oversized document costs a
@@ -539,6 +567,21 @@ internal sealed interface AllowanceSnapshot {
     data object Closed : AllowanceSnapshot
 }
 
+/** Named durability boundaries inside one durable write, in the order they occur. */
+enum class AllowanceBarrier {
+    /** The temporary file is written and synced; nothing is visible yet. */
+    FileWritten,
+
+    /** The temporary file has been RENAMED onto the target: visible, but not yet durable. */
+    Renamed,
+
+    /** The entry's directory is synced. */
+    EntrySynced,
+
+    /** The entry's parent directory (and any ancestor created) is synced. */
+    ParentSynced,
+}
+
 /** Ordered write phases, exposed so a control can fail a NAMED barrier. */
 enum class AllowanceWrite {
     GENESIS_INITIALIZING,
@@ -562,3 +605,6 @@ internal fun CaptureAllowanceLedger.snapshotByteCount(): Long = when (val snap =
     is AllowanceSnapshot.Entry -> snap.chargedBytes
     AllowanceSnapshot.Closed -> -1L
 }
+
+/** The charged record count, or -1 when the accounting is closed (never a misleading zero). */
+internal fun CaptureAllowanceLedger.recordsForTest(): Int = snapshotRecordCount()

@@ -53,9 +53,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.FailedOperation
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.PendingOperation
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.SettingsOperationStatus
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSettingsUiState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSettingsViewModel
 import dagger.hilt.android.AndroidEntryPoint
@@ -177,32 +174,6 @@ class VoiceControlSettingsFragment : BaseFragment() {
 }
 
 @Composable
-private fun voiceSharingRowCopy(state: VoiceSharingSettingsUiState, benefits: String): String {
-    // HONEST SECONDARY COPY, same mapping the shell Screen renders: the pending label names the
-    // operation actually in flight; failures and conflicts stay visible until the next action.
-    if (state.pending) {
-        return stringResource(
-            when (state.pendingOperation) {
-                PendingOperation.ENROLL -> LR.string.voice_sharing_enroll_pending
-                PendingOperation.WITHDRAW -> LR.string.voice_sharing_withdraw_pending
-                PendingOperation.NONE -> LR.string.voice_sharing_withdraw_pending
-            },
-        )
-    }
-    if (state.status == SettingsOperationStatus.RELEASE_FAILED) {
-        return stringResource(LR.string.voice_sharing_local_stop_failed)
-    }
-    if (state.status == SettingsOperationStatus.CONFLICT) {
-        return stringResource(LR.string.voice_sharing_conflict)
-    }
-    return when (state.failedOperation) {
-        FailedOperation.ENROLL -> stringResource(LR.string.voice_sharing_enroll_failed)
-        FailedOperation.WITHDRAW -> stringResource(LR.string.voice_sharing_withdraw_failed)
-        FailedOperation.NONE -> benefits
-    }
-}
-
-@Composable
 private fun VoiceControlSettingsPage(
     enabled: Boolean,
     modelReady: Boolean,
@@ -215,6 +186,19 @@ private fun VoiceControlSettingsPage(
     onBackPress: () -> Unit,
     bottomInset: Dp,
 ) {
+    // Strings resolved eagerly in composition; the sharing copy mapping itself stays a pure,
+    // unit-tested function (VoiceSharingSettingsRowCopyTest).
+    val rowStrings = mapOf(
+        LR.string.voice_sharing_enroll_pending to stringResource(LR.string.voice_sharing_enroll_pending),
+        LR.string.voice_sharing_withdraw_pending to stringResource(LR.string.voice_sharing_withdraw_pending),
+        LR.string.voice_sharing_enroll_failed to stringResource(LR.string.voice_sharing_enroll_failed),
+        LR.string.voice_sharing_withdraw_failed to stringResource(LR.string.voice_sharing_withdraw_failed),
+        LR.string.voice_sharing_local_stop_failed to stringResource(LR.string.voice_sharing_local_stop_failed),
+        LR.string.voice_sharing_conflict to stringResource(LR.string.voice_sharing_conflict),
+        LR.string.voice_sharing_delete_pending to stringResource(LR.string.voice_sharing_delete_pending),
+        LR.string.voice_sharing_delete_failed to stringResource(LR.string.voice_sharing_delete_failed),
+    )
+    val copyResolver: (Int) -> String = { rowStrings[it].orEmpty() }
     Column(modifier = Modifier.padding(bottom = bottomInset)) {
         ThemedTopAppBar(
             title = "Voice Control",
@@ -270,7 +254,7 @@ private fun VoiceControlSettingsPage(
                     val benefits = stringResource(LR.string.voice_sharing_benefits)
                     SettingRow(
                         primaryText = stringResource(LR.string.voice_sharing_setting_share_recordings),
-                        secondaryText = voiceSharingRowCopy(sharing, benefits),
+                        secondaryText = VoiceSharingSettingsRowCopy.switchSecondary(sharing, benefits, copyResolver),
                         toggle = SettingRowToggle.Switch(checked = sharing.enrolled),
                         modifier = Modifier.toggleable(
                             value = sharing.enrolled,
@@ -283,11 +267,7 @@ private fun VoiceControlSettingsPage(
                 // Its pending state is 202-processing honesty, never "deleted" (202 ≠ done).
                 if (sharing.enrolled) {
                     item {
-                        val deleteSecondary = when {
-                            sharing.deletionPending -> stringResource(LR.string.voice_sharing_delete_pending)
-                            sharing.deletionFailed -> stringResource(LR.string.voice_sharing_delete_failed)
-                            else -> ""
-                        }
+                        val deleteSecondary = VoiceSharingSettingsRowCopy.deleteSecondary(sharing, copyResolver)
                         SettingRow(
                             primaryText = stringResource(LR.string.voice_sharing_delete_action),
                             secondaryText = deleteSecondary,

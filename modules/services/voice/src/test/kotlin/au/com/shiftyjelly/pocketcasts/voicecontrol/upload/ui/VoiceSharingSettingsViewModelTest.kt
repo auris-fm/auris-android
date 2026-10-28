@@ -579,13 +579,13 @@ class VoiceSharingSettingsViewModelTest {
 
         vm.deleteSharedData()
         mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("deletion in flight shows pending", vm.state.value.deletionPending)
+        assertTrue("deletion in flight shows the REQUEST state", vm.state.value.deletionRequested)
         assertFalse("pending deletion is not settled success", vm.state.value.deletionFailed)
 
         // A null receipt is the controller's Failed path (no processing receipt from the server).
         deleteGate.release.complete(null)
         mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse("a failed deletion is no longer pending", vm.state.value.deletionPending)
+        assertFalse("a failed deletion is no longer in flight", vm.state.value.deletionRequested)
         assertTrue("a failed deletion stays visible until the next action", vm.state.value.deletionFailed)
     }
 
@@ -613,14 +613,14 @@ class VoiceSharingSettingsViewModelTest {
 
         vm.deleteSharedData()
         mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("PREMISE: deletion pending", vm.state.value.deletionPending)
+        assertTrue("PREMISE: deletion request in flight", vm.state.value.deletionRequested)
 
         // Account switch: a fresh projection for the new session emits through the collector.
         session = 2L
         projection.value = enrolledProjection().copy(membershipRevision = "rev-B")
         mainDispatcher.scheduler.advanceUntilIdle()
 
-        assertFalse("account B must not see account A's deletion pending", vm.state.value.deletionPending)
+        assertFalse("account B must not see account A's deletion state", vm.state.value.deletionRequested)
         assertFalse(vm.state.value.deletionFailed)
     }
 
@@ -631,6 +631,125 @@ class VoiceSharingSettingsViewModelTest {
         projection.value = enrolledProjection()
         mainDispatcher.scheduler.advanceUntilIdle()
         assertTrue(vm.state.value.projectionObserved)
+    }
+
+    // --- Reviewer 578bb62a: deletion lifecycle, conflict keeps the stop, current-session projection.
+
+    @Test
+    fun `a withdrawal conflict keeps the local stop and reconciles through the fence`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection()
+        val gate = Gate()
+        val vm = viewModel(withdrawGate = gate)
+
+        vm.withdraw()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.MembershipConflict(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue("PREMISE: the stop survives a conflicted withdrawal", persistenceFlag.stopped)
+        assertEquals(
+            "a CONFLICTED withdrawal must also latch through onWithdrawalFailed (tap write + outcome write)",
+            listOf(true, true),
+            persistenceFlag.writes,
+        )
+        assertEquals(SettingsOperationStatus.CONFLICT, vm.state.value.status)
+    }
+
+    @Test
+    fun `deletion request-in-flight is distinct from the accepted-but-pending receipt`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection()
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { 1L },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            policy = policy,
+            projection = projection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { 1L },
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        vm.deleteSharedData()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("the tap is the REQUEST in flight", vm.state.value.deletionRequested)
+        assertFalse("the request in flight is not yet an accepted receipt", vm.state.value.deletionReceiptPending)
+
+        deleteGate.release.complete(DeletionReceipt("req-1", "pending"))
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse("the accepted receipt ends the request-in-flight state", vm.state.value.deletionRequested)
+        assertTrue("an accepted receipt is still PROCESSING, never deleted", vm.state.value.deletionReceiptPending)
+        assertFalse(vm.state.value.deletionFailed)
+    }
+
+    @Test
+    fun `a deletion completing after a session switch mutates nothing`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection()
+        var session = 1L
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            policy = policy,
+            projection = projection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { session },
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        vm.deleteSharedData()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("PREMISE: deletion request in flight", vm.state.value.deletionRequested)
+
+        // Session switch, THEN A's deletion completes.
+        session = 2L
+        projection.value = enrolledProjection().copy(membershipRevision = "rev-B")
+        mainDispatcher.scheduler.advanceUntilIdle()
+        deleteGate.release.complete(DeletionReceipt("req-1", "pending"))
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertFalse("A's late deletion receipt must not set B's presentation", vm.state.value.deletionReceiptPending)
+        assertFalse(vm.state.value.deletionRequested)
+        assertFalse(vm.state.value.deletionFailed)
+    }
+
+    @Test
+    fun `projectionObserved means the CURRENT session's projection, not a retained one`() = runTest(mainDispatcher) {
+        var currentSession = 1L
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, ownerSession = { currentSession })
+        assertFalse("PREMISE: nothing observed yet", vm.state.value.projectionObserved)
+
+        projection.value = enrolledProjection()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue(vm.state.value.projectionObserved)
+        assertTrue(vm.state.value.enrolled)
+
+        // Session switch WITHOUT a projection emission yet: the retained projection belongs to A.
+        // (production drops obsolete-account responses asynchronously; until B's projection
+        // lands the screen must not show A's membership as the current account's). The next
+        // render is a real user path: B taps the switch ON (no local stop is recorded, so the
+        // guard itself must refuse the foreign projection) before B's projection arrives.
+        currentSession = 2L
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertFalse("a retained foreign-session projection is not the current session's", vm.state.value.projectionObserved)
+        assertFalse("a foreign-session projection must not render as enrolled", vm.state.value.enrolled)
     }
 
     // --- Reviewer b7ad7c92: a retired tap must have NO presentation effects on a newer action.

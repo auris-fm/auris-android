@@ -43,10 +43,19 @@ data class VoiceSharingSettingsUiState(
     val failedOperation: FailedOperation = FailedOperation.NONE,
     /** WHICH operation is in flight; the pending copy names it, it is not hard-coded withdrawal. */
     val pendingOperation: PendingOperation = PendingOperation.NONE,
-    /** True once an account projection has been observed; the section cannot render before it. */
+    /**
+     * True only when the CURRENT session's projection has been observed. A projection retained
+     * from another account (the drop of an obsolete-account response is asynchronous) is not the
+     * current account's state and must not render (reviewer 578bb62a).
+     */
     val projectionObserved: Boolean,
-    /** Deletion of already-accepted data: 202 processing stays pending, never "deleted". */
-    val deletionPending: Boolean = false,
+    /**
+     * Deletion of already-accepted data, in THREE honest states (reviewer 578bb62a): the tap is
+     * the REQUEST in flight; a 202 receipt is ACCEPTED-BUT-PROCESSING; neither ever means
+     * deleted, and a failure is visible until the next action.
+     */
+    val deletionRequested: Boolean = false,
+    val deletionReceiptPending: Boolean = false,
     val deletionFailed: Boolean = false,
     val disclosureVersion: String,
     val disclosureTitle: String,
@@ -101,9 +110,17 @@ class VoiceSharingSettingsViewModel(
     private var actionGeneration = 0L
 
     // Deletion presentation: durable like the membership presentation, retired at the same
-    // owner-session boundary.
-    private var deletionPending = false
+    // owner-session boundary, with its OWN completion fence (reviewer 578bb62a).
+    private var deletionRequested = false
+    private var deletionReceiptPending = false
     private var deletionFailed = false
+    private var deletionGeneration = 0L
+
+    /**
+     * The session whose projection render() last saw; 0 = none observed yet. A projection present
+     * at construction belongs to the CURRENT session: nothing has switched yet.
+     */
+    private var projectionSession = if (projection.value != null) ownerSession() else 0L
 
     /**
      * THE status the screen shows, as durable UI state. Deriving it from the controller state on
@@ -120,25 +137,40 @@ class VoiceSharingSettingsViewModel(
     val state: StateFlow<VoiceSharingSettingsUiState> = mutableState.asStateFlow()
 
     init {
+        // The projection's observed session updates ONLY when the projection flow itself emits:
+        // an unrelated emission (policy flip, controller state) under the new session must not
+        // re-label a retained foreign-session projection as current (reviewer 578bb62a).
         scope.launch {
-            kotlinx.coroutines.flow.combine(policy, projection, enrollmentController.state) { _, _, _ -> }
+            projection.collect { p ->
+                retireForeignSessionPresentation()
+                projectionSession = if (p != null) ownerSession() else 0L
+                mutableState.value = render()
+            }
+        }
+        scope.launch {
+            kotlinx.coroutines.flow.combine(policy, enrollmentController.state) { _, _ -> }
                 .collect {
-                    // The account boundary retires operation presentation (reviewer a2136dd9):
-                    // an account switch emits through the projection, so checking the shared
-                    // session here catches it. An unrelated refresh within the SAME session
-                    // leaves the failure copy untouched.
-                    val session = ownerSession()
-                    if (session != presentedSession) {
-                        presentedSession = session
-                        lastFailedOperation = FailedOperation.NONE
-                        pendingOperation = PendingOperation.NONE
-                        presentationStatus = SettingsOperationStatus.NONE
-                        deletionPending = false
-                        deletionFailed = false
-                    }
+                    retireForeignSessionPresentation()
                     mutableState.value = render()
                 }
         }
+    }
+
+    /**
+     * The account boundary retires operation presentation (reviewer a2136dd9): an account switch
+     * emits through the flows, so checking the shared session here catches it. An unrelated
+     * refresh within the SAME session leaves the failure copy untouched.
+     */
+    private fun retireForeignSessionPresentation() {
+        val session = ownerSession()
+        if (session == presentedSession) return
+        presentedSession = session
+        lastFailedOperation = FailedOperation.NONE
+        pendingOperation = PendingOperation.NONE
+        presentationStatus = SettingsOperationStatus.NONE
+        deletionRequested = false
+        deletionReceiptPending = false
+        deletionFailed = false
     }
 
     /** Enrolls with the exact disclosure version whose copy this screen renders. */
@@ -171,22 +203,29 @@ class VoiceSharingSettingsViewModel(
      */
     fun deleteSharedData() {
         deletionFailed = false
-        deletionPending = true
-        mutableState.value = render()
+        deletionReceiptPending = false
+        deletionRequested = true
+        val generation = ++deletionGeneration
         val tappedSession = ownerSession()
+        mutableState.value = render()
         scope.launch {
             if (ownerSession() != tappedSession) return@launch
             val outcome = enrollmentController.deleteSharedData()
-            if (generation() != actionGeneration) return@launch
+            // COMPLETION FENCE: the outcome arrives AFTER a suspension, so BOTH the session and
+            // the deletion generation must be re-checked here - a deletion whose session changed
+            // or that was superseded while parked must not touch the screen (reviewer 578bb62a).
+            if (generation != deletionGeneration || ownerSession() != tappedSession) return@launch
             when (outcome) {
                 is EnrollmentOutcome.DeletionRequested -> {
-                    // 202 = still processing. Pending stays; nothing is claimed as done.
-                    deletionPending = true
+                    // 202 = accepted but still processing. Never claimed as deleted.
+                    deletionRequested = false
+                    deletionReceiptPending = true
                     deletionFailed = false
                 }
 
                 is EnrollmentOutcome.Failed, is EnrollmentOutcome.Refused -> {
-                    deletionPending = false
+                    deletionRequested = false
+                    deletionReceiptPending = false
                     deletionFailed = true
                 }
 
@@ -261,6 +300,14 @@ class VoiceSharingSettingsViewModel(
 
             is EnrollmentOutcome.Conflict -> {
                 if (generation != actionGeneration) return
+                if (operation == FailedOperation.WITHDRAW) {
+                    // A CONFLICTED withdrawal did not apply either: the user's stop decision
+                    // stands and is latched through the same fenced path as a failure
+                    // (reviewer 578bb62a).
+                    enrollmentController.applyForOutcome(outcome) {
+                        withdrawalIntent.onWithdrawalFailed()
+                    }
+                }
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.CONFLICT
                 mutableState.value = render(SettingsOperationStatus.CONFLICT)
@@ -326,8 +373,9 @@ class VoiceSharingSettingsViewModel(
         // last operation's Pending state even after it settles as Superseded (its own lifecycle
         // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
         pending = pendingOperation != PendingOperation.NONE,
-        projectionObserved = projection.value != null,
-        deletionPending = deletionPending,
+        projectionObserved = projectionSession == ownerSession() && projection.value != null,
+        deletionRequested = deletionRequested,
+        deletionReceiptPending = deletionReceiptPending,
         deletionFailed = deletionFailed,
         status = status,
         failedOperation = lastFailedOperation,
@@ -345,6 +393,7 @@ class VoiceSharingSettingsViewModel(
      * withdrawal cannot render as enrolled.
      */
     private fun isEnrolled(): Boolean {
+        if (projectionSession != ownerSession()) return false
         val p = projection.value ?: return false
         return p.voiceSharingEnrolled &&
             p.withdrawalState == WithdrawalState.ACTIVE &&

@@ -108,6 +108,7 @@ class VoiceSharingSettingsViewModelTest {
         enrollGate: Gate = Gate(),
         withdrawGate: Gate = Gate(),
         scope: kotlinx.coroutines.CoroutineScope? = null,
+        persistence: RecordingPersistence = RecordingPersistence(),
     ): VoiceSharingSettingsViewModel {
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
@@ -126,7 +127,7 @@ class VoiceSharingSettingsViewModelTest {
             policy = policy,
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(RecordingPersistence()),
+            withdrawalIntent = LocalWithdrawalIntentStore(persistence),
             scope = effective,
         )
     }
@@ -223,5 +224,102 @@ class VoiceSharingSettingsViewModelTest {
         val failed = vm.state.value
         assertFalse("a FAILED withdrawal keeps the local stop: the user decided", failed.enrolled)
         assertEquals("the failure must be surfaced honestly", SettingsOperationStatus.FAILED, failed.status)
+    }
+
+    // --- Reviewer ae7922f9: re-enrollment must release the durable stop through the outcome fence.
+
+    @Test
+    fun `a successful re-enrollment releases the durable local stop`() = runTest(mainDispatcher) {
+        // PREMISE: the account re-enrolled server-side, but a durable withdrawal intent from an
+        // earlier opt-out still holds collection stopped. This is the state the current controls
+        // never start from — and the one where the stop must finally be released.
+        val persistence = RecordingPersistence(stopped = true)
+        projection.value = enrolledProjection()
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, persistence = persistence)
+        assertFalse("PREMISE: the durable stop holds even with an enrolled projection", vm.state.value.enrolled)
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertTrue("a server-applied re-enrollment is enrolled", vm.state.value.enrolled)
+        assertFalse(
+            "the successful enrollment must RELEASE the durable stop (atomic with the outcome)",
+            persistence.stopped,
+        )
+    }
+
+    @Test
+    fun `a failed enrollment keeps the durable local stop`() = runTest(mainDispatcher) {
+        val persistence = RecordingPersistence(stopped = true)
+        projection.value = enrolledProjection()
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate, persistence = persistence)
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.Failure
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertFalse("a failed enrollment must NOT render as enrolled", vm.state.value.enrolled)
+        assertTrue("the durable stop survives a failed enrollment", persistence.stopped)
+    }
+
+    // --- Reviewer ae7922f9: failure identity is durable UI state, not transient render input.
+
+    @Test
+    fun `the failure copy survives unrelated projection updates until the next action`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val gate = Gate()
+        val vm = viewModel(enrollGate = gate)
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.Failure
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals("PREMISE: the enrollment failed", SettingsOperationStatus.FAILED, vm.state.value.status)
+        assertEquals("PREMISE: the failure names the enrollment", FailedOperation.ENROLL, vm.state.value.failedOperation)
+
+        // An unrelated downstream emission (account projection refresh) re-renders the screen.
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-2")
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("an unrelated update must NOT erase the failure copy", SettingsOperationStatus.FAILED, vm.state.value.status)
+        assertEquals("the failure must still name the enrollment", FailedOperation.ENROLL, vm.state.value.failedOperation)
+    }
+
+    // --- Reviewer ae7922f9: pending is labeled by ITS operation, not a hard-coded withdrawal.
+
+    @Test
+    fun `pending is labeled by its operation - enrollment pending is not withdrawal pending`() = runTest(mainDispatcher) {
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val enrollGate = Gate()
+        val withdrawGate = Gate()
+        val vm = viewModel(enrollGate = enrollGate, withdrawGate = withdrawGate)
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(
+            "an in-flight ENROLLMENT must render enrollment-pending copy, not withdrawal copy",
+            PendingOperation.ENROLL,
+            vm.state.value.pendingOperation,
+        )
+        enrollGate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        enrollGate.release.complete(Unit)
+        projection.value = enrolledProjection()
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        vm.withdraw()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals(
+            "an in-flight WITHDRAWAL renders withdrawal-pending copy",
+            PendingOperation.WITHDRAW,
+            vm.state.value.pendingOperation,
+        )
     }
 }

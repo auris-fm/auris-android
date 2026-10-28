@@ -1804,6 +1804,7 @@
     <string name="voice_sharing_benefits">Sharing is optional and does not change your plan. Pro features stay yours whether or not you share.</string>
     <string name="voice_sharing_enroll_failed">Auris could not reach the server to turn sharing on. Nothing is being shared.</string>
     <string name="voice_sharing_withdraw_failed">Auris could not reach the server to finish turning sharing off. Sharing is already off on this device and no new recordings will be sent.</string>
+    <string name="voice_sharing_enroll_pending">Turning sharing on for your account…</string>
     <string name="voice_sharing_withdraw_pending">Turning sharing off on your account…</string>
     <string name="voice_sharing_conflict">Your account changed while updating. Review the current setting and try again.</string>
     <string name="voice_sharing_delete_action">Delete shared recordings</string>

@@ -62,7 +62,15 @@ fun VoiceSharingSettingsScreen(
         )
         if (state.pending) {
             Text(
-                text = stringResource(R.string.voice_sharing_withdraw_pending),
+                // The pending label names the operation actually in flight (reviewer ae7922f9):
+                // an enrollment in flight must not say "turning sharing off".
+                text = stringResource(
+                    when (state.pendingOperation) {
+                        PendingOperation.ENROLL -> R.string.voice_sharing_enroll_pending
+                        PendingOperation.WITHDRAW -> R.string.voice_sharing_withdraw_pending
+                        PendingOperation.NONE -> R.string.voice_sharing_withdraw_pending
+                    },
+                ),
                 style = MaterialTheme.typography.caption,
             )
         }

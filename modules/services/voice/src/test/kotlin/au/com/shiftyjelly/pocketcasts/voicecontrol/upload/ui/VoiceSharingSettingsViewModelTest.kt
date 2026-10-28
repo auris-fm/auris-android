@@ -945,6 +945,88 @@ class VoiceSharingSettingsViewModelTest {
         )
     }
 
+    @Test
+    fun `a cross-operation action retires the old session's stale presentation before its own`() = runTest(mainDispatcher) {
+        var session = 1L
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            policy = policy,
+            taggedProjection = taggedProjection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { session },
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        // A's membership failure is left on screen.
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        enrollGate.result = VoiceSharingMutationResult.Failure
+        enrollGate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertEquals("PREMISE: A's failure is visible", SettingsOperationStatus.FAILED, vm.state.value.status)
+
+        // Switch to B; B runs a DIFFERENT operation before the collector runs.
+        session = 2L
+        tagSession = 2L
+        vm.requestDelete()
+        vm.confirmDelete()
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("B's screen must not carry A's failure", SettingsOperationStatus.NONE, vm.state.value.status)
+        assertEquals(FailedOperation.NONE, vm.state.value.failedOperation)
+        assertTrue("PREMISE: B's deletion is in flight", vm.state.value.deletionRequested)
+
+        // Reverse direction: A leaves a DELETION failure; B runs ENROLL (which does not touch
+        // the deletion fields itself) before the collector - the boundary retire is the only
+        // thing that can clear them.
+        session = 1L
+        tagSession = 1L
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
+        vm = VoiceSharingSettingsViewModel(
+            policy = policy,
+            taggedProjection = taggedProjection,
+            enrollmentController = EnrollmentController(
+                enrollOperation = { enrollGate2.await() },
+                withdrawOperation = { withdrawGate2.await() },
+                deleteOperation = { deleteGate2.await() },
+                clearLocalPending = {},
+                ownerSession = { session },
+            ),
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { session },
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+        vm.requestDelete()
+        vm.confirmDelete()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        deleteGate2.release.complete(null)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("PREMISE: A's deletion failure is visible", vm.state.value.deletionFailed)
+
+        session = 2L
+        tagSession = 2L
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse("B's enroll must not preserve A's deletion failure", vm.state.value.deletionFailed)
+        assertFalse(vm.state.value.deletionRequested)
+        assertFalse(vm.state.value.deletionReceiptPending)
+    }
+
+    private val enrollGate2 = Gate()
+    private val withdrawGate2 = Gate()
+    private val deleteGate2 = ReceiptGate()
+
     // --- Reviewer b7ad7c92: a retired tap must have NO presentation effects on a newer action.
 
     @Test

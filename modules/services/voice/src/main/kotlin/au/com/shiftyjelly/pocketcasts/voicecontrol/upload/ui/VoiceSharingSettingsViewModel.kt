@@ -189,6 +189,10 @@ class VoiceSharingSettingsViewModel(
 
     /** Enrolls with the exact disclosure version whose copy this screen renders. */
     fun enroll() {
+        // ACTION BOUNDARY (reviewer 66e3d5ec): retire the OLD session's stale presentation
+        // FIRST, then create this action's own fields - in this order, because the retire
+        // clears the same fields the action is about to set.
+        retireForeignSessionPresentation()
         // A new action retires the previous failure copy (reviewer ae7922f9: durable until the
         // next action, not wiped by an unrelated emission but not carried into a fresh attempt).
         lastFailedOperation = FailedOperation.NONE
@@ -199,7 +203,6 @@ class VoiceSharingSettingsViewModel(
         // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
         // never reach the new account's controller.
         val tappedSession = ownerSession()
-        presentedSession = tappedSession
         mutableState.value = render()
         scope.launch {
             if (ownerSession() != tappedSession) {
@@ -212,9 +215,10 @@ class VoiceSharingSettingsViewModel(
 
     /** Opens the destructive-confirmation dialog, bound to the CURRENT session. */
     fun requestDelete() {
-        // ACTION BOUNDARY: adopt the session FIRST, so a controller emission triggered by the
-        // queued action cannot retire the new session's own state (reviewer 278e595f).
-        presentedSession = ownerSession()
+        // ACTION BOUNDARY (reviewer 66e3d5ec): retire the OLD session's stale presentation
+        // first (comment above in enroll()); the controller emission triggered by the queued
+        // action can then neither retire this state nor preserve the old session's.
+        retireForeignSessionPresentation()
         deleteConfirmationOpen = true
         confirmationSession = ownerSession()
         mutableState.value = render()
@@ -243,7 +247,7 @@ class VoiceSharingSettingsViewModel(
     }
 
     private fun startDeletion() {
-        presentedSession = ownerSession()
+        retireForeignSessionPresentation()
         deletionFailed = false
         deletionReceiptPending = false
         deletionRequested = true
@@ -279,6 +283,7 @@ class VoiceSharingSettingsViewModel(
 
     /** Records the local stop FIRST, then withdraws; a failure keeps the stop. */
     fun withdraw() {
+        retireForeignSessionPresentation()
         lastFailedOperation = FailedOperation.NONE
         pendingOperation = PendingOperation.WITHDRAW
         presentationStatus = SettingsOperationStatus.NONE
@@ -286,7 +291,6 @@ class VoiceSharingSettingsViewModel(
         // Same tap-time session capture as enroll() (reviewer 66ae7752). The LOCAL stop is still
         // recorded first: stopping collection on the old account is correct the instant of the tap.
         val tappedSession = ownerSession()
-        presentedSession = tappedSession
         withdrawalIntent.recordWithdrawalRequested()
         mutableState.value = render()
         scope.launch {

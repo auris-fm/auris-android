@@ -83,7 +83,14 @@ class VoiceSharingSettingsViewModel(
     // until the NEXT action; the pending label lasts until the outcome settles.
     private var lastFailedOperation = FailedOperation.NONE
     private var pendingOperation = PendingOperation.NONE
-    private var renderedSession: Long = ownerSession()
+
+    /**
+     * The session whose presentation is currently on screen. The session-change retire clears
+     * only presentation belonging to a DIFFERENT (dead) session - a fresh tap under the new
+     * session that landed before this collector processed the emission must survive (reviewer
+     * b7ad7c92, second interleaving).
+     */
+    private var presentedSession: Long = ownerSession()
 
     /** Identifies the CURRENT action; a stale (superseded) outcome may not touch presentation. */
     private var actionGeneration = 0L
@@ -111,8 +118,8 @@ class VoiceSharingSettingsViewModel(
                     // session here catches it. An unrelated refresh within the SAME session
                     // leaves the failure copy untouched.
                     val session = ownerSession()
-                    if (session != renderedSession) {
-                        renderedSession = session
+                    if (session != presentedSession) {
+                        presentedSession = session
                         lastFailedOperation = FailedOperation.NONE
                         pendingOperation = PendingOperation.NONE
                         presentationStatus = SettingsOperationStatus.NONE
@@ -134,10 +141,11 @@ class VoiceSharingSettingsViewModel(
         // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
         // never reach the new account's controller.
         val tappedSession = ownerSession()
+        presentedSession = tappedSession
         mutableState.value = render()
         scope.launch {
             if (ownerSession() != tappedSession) {
-                retireTapPresentation()
+                retireTapPresentation(generation)
                 return@launch
             }
             consume(enrollmentController.enroll(EnrollmentDisclosure.VERSION), FailedOperation.ENROLL, generation)
@@ -153,11 +161,12 @@ class VoiceSharingSettingsViewModel(
         // Same tap-time session capture as enroll() (reviewer 66ae7752). The LOCAL stop is still
         // recorded first: stopping collection on the old account is correct the instant of the tap.
         val tappedSession = ownerSession()
+        presentedSession = tappedSession
         withdrawalIntent.recordWithdrawalRequested()
         mutableState.value = render()
         scope.launch {
             if (ownerSession() != tappedSession) {
-                retireTapPresentation()
+                retireTapPresentation(generation)
                 return@launch
             }
             consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW, generation)
@@ -183,6 +192,9 @@ class VoiceSharingSettingsViewModel(
                     // stopped while the server says enrolled. That is a distinct state from a
                     // server rejection and is surfaced as one (reviewer a2136dd9).
                     if (released == false && generation == actionGeneration) {
+                        // The operation SETTLED (server applied it); only the local release
+                        // failed - it must not leave the action pending (reviewer b7ad7c92).
+                        pendingOperation = PendingOperation.NONE
                         presentationStatus = SettingsOperationStatus.RELEASE_FAILED
                         mutableState.value = render(SettingsOperationStatus.RELEASE_FAILED)
                         return
@@ -231,8 +243,13 @@ class VoiceSharingSettingsViewModel(
         }
     }
 
-    /** A retired (dead-session) tap cleans up its own pending presentation without settling. */
-    private fun retireTapPresentation() {
+    /**
+     * A retired (dead-session) tap cleans up its OWN pending presentation without settling — but
+     * only if it is still the current action (reviewer b7ad7c92): a stale tap must have NO
+     * presentation effects on a newer action's state.
+     */
+    private fun retireTapPresentation(generation: Long) {
+        if (generation != actionGeneration) return
         pendingOperation = PendingOperation.NONE
         presentationStatus = SettingsOperationStatus.NONE
         mutableState.value = render()

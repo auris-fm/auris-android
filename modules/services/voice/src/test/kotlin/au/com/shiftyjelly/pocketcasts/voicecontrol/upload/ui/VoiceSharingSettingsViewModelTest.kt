@@ -425,6 +425,9 @@ class VoiceSharingSettingsViewModelTest {
             SettingsOperationStatus.RELEASE_FAILED,
             vm.state.value.status,
         )
+        // The operation SETTLED - a failed local release must not leave it pending forever.
+        assertFalse("a settled operation is not pending (reviewer b7ad7c92)", vm.state.value.pending)
+        assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
 
     // --- Reviewer 66ae7752: a session switch must not leave the stale action pending on the NEW account.
@@ -483,5 +486,34 @@ class VoiceSharingSettingsViewModelTest {
         )
         assertFalse("the dead tap leaves no pending state on the new account", vm.state.value.pending)
         assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
+    }
+
+    // --- Reviewer b7ad7c92: a retired tap must have NO presentation effects on a newer action.
+
+    @Test
+    fun `a retired stale tap does not clear a newer action's pending presentation`() = runTest(mainDispatcher) {
+        var session = 1L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED)
+        val enrollGateA = Gate()
+        val enrollGateB = Gate()
+        var issues = 0
+        val vm = viewModel(enrollGate = enrollGateA, withdrawGate = enrollGateB, ownerSession = { session }, onEnrollIssue = { issues++ })
+
+        // Tap A under session 1; the coroutine is queued, not yet run.
+        vm.enroll()
+
+        // The session switches, then a NEW tap B lands before the dispatcher runs anything.
+        session = 2L
+        projection.value = enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B")
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals("PREMISE: only B's tap may issue", 1, issues)
+        assertEquals(
+            "B's pending presentation survives A's rejection",
+            PendingOperation.ENROLL,
+            vm.state.value.pendingOperation,
+        )
+        assertTrue("B's action is still pending", vm.state.value.pending)
     }
 }

@@ -22,6 +22,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.mockito.Mockito
 import org.mockito.kotlin.mock
@@ -39,6 +40,9 @@ import org.mockito.kotlin.whenever
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class UploadCostMeasurementTest {
+
+    @get:Rule
+    val tmp = org.junit.rules.TemporaryFolder()
 
     // --- Transfer cost: real canonical record + real multipart envelope over a real socket. ---
 
@@ -71,7 +75,7 @@ class UploadCostMeasurementTest {
     )
 
     /** A real WAV: 44-byte canonical header + s16le mono 16 kHz PCM for `seconds`. */
-    private fun realWav(seconds: Int, root: File): Pair<File, Int> {
+    private fun realWav(seconds: Int, root: File, name: String = "recording.wav"): Pair<File, Int> {
         val samples = seconds * 16_000
         val pcm = ByteArray(samples * 2)
         java.util.Random(7).nextBytes(pcm) // incompressible content, like speech
@@ -93,15 +97,14 @@ class UploadCostMeasurementTest {
         header[34] = 16
         "data".forEachIndexed { i, c -> header[36 + i] = c.code.toByte() }
         put(40, pcm.size)
-        val file = File(root, "recording.wav")
+        val file = File(root, name)
         file.writeBytes(header + pcm)
         return file to (44 + pcm.size)
     }
 
     @Test
     fun `measured upload transfer cost - canonical record and multipart envelope bytes`() {
-        val tmp = checkNotNull(File.createTempFile("b10", "wav").parentFile)
-        val (wav, wavBytes) = realWav(seconds = 10, root = tmp)
+        val (wav, wavBytes) = realWav(seconds = 10, root = tmp.newFolder("transfer"))
         val id = UUID.randomUUID().toString()
         val record = referenceRecord(id, wavBytes = wavBytes, retainedSamples = (wavBytes - 44) / 2)
         val recordBytes = CanonicalJson.canonicalBytes(record).size
@@ -115,7 +118,7 @@ class UploadCostMeasurementTest {
         )
         val sha = java.security.MessageDigest.getInstance("SHA-256").digest(wav.readBytes()).joinToString("") { "%02x".format(it) }
         val owned = OwnedAudio(java.io.FileInputStream(wav), wav.length(), sha)
-        val uploadResult = kotlinx.coroutines.runBlocking { transport.upload(id, record, owned) }
+        val uploadResult = owned.use { kotlinx.coroutines.runBlocking { transport.upload(id, record, it) } }
         assertTrue("PREMISE: the measured upload is accepted", uploadResult is ContributionUploadTransport.Response.Accepted)
 
         val recorded = server.takeRequest()
@@ -131,31 +134,27 @@ class UploadCostMeasurementTest {
 
     @Test
     fun `measured storage cost - wav plus canonical record per retained segment`() {
-        val dir = kotlinx.coroutines.test.TestCoroutineScheduler().let {
-            // isolated temp root
-            File.createTempFile("b10store", "").let { f ->
-                f.delete()
-                f.mkdirs()
-                f
-            }
-        }
-        var total = 0L
+        val dir = tmp.newFolder("store")
         val n = 10
         repeat(n) { i ->
-            val (wav, wavBytes) = realWav(seconds = 5, root = dir.apply { File(this, "x$i.wav").delete() })
+            val (wav, wavBytes) = realWav(seconds = 5, root = dir, name = "segment-$i.wav")
             val record = referenceRecord(UUID.randomUUID().toString(), wavBytes = wavBytes, retainedSamples = (wavBytes - 44) / 2)
-            val recordFile = File(dir, "x$i.json")
-            recordFile.writeBytes(CanonicalJson.canonicalBytes(record))
-            total += wav.length() + recordFile.length()
+            File(dir, "segment-$i.json").writeBytes(CanonicalJson.canonicalBytes(record))
         }
+        // Measure the directory's ACTUAL footprint (files on disk), not an in-memory sum.
+        val files = dir.listFiles().orEmpty()
+        assertEquals("each segment is exactly two durable artifacts", n * 2, files.size)
+        val total = files.sumOf { it.length() }
         val perSegment = total / n
-        // REPORT (asserted ceiling: 5 s segment must stay under 80 KiB durable — audio dominates):
-        println("B10-STORAGE: segments=$n total_bytes=$total per_segment_bytes=$perSegment (5s 16kHz mono s16le wav + canonical record json)")
+        // REPORT (asserted ceiling: audio-dominated; record JSON ~0.3%).
+        println(
+            "B10-STORAGE: segments=$n files=${files.size} measured_directory_bytes=$total per_segment_bytes=$perSegment " +
+                "(5s 16kHz mono s16le wav + canonical record json; the durable STORE's own index/lease overhead is NOT exercised here - UNVERIFIED)",
+        )
         // Ceiling: the audio payload itself (5 s = 160,044 B) plus a 16 KiB allowance for the
         // canonical record and any sidecar — the durable footprint must be audio-dominated.
         val ceiling = (5 * 16_000 * 2 + 44) + 16 * 1024
         assertTrue("per-segment durable footprint must stay under $ceiling (measured $perSegment)", perSegment < ceiling)
-        dir.deleteRecursively()
     }
 
     // --- Policy refresh propagation: measured on the provider's own monotonic bookkeeping. ---
@@ -221,23 +220,22 @@ class UploadCostMeasurementTest {
         assertTrue("PREMISE: starts enabled", provider.policy.value.enabled)
 
         // The disabling publication lands remotely; the next refresh observes it.
-        val flipAtVirtualMs = monotonicNowMs
         rawValue = "false"
         fetchTimeMs += 1_000
-        monotonicNowMs += 50 // bookkeeping advance the fetch itself performs, as production does
+        // INDEPENDENT elapsed observation: real wall time around the refresh that observes the
+        // disable - NOT the synthetic bookkeeping step (reviewer b7ad7c92).
+        val startedAtNano = System.nanoTime()
         kotlinx.coroutines.runBlocking { provider.refresh() }
-
-        val observedAtVirtualMs = monotonicNowMs
+        val elapsedMs = (System.nanoTime() - startedAtNano) / 1_000_000
         assertFalse("the disabled policy is observable", provider.policy.value.enabled)
-        val propagationMs = observedAtVirtualMs - flipAtVirtualMs
-        // REPORT: propagation is EVENT-DRIVEN at fetch completion (no polling delay measured); the
-        // compiled upper bound is one refresh cycle, capped by REFRESH_TIMEOUT_MS. Real-world radio
-        // latency is UNVERIFIED on the JVM host.
+        // REPORT: propagation is EVENT-DRIVEN at fetch completion (no polling); the independently
+        // observed host-elapsed refresh interval is reported alongside the compiled bound. Device
+        // radio latency and server publish->observe are UNVERIFIED on the JVM host.
         println(
-            "B10-PROPAGATION: event_driven=true measured_bookkeeping_delta_ms=$propagationMs " +
+            "B10-PROPAGATION: event_driven=true observed_refresh_elapsed_ms=$elapsedMs " +
                 "upper_bound_refresh_timeout_ms=${VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS} " +
-                "real_world_radio_latency=UNVERIFIED(JVM host)",
+                "real_world_radio_latency=UNVERIFIED(JVM host) server_publish_to_observe=UNVERIFIED(server-side)",
         )
-        assertTrue("propagation must be bounded by one refresh cycle", propagationMs <= VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS)
+        assertTrue("the observing refresh must stay within its compiled bound", elapsedMs <= VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS)
     }
 }

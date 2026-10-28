@@ -3,19 +3,19 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
 import java.io.File
 
 /**
- * The admission handoff for one owner (spec delta b768de49, reviewer 131e248b / 080e1f01).
+ * The admission handoff for one owner (spec b768de49; reviewer 131e248b, 080e1f01, 82cdd583 #3).
  *
- * EXACTLY ONE prepaid, single-use [CaptureAllowanceToken] exists at a time. Minting it is the ONLY work
- * that touches the ledger, the file lock or the JVM lock, and it happens OFF the capture path
- * ([prepareToken] from a dedicated writer). Admission calls [takeToken], which does nothing but a
- * compare-and-set under this object's monitor: no I/O, no file lock, no waiting, no retry. A capture
- * that finds no usable token is refused - it never waits for a refill, because the VAD collector is
- * parked behind it.
+ * EXACTLY ONE prepaid, single-use [CaptureAllowanceToken] exists at a time. Only [prepareToken] does
+ * work that can block — it is OFF the capture path, on a dedicated writer — and it holds [preparing]
+ * only around the storage call, never [lock]. That separation is what keeps the VAD collector free:
+ * [takeToken] and [retire] take [lock] for a handful of field reads and never wait behind I/O, and
+ * the generation can therefore change WHILE a charge is in flight, making the stale-completion check
+ * meaningful.
  *
- * The token is bound to the account digest, the validated limits and the accounting window. Any change
- * to those (or to the lifecycle) retires it WITHOUT REFUND: the durable charge stays consumed even
- * though no audio is admitted. Process death loses the in-memory token the same way, because the
- * charge outlives the process while the token does not.
+ * A capture that finds no usable token is refused; it never waits for a refill, because the
+ * collector is parked behind it. Retiring a token without refund is deliberate: the durable charge
+ * stays consumed even though no audio was admitted, and process death loses the in-memory token the
+ * same way.
  */
 class CaptureAllowanceOwner(
     area: File,
@@ -25,33 +25,42 @@ class CaptureAllowanceOwner(
     provisioning: AllowanceProvisioning = AllowanceProvisioning.Unavailable,
 ) {
     private val ledger = CaptureAllowanceLedger(area, account, limits, window, provisioning)
-    private val generation: String = "${ledger.bindingAndEqualityForTest()}|${limits.binding()}|${window.binding()}"
+    private val limitsBinding = limits.binding()
+    private val windowBinding = window.binding()
 
+    /** The admission decision's only lock: field access, never I/O. */
     private val lock = Any()
-    private var pending: CaptureAllowanceToken? = null
-    private var currentGeneration: String = generation
 
-    /** Charges durably and mints the single token. Off-path only. False when no token may be granted. */
-    fun prepareToken(): Boolean = synchronized(lock) {
-        if (pending != null) return false // at most one pending refill, never a second charge
-        val mintedFrom = currentGeneration
-        val charged = ledger.chargeForCapture()
-        if (!charged) return false
-        if (mintedFrom != currentGeneration) {
-            // The binding changed while charging: retire the handoff without refund.
-            return false
+    /** Serializes off-path preparations so at most ONE refill is ever pending. */
+    private val preparing = Any()
+
+    @Volatile
+    private var generation: Long = 0
+
+    @Volatile
+    private var pending: CaptureAllowanceToken? = null
+
+    @Volatile
+    private var preparedGeneration: Long = -1
+
+    /** Mints the single token. OFF-PATH only: may block on storage, never called by admission. */
+    fun prepareToken(): Boolean {
+        synchronized(preparing) {
+            if (pending != null) return false // at most one pending refill, never a second charge
+            val mintedFrom = generation
+            val charged = ledger.chargeForCapture()
+            if (!charged) return false
+            return publish(mintedFrom)
         }
-        pending = CaptureAllowanceToken(mintedFrom)
-        true
     }
 
     /**
-     * The admission call. Atomic compare-and-set only: no I/O, no blocking, no refill. Null means the
-     * capture is refused, and nothing was allocated or drained by the caller.
+     * The admission call. Non-blocking and IO-free: one atomic check-and-take. Null means the capture
+     * is refused and nothing was allocated or drained.
      */
     fun takeToken(): CaptureAllowanceToken? = synchronized(lock) {
         val token = pending ?: return null
-        if (token.generation != currentGeneration) {
+        if (token.generation != generation || token.limitsBinding != limitsBinding || token.windowBinding != windowBinding) {
             pending = null
             return null
         }
@@ -59,21 +68,38 @@ class CaptureAllowanceOwner(
         token
     }
 
-    /** Account, policy or lifecycle loss retires the pending handoff; the charge is never refunded. */
-    fun retireGenerationForTest() {
-        synchronized(lock) { currentGeneration = "$currentGeneration|retired" }
+    /**
+     * Retires the pending handoff without refund: a preparation in flight for an older generation will
+     * no longer publish, and any token already minted becomes unusable.
+     */
+    fun retire() {
+        synchronized(lock) {
+            generation += 1
+            pending = null
+        }
     }
 
-    /** A late off-path completion must not mint into a generation that has since changed. */
-    fun publishTokenFromStaleCompletionForTest(): CaptureAllowanceToken? = synchronized(lock) {
-        if (pending != null) return null
-        CaptureAllowanceToken(currentGeneration + "|stale-eligible-only") // never equal to a live generation
-            .also { pending = it }
-            .let { null }
+    /** True when a prepared token exists for the CURRENT generation, limits and window. */
+    fun hasUsableToken(): Boolean = synchronized(lock) {
+        val token = pending ?: return false
+        token.generation == generation && token.limitsBinding == limitsBinding && token.windowBinding == windowBinding
+    }
+
+    private fun publish(mintedFrom: Long): Boolean = synchronized(lock) {
+        // A generation change during the charge must not mint: the charge stays consumed, no refund.
+        if (mintedFrom != generation) return false
+        if (pending != null) return false
+        pending = CaptureAllowanceToken(generation, limitsBinding, windowBinding)
+        preparedGeneration = generation
+        true
     }
 
     fun ledgerChargesForTest(): Int = ledger.snapshot().chargedRecords
 }
 
-/** A prepaid, single-use admission. Its mere existence means one durable charge is already recorded. */
-class CaptureAllowanceToken internal constructor(internal val generation: String)
+/** A prepaid, single-use admission. Its existence means one durable charge is already recorded. */
+class CaptureAllowanceToken internal constructor(
+    internal val generation: Long,
+    internal val limitsBinding: String,
+    internal val windowBinding: String,
+)

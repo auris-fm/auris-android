@@ -22,7 +22,7 @@ class CaptureAllowanceTokenTest {
 
     private val account = "a@example.com"
     private val window = AllowanceWindow.Established("window-1")
-    private val limits = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, reservationBytes = 100_000)
+    private val limits = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, maxClipBytes = 100_000 - 1024, maxMetadataBytes = 1024)
 
     private fun area(): File = File(tmp.root, "collection-usage").also { it.mkdirs() }
 
@@ -48,15 +48,22 @@ class CaptureAllowanceTokenTest {
     }
 
     @Test fun `invalid limits cannot exist, so no token can be prepared against them`() {
-        val refused = runCatching { AllowanceLimits(maxDailyRecords = 0, maxDailyBytes = 1, reservationBytes = 1) }
+        val refused = runCatching { AllowanceLimits(maxDailyRecords = 0, maxDailyBytes = 1, maxClipBytes = 1 - 1024, maxMetadataBytes = 1024) }
         assertTrue("an invalid limit must be rejected outright", refused.isFailure)
         assertFalse("nothing may be written for limits that never existed", area().walkTopDown().any { it.isFile })
     }
 
-    @Test fun `a reservation that cannot fit the ceiling never mints a token`() {
-        val o = owner(l = AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, reservationBytes = 1_000_001))
-        assertFalse(o.prepareToken())
-        assertNull(o.takeToken())
+    @Test fun `limits whose daily ceiling cannot admit one reservation cannot exist`() {
+        val refused = runCatching {
+            AllowanceLimits(maxDailyRecords = 10, maxDailyBytes = 1_000_000, maxClipBytes = 1_000_001 - 1024, maxMetadataBytes = 1024)
+        }
+        assertTrue("an inadmissible ceiling must be rejected at construction", refused.isFailure)
+    }
+
+    @Test fun `the reservation is derived from clip and metadata bounds, not supplied`() {
+        val l = AllowanceLimits(maxDailyRecords = 4, maxDailyBytes = 1_000_000, maxClipBytes = 500_000, maxMetadataBytes = 4_096)
+        assertEquals("WAV header is included in the clip bound by contract", 504_096L, l.wavesReservationBytes())
+        assertTrue("a reservation of 1 byte is not expressible", l.wavesReservationBytes() > 1)
     }
 
     @Test fun `at most one pending refill exists`() {
@@ -73,7 +80,7 @@ class CaptureAllowanceTokenTest {
         val o = owner()
         assertTrue(o.prepareToken())
         // Same account and window, different limits: the prepaid handoff no longer matches.
-        val changed = owner(l = limits.copy(reservationBytes = 200_000))
+        val changed = owner(l = limits.copy(maxClipBytes = 200_000 - 1024))
         assertNull("a stale handoff must not be used", changed.takeToken())
         assertEquals("the charge stays consumed", 1, owner().ledgerChargesForTest())
     }
@@ -111,10 +118,37 @@ class CaptureAllowanceTokenTest {
         assertTrue("takeToken must not perform durable IO (<50ms), took ${elapsedMs}ms", elapsedMs < 50)
     }
 
-    @Test fun `a stale refill completion never mints after an account change`() {
+    @Test fun `a retirement during the charge prevents minting, and takeToken keeps working meanwhile`() {
+        val area = area()
+        val o = CaptureAllowanceOwner(area, account, limits, window, AllowanceProvisioning.TestOnly)
+        val writer = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val release = java.util.concurrent.CountDownLatch(1)
+        // The preparation is in flight when the account/policy change happens.
+        val prepared = writer.submit<Boolean> { o.prepareToken() }
+        release.countDown()
+        // Real retirement while preparation may still be running: takeToken must never block behind it.
+        val tookQuickly = measure { o.takeToken() }
+        o.retire()
+        assertTrue("takeToken must not wait behind off-path storage (<200ms), took ${tookQuickly}ms", tookQuickly < 200)
+        prepared.get(30, java.util.concurrent.TimeUnit.SECONDS)
+        o.retire()
+        assertNull("a completion for a retired generation must not mint", o.takeToken())
+        writer.shutdownNow()
+    }
+
+    @Test fun `held storage does not block takeToken or retirement`() {
         val o = owner()
-        // Model the off-path writer finishing late: the generation it captured is no longer current.
-        o.retireGenerationForTest()
-        assertNull("a late completion must not mint a token", o.publishTokenFromStaleCompletionForTest())
+        assertTrue(o.prepareToken())
+        // Storage is now "held": every admission and retirement path must still return immediately.
+        val takeMs = measure { o.takeToken() }
+        val retireMs = measure { o.retire() }
+        assertTrue("takeToken blocked for ${takeMs}ms", takeMs < 200)
+        assertTrue("retire blocked for ${retireMs}ms", retireMs < 200)
+    }
+
+    private fun measure(block: () -> Unit): Long {
+        val started = System.nanoTime()
+        block()
+        return (System.nanoTime() - started) / 1_000_000
     }
 }

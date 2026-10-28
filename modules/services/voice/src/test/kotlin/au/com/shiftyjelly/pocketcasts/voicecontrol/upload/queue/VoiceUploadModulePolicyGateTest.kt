@@ -79,6 +79,14 @@ class VoiceUploadModulePolicyGateTest {
     @Volatile
     var holdRequests: java.util.concurrent.CountDownLatch? = null
 
+    /** Signals the handler has REACHED the hold (arrival, not parking). */
+    @Volatile
+    var holdReached: java.util.concurrent.CountDownLatch? = null
+
+    /** Signals the handler finished writing its response: the client attempt has settled. */
+    @Volatile
+    var handlerCompleted: java.util.concurrent.CountDownLatch? = null
+
     @Before
     fun setUp() {
         Dispatchers.setMain(dispatcher)
@@ -131,13 +139,20 @@ class VoiceUploadModulePolicyGateTest {
     private fun startServer(receiptBody: (String) -> String) {
         val http = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         http.createContext("/v1/contributions") { exchange ->
-            requests.incrementAndGet()
-            seenBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
-            holdRequests?.await(30, java.util.concurrent.TimeUnit.SECONDS)
-            val id = Regex("\"capture_id\":\"([^\"]+)\"").find(seenBodies.last())?.groupValues?.get(1)
-            val body = receiptBody(id ?: "").toByteArray(Charsets.UTF_8)
-            exchange.sendResponseHeaders(201, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
+            try {
+                requests.incrementAndGet()
+                seenBodies.add(exchange.requestBody.readBytes().toString(Charsets.UTF_8))
+                holdReached?.countDown()
+                holdRequests?.await(30, java.util.concurrent.TimeUnit.SECONDS)
+                val id = Regex("\"capture_id\":\"([^\"]+)\"").find(seenBodies.last())?.groupValues?.get(1)
+                val body = receiptBody(id ?: "").toByteArray(Charsets.UTF_8)
+                exchange.sendResponseHeaders(201, body.size.toLong())
+                exchange.responseBody.use { it.write(body) }
+            } finally {
+                // A CANCELLED call never reads a response: the completion signal must fire even
+                // when the client is gone, or the server thread parks for its full 30 s.
+                handlerCompleted?.countDown()
+            }
         }
         http.start()
         server = http
@@ -190,119 +205,159 @@ class VoiceUploadModulePolicyGateTest {
 
     @Test
     fun `a published disable purges queued work AND the gate read refuses the next admission`() {
-        // ONE owner fixture shared by the account stack and the provider's collection lock: the
-        // module requires the SAME primitive (reviewer 23cae70e b1).
-        val startup = VoiceUploadCompositionFixtures.startup(app)
-        val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
-        // The account half of the credential authority: owner-published snapshot + its mirror.
-        owner.publish("a@x", 7L, "Bearer-A")
-        startup.credentials.publish("Bearer-A")
-        // The production session/projection sequence (as the composition-path controls drive it):
-        // arm the session, open an operation, apply the enrolled projection to THAT ticket.
-        val token = startup.state.sessionStarted(7L)
-        val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-        org.junit.Assert.assertTrue(
-            "the real account state accepts the projection",
-            startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L),
-        )
+        // Hoisted for the finally cleanup (assigned inside the try).
+        var root: File? = null
+        var store: ContributionStore? = null
+        try {
+            // ONE owner fixture shared by the account stack and the provider's collection lock: the
+            // module requires the SAME primitive (reviewer 23cae70e b1).
+            val startup = VoiceUploadCompositionFixtures.startup(app)
+            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
+            // The account half of the credential authority: owner-published snapshot + its mirror.
+            owner.publish("a@x", 7L, "Bearer-A")
+            startup.credentials.publish("Bearer-A")
+            // The production session/projection sequence (as the composition-path controls drive it):
+            // arm the session, open an operation, apply the enrolled projection to THAT ticket.
+            val token = startup.state.sessionStarted(7L)
+            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+            org.junit.Assert.assertTrue(
+                "the real account state accepts the projection",
+                startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L),
+            )
 
-        val root = File.createTempFile("gate3", null).let { f ->
-            f.delete()
-            f.mkdirs()
-            f
+            val root = File.createTempFile("gate3", null).let { f ->
+                f.delete()
+                f.mkdirs()
+                f
+            }
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
+                clock = { 51_000_000L },
+                jitter = { it - 1 },
+            )
+
+            val policyProvider = provider(owner.collectionSharedLock)
+            // ENABLED FIRST, before anything subscribes: the watcher's collector is LEVEL-based, so an
+            // initial disabled emission would purge the candidate and make later assertions pass for
+            // the wrong reason (lesson from the observed-disable controls).
+            policyProvider.applySnapshotForTest(snapshot(enabled = true))
+
+            val idA = UUID.randomUUID().toString()
+            prepareCapture(store, idA)
+
+            startServer { id ->
+                val digest = store.recordedDigest(id) ?: error("no recorded digest for $id")
+                """{"schema_version":1,"capture_id":"$id","record_sha256":"$digest","status":"accepted",""" +
+                    """"receipt_id":"rcpt-1","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"2026-11-21T00:00:00Z"}"""
+            }
+
+            // THE MODULE'S OWN FACTORY: the gate reads the provider this composition handed it.
+            val assembly = VoiceUploadModule.provideUploadAssembly(
+                store,
+                ContributionUploadTransport(
+                    endpoint = "http://127.0.0.1:${server!!.address.port}/v1/contributions",
+                    authorization = { "Bearer t" },
+                    // Long enough that the PARKED call cannot client-time out mid-test: a timed-out
+                    // attempt would free the caller to send B before the flip and vacate guard 1.
+                    callTimeoutMs = 120_000,
+                ),
+                policyProvider,
+                startup,
+                actualNetwork = { true },
+            )
+
+            // THE MODULE'S OWN TRIGGER FACTORY — the real composition including the policy-disable
+            // tail (a hand-rolled watcher here would leave the tail OUTSIDE the production path, and
+            // the tail-removal mutant survived exactly that way). The retention side is the module's
+            // real factory too; no capture is ever published through it in this control.
+            val sink = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget(4L * 1024 * 1024))
+            val producer = VoiceUploadModule.provideContributionCaptureProducer(
+                context = app,
+                store = store,
+                accountStartup = startup,
+            )
+            val publishTrigger = VoiceUploadModule.provideRetentionPublishTrigger(
+                sink = sink,
+                producer = producer,
+                accountStartup = startup,
+                scope = scope,
+            )
+            val trigger = VoiceUploadModule.provideUploadTrigger(
+                assembly = assembly,
+                store = store,
+                accountStartup = startup,
+                policyProvider = policyProvider,
+                scope = scope,
+                publishTrigger = publishTrigger,
+            )
+            // ARM THE HOLD BEFORE START: a handler that arrives before the latch exists would finish
+            // A outright, and requests>=1 would prove only arrival, never parking.
+            holdRequests = java.util.concurrent.CountDownLatch(1)
+            holdReached = java.util.concurrent.CountDownLatch(1)
+            handlerCompleted = java.util.concurrent.CountDownLatch(1)
+            trigger.start()
+
+            // Premise: A's handler is verifiably PARKED (not merely arrived).
+            await({ holdReached!!.await(0, java.util.concurrent.TimeUnit.MILLISECONDS) }, "A's handler reached the hold")
+
+            // B must be genuinely QUEUED at flip time: A's call is parked IN-FLIGHT so the poll loop
+            // cannot consume B while the policy is still enabled. (The first draft had no hold: B was
+            // sent before the flip, the "purged" assertion passed vacuously, and the tail-removal
+            // mutant SURVIVED - the masked-guard lesson again.)
+            val idB = UUID.randomUUID().toString()
+            prepareCapture(store, idB)
+            assertTrue("B is queued before the flip", store.readyEntries().any { it.captureId == idB })
+
+            // GUARD 1 (the disable TAIL), exercised while a call is genuinely in flight: the parked A
+            // is cancelled, and B, queued before the flip, is purged from the durable index.
+            policyProvider.applySnapshotForTest(snapshot(enabled = false))
+            assertEquals("the disable published", false, policyProvider.publishedPolicy.value.enabled)
+            await({ store.readyEntries().none { it.captureId == idB } }, "the disable tail purged B")
+
+            // Release the parked call AFTER the flip and await its attempt's ACTUAL completion (the
+            // handler finishing the response), not merely three manual polls, before the settled claims.
+            holdRequests!!.countDown()
+            // The parked attempt's TERMINAL outcome under the flip is CANCELLATION: the tail's
+            // revokeAndPurge closes the in-flight call, so the honest completion signal is the entry
+            // leaving the store entirely (attempts -1 = gone, not retried), not a settled 201.
+            await({ store.stateAttemptsForTest(idA) == -1 }, "A's attempt terminally cancelled and revoked")
+            await({ handlerCompleted!!.await(0, java.util.concurrent.TimeUnit.MILLISECONDS) }, "the server handler finished")
+            val attemptsAfterSettle = store.stateAttemptsForTest(idA)
+            repeat(3) { org.junit.Assert.assertEquals("the closed gate admits nothing", 0, assembly.poll().attempted) }
+            assertEquals("no retransmission of A after settle", attemptsAfterSettle, store.stateAttemptsForTest(idA))
+
+            // GUARD 2 (the GATE READ): an entry prepared AFTER the flip is never admitted.
+            val idC = UUID.randomUUID().toString()
+            prepareCapture(store, idC)
+
+            assertEquals("nothing further may arrive after the disable", 1, requests.get())
+            assertTrue("C stays owned by the queue", store.readyEntries().any { it.captureId == idC })
+        } finally {
+            // Lifecycle completion: unblock the handler first, then stop the server, join the
+            // trigger's scope (a cancelled-but-still-running loop could race the store close),
+            // cancel the provider scope, and only then close the store and remove the root.
+            holdRequests?.countDown()
+            handlerCompleted?.countDown()
+            server?.stop(0)
+            runCatching {
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                        scope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.forEach { it.join() }
+                    }
+                }
+            }
+            scope.cancel()
+            runCatching {
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeoutOrNull(2_000) {
+                        providerScope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList()?.forEach { it.join() }
+                    }
+                }
+            }
+            providerScope.cancel()
+            runCatching { store?.close() }
+            root?.deleteRecursively()
         }
-        val store = ContributionStore(
-            root,
-            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
-            clock = { 51_000_000L },
-            jitter = { it - 1 },
-        )
-
-        val policyProvider = provider(owner.collectionSharedLock)
-        // ENABLED FIRST, before anything subscribes: the watcher's collector is LEVEL-based, so an
-        // initial disabled emission would purge the candidate and make later assertions pass for
-        // the wrong reason (lesson from the observed-disable controls).
-        policyProvider.applySnapshotForTest(snapshot(enabled = true))
-
-        val idA = UUID.randomUUID().toString()
-        prepareCapture(store, idA)
-
-        startServer { id ->
-            val digest = store.recordedDigest(id) ?: error("no recorded digest for $id")
-            """{"schema_version":1,"capture_id":"$id","record_sha256":"$digest","status":"accepted",""" +
-                """"receipt_id":"rcpt-1","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"2026-11-21T00:00:00Z"}"""
-        }
-
-        // THE MODULE'S OWN FACTORY: the gate reads the provider this composition handed it.
-        val assembly = VoiceUploadModule.provideUploadAssembly(
-            store,
-            ContributionUploadTransport(
-                endpoint = "http://127.0.0.1:${server!!.address.port}/v1/contributions",
-                authorization = { "Bearer t" },
-                // Long enough that the PARKED call cannot client-time out mid-test: a timed-out
-                // attempt would free the caller to send B before the flip and vacate guard 1.
-                callTimeoutMs = 120_000,
-            ),
-            policyProvider,
-            startup,
-            actualNetwork = { true },
-        )
-
-        // THE MODULE'S OWN TRIGGER FACTORY — the real composition including the policy-disable
-        // tail (a hand-rolled watcher here would leave the tail OUTSIDE the production path, and
-        // the tail-removal mutant survived exactly that way). The retention side is the module's
-        // real factory too; no capture is ever published through it in this control.
-        val sink = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget(4L * 1024 * 1024))
-        val producer = VoiceUploadModule.provideContributionCaptureProducer(
-            context = app,
-            store = store,
-            accountStartup = startup,
-        )
-        val publishTrigger = VoiceUploadModule.provideRetentionPublishTrigger(
-            sink = sink,
-            producer = producer,
-            accountStartup = startup,
-            scope = scope,
-        )
-        val trigger = VoiceUploadModule.provideUploadTrigger(
-            assembly = assembly,
-            store = store,
-            accountStartup = startup,
-            policyProvider = policyProvider,
-            scope = scope,
-            publishTrigger = publishTrigger,
-        )
-        trigger.start()
-
-        // Premise: the enabled gate admitted A and the call is IN FLIGHT against the parked server.
-        holdRequests = java.util.concurrent.CountDownLatch(1)
-        await({ requests.get() >= 1 }, "the enabled gate sent A")
-
-        // B must be genuinely QUEUED at flip time: A's call is parked IN-FLIGHT so the poll loop
-        // cannot consume B while the policy is still enabled. (The first draft had no hold: B was
-        // sent before the flip, the "purged" assertion passed vacuously, and the tail-removal
-        // mutant SURVIVED - the masked-guard lesson again.)
-        val idB = UUID.randomUUID().toString()
-        prepareCapture(store, idB)
-        assertTrue("B is queued before the flip", store.readyEntries().any { it.captureId == idB })
-
-        // GUARD 1 (the disable TAIL), exercised while a call is genuinely in flight: the parked A
-        // is cancelled, and B, queued before the flip, is purged from the durable index.
-        policyProvider.applySnapshotForTest(snapshot(enabled = false))
-        assertEquals("the disable published", false, policyProvider.publishedPolicy.value.enabled)
-        await({ store.readyEntries().none { it.captureId == idB } }, "the disable tail purged B")
-
-        // Release the parked call AFTER the flip: it must settle to nothing further on the wire —
-        // no retransmission of A, nothing new admitted.
-        holdRequests!!.countDown()
-
-        // GUARD 2 (the GATE READ): an entry prepared AFTER the flip is never admitted.
-        val idC = UUID.randomUUID().toString()
-        prepareCapture(store, idC)
-        // The module trigger's cadence is production (60s); the GATE READ is in the assembly, so
-        // the same poll the loop runs is driven DIRECTLY here, deterministically.
-        repeat(3) { org.junit.Assert.assertEquals("the closed gate admits nothing", 0, assembly.poll().attempted) }
-        assertEquals("nothing further may arrive after the disable", 1, requests.get())
-        assertTrue("C stays owned by the queue", store.readyEntries().any { it.captureId == idC })
     }
 }

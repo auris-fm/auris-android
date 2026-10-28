@@ -43,6 +43,11 @@ data class VoiceSharingSettingsUiState(
     val failedOperation: FailedOperation = FailedOperation.NONE,
     /** WHICH operation is in flight; the pending copy names it, it is not hard-coded withdrawal. */
     val pendingOperation: PendingOperation = PendingOperation.NONE,
+    /** True once an account projection has been observed; the section cannot render before it. */
+    val projectionObserved: Boolean,
+    /** Deletion of already-accepted data: 202 processing stays pending, never "deleted". */
+    val deletionPending: Boolean = false,
+    val deletionFailed: Boolean = false,
     val disclosureVersion: String,
     val disclosureTitle: String,
     val disclosureSupporting: String,
@@ -95,6 +100,11 @@ class VoiceSharingSettingsViewModel(
     /** Identifies the CURRENT action; a stale (superseded) outcome may not touch presentation. */
     private var actionGeneration = 0L
 
+    // Deletion presentation: durable like the membership presentation, retired at the same
+    // owner-session boundary.
+    private var deletionPending = false
+    private var deletionFailed = false
+
     /**
      * THE status the screen shows, as durable UI state. Deriving it from the controller state on
      * every render was the bug: the controller keeps the LAST operation's settled state (Failed,
@@ -123,6 +133,8 @@ class VoiceSharingSettingsViewModel(
                         lastFailedOperation = FailedOperation.NONE
                         pendingOperation = PendingOperation.NONE
                         presentationStatus = SettingsOperationStatus.NONE
+                        deletionPending = false
+                        deletionFailed = false
                     }
                     mutableState.value = render()
                 }
@@ -152,6 +164,40 @@ class VoiceSharingSettingsViewModel(
         }
     }
 
+    /**
+     * Deletes already-accepted data (a separate operation from withdrawal; the server returns a
+     * processing receipt, so PENDING is honest and never means deleted). Presentation follows the
+     * same durable/session-retired rules as the membership operations.
+     */
+    fun deleteSharedData() {
+        deletionFailed = false
+        deletionPending = true
+        mutableState.value = render()
+        val tappedSession = ownerSession()
+        scope.launch {
+            if (ownerSession() != tappedSession) return@launch
+            val outcome = enrollmentController.deleteSharedData()
+            if (generation() != actionGeneration) return@launch
+            when (outcome) {
+                is EnrollmentOutcome.DeletionRequested -> {
+                    // 202 = still processing. Pending stays; nothing is claimed as done.
+                    deletionPending = true
+                    deletionFailed = false
+                }
+
+                is EnrollmentOutcome.Failed, is EnrollmentOutcome.Refused -> {
+                    deletionPending = false
+                    deletionFailed = true
+                }
+
+                else -> {}
+            }
+            mutableState.value = render()
+        }
+    }
+
+    private fun generation() = actionGeneration
+
     /** Records the local stop FIRST, then withdraws; a failure keeps the stop. */
     fun withdraw() {
         lastFailedOperation = FailedOperation.NONE
@@ -176,6 +222,13 @@ class VoiceSharingSettingsViewModel(
     private suspend fun consume(outcome: EnrollmentOutcome, operation: FailedOperation, generation: Long) {
         when (outcome) {
             is EnrollmentOutcome.Applied -> {
+                if (operation == FailedOperation.WITHDRAW) {
+                    // The server AGREED to the withdrawal: reconcile the recorded request (same
+                    // fenced call the reachable Settings section performed before the binding).
+                    enrollmentController.applyForOutcome(outcome) {
+                        withdrawalIntent.onServerAgrees()
+                    }
+                }
                 // A SUCCESSFUL re-enrollment releases the durable stop, atomically with the
                 // outcome: the clear runs inside the fence/owner transaction via applyForOutcome,
                 // so a superseded or cross-account outcome releases nothing (reviewer ae7922f9).
@@ -215,6 +268,12 @@ class VoiceSharingSettingsViewModel(
 
             is EnrollmentOutcome.Failed -> {
                 if (generation != actionGeneration) return
+                if (operation == FailedOperation.WITHDRAW) {
+                    // A FAILED withdrawal latches its failure with the intent store, fenced.
+                    enrollmentController.applyForOutcome(outcome) {
+                        withdrawalIntent.onWithdrawalFailed()
+                    }
+                }
                 lastFailedOperation = operation
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.FAILED
@@ -230,6 +289,11 @@ class VoiceSharingSettingsViewModel(
 
             is EnrollmentOutcome.Refused -> {
                 if (generation != actionGeneration) return
+                if (operation == FailedOperation.WITHDRAW) {
+                    enrollmentController.applyForOutcome(outcome) {
+                        withdrawalIntent.onWithdrawalFailed()
+                    }
+                }
                 lastFailedOperation = operation
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.FAILED
@@ -262,6 +326,9 @@ class VoiceSharingSettingsViewModel(
         // last operation's Pending state even after it settles as Superseded (its own lifecycle
         // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
         pending = pendingOperation != PendingOperation.NONE,
+        projectionObserved = projection.value != null,
+        deletionPending = deletionPending,
+        deletionFailed = deletionFailed,
         status = status,
         failedOperation = lastFailedOperation,
         pendingOperation = pendingOperation,

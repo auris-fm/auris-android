@@ -53,12 +53,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.DeletionState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentOutcome
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.FailedOperation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.PendingOperation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.SettingsOperationStatus
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSettingsUiState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSettingsViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.launch
@@ -79,69 +78,12 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
     @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
 
-    @Inject lateinit var voiceSharingAccountStartup: VoiceSharingAccountStartup
-
-    @Inject lateinit var contributionStore: ContributionStore
-
-    @Inject lateinit var localWithdrawalIntent: LocalWithdrawalIntentStore
+    @Inject lateinit var voiceSharingSettings: VoiceSharingSettingsViewModel
 
     private fun Context.isRecordAudioGranted() = ContextCompat.checkSelfPermission(
         this,
         Manifest.permission.RECORD_AUDIO,
     ) == PackageManager.PERMISSION_GRANTED
-
-    /**
-     * The ONE place an enrollment outcome may mutate the durable stop.
-     *
-     * Runs through [EnrollmentController.applyForOutcome], NOT a fragment-owned lock (reviewer
-     * 60647af3, a65eef2f). A caller-side lock cannot make check-then-act indivisible against the
-     * fence's own mutations: `issue`/`supersede` do not acquire it, so an owner or action change could
-     * land between "is this still authoritative?" and "do it". The decision and the effect now run
-     * inside the fence's critical section, the same one its mutations take.
-     *
-     * A refused outcome runs NOTHING - not even the conservative re-record. A stop written on behalf
-     * of a superseded or foreign action is indistinguishable from a real one, and would silently
-     * re-stop sharing after the user turned it on.
-     */
-    private fun applyStopEffect(
-        checked: Boolean,
-        outcome: EnrollmentOutcome,
-        controller: EnrollmentController,
-        intent: LocalWithdrawalIntentStore,
-        onReleased: () -> Unit,
-    ) {
-        controller.applyForOutcome(outcome) {
-            when {
-                // A fresh explicit opt-in, applied, releases the local stop. Only an APPLIED
-                // enrollment releases: a failed one is not consent to resume collection.
-                checked && outcome is EnrollmentOutcome.Applied -> {
-                    intent.clearOnUserEnrollment()
-                    onReleased()
-                }
-
-                // Withdrawal applied: the stop is KEPT (a stale enrolled projection must not resume
-                // collection), so this restates the request rather than clearing anything.
-                !checked && outcome is EnrollmentOutcome.Applied -> intent.onServerAgrees()
-
-                // A failed withdrawal leaves the stop in place: a network failure is not consent.
-                !checked -> intent.onWithdrawalFailed()
-            }
-        }
-    }
-
-    private fun newEnrollmentController() = voiceSharingAccountStartup.enrollmentController {
-        // Use the store's single ownership transaction, not a bare file sweep: a withdrawal must
-        // both withdraw in-flight launches and delete everything this owner holds, under the same
-        // lock every other revocation uses.
-        contributionStore.revokeAndPurge("enrollment-withdrawn")
-    }
-
-    /**
-     * The disclosure version the user is accepting. Sourced from the disclosure this UI actually
-     * showed, NOT from server state: the server validates it against its supported set, so sending
-     * a version we did not render would be a false consent record.
-     */
-    private fun localDisclosureVersion(): String = "2026-10-01"
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -179,48 +121,13 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 }
             }
 
-            val projection by voiceSharingAccountStartup.state.projection.collectAsStateWithLifecycle()
-            // The controller is created per screen visit: it holds only in-flight operation state,
-            // and a stale Pending surviving into a new visit would misreport an operation nobody is
-            // waiting on any more.
-            val enrollmentController = remember { newEnrollmentController() }
-            val enrollmentState by enrollmentController.state.collectAsStateWithLifecycle()
-            var deletionState by remember { mutableStateOf<DeletionState?>(null) }
-            var deletionFailed by remember { mutableStateOf(false) }
-            // LOCAL intent, not derived from the server: once the user turns sharing off we stop
-            // sending immediately, so the toggle must not wait for a round trip to move.
-            //
-            // INITIALIZATION must consult the DURABLE stop, not just the server projection. A user who
-            // turned sharing off and then relaunched would otherwise be shown "sharing on" by a stale
-            // enrolled projection while collection was in fact stopped — the screen disagreeing with
-            // the gate about the one thing the user cares about. The local stop wins here for the same
-            // reason it wins in CollectionAuthority: the user's decision, not server state.
-            var locallySharing by remember(projection?.membershipRevision) {
-                mutableStateOf(
-                    projection?.voiceSharingEnrolled == true &&
-                        localWithdrawalIntent.collectionPermittedByLocalIntent(projection),
-                )
-            }
-            val scope = rememberCoroutineScope()
-            val sharingCopy = VoiceSharingCopy(
-                supporting = stringResource(LR.string.voice_sharing_disclosure_supporting),
-                detail = stringResource(LR.string.voice_sharing_disclosure_detail),
-                benefits = stringResource(LR.string.voice_sharing_benefits),
-                withdrawPending = stringResource(LR.string.voice_sharing_withdraw_pending),
-                withdrawFailed = stringResource(LR.string.voice_sharing_withdraw_failed),
-                conflict = stringResource(LR.string.voice_sharing_conflict),
-                deleteAction = stringResource(LR.string.voice_sharing_delete_action),
-                deletePending = stringResource(LR.string.voice_sharing_delete_pending),
-                deleteFailed = stringResource(LR.string.voice_sharing_delete_failed),
-            )
-            val sharing = VoiceSharingPresentation.forRow(
-                projection = projection,
-                locallySharing = locallySharing,
-                enrollmentState = enrollmentState,
-                deletionState = deletionState,
-                deletionFailed = deletionFailed,
-                copy = sharingCopy,
-            )
+            // ONE SHARING SURFACE (spec directive): the reachable Settings section binds to the
+            // reviewed ViewModel — durable presentation, tap-time session capture, fenced outcome
+            // effects and the local-stop-first withdrawal all live there now.
+            val sharingState by voiceSharingSettings.state.collectAsStateWithLifecycle()
+            // The section only renders when it can be truthful: policy available AND an account
+            // projection actually observed (no switch without a projection to read it against).
+            val sharing = if (sharingState.settingAvailable && sharingState.projectionObserved) sharingState else null
             var confirmDelete by remember { mutableStateOf(false) }
             if (confirmDelete) {
                 AlertDialog(
@@ -231,11 +138,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
                         TextButton(
                             onClick = {
                                 confirmDelete = false
-                                scope.launch {
-                                    val outcome = enrollmentController.deleteSharedData()
-                                    deletionState = (outcome as? EnrollmentOutcome.DeletionRequested)?.state
-                                    deletionFailed = outcome is EnrollmentOutcome.Failed
-                                }
+                                voiceSharingSettings.deleteSharedData()
                             },
                         ) { Text(stringResource(LR.string.voice_sharing_delete_action)) }
                     },
@@ -260,52 +163,10 @@ class VoiceControlSettingsFragment : BaseFragment() {
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)
                 },
                 sharing = sharing,
-                sharingCopy = sharingCopy,
                 onSharingChange = { checked ->
-                    // Turning OFF takes effect locally FIRST and unconditionally: the controller
-                    // clears everything this device would have sent BEFORE it awaits the server, so
-                    // there is no window in which we keep collecting after the user said stop. No
-                    // confirmation dialog here, for exactly that reason.
-                    if (!checked) locallySharing = false
-                    // THE USER'S STOP IS RECORDED HERE, not inside the request. This is the only
-                    // place the actual tap reaches durable state, so without it the collection gate
-                    // consults a flag nobody ever sets. Written BEFORE the coroutine launches, so no
-                    // scheduling window exists in which collection could still admit a capture.
-                    // A stop that could not be DURABLY written is still a stop. The store latches that
-                    // failure and the COLLECTION GATE consults the latch, so enforcement lives where
-                    // admission is decided rather than in a flag beside the screen (reviewer 7a2e10a6).
-                    if (!checked) localWithdrawalIntent.recordWithdrawalRequested()
-                    scope.launch {
-                        val outcome = if (checked) {
-                            enrollmentController.enroll(acceptedDisclosureVersion = localDisclosureVersion())
-                        } else {
-                            enrollmentController.withdraw()
-                        }
-                        // SUPERSEDED RESULTS ARE IGNORED ENTIRELY (reviewer 668882eb, fd258849).
-                        // A result the user has already moved past describes an action that no longer
-                        // exists: the catchall below used to treat it as a failure and re-record the
-                        // stop, so a delayed withdrawal superseded by a SUCCESSFUL new enrollment put
-                        // the stop back after the opt-in had cleared it. It can also belong to a
-                        // different account, and the durable stop is global.
-                        if (outcome is EnrollmentOutcome.Superseded) return@launch
-                        // EVERY outcome-driven side effect is fenced, not only the release
-                        // (reviewer a65eef2f). The stop-recording branches had no check at all, and
-                        // an outcome can go stale between the controller returning and this code
-                        // running just as easily for a withdrawal as for an enrollment. The durable
-                        // stop is GLOBAL, so an unfenced branch can mutate another account's state or
-                        // overwrite a newer decision.
-                        //
-                        // The check and the mutation run under ONE lock (see applyStopEffect) so a
-                        // competing owner/action change cannot interleave between them: checking and
-                        // then mutating unlocked would leave the same window one level down.
-                        applyStopEffect(
-                            checked = checked,
-                            outcome = outcome,
-                            controller = enrollmentController,
-                            intent = localWithdrawalIntent,
-                            onReleased = { locallySharing = true },
-                        )
-                    }
+                    // The ViewModel owns the ordering: withdraw records the LOCAL stop at the tap
+                    // (before any request) and enrolls release the stop only inside the fence.
+                    if (checked) voiceSharingSettings.enroll() else voiceSharingSettings.withdraw()
                 },
                 onDeleteSharedData = { confirmDelete = true },
                 onBackPress = { activity?.onBackPressedDispatcher?.onBackPressed() },
@@ -316,13 +177,38 @@ class VoiceControlSettingsFragment : BaseFragment() {
 }
 
 @Composable
+private fun voiceSharingRowCopy(state: VoiceSharingSettingsUiState, benefits: String): String {
+    // HONEST SECONDARY COPY, same mapping the shell Screen renders: the pending label names the
+    // operation actually in flight; failures and conflicts stay visible until the next action.
+    if (state.pending) {
+        return stringResource(
+            when (state.pendingOperation) {
+                PendingOperation.ENROLL -> LR.string.voice_sharing_enroll_pending
+                PendingOperation.WITHDRAW -> LR.string.voice_sharing_withdraw_pending
+                PendingOperation.NONE -> LR.string.voice_sharing_withdraw_pending
+            },
+        )
+    }
+    if (state.status == SettingsOperationStatus.RELEASE_FAILED) {
+        return stringResource(LR.string.voice_sharing_local_stop_failed)
+    }
+    if (state.status == SettingsOperationStatus.CONFLICT) {
+        return stringResource(LR.string.voice_sharing_conflict)
+    }
+    return when (state.failedOperation) {
+        FailedOperation.ENROLL -> stringResource(LR.string.voice_sharing_enroll_failed)
+        FailedOperation.WITHDRAW -> stringResource(LR.string.voice_sharing_withdraw_failed)
+        FailedOperation.NONE -> benefits
+    }
+}
+
+@Composable
 private fun VoiceControlSettingsPage(
     enabled: Boolean,
     modelReady: Boolean,
     modelState: ModelDownloadState,
     statusText: String,
-    sharing: VoiceSharingRowState?,
-    sharingCopy: VoiceSharingCopy?,
+    sharing: VoiceSharingSettingsUiState?,
     onEnabledChange: (Boolean) -> Unit,
     onSharingChange: (Boolean) -> Unit,
     onDeleteSharedData: () -> Unit,
@@ -369,53 +255,42 @@ private fun VoiceControlSettingsPage(
                     indent = false,
                 )
             }
-            // SHARING SURFACE. Only rendered once account state has been observed: without a
-            // projection we cannot show a truthful switch, and offering a control we cannot honor
-            // would be worse than showing nothing.
-            if (sharing != null && sharingCopy != null) {
+            // SHARING SURFACE — one surface, bound to the reviewed ViewModel. Only rendered once
+            // an account projection has been observed and the policy allows the setting.
+            if (sharing != null) {
                 item {
                     SettingRow(
                         primaryText = stringResource(LR.string.voice_sharing_title),
-                        secondaryText = sharingCopy.detail,
+                        secondaryText = sharing.disclosureDetail,
                         toggle = SettingRowToggle.None,
                         indent = false,
                     )
                 }
                 item {
+                    val benefits = stringResource(LR.string.voice_sharing_benefits)
                     SettingRow(
                         primaryText = stringResource(LR.string.voice_sharing_setting_share_recordings),
-                        secondaryText = sharing.secondary,
-                        toggle = if (sharing.switchAvailable) {
-                            SettingRowToggle.Switch(checked = sharing.switchEnabled)
-                        } else {
-                            SettingRowToggle.None
-                        },
-                        modifier = if (sharing.switchAvailable) {
-                            Modifier.toggleable(
-                                value = sharing.switchEnabled,
-                                role = Role.Switch,
-                            ) { onSharingChange(it) }
-                        } else {
-                            Modifier
-                        },
+                        secondaryText = voiceSharingRowCopy(sharing, benefits),
+                        toggle = SettingRowToggle.Switch(checked = sharing.enrolled),
+                        modifier = Modifier.toggleable(
+                            value = sharing.enrolled,
+                            role = Role.Switch,
+                        ) { onSharingChange(it) },
                         indent = false,
                     )
                 }
-                item {
-                    SettingRow(
-                        primaryText = "",
-                        secondaryText = sharingCopy.benefits,
-                        toggle = SettingRowToggle.None,
-                        indent = false,
-                    )
-                }
-                if (sharing.showDeleteAction) {
+                // Deleting already-accepted data is a separate, available operation while enrolled.
+                // Its pending state is 202-processing honesty, never "deleted" (202 ≠ done).
+                if (sharing.enrolled) {
                     item {
+                        val deleteSecondary = when {
+                            sharing.deletionPending -> stringResource(LR.string.voice_sharing_delete_pending)
+                            sharing.deletionFailed -> stringResource(LR.string.voice_sharing_delete_failed)
+                            else -> ""
+                        }
                         SettingRow(
                             primaryText = stringResource(LR.string.voice_sharing_delete_action),
-                            // A pending or failed deletion is surfaced here with the SAME honesty
-                            // rule as the switch: 202 is "still processing", never "deleted".
-                            secondaryText = sharing.deleteSecondary,
+                            secondaryText = deleteSecondary,
                             toggle = SettingRowToggle.None,
                             modifier = Modifier.rowModifier(onDeleteSharedData),
                             indent = false,
@@ -439,7 +314,6 @@ private fun VoiceControlSettingsPagePreview(
             modelState = ModelDownloadState.Ready,
             statusText = "Active (wake word required)",
             sharing = null,
-            sharingCopy = null,
             onEnabledChange = {},
             onSharingChange = {},
             onDeleteSharedData = {},

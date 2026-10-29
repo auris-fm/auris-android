@@ -38,6 +38,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         if (recognizer != null && loadedDir == dir) {
             return@withContext Result.success(Unit)
         }
+        loadVerified = false
         try {
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
@@ -62,6 +63,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
                 return@withContext Result.failure(CancellationException("cancelled during model load"))
             }
             recognizer = created
+            loadVerified = true
             loadedDir = dir
             Timber.i("SenseVoiceBackend ready")
             Result.success(Unit)
@@ -108,6 +110,20 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         modelDir = dir
     }
 
+    private var loadVerified = false
+
+    /**
+     * P1 (reviewer be375ea1): load evidence = THIS loader's successful creation from the
+     * content-verified bytes of the pinned manifest identity ([SENSEVOICE_MANIFEST_ID]).
+     */
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+        if (!loadVerified) return null
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+            "sense-voice",
+            SENSEVOICE_MANIFEST_ID,
+        )
+    }
+
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
             ModelFile(
@@ -140,6 +156,9 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         recognizer?.release()
         recognizer = null
         loadedDir = null
+        // P1 (reviewer be375ea1): released load state can NEVER claim the artifact for a
+        // later invocation.
+        loadVerified = false
     }
 
     companion object {

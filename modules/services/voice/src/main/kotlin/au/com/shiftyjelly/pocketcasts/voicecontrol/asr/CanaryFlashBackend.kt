@@ -62,6 +62,7 @@ class CanaryFlashBackend @Inject constructor(
         if (recognizer != null && loadedSrcLang == srcLang && loadedDir == dir) {
             return@withContext Result.success(Unit)
         }
+        loadVerified = false
         try {
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
@@ -92,6 +93,7 @@ class CanaryFlashBackend @Inject constructor(
                 return@withContext Result.failure(CancellationException("cancelled during model load"))
             }
             recognizer = created
+            loadVerified = true
             loadedSrcLang = srcLang
             loadedDir = dir
             Timber.i("CanaryFlashBackend ready (src=%s, tgt=en)", srcLang)
@@ -134,6 +136,20 @@ class CanaryFlashBackend @Inject constructor(
         modelDir = dir
     }
 
+    private var loadVerified = false
+
+    /**
+     * P1 (reviewer be375ea1): load evidence = THIS loader's successful preparation from the
+     * content-verified bytes of the pinned manifest identity ([CANARY_MANIFEST_ID]).
+     */
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+        if (!loadVerified) return null
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+            "canary-flash",
+            CANARY_MANIFEST_ID,
+        )
+    }
+
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
             // sha256s = LFS oids at the pinned commit; existing caches are re-verified before
@@ -172,6 +188,8 @@ class CanaryFlashBackend @Inject constructor(
         recognizer = null
         loadedSrcLang = null
         loadedDir = null
+        // P1: released load state can NEVER claim the artifact for a later invocation.
+        loadVerified = false
     }
 
     private fun canarySourceLanguage(): String = currentLocale().language

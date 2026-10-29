@@ -312,13 +312,16 @@ object VoiceUploadModule {
     }
 
     /**
-     * The FIXED app-deployment models (these do not vary per capture). The per-capture ASR and
-     * translation refs travel WITH the frozen capture context — never fixed labels here.
+     * P1 (reviewer 0cd7e39d/7033f4d9): NO invented model labels. The bundled VAD/wake assets
+     * expose NO loader-verified version ("filename without an established required version is
+     * insufficient"), so their refs are the schema's declared absence (ModelRef.None = null)
+     * until a loader establishes a verified identity. asr/translation are per-capture observed
+     * values, and the router ref is attached only when routing actually runs
+     * ([VoiceRecognizer.loadedModelRef]) — never a fixed label here.
      */
     private val ENGINE_FIXED_MODEL_PROVENANCE = listOf(
-        "vad" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("silero-vad", "4.0"),
-        "wakeword" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("auris-wake", "1.2"),
-        "router" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("lfm-intent", "0.3"),
+        "vad" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+        "wakeword" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
     )
 }
 

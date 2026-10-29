@@ -70,6 +70,10 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
             val cacheFile = java.io.File(file.parentFile, "vulkan_pipeline_cache.bin")
             WhisperNative.setPipelineCachePath(cacheFile.absolutePath)
             if (WhisperNative.init(file.absolutePath)) {
+                // P1 (reviewer be375ea1): successful native init of THIS artifact is the load
+                // evidence; the moonshine download has NO pinned manifest version, so per the
+                // ruling the identity stays None (a filename alone is insufficient).
+                loadVerified = true
                 Result.success(Unit)
             } else {
                 Result.failure(IllegalStateException("Whisper model init failed"))
@@ -103,6 +107,16 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
         }
     }
 
+    private var loadVerified = false
+
+    // P1 (reviewer be375ea1): the artifacts carry no loader-verified manifest version, so even
+    // a successful load cannot mint a Named ref. A released or failed load state is the same
+    // absence — there is no jar under this and ktlint refuses a KDoc inside a class body.
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+        if (!loadVerified) return null
+        return null
+    }
+
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
             ModelFile(
@@ -128,5 +142,7 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
 
     override fun release() {
         WhisperNative.freeModel()
+        // P1: released load state can NEVER claim the artifact for a later invocation.
+        loadVerified = false
     }
 }

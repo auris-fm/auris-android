@@ -629,7 +629,10 @@ class VoiceAsrEngine @Inject constructor(
             }
 
             ListeningMode.WakeWord -> {
-                // Outside grace: drop — wake word is required
+                // Outside grace: drop — wake word is required.
+                // P1 (reviewer 7033f4d9): the known wake/bleed decision that skips ASR is a
+                // RECORDED fact (existing vocabulary `rejected_by_wake`), not a wait-expiry unknown.
+                capture?.let { joinOutcome(CollectionOutcome.NotCollected(it.captureId, "rejected_by_wake")) }
                 Timber.i("[VoicePipeline] wake %s → drop (no grace)", wakeCmp)
                 null
             }
@@ -654,9 +657,27 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
 
+        // P1 (reviewer 0cd7e39d): freeze the INVOKED backend's verified loaded identity AT the
+        // actual invocation — carried independently of the result, so failed/empty invocations
+        // keep provenance and a replacement between SpeechStarted and here cannot misattribute.
+        val invokedIdentity = verifiedLoadedIdentity(b)
+        request.capture?.let { segmentObserver.noteAsrInvocation(it, invokedIdentity) }
         // ASR
         val asrStartedAt = System.currentTimeMillis()
-        val asrResult = b.transcribe(floatSamples, sampleRateHz)
+        val asrResult = try {
+            b.transcribe(floatSamples, sampleRateHz)
+        } catch (ce: java.util.concurrent.CancellationException) {
+            // Cancellation is NOT a provider failure: record the KNOWN cancelled fact (reviewer
+            // be375ea1) and rethrow — nonterminal, no early publication.
+            request.capture?.let { joinOutcome(CollectionOutcome.AsrCancelled(it.captureId)) }
+            throw ce
+        } catch (t: Throwable) {
+            // A known provider failure is a RECORDED fact (reviewer 7033f4d9): failed/provider_error,
+            // never a wait-expiry unknown. The AsrFailed join is a publishable terminal.
+            request.capture?.let { joinOutcome(CollectionOutcome.AsrFailed(it.captureId)) }
+            Timber.w(t, "[VoicePipeline] asr provider failed")
+            return
+        }
         val asrMs = System.currentTimeMillis() - asrStartedAt
         val durationMs = (floatSamples.size * 1000L / sampleRateHz).toInt()
         val transcript = WakeTranscriptTrimmer.commandText(
@@ -681,12 +702,20 @@ class VoiceAsrEngine @Inject constructor(
                 trimNote?.let { " $it" } ?: "",
                 if (request.wakePositive) "wake-only" else "empty",
             )
-            // No leftover command after the wake: the session started and
-            // nothing was asked, so nothing is reported. (The WAKE_WORD earcon
-            // already acknowledged detection.)
-            joinOutcome(
-                CollectionOutcome.NotCollected(request.capture?.captureId ?: return, if (request.wakePositive) "wake-only" else "empty"),
-            )
+            // P1 (reviewer be375ea1): command trimming may remove recognized wake text, so a
+            // wake-only drop is NOT necessarily an empty recognition. Only a GENUINELY empty
+            // raw result is completed/empty_result; otherwise the ACTUAL transcript is
+            // preserved as the recognized fact (normal trimming stays a pipeline behavior,
+            // never an erasure of the observed output).
+            if (asrResult.text.isNotBlank()) {
+                request.capture?.let {
+                    joinOutcome(CollectionOutcome.Recognized(it.captureId, asrResult.text, asrResult.detectedLanguage))
+                }
+            } else {
+                joinOutcome(
+                    CollectionOutcome.NotCollected(request.capture?.captureId ?: return, "empty"),
+                )
+            }
             return
         }
         // Recognized: the ACTUAL trimmed transcript + detected language of THIS capture.
@@ -698,6 +727,36 @@ class VoiceAsrEngine @Inject constructor(
         val routePrep = prepareRoutingInput(trimmedResult, b)
         // OBSERVED translation provenance travels with the capture (never claimed when absent).
         routePrep.translation?.let(request.noteTranslation)
+        // P1 (reviewer 7033f4d9): a known translation-skip is a RECORDED fact, not unknown.
+        routePrep.translationSkipReason?.let { reason ->
+            request.capture?.let { ctx ->
+                segmentObserver.noteTranslation(
+                    ctx,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+                        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                        producedResult = false,
+                        translatedText = null,
+                        targetLanguage = null,
+                        skipReason = reason,
+                    ),
+                )
+            }
+        }
+        // P1: a run-and-fail is a recorded FAILURE fact (state failed), not a skip or unknown.
+        if (routePrep.translationFailed) {
+            request.capture?.let { ctx ->
+                segmentObserver.noteTranslation(
+                    ctx,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+                        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                        producedResult = false,
+                        translatedText = null,
+                        targetLanguage = null,
+                        failedWith = "provider_error",
+                    ),
+                )
+            }
+        }
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         // Printing post-translate fields first made lines like
         //   lang=en 'Play.' translate=yue→en '播放。'
@@ -777,6 +836,15 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
 
+        // P1 (reviewer 7033f4d9 + be375ea1): the router identity is claimed only when routing
+        // ACTUALLY RUNS, bound to the recognizer ACTUALLY CALLED (`recognizer`, not another
+        // component's load state) — its own verified loader evidence.
+        capture?.let { ctxCap ->
+            recognizer.loadedModelRef()?.let { ref ->
+                segmentObserver.noteRouterInvocation(ctxCap, ref)
+            }
+        }
+
         val t0 = System.currentTimeMillis()
         val ctx = VoiceRecognitionContext(
             listeningMode = currentMode,
@@ -811,6 +879,12 @@ class VoiceAsrEngine @Inject constructor(
             reason,
             input.routerTranscript,
         )
+
+        // P1 (reviewer be375ea1): the recognizer's OWN reported decision travels — a null
+        // intent is NOT always no_candidates (it may be validation or a model failure), and
+        // the observation stream is NOT closed: a later cloud escalation can still supply
+        // its normal outcome. NONTERMINAL fact.
+        capture?.let { joinOutcome(CollectionOutcome.RoutingNone(it.captureId, diagnostic?.reason)) }
 
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
@@ -887,6 +961,9 @@ class VoiceAsrEngine @Inject constructor(
                 ),
                 translateNote = "translate=skip(no lang)",
                 dropWithError = false,
+                // P1: known skip in the owning vocabulary — no source language, so the separate
+                // translation stage could not run.
+                translationSkipReason = "source_language_unavailable",
             )
         }
         // Backend-native English (Canary de/es/fr→en) before the native-English branch:
@@ -901,9 +978,12 @@ class VoiceAsrEngine @Inject constructor(
                 ),
                 translateNote = "translate=skip(backend)",
                 dropWithError = false,
-                // The BACKEND itself produced English: its model identity IS the translation
-                // provenance, and a result was produced by definition of this path.
-                translation = requestTranslationProvenance(backend, translatedText = trimmed.text),
+                // P1 (reviewer 7033f4d9): the SEPARATE translation stage is skipped because the
+                // invoked backend produced the English text in the SAME transcribe call (observed
+                // output above). Capability alone never asserts a produced translation — but the
+                // backend's ACTUAL English output for THIS invocation is the observed fact, and
+                // the skip of the separate stage is a known fact in the owning vocabulary.
+                translationSkipReason = "backend_handles_translation",
             )
         }
         if (detected == "en") {
@@ -916,37 +996,48 @@ class VoiceAsrEngine @Inject constructor(
                 ),
                 translateNote = null,
                 dropWithError = false,
+                // P1: known skip — source and target are the same language; no stage ran.
+                translationSkipReason = "source_language_target_language",
             )
         }
 
         val ready = translationStage.ensureReady(detected)
         if (ready.isFailure) {
+            // P1: the translator could not run at all — known SKIP, owning vocabulary.
             return RoutePrep(
                 input = null,
                 translateNote = "translate=fail($detected)",
                 dropWithError = true,
+                translationSkipReason = "translator_unavailable",
             )
         }
         val translated = translationStage.translate(trimmed.text, detected).getOrElse {
+            // P1 (reviewer be375ea1): the stage RAN and failed — a known FAILURE fact.
             return RoutePrep(
                 input = null,
                 translateNote = "translate=fail($detected)",
                 dropWithError = true,
+                translationFailed = true,
             )
         }
         if (translated.isBlank()) {
+            // P1: the stage RAN and returned invalid (blank) output — known FAILURE.
             return RoutePrep(
                 input = null,
                 translateNote = "translate=blank($detected)",
                 dropWithError = true,
+                translationFailed = true,
             )
         }
         // Reject no-op "translations" that would mislabel CJK as English.
         if (translated == trimmed.text) {
+            // P1: a no-op string does not establish source/target equality — the stage ran
+            // and produced INVALID output: known FAILURE.
             return RoutePrep(
                 input = null,
                 translateNote = "translate=noop($detected)",
                 dropWithError = true,
+                translationFailed = true,
             )
         }
         return RoutePrep(
@@ -971,6 +1062,15 @@ class VoiceAsrEngine @Inject constructor(
         )
     }
 
+    /**
+     * P1 (reviewer 0cd7e39d): the backend's EXISTING verified loaded identity — the loader's own
+     * manifest identity for the artifact it verified. When the loader cannot establish a name
+     * AND version, the result is [ModelRef.None]; an empty version on a Named ref is never minted.
+     */
+    private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef = // P1 (reviewer be375ea1): ONLY the backend's OWN successful-load evidence counts; a
+        // configured requiredModel is a requirement, not evidence. Absence → None.
+        backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None
+
     /** The selected backend's manifest identity, when it is the component translating. */
     private fun requestTranslationProvenance(
         backend: AsrBackend,
@@ -992,6 +1092,13 @@ class VoiceAsrEngine @Inject constructor(
         val dropWithError: Boolean,
         /** OBSERVED translation provenance for this capture (reviewer 8288ac15); null = none ran. */
         val translation: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance? = null,
+        /**
+         * P1 (reviewer 7033f4d9): a KNOWN skip of the separate translation stage, in the
+         * existing owning vocabulary. A skip is a recorded fact, not unknown.
+         */
+        val translationSkipReason: String? = null,
+        /** P1: the translation stage RAN and failed / returned invalid output. */
+        val translationFailed: Boolean = false,
     )
 
     fun stop() {

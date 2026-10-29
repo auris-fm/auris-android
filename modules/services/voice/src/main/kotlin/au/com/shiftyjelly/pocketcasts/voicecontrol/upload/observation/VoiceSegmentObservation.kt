@@ -41,6 +41,18 @@ data class TranslationProvenance(
     val translatedText: String? = null,
     /** The target language the result is in (observed), when a result exists. */
     val targetLanguage: String?,
+    /**
+     * P1 (reviewer 7033f4d9): a KNOWN skip of the separate translation stage, in the existing
+     * owning vocabulary (backend_handles_translation / source_language_unavailable /
+     * translator_unavailable / source_language_target_language). A skip is a known fact, not
+     * honest-unknown; capability alone never asserts a produced result.
+     */
+    val skipReason: String? = null,
+    /**
+     * P1 (reviewer be375ea1): the stage RAN and failed / returned invalid output — a known
+     * FAILURE fact (state failed), never laundered into a skip or unknown.
+     */
+    val failedWith: String? = null,
 )
 
 /**

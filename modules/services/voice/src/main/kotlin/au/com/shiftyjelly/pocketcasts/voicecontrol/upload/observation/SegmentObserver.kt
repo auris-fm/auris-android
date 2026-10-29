@@ -96,6 +96,27 @@ class SegmentObserver(
         val selectedMaxMetadataBytes: Int,
     )
 
+    /**
+     * P1 (reviewer 0cd7e39d): the sink owns retained state; the INVOKED backend/router identity
+     * is stored beside the candidate (never on the issued context). A backend replaced between
+     * the SpeechStarted selection and the actual invocation cannot misattribute: the invocation
+     * note is what the record claims.
+     */
+    fun noteAsrInvocation(
+        context: CaptureContext,
+        ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
+    ) {
+        (sink as? ContributionRetentionSink)?.noteAsrInvocation(context.captureId, ref)
+    }
+
+    /** P1: identity of the router ACTUALLY invoked — loading a model is not routing. */
+    fun noteRouterInvocation(
+        context: CaptureContext,
+        ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
+    ) {
+        (sink as? ContributionRetentionSink)?.noteRouterInvocation(context.captureId, ref)
+    }
+
     /** Records the ACTUAL translation observation for a retained capture (null = none). */
     fun noteTranslation(
         context: CaptureContext,

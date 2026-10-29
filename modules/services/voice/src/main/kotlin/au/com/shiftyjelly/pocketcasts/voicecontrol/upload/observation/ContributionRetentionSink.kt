@@ -29,6 +29,28 @@ sealed interface CollectionOutcome {
     /** Ordinary pipeline kept no contribution for this capture (bleed/drop/wake-only/no text). */
     data class NotCollected(override val captureId: UUID, val reason: String) : CollectionOutcome
 
+    /**
+     * P1 (reviewer 0cd7e39d): the ASR PROVIDER FAILED for this capture — a known failure,
+     * joined at the actual transcribe call. Cancellation is NEVER joined here (it is rethrown,
+     * not laundered into a provider fact). Publishable terminal: nothing further can arrive.
+     */
+    data class AsrFailed(override val captureId: UUID) : CollectionOutcome
+
+    /**
+     * P1 (reviewer be375ea1): ASR invocation was CANCELLED — the known cancelled fact is
+     * recorded BEFORE rethrowing, WITHOUT early publication. NONTERMINAL: the observation
+     * stream stays open; the bounded wait still owns finalization.
+     */
+    data class AsrCancelled(override val captureId: UUID) : CollectionOutcome
+
+    /**
+     * P1 (reviewer be375ea1): the router RAN and reported NO usable intent — the recognizer's
+     * OWN reported decision (e.g. no_candidates / low_confidence / validation_failed) travels,
+     * never a blanket mapping of every null intent. NONTERMINAL: a later cloud escalation can
+     * still supply its normal outcome; the stream is not closed.
+     */
+    data class RoutingNone(override val captureId: UUID, val recognizerReason: String?) : CollectionOutcome
+
     /** ASR produced a transcript for this capture; language is the ACTUAL detected value or null. */
     data class Recognized(
         override val captureId: UUID,
@@ -70,6 +92,21 @@ class RetainedCandidate internal constructor(
     var sampleRateHz: Int = 16000
     var wakeState: SegmentObservation.WakeState = SegmentObservation.WakeState.NotDetected
     var outcome: CollectionOutcome? = null
+
+    /**
+     * P1 (reviewer 0cd7e39d): model identity of the backend ACTUALLY INVOKED for ASR — frozen
+     * at the transcribe call from that backend's verified loaded identity, INDEPENDENT of the
+     * call's result (a failed/empty invocation still carries it). Null = ASR was never invoked
+     * for this capture; the record then claims NO asr model. Never read from the SpeechStarted
+     * selection: a backend replacement between selection and invocation must not misattribute.
+     */
+    var asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? = null
+
+    /**
+     * P1: identity of the router ACTUALLY INVOKED for this capture, frozen when routing runs.
+     * Null = routing never ran; the record claims NO router model (loading alone is not routing).
+     */
+    var routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? = null
 
     /**
      * EVERY joined outcome in join order (reviewer 54635caa): stage provenance reads the
@@ -576,7 +613,10 @@ open class ContributionRetentionSink(
             if (candidate.sealed) {
                 return false // BATCH B: sealed immutable record — late outcomes REFUSED
             }
-            if (candidate.outcome is CollectionOutcome.Executed || candidate.outcome is CollectionOutcome.NotCollected) {
+            if (candidate.outcome is CollectionOutcome.Executed ||
+                candidate.outcome is CollectionOutcome.NotCollected ||
+                candidate.outcome is CollectionOutcome.AsrFailed
+            ) {
                 return false // terminal outcome already recorded
             }
             candidate.outcome = outcome
@@ -586,7 +626,10 @@ open class ContributionRetentionSink(
             // correlator made a real decision. Other NotCollected reasons stay unpublished: the
             // bounded wait continues (no seal, no hook). Publication still passes every trigger
             // guard (frozen identity, consent, eligibility) unchanged.
+            // P1 (reviewer 0cd7e39d): a joined ASR provider failure is a KNOWN terminal fact —
+            // publishable like bleed, never left to dry into a wait-expiry unknown.
             val publishable = outcome is CollectionOutcome.Executed ||
+                outcome is CollectionOutcome.AsrFailed ||
                 (outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
             if (publishable) {
                 // ONE SEAL OPERATION for BOTH completion paths (reviewer be6bb62e #1): early
@@ -620,6 +663,8 @@ open class ContributionRetentionSink(
         outcome = candidate.outcome,
         stageHistory = candidate.stageOutcomes.toList(),
         translation = candidate.translation,
+        asrInvocationModel = candidate.asrInvocationModel,
+        routerInvocationModel = candidate.routerInvocationModel,
         executionOutcome = candidate.executionOutcome,
         allowanceMetadataCap = candidate.allowanceMetadataCap,
         cause = cause,
@@ -647,6 +692,7 @@ open class ContributionRetentionSink(
             val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return null
             if (candidate.sealed) return null // already sealed: exactly-once
             if (candidate.outcome is CollectionOutcome.Executed ||
+                candidate.outcome is CollectionOutcome.AsrFailed ||
                 (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
             ) {
                 return null // publishable terminal sealed first: its publication already ran
@@ -708,6 +754,30 @@ open class ContributionRetentionSink(
         val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
         if (candidate.sealed) return false // BATCH B: sealed immutable record
         candidate.translation = provenance
+        true
+    }
+
+    /**
+     * P1 (reviewer 0cd7e39d): freezes the INVOKED backend's verified loaded identity at the
+     * actual ASR invocation, independently of the invocation's result. Same ownership rule as
+     * [noteTranslation]; refused after sealing. A backend replaced between the SpeechStarted
+     * selection and this call cannot misattribute: THIS value is what the record claims.
+     */
+    open fun noteAsrInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): Boolean = synchronized(lock) {
+        val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        if (candidate.sealed) return false
+        candidate.asrInvocationModel = ref
+        true
+    }
+
+    /**
+     * P1: freezes the router identity AT the actual routing invocation. Loading a model is not
+     * routing; a record claims the router model only when routing ran with it.
+     */
+    open fun noteRouterInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): Boolean = synchronized(lock) {
+        val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        if (candidate.sealed) return false
+        candidate.routerInvocationModel = ref
         true
     }
 

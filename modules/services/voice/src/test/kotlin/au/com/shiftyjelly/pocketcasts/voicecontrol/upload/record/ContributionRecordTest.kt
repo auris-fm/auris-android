@@ -148,6 +148,60 @@ class ContributionRecordTest {
      * that is what a persisted record is re-read from.
      */
     @Test
+    fun `rejected_by_bleed round-trips only beside an OBSERVED bleed decision - spec 1e79e5b4`() {
+        val node = complete(builder())
+            .replaceStage(
+                StageName.Bleed,
+                StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("overlap"))),
+            )
+            .replaceStage(
+                StageName.Asr,
+                StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))),
+            )
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        val json = CanonicalJson.canonicalBytes(node).toString(Charsets.UTF_8)
+        val decoded = RecordValidator.validate(CanonicalJson.parse(json))
+        assertTrue(
+            "the valid bleed-skip pairing must be ACCEPTED by the real validator, got: $decoded",
+            decoded is RecordValidator.Result.Ok,
+        )
+
+        // NEGATIVE 1: the reason is not in any OTHER stage's enumeration, so the wrong-stage
+        // record cannot even be constructed — the builder refuses the pairing outright.
+        val wrongStageRefused = runCatching {
+            complete(builder())
+                .replaceStage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))))
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue(
+            "rejected_by_bleed on routing must be REFUSED by the builder, got: $wrongStageRefused",
+            wrongStageRefused is IllegalArgumentException,
+        )
+
+        // NEGATIVE 2: a COMPLETED asr stage carrying any reason is refused — a ran stage cannot
+        // also claim a skip reason.
+        val ranAsrRefused = runCatching {
+            complete(builder())
+                .replaceStage(StageName.Bleed, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("overlap"))))
+                .replaceStage(StageName.Asr, StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))))
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue(
+            "rejected_by_bleed beside a ran ASR must be REFUSED, got: $ranAsrRefused",
+            ranAsrRefused is IllegalArgumentException,
+        )
+
+        // NEGATIVE 3: the skip WITHOUT an observed bleed decision is refused.
+        val noBleed = complete(builder())
+            .replaceStage(StageName.Asr, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))))
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        assertTrue(
+            "rejected_by_bleed without an observed bleed decision must be REFUSED",
+            RecordValidator.validate(CanonicalJson.parse(CanonicalJson.canonicalBytes(noBleed).toString(Charsets.UTF_8))) is RecordValidator.Result.Rejected,
+        )
+    }
+
+    @Test
     fun `the emitted bytes for empty_result round-trip through recovery acceptance`() {
         val node = complete(builder())
             .replaceStage(

@@ -29,6 +29,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
  */
 object EngineStageProvenance {
 
+    /** P1: routing not_run reasons the recognizer's own decision may map to (existing set). */
+    private val STAGE_ROUTING_NONE_REASONS = setOf("no_candidates", "low_confidence", "validation_failed")
+
     fun stagesFor(sealed: SealedCapture): List<Pair<StageName, StageEntry>> {
         // HISTORY, not [outcome] (reviewer 54635caa): the terminal Executed join overwrites
         // [outcome]; the Recognized/Routed joins are read from the sealed join history.
@@ -36,6 +39,15 @@ object EngineStageProvenance {
         val history = sealed.stageHistory + listOfNotNull(sealed.outcome)
         val recognized = history.filterIsInstance<CollectionOutcome.Recognized>().firstOrNull()
         val routed = history.filterIsInstance<CollectionOutcome.Routed>().firstOrNull()
+        // P1 (reviewer 7033f4d9): KNOWN facts from the actual invocation path — a provider
+        // failure is failed/provider_error; a known skip reason names itself; missing facts
+        // NEVER invent provider_error/no_candidates.
+        val asrFailed = history.any { it is CollectionOutcome.AsrFailed }
+        val asrCancelled = history.any { it is CollectionOutcome.AsrCancelled }
+        val notCollected = (sealed.outcome as? CollectionOutcome.NotCollected)?.reason
+        // P1 (reviewer be375ea1): the recognizer's OWN reported decision, never a blanket
+        // null-intent mapping.
+        val routingNone = history.filterIsInstance<CollectionOutcome.RoutingNone>().lastOrNull()?.recognizerReason
         // BATCH B (reviewer be6bb62e #1/#4): only a capture whose wait GENUINELY EXPIRED
         // (cause outcome_wait_expired) types its unresolved stages by the expired wait. An
         // early-completed capture (cause terminal) keeps the pre-Batch-B
@@ -84,12 +96,36 @@ object EngineStageProvenance {
                 recognized != null ->
                     StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str(recognized.transcript)))
 
+                // P1: a GENUINELY empty raw recognition is completed/empty_result (owning
+                // contract, c6f3df7) — only when ASR was actually INVOKED; a wake-only drop
+                // with recognized text preserves the transcript as Recognized instead.
+                notCollected == "empty" && sealed.asrInvocationModel != null ->
+                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result")))
+
+                // P1: known provider FAILURE joined at the transcribe call.
+                asrFailed -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("provider_error")))
+
+                // P1 (reviewer be375ea1): the KNOWN cancelled fact recorded before rethrow.
+                asrCancelled -> StageEntry(StageState.Cancelled, mapOf("reason" to RecordNode.Str("cancelled_by_user")))
+
+                // P1: the known wake decision that skipped ASR (owning vocabulary).
+                notCollected == "rejected_by_wake" ->
+                    StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_wake")))
+
+                // P1 + spec 1e79e5b4: the observed bleed decision ACTUALLY skipped ASR —
+                // not_run/rejected_by_bleed; the bleed stage itself carries the observation.
+                notCollected == "bleed" ->
+                    StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed")))
+
                 // BATCH B: an expired-wait record's ASR stage carries the genuine wait fact,
                 // not a provider error (early-completed records keep the pre-Batch-B typing).
                 sealed.cause == SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED ->
                     StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
 
-                else -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("provider_error")))
+                // P1 (reviewer 7033f4d9): no known fact — honest unknown; the invented
+                // provider_error is gone. A bleed rejection keeps the bleed stage's own
+                // completed/overlap fact; ASR carries no invented claim.
+                else -> StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
             },
             // TRANSLATION: only OBSERVED truth (reviewer 8288ac15). A produced result is
             // completed with the observed target language; no observation at all is UNKNOWN —
@@ -105,10 +141,16 @@ object EngineStageProvenance {
                 routed != null ->
                     StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str(routed.intentCategory)))
 
+                // P1 (reviewer be375ea1): the router RAN and reported no usable intent — the
+                // recognizer's OWN reason, only when it is in the owning vocabulary.
+                routingNone != null && routingNone in STAGE_ROUTING_NONE_REASONS ->
+                    StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(routingNone)))
+
                 sealed.cause == SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED ->
                     StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
 
-                else -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates")))
+                // P1: no known fact — honest unknown; the invented no_candidates is gone.
+                else -> StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
             },
             // THE EXECUTOR'S OWN RESULT when it actually reported one (spec audit, action-result
             // channel): the outcome is what the executor returned/threw, never an inference. A
@@ -137,6 +179,16 @@ object EngineStageProvenance {
         translation: TranslationProvenance?,
         unresolvedReason: RecordNode.Str,
     ): StageEntry = when {
+        // P1 (reviewer 7033f4d9): a KNOWN skip is not_run with its owning-vocabulary reason —
+        // never unknown, and never a produced result claimed from capability alone.
+        translation != null && translation.skipReason != null ->
+            StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(translation.skipReason)))
+
+        // P1 (reviewer be375ea1): the stage RAN and failed/returned invalid output — a known
+        // FAILURE (existing provider_error), never a skip or an unknown.
+        translation != null && translation.failedWith != null ->
+            StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str(translation.failedWith)))
+
         translation != null && translation.producedResult &&
             translation.translatedText != null && translation.targetLanguage != null ->
             StageEntry(

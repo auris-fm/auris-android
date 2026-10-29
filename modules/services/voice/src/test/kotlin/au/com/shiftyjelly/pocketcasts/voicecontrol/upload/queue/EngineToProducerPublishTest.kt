@@ -24,6 +24,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -144,10 +145,12 @@ class EngineToProducerPublishTest {
 
     private val asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin")
 
+    // P1 (reviewer 0cd7e39d/7033f4d9): the module's fixed list carries NO invented labels —
+    // vad/wakeword are the schema's declared absence (no loader-verified version), and the
+    // router ref is claimed only from the actual routing invocation (never a fixed entry).
     private val fixedModels = listOf(
-        "vad" to ModelRef.Named("silero-vad", "4.0"),
-        "wakeword" to ModelRef.Named("auris-wake", "1.2"),
-        "router" to ModelRef.Named("lfm-intent", "0.3"),
+        "vad" to ModelRef.None,
+        "wakeword" to ModelRef.None,
     )
 
     private val stages = listOf(
@@ -330,7 +333,7 @@ class EngineToProducerPublishTest {
     }
 
     @Test
-    fun `a capture with no observed asr model is not publishable`() {
+    fun `a capture with no ASR invocation publishes honestly claiming no asr model`() {
         val root = tmp.newFolder("no-model")
         val store = newStore(root)
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
@@ -342,11 +345,13 @@ class EngineToProducerPublishTest {
             asrModel = ModelRef.None,
         )
         retainCapture(sink, ctx)
+        // An EXECUTED outcome is a publishable terminal: the capture publishes (it does NOT stay
+        // retained), and the record may claim no asr model because no invocation happened.
         trigger(sink, store).attach()
 
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
-        assertEquals(0, store.readyEntries().size)
+        assertEquals(1, store.readyEntries().size)
         assertEquals(0L, sink.retainedBytes())
     }
 
@@ -537,6 +542,110 @@ class EngineToProducerPublishTest {
         val decodedBleed = decodedRecord.observations.getValue(StageName.Bleed)
         assertEquals("the PERSISTED bleed state must be a completed check", StageState.Completed, decodedBleed.state)
         assertEquals("overlap", (decodedBleed.fields.getValue("decision") as RecordNode.Str).value)
+    }
+
+    // P1 (reviewer 4927bb31): representative ENGINE facts must be asserted from a record the
+    // producer actually BUILT and persisted, not only from sealedSnapshotForTest.
+    @Test
+    fun `P1 - a token-provider failure is persisted as asr failed with provider_error and no model`() {
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        val first = ShortArray(800) { i -> i.toShort() }
+        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800, allowanceMetadataCapBytes = 1 shl 20)))
+        sink.completed(
+            SegmentObservation.Completed(
+                ctx,
+                frames = listOf(ShortArray(800) { i -> (i + 1).toShort() }),
+                sampleRateHz = 16000,
+                speechOnsetSample = 0,
+                speechEndSample = 1600,
+                wakeState = SegmentObservation.WakeState.Detected,
+            ),
+        )
+        // The production failure fact: ASR ran and failed; no model could be claimed because the
+        // invocation produced no verified load evidence.
+        assertTrue(sink.noteAsrInvocation(ctx.captureId, ModelRef.None))
+        assertTrue(sink.joinOutcome(CollectionOutcome.AsrFailed(ctx.captureId)))
+
+        val stages = EngineStageProvenance.stagesFor(sink.sealedSnapshotForTest(ctx.captureId)!!)
+        val store = newStore(tmp.newFolder("p1-provider-error"))
+        val stored = producer(store).publish(
+            ctx.captureId.toString(),
+            "epoch-1",
+            16000,
+            listOf(first to 800),
+            listOf(
+                "vad" to ModelRef.None,
+                "wakeword" to ModelRef.None,
+                "asr" to ModelRef.None,
+                "translation" to ModelRef.None,
+                "router" to ModelRef.None,
+            ),
+            stages,
+        )
+        assertTrue("the producer must publish a record for a failed invocation", stored != null)
+        val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
+        val record = when (val v = RecordValidator.validate(decoded.record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val asr = record.observations.getValue(StageName.Asr)
+        assertEquals("a ran-and-failed invocation is a KNOWN failure", StageState.Failed, asr.state)
+        assertEquals("provider_error", (asr.fields.getValue("reason") as RecordNode.Str).value)
+        // No claim of a model that was never verified.
+        assertEquals(ModelRef.None, record.models["asr"])
+    }
+
+    @Test
+    fun `P1 - a wake-only capture with text is persisted as recognized, not as an empty result`() {
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        val first = ShortArray(800) { i -> i.toShort() }
+        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800, allowanceMetadataCapBytes = 1 shl 20)))
+        sink.completed(
+            SegmentObservation.Completed(
+                ctx,
+                frames = listOf(ShortArray(800) { i -> (i + 1).toShort() }),
+                sampleRateHz = 16000,
+                speechOnsetSample = 0,
+                speechEndSample = 2,
+                wakeState = SegmentObservation.WakeState.Detected,
+            ),
+        )
+        assertTrue(sink.noteAsrInvocation(ctx.captureId, ModelRef.Named("sense-voice", "2024-07-17")))
+        assertTrue(sink.joinOutcome(CollectionOutcome.Recognized(ctx.captureId, " ok pause ", "en")))
+
+        val stages = EngineStageProvenance.stagesFor(sink.sealedSnapshotForTest(ctx.captureId)!!)
+        val store = newStore(tmp.newFolder("p1-wake-only-text"))
+        val stored = producer(store).publish(
+            ctx.captureId.toString(),
+            "epoch-1",
+            16000,
+            listOf(first to 800),
+            listOf(
+                "vad" to ModelRef.None,
+                "wakeword" to ModelRef.None,
+                "asr" to ModelRef.Named("sense-voice", "2024-07-17"),
+                "translation" to ModelRef.None,
+                "router" to ModelRef.None,
+            ),
+            stages,
+        )
+        assertTrue("the producer must publish a record for a wake-only capture with text", stored != null)
+        val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
+        val json = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+            .canonicalBytes(decoded.record).toString(Charsets.UTF_8)
+        val record = when (val v = RecordValidator.validate(decoded.record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val asr = record.observations.getValue(StageName.Asr)
+        assertEquals("recognized text means ASR completed", StageState.Completed, asr.state)
+        assertFalse(
+            "a wake-only capture with real text must not be persisted as an empty result: $json",
+            json.contains("empty_result"),
+        )
+        assertEquals(ModelRef.Named("sense-voice", "2024-07-17"), record.models["asr"])
     }
 
     /**

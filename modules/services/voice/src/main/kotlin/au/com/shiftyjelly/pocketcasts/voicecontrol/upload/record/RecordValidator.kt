@@ -97,6 +97,22 @@ object RecordValidator {
     private val EXECUTION_DISPOSITIONS = setOf("executed", "refused", "failed", "not_run", "pending")
     private val EXECUTION_OUTCOMES = setOf("success", "failure", "refused", "cancelled")
 
+    /**
+     * P1 / spec 1e79e5b4: the SHARED reason/state pairing rule (builder and recovery must
+     * produce only pairs this validator accepts). True when [reason] may appear on [stage]
+     * in [state]: enumerated for the stage, present only on non-completed states (with the
+     * single completed exception `empty_result` on ASR), and never `observation_unavailable`
+     * beside a non-unknown state.
+     */
+    fun canStageReason(stage: StageName, state: StageState, reason: String): Boolean {
+        if (!StageReasons.isAllowed(stage, reason)) return false
+        if (state == StageState.Completed) return stage == StageName.Asr && reason == "empty_result"
+        if (reason == "observation_unavailable") return state == StageState.Unknown
+        if (reason == "empty_result") return false
+        if (reason in TRANSLATION_SKIP_REASONS) return stage == StageName.Translation && state == StageState.NotRun
+        return true
+    }
+
     fun validate(node: RecordNode): Result {
         val root = node as? RecordNode.Obj ?: return reject("record is not an object")
         val fields = root.fields
@@ -126,6 +142,23 @@ object RecordValidator {
         val audio = validateAudio(audioNode) ?: return reject("audio block invalid")
         val models = validateModels(fields["models"]) ?: return reject("models invalid")
         val observations = validateObservations(fields["observations"]) ?: return reject("observations invalid")
+        // spec 1e79e5b4: `rejected_by_bleed` is valid ONLY as asr/not_run AND only beside an
+        // OBSERVED bleed decision (bleed completed with decision overlap/no_overlap/uncertain)
+        // — the bleed stage itself carries the observation. A record whose bleed stage ran is
+        // also an ASR that ran ( Recognized/etc. ), which contradicts the skip.
+        run {
+            val asr = observations[StageName.Asr]
+            val bleed = observations[StageName.Bleed]
+            val bleedSkip = asr?.state == StageState.NotRun &&
+                (asr.fields["reason"] as? RecordNode.Str)?.value == "rejected_by_bleed"
+            if (bleedSkip) {
+                val observedBleed = bleed?.state == StageState.Completed &&
+                    (bleed.fields["decision"] as? RecordNode.Str)?.value != null
+                // `asr` is non-null here by construction (bleedSkip requires a non-null asr).
+                val asrRan = asr.state != StageState.NotRun
+                if (!observedBleed || asrRan) return reject("rejected_by_bleed without observed bleed decision")
+            }
+        }
         fields["links"]?.let { if (validateLinks(it) == null) return reject("links invalid") }
 
         return Result.Ok(

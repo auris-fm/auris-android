@@ -559,8 +559,12 @@ class CaptureOutcomeFinalizerTest {
         val canonical = CanonicalJson.canonicalBytes(durable.record).toString(Charsets.UTF_8)
         assertTrue("the persisted record must carry the wake decision", canonical.contains("\"detected\""))
         assertTrue("the persisted record must carry the recognized transcript", canonical.contains("skip this ad"))
-        // The module's REAL named fixed models are present (not reconstructed nulls).
-        assertTrue("the persisted record must carry the module's real vad model", canonical.contains("silero-vad"))
+        // P1 (reviewer 0cd7e39d/7033f4d9): the module's REAL fixed list is the declared
+        // absence — no invented labels. vad/wakeword serialize as null (no loader-verified
+        // version exists), and asr claims only invocation evidence (none was noted here).
+        assertTrue("the persisted record must declare the vad absence", canonical.contains("\"vad\":null"))
+        assertTrue("the persisted record must declare the wakeword absence", canonical.contains("\"wakeword\":null"))
+        assertTrue("the record must not resurrect the removed fixed labels", !canonical.contains("silero-vad"))
     }
 
     @Test(timeout = 60_000)

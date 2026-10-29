@@ -24,6 +24,10 @@ class SealedCapture(
     val outcome: CollectionOutcome?,
     val stageHistory: List<CollectionOutcome>,
     val translation: TranslationProvenance?,
+    /** P1 (reviewer 0cd7e39d): identity of the backend ACTUALLY invoked for ASR; null = never invoked. */
+    val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
+    /** P1: identity of the router ACTUALLY invoked; null = routing never ran. */
+    val routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
     val executionOutcome: ExecutionOutcome?,
     val allowanceMetadataCap: Int?,
     val cause: String,

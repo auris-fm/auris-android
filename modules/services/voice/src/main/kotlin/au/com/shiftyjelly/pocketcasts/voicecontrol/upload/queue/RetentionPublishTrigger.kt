@@ -108,18 +108,21 @@ class RetentionPublishTrigger(
             // (reviewer fde5349e): a capture that was never allowance-admitted refuses here,
             // before any queue admission or write.
             val metadataCapBytes = sealed.allowanceMetadataCap ?: return
-            // GUARD 4: observed per-capture model provenance is record truth. A Named ref is
-            // required for EARLY-COMPLETED records (execution implies observed ASR). An
-            // outcome-wait-expired record may carry NO observed ASR model (the wait expired
-            // before one joined): that absence is honest and the ASR stage is typed by its
-            // cause — publication with ModelRef.None, never fabricated provenance (reviewer
-            // 399cb2e6 #1: retaining legitimate no-ASR outcomes cannot be deferred).
-            val observedAsr = sealed.context.asrModel as? ModelRef.Named
-            if (observedAsr == null && sealed.cause != SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED) return
-            val asrModel = observedAsr ?: ModelRef.None
-            // TRANSLATION provenance comes from the OBSERVED record on the sealed snapshot,
-            // never from the frozen context (which cannot know whether translation ran).
-            val translationModel = sealed.translation?.model ?: ModelRef.None
+            // GUARD 4 (P1, reviewer 0cd7e39d/7033f4d9): model provenance is INVOCATION evidence.
+            // The asr ref is the identity of the backend ACTUALLY INVOKED (frozen at the
+            // transcribe call), never the SpeechStarted selection on the frozen context. An
+            // invocation that failed or returned empty STILL carries it; no invocation at all
+            // claims NO asr model. A produced translation (or a known skip) is claimed per the
+            // observed record; the router ref only when routing actually ran.
+            val asrModel = sealed.asrInvocationModel ?: ModelRef.None
+            val translationSkip = sealed.translation?.skipReason != null
+            val translationModel = if (translationSkip || sealed.translation?.producedResult != true) {
+                ModelRef.None
+            } else {
+                // producedResult=true implies a translation exists, so the safe call is redundant.
+                sealed.translation.model
+            }
+            val routerModel = sealed.routerInvocationModel ?: ModelRef.None
             val chunks = listOf(pcm to pcm.size)
             val commit = {
                 producer.publish(
@@ -127,7 +130,11 @@ class RetentionPublishTrigger(
                     frozen.enrollmentEpoch,
                     sealed.sampleRateHz,
                     chunks,
-                    fixedModels + listOf("asr" to asrModel, "translation" to translationModel),
+                    fixedModels + listOf(
+                        "asr" to asrModel,
+                        "translation" to translationModel,
+                        "router" to routerModel,
+                    ),
                     stagesProvider(sealed),
                     metadataCapBytes = metadataCapBytes,
                 )

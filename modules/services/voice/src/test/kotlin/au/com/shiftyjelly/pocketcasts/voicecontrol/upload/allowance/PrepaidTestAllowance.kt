@@ -1,11 +1,16 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
 
 /**
- * Test authority that is ALWAYS prepaid: each take mints one synthetic token. Existing positive
- * controls inject this explicitly (reviewer 2164aee3: "existing positive controls should explicitly
- * inject a provisioned, prepaid owner"); it is NOT a production shape and refuses nothing.
+ * SYNTHETIC test authority that is always prepaid: each take mints one synthetic token so
+ * unrelated positive controls can exercise admission without composing a real owner. These
+ * synthetic tokens are NOT evidence of real provisioning — no ledger, window or production
+ * authority is involved (reviewer 174083e0). Proof-bearing controls use the REAL provisioned
+ * [CaptureAllowanceOwner] (see CaptureAllowanceAdmissionTest).
  */
-class PrepaidTestAllowance : CaptureAllowanceAuthority {
+class PrepaidTestAllowance(
+    private val maxClipBytes: Long = 8L * 1024 * 1024,
+    private val maxMetadataBytes: Int = 8_192,
+) : CaptureAllowanceAuthority {
     var taken = 0
         private set
     val events = mutableListOf<String>()
@@ -13,6 +18,6 @@ class PrepaidTestAllowance : CaptureAllowanceAuthority {
     override fun takePrepaidToken(): CaptureAllowanceToken? {
         events += "take"
         taken += 1
-        return CaptureAllowanceToken(generation = 0, limitsBinding = "test", windowBinding = "test")
+        return CaptureAllowanceToken(generation = 0, limitsBinding = "test", windowBinding = "test", selectedMaxClipBytes = maxClipBytes, selectedMaxMetadataBytes = maxMetadataBytes)
     }
 }

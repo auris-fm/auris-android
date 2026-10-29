@@ -327,11 +327,8 @@ class ContributionUploadTransport(
     }
 
     private fun metadataPart(record: RecordNode.Obj): ByteArray? = runCatching {
-        val canonical = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.canonicalBytes(record)
-        val digest = sha256Hex(canonical)
-        // Exactly the two members the intake reads, in this order, digest over the CLIENT bytes.
-        val json = "{\"record\":" + canonical.toString(Charsets.UTF_8) + ",\"record_sha256\":\"" + digest + "\"}"
-        json.toByteArray(Charsets.UTF_8)
+        // THE single envelope definition - the allowance bound was enforced against these bytes.
+        UploadMetadataEnvelope.bytes(record)
     }.getOrElse { null }
 
     private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

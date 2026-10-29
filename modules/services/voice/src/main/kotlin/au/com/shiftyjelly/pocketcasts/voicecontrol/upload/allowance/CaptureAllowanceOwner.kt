@@ -26,6 +26,8 @@ class CaptureAllowanceOwner(
 ) : CaptureAllowanceAuthority {
     private val ledger = CaptureAllowanceLedger(area, account, limits, window, provisioning)
     private val limitsBinding = limits.binding()
+    private val selectedMaxClipBytes = limits.maxClipBytes
+    private val selectedMaxMetadataBytes = limits.maxMetadataBytes
 
     private val windowBinding = window.binding()
 
@@ -126,7 +128,7 @@ class CaptureAllowanceOwner(
             // A generation change during the charge must not mint: the charge stays consumed, no refund.
             if (mintedFrom != generation) return false
             if (pending != null) return false
-            pending = CaptureAllowanceToken(generation, limitsBinding, windowBinding)
+            pending = CaptureAllowanceToken(generation, limitsBinding, windowBinding, selectedMaxClipBytes, selectedMaxMetadataBytes)
             preparedGeneration = generation
             return true
         } finally {
@@ -147,4 +149,8 @@ class CaptureAllowanceToken internal constructor(
     internal val generation: Long,
     internal val limitsBinding: String,
     internal val windowBinding: String,
+    /** The SELECTED clip bound this charge was validated against — enforced at every capture boundary. */
+    internal val selectedMaxClipBytes: Long,
+    /** The SELECTED metadata envelope bound frozen for the capture's persistence stage. */
+    internal val selectedMaxMetadataBytes: Int,
 )

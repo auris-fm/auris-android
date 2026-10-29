@@ -127,6 +127,7 @@ internal object VoiceUploadCompositionPaths {
                     ctx,
                     ShortArray(800) { it.toShort() },
                     validSamples = 800,
+                    allowanceMetadataCapBytes = 1 shl 20,
                 ),
             ),
         )

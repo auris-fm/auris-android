@@ -169,7 +169,7 @@ class EngineToProducerPublishTest {
 
     private fun retainCapture(sink: ContributionRetentionSink, context: CaptureContext, samples: Int = 1600) {
         val first = ShortArray(800) { i -> i.toShort() }
-        assertTrue(sink.started(SegmentObservation.Started(context, first, validSamples = 800)))
+        assertTrue(sink.started(SegmentObservation.Started(context, first, validSamples = 800, allowanceMetadataCapBytes = 1 shl 20)))
         val rest = ShortArray(samples - 800) { i -> (i + 1).toShort() }
         sink.completed(
             SegmentObservation.Completed(context, frames = listOf(rest), sampleRateHz = 16000, speechOnsetSample = 0, speechEndSample = samples, wakeState = SegmentObservation.WakeState.Detected),
@@ -491,7 +491,7 @@ class EngineToProducerPublishTest {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         val first = ShortArray(800) { i -> i.toShort() }
-        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800)))
+        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800, allowanceMetadataCapBytes = 1 shl 20)))
         sink.completed(
             SegmentObservation.Completed(
                 ctx,
@@ -676,7 +676,7 @@ class EngineToProducerPublishTest {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         val first = ShortArray(800) { i -> i.toShort() }
-        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800)))
+        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800, allowanceMetadataCapBytes = 1 shl 20)))
         sink.completed(
             SegmentObservation.Completed(
                 ctx,

@@ -71,6 +71,8 @@ class ContributionCaptureProducer(
         pcmChunks: List<Pair<ShortArray, Int>>,
         models: List<Pair<String, ModelRef>>,
         stages: List<Pair<StageName, StageEntry>>,
+        /** Frozen allowance metadata bound for THIS capture (null = no allowance constraint). */
+        metadataCapBytes: Int? = null,
     ): ContributionStore.Entry? {
         if (!captureId.matches(UUID_RE)) return null
         val samples = pcmChunks.sumOf { it.second.toLong() }
@@ -131,6 +133,10 @@ class ContributionCaptureProducer(
             audio = block,
         )
         val metadata = CanonicalJson.canonicalBytes(record)
+        // THE PREPAID METADATA BOUND, enforced at the persistence boundary (spec 0987c463):
+        // count the FULL canonical record/digest envelope - the representation the transport
+        // actually sends - and refuse BEFORE any store reservation or write.
+        if (metadataCapBytes != null && UploadMetadataEnvelope.bytes(record).size > metadataCapBytes) return null
         val admission = store.admit(samples, metadata.size) ?: return null
         return store.prepare(admission, captureId, enrollmentEpoch, pcmChunks, metadata, account, session)
     }

@@ -55,7 +55,17 @@ sealed interface SegmentObservation {
 
     /** VAD reported speech onset: the moment the context is frozen. Zero audio retained. */
 
-    data class Admission(override val context: CaptureContext, val producerSamples: Int) : SegmentObservation
+    data class Admission(
+        override val context: CaptureContext,
+        val producerSamples: Int,
+        /**
+         * The SELECTED prepaid metadata bound, FROZEN at admission (reviewer fde5349e): it travels
+         * with the capture into the retained candidate, so persistence reads immutable frozen
+         * state. NULL refuses publication fail-closed - missing metadata authority never means
+         * unconstrained. Positive fixtures pass an explicit bound.
+         */
+        val allowanceMetadataCapBytes: Int?,
+    ) : SegmentObservation
 
     data class Started(
         override val context: CaptureContext,
@@ -66,6 +76,9 @@ sealed interface SegmentObservation {
         val firstChunk: ShortArray,
         /** Samples actually drained into [firstChunk] (distinctive-partial-copy proof). */
         val validSamples: Int = firstChunk.size,
+        /** The frozen allowance metadata cap (same fail-closed contract as Admission). Direct-sink
+         * starts (joined-path controls) freeze it here; null refuses publication. */
+        val allowanceMetadataCapBytes: Int? = null,
     ) : SegmentObservation
 
     /** Incremental accounting of REAL produced samples, bounded by collector ownership. */
@@ -189,6 +202,8 @@ class ReservationToken constructor(
     internal val captureId: java.util.UUID,
     internal val id: Long,
     internal var bytes: Long,
+    /** The allowance metadata cap FROZEN on the ADMISSION token (capture-owned; null = none). */
+    internal val allowanceMetadataCapBytes: Int? = null,
 )
 
 /** Runs a block inside the collection authority transaction (composition supplies the fence). */

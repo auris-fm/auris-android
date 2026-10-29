@@ -46,6 +46,20 @@ class SegmentObserver(
     private var open: CaptureContext? = null
     private var retainedForOpen = false
     private var admissionToken: ReservationToken? = null
+
+    /** The open capture's prepaid clip bound (encoded-WAV bytes incl. 44-byte header). */
+    private var openPrepaidClipBytes: Long = Long.MAX_VALUE
+
+    /**
+     * THE single retained/reserved-byte authority for the open capture (reviewer 55433b71):
+     * sink-side charged bytes INCLUDING outstanding (not yet committed/released) reservations.
+     * Every growth decision checks THIS, never an engine-fed sample counter.
+     */
+    private var openChargedBytes: Long = 0L
+
+    /** Outstanding reservations (token -> reserved bytes) not yet committed or released. */
+    private val outstanding = java.util.HashMap<ReservationToken, Long>()
+
     private var cumulativeAccounted = 0
     private var totalRetainedBytes = 0L
 
@@ -73,7 +87,14 @@ class SegmentObserver(
     // Admission + its IMMUTABLE initial-reservation handle (reviewer 79b2b5c9 b2): producers
     // adopt/release by THIS handle even after revocation closed the capture or a successor
     // opened — release never depends on "the currently open context".
-    data class AdmissionHandle(val context: CaptureContext, val initialToken: ReservationToken?)
+    data class AdmissionHandle(
+        val context: CaptureContext,
+        val initialToken: ReservationToken?,
+        /** The prepaid token's SELECTED clip bound — binds every allocation/growth of THIS capture. */
+        val selectedMaxClipBytes: Long,
+        /** The prepaid token's SELECTED metadata bound — frozen for the capture's persistence stage. */
+        val selectedMaxMetadataBytes: Int,
+    )
 
     /** Records the ACTUAL translation observation for a retained capture (null = none). */
     fun noteTranslation(
@@ -114,15 +135,34 @@ class SegmentObserver(
         // allocation/drain. Null (unavailable/empty) REFUSES the capture fail-closed.
         val prepaid = if (permitted) allowance.takePrepaidToken() else null
         if (prepaid == null) return@gate null
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, prepaid)?.let { AdmissionHandle(it, admissionToken) }
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, prepaid)?.let {
+            AdmissionHandle(it, admissionToken, prepaid.selectedMaxClipBytes, prepaid.selectedMaxMetadataBytes)
+        }
     }
 
     private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, prepaid: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceToken): CaptureContext? {
         val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel)
+        // INVALID SIZES refuse before any arithmetic or admission (reviewer fde5349e): a negative
+        // producer size would create a negative open charge and REDUCE the sink budget reservation.
+        // ZERO stays legal: the empty-prefix admission is a real, retained capture (deltas grow it).
+        if (producerSize < 0) return null
+        // The PREPAID bound binds BEFORE any allocation (reviewer 174083e0 #1): a capture larger
+        // than what was charged for is refused here even when the sink's own independent cap would
+        // still allow it. 2 bytes/sample, same accounting the sink uses.
+        // 44-byte WAV header INCLUDED: selectedMaxClipBytes is an encoded-WAV bound.
+        if (producerSize.toLong() * 2L + 44L > prepaid.selectedMaxClipBytes) {
+            // BURN: the token was taken for a capture whose allocation exceeds the charged bound.
+            return null
+        }
         return synchronized(lock) {
             if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0
-            val token = sink.admit(SegmentObservation.Admission(context, producerSize))
+            openPrepaidClipBytes = prepaid.selectedMaxClipBytes
+            openChargedBytes = producerSize.toLong() * 2L // the sink reserves full capacity at admit
+            outstanding.clear()
+            // The SELECTED metadata bound is FROZEN into the admission event itself; the sink
+            // stamps it into the immutable retained candidate. No side map, no lookup race.
+            val token = sink.admit(SegmentObservation.Admission(context, producerSize, prepaid.selectedMaxMetadataBytes))
             if (token == null) {
                 // SINK REFUSAL BURNS the prepaid token, no refund (reviewer 2164aee3): the durable
                 // charge stays consumed even though no audio was admitted. The token object itself
@@ -144,8 +184,18 @@ class SegmentObserver(
         val context = admission.context
         if (open?.captureId != context.captureId) return false
         val token = admission.initialToken ?: return false
+        if (validSamples < 0 || validSamples > firstChunk.size) return false
+        // The sink adopts the WHOLE array capacity, which may exceed the initial reservation: any
+        // such growth is bound-checked BEFORE adoption, never discovered after the charge moved.
+        val capacityBytes = firstChunk.size.toLong() * 2L
+        val reservedBytes = token.bytes
+        if (capacityBytes != reservedBytes) {
+            if (openChargedBytes - reservedBytes + capacityBytes + 44L > openPrepaidClipBytes) return false
+        }
         val transferred = sink.adopted(SegmentObservation.Started(context, firstChunk, validSamples), token)
         if (transferred) {
+            // The authority mirrors the sink's ACTUAL charge: full capacity, reservation settled.
+            openChargedBytes += capacityBytes - reservedBytes
             admissionToken = null
             // Retention is live once the prefix exists (sink sets it on adoption); mirror for gates.
             retainedForOpen = openPrefixExistsFor(context)
@@ -179,43 +229,73 @@ class SegmentObserver(
     // observer monitor only — the collection fence was acquired at admission and is NOT re-entered
     // upward from here. ---
     fun reserveDelta(context: CaptureContext, samples: Int): ReservationToken? = synchronized(lock) {
+        reserveEnforcedLocked(context, samples)
+    }
+
+    /** THE enforced growth gate: Long arithmetic, WAV header included, outstanding bytes counted. */
+    private fun reserveEnforcedLocked(context: CaptureContext, samples: Int): ReservationToken? {
+        if (samples <= 0) return null
         if (open?.captureId != context.captureId) return null
-        sink.reserveDelta(context, samples)
+        val addBytes = samples.toLong() * 2L
+        // selectedMaxClipBytes is the encoded-WAV bound: PCM bytes + 44-byte header must fit.
+        if (openChargedBytes + addBytes + 44L > openPrepaidClipBytes) return null
+        val token = sink.reserveDelta(context, samples) ?: return null
+        outstanding[token] = addBytes
+        openChargedBytes += addBytes
+        return token
     }
 
     // Producer drop path: even when the capture is already closed/revoked, the sink MUST see the
     // release so a lease-held charge leaves the budget exactly once (reviewer 8273382e b4).
     // Advances accounting ONLY when the sink actually adopted (reviewer 23cae70e b2).
     fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean = synchronized(lock) {
+        // BOTH the engine path and the compatibility path commit through HERE, so the capacity
+        // accounting has exactly one definition (reviewer 55433b71 follow-up).
         if (open?.captureId != context.captureId || token == null) {
             // Refused commit: the producer still owns the array; its charge leaves ONLY through
             // releaseDelta when the producer drops it — do not adopt or double-release here.
             return false
         }
+        if (copied < 0 || copied > drained.size) return false
+        val reservedBytes = outstanding[token] ?: return false // unknown/stale token: refuse
+        // The sink adopts the WHOLE array capacity; growth beyond the reservation is enforced
+        // against the prepaid bound BEFORE adoption, never discovered after the charge moved.
+        val capacityBytes = drained.size.toLong() * 2L
+        if (capacityBytes > reservedBytes) {
+            if (openChargedBytes - reservedBytes + capacityBytes + 44L > openPrepaidClipBytes) return false
+        }
         val adopted = sink.commitDelta(context, drained, copied, token)
-        if (adopted) cumulativeAccounted += copied
+        if (adopted) {
+            // The authority mirrors the sink's ACTUAL retained charge: full capacity, reservation settled.
+            openChargedBytes += capacityBytes - reservedBytes
+            outstanding.remove(token)
+            cumulativeAccounted += copied
+        }
         adopted
     }
 
-    fun releaseDelta(context: CaptureContext, token: ReservationToken?) {
+    fun releaseDelta(context: CaptureContext, token: ReservationToken?) = synchronized(lock) {
+        openChargedBytes -= outstanding.remove(token) ?: 0L
         sink.releaseDelta(context, token)
     }
 
-    /** Real sample delta produced by the production producer since the previous accounting point. */
+    /** READ-ONLY test seam: samples actually accounted (adopted+committed) for the open capture. */
+    fun chargedSamplesForTest(): Int = synchronized(lock) { cumulativeAccounted }
+
+    /** READ-ONLY test seam: THE charged-byte authority (incl. outstanding) for the open capture. */
+    fun chargedBytesForTest(): Long = synchronized(lock) { openChargedBytes }
+
     fun speechIncremental(context: CaptureContext?, samples: ShortArray): Unit = synchronized(lock) {
         val current = open ?: return
         if (context == null || current.captureId != context.captureId) return // stale/unknown: refuse
         if (!retainedForOpen || samples.isEmpty()) return
-        // Reserve-before-copy even on the compatibility path: growth that cannot be reserved ends
-        // retention via the sink's own terminal; nothing is copied uncharged.
-        val token = sink.reserveDelta(current, samples.size) ?: return
+        // The compatibility path shares THE enforced gate AND the shared capacity-accounting commit.
+        val token = reserveEnforcedLocked(current, samples.size) ?: return
         try {
-            if (sink.commitDelta(current, samples, samples.size, token)) {
-                cumulativeAccounted += samples.size
-            }
+            commitDelta(current, samples, samples.size, token)
         } finally {
             // If commit refused/threw, THIS token's charge returns on producer drop.
-            sink.releaseDelta(current, token)
+            releaseDelta(current, token)
         }
     }
 
@@ -306,6 +386,19 @@ class SegmentObserver(
             return false
         }
         val (frames, rate) = framesProvider()
+        // FROZEN CLIP BOUND AT COMPLETION (reviewer be120bf2 #1): a refused growth/final-tail
+        // reserveDelta leaves the capture open, and the completion drain can hand back the FULL
+        // native segment. Enforce the frozen encoded-WAV bound HERE, before any flatten or
+        // allocation, with Long totals (2 bytes/sample + the 44-byte header). Refusal terminates
+        // collection cleanly - exactly one terminal, prefix and charge released, NO candidate -
+        // while recognition itself continues untouched.
+        val completionSamples = frames.sumOf { it.size.toLong() }
+        if (completionSamples * 2L + 44L > openPrepaidClipBytes) {
+            sink.cancelled(SegmentObservation.Cancelled(current, "handoff-clip-bound-refused"))
+            closeLocked()
+            totalRetainedBytes = 0L
+            return false
+        }
         val adopted = sink.completed(
             SegmentObservation.Completed(current, frames, rate, speechOnsetSample, speechEndSample, wakeState),
         )

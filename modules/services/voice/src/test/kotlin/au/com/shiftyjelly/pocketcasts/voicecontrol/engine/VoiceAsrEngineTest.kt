@@ -1281,6 +1281,153 @@ class VoiceAsrEngineTest {
         wakeWordResult: WakeWordResult,
     ) = createEngineWithSpeech(observer, retentionSink, authority, recognizer, wakeWordResult)
 
+    // / REAL-ENGINE allowance controls (reviewer 174083e0 #2): the engine allocation/drain boundary
+    // / is exercised by the REAL VoiceAsrEngine over the REAL observer + retention sink — not a
+    // / manually allocated array.
+
+    @Test
+    fun `unavailable allowance - the engine allocates and drains NOTHING while recognition still proceeds`() = runTest {
+        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val unavailableObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retention,
+            liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance,
+        )
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(unavailableObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Headset(hasMicrophone = true),
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+        advanceUntilIdle()
+
+        // The capture is refused fail-closed at admission: the engine NEVER reaches allocation —
+        // no drain of the native PCM into a ShortArray, no adopt, nothing retained.
+        verify(voiceAudioProcessor, times(0)).drainSpeechPcm(org.mockito.kotlin.any<ShortArray>())
+        verify(voiceAudioProcessor, times(0)).drainSpeechTail(org.mockito.kotlin.any<ShortArray>(), org.mockito.kotlin.any<Int>(), org.mockito.kotlin.any<Int>())
+        verify(voiceAudioProcessor, times(0)).peekSpeechDelta(org.mockito.kotlin.any<Int>())
+        assertEquals("nothing may be retained from a refused capture", 0, retention.retainedCount())
+        assertEquals(0L, retention.retainedBytes())
+        assertNull(retention.retainedSnapshot().firstOrNull())
+        engine.stop()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `prepaid positive companion - the same engine path retains exactly one capture`() = runTest {
+        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val prepaidObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retention,
+            liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance(),
+        )
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(prepaidObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Headset(hasMicrophone = true),
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+        advanceUntilIdle()
+
+        val candidate = retention.retainedSnapshot().singleOrNull()
+        assertTrue("the prepaid positive companion must retain exactly one capture", candidate != null)
+        assertEquals(1L, candidate!!.context.captureSession)
+        engine.stop()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `mismatched prepaid bound - the REAL growth and final-tail paths stop at the charged clip bound`() = runTest {
+        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        // Bound 51 bytes: the empty initial reservation (44-byte header only) fits, but the 4-sample
+        // final tail (8+44=52) exceeds it — the tail must be refused through observer.reserveDelta.
+        val mismatchObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retention,
+            liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance(maxClipBytes = 51),
+        )
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(mismatchObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Headset(hasMicrophone = true),
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+        advanceUntilIdle()
+
+        assertTrue("the over-bound tail must NOT be retained", retention.retainedSnapshot().isEmpty())
+        assertEquals("no byte may be charged past the prepaid bound", 0L, retention.retainedBytes())
+        // Recognition itself proceeded untouched (no crash, engine stops cleanly).
+        engine.stop()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `growth refused - wake completion still happens yet nothing over-bound is retained while recognition continues`() = runTest {
+        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        // Bound 51 bytes: the empty initial reservation (44-byte header only) fits; EVERY real
+        // growth - continuing buffers AND the final tail - is refused through reserveDelta. The
+        // completion drain can still hand back the FULL native segment, so the frozen bound is
+        // enforced AT completion too: the flattened segment (4 samples = 8 + 44 = 52 bytes)
+        // exceeds it, and the handoff must terminate retention with NO candidate - while the
+        // utterance itself still reaches recognition.
+        val mismatchObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retention,
+            liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance(maxClipBytes = 51),
+        )
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(mismatchObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Headset(hasMicrophone = true),
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "recognition continues: the utterance still reached the recognizer after retention refused",
+            recognizer.calls.any { it.startsWith("recognize:") },
+        )
+        assertTrue(
+            "zero over-bound candidate: the completion flatten must not retain past the frozen bound",
+            retention.retainedSnapshot().isEmpty(),
+        )
+        assertEquals(0L, retention.retainedBytes())
+        engine.stop()
+        advanceUntilIdle()
+    }
+
     private fun CoroutineScope.createEngineWithSpeech(
         observer: SegmentObserver,
         sink: ContributionRetentionSink,

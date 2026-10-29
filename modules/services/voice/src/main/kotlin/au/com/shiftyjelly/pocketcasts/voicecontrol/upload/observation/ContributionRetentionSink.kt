@@ -56,7 +56,16 @@ sealed interface CollectionOutcome {
 }
 
 /** Retained candidate: owns a bounded PCM prefix and later stage outcomes joined by capture id. */
-class RetainedCandidate internal constructor(val context: CaptureContext) {
+class RetainedCandidate internal constructor(
+    val context: CaptureContext,
+    /**
+     * The allowance metadata bound FROZEN at admission: copied from THIS capture's own admission
+     * token/prefix under the same lock that transfers prefix ownership. NULL = never
+     * allowance-admitted (or no-prefix completion): publication refuses fail-closed - missing
+     * metadata authority never means unconstrained (reviewer fde5349e / be120bf2).
+     */
+    val allowanceMetadataCap: Int? = null,
+) {
     var pcm: ShortArray? = null
     var sampleRateHz: Int = 16000
     var wakeState: SegmentObservation.WakeState = SegmentObservation.WakeState.NotDetected
@@ -110,9 +119,12 @@ open class ContributionRetentionSink(
     private val lock = Any()
     private var openPrefix: OpenPrefix? = null
     private val candidates = ArrayDeque<RetainedCandidate>()
+
     private val _lossEvents = mutableListOf<String>()
 
     private class OpenPrefix(val context: CaptureContext, val buffer: MutableList<ShortArray>) {
+        /** Frozen at admission; travels with THIS capture only (reviewer be120bf2 #2). */
+        var allowanceMetadataCap: Int? = null
         var chargedBytes: Long = 0L
 
         /** Valid length per ADOPTED array (arrays may carry unused reserved capacity at the tail;
@@ -141,6 +153,7 @@ open class ContributionRetentionSink(
             openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk)).apply {
                 chargedBytes = actualBytes
                 validLengths[observation.firstChunk] = observation.firstChunk.size
+                allowanceMetadataCap = observation.allowanceMetadataCapBytes
             }
         }
         return true
@@ -152,7 +165,10 @@ open class ContributionRetentionSink(
         // Empty prefix (size 0): still admitted — nothing allocated, nothing charged; the
         // capture retains from deltas onward under the same ownership.
         if (bytes > maxBytesPerClip || !budget.reserve(bytes)) return null
-        val token = ReservationToken(observation.context.captureId, nextReservationId(), bytes)
+        // The frozen cap rides on the ADMISSION TOKEN itself (capture-owned): it reaches the
+        // prefix at adoption inside the ownership-transfer lock, never a shared scalar.
+        // A FAILED admission creates no token, so no cap survives a refusal.
+        val token = ReservationToken(observation.context.captureId, nextReservationId(), bytes, observation.allowanceMetadataCapBytes)
         synchronized(lock) {
             tokens[token.id] = token
             leases.getOrPut(token.captureId) { mutableListOf() }.add(ReservationLease(token.id, bytes))
@@ -191,6 +207,10 @@ open class ContributionRetentionSink(
             openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk)).apply {
                 chargedBytes = token.bytes
                 validLengths[observation.firstChunk] = observation.validSamples
+                // Capture-OWNED: copied from this capture's own admission token inside the SAME
+                // synchronized block that transfers prefix ownership - no shared scalar, no
+                // cross-capture read (reviewer be120bf2 #2).
+                allowanceMetadataCap = token.allowanceMetadataCapBytes
             }
             // The drained-valid shortfall vs capacity remains charged WITH the array; when the
             // capture completes or purges, release uses chargedBytes (capacity), never valid audio.
@@ -372,6 +392,9 @@ open class ContributionRetentionSink(
     override fun completed(observation: SegmentObservation.Completed): Boolean {
         val fullSamples = observation.frames.sumOf { it.size }
         val fullBytes = fullSamples.toLong() * BYTES_PER_SAMPLE
+        // The frozen cap copied from THIS capture's prefix under the ownership-transfer lock
+        // (written only inside that synchronized block; see the transfer branch below).
+        var completionCap: Int? = null
         if (fullBytes > maxBytesPerClip) {
             logLoss("refused-handoff:clip-cap")
             // Refusal must not leave the capture retained-open: cancel/release the prefix too.
@@ -400,6 +423,9 @@ open class ContributionRetentionSink(
                     prefix.validLengths.clear()
                     prefix.chargedBytes = fullBytes
                     openPrefix = null
+                    // Copy THIS capture's frozen cap inside the SAME lock that ends prefix
+                    // ownership (reviewer be120bf2 #2).
+                    completionCap = prefix.allowanceMetadataCap
                     // Peak ends: the reserved fullBytes covers the new owned buffer; the retired
                     // prefix charge returns to the budget exactly once.
                     budget.release(retired)
@@ -409,19 +435,24 @@ open class ContributionRetentionSink(
                 }
             }
             if (!transferred) {
+                completionCap = null
                 // Prefix was closed concurrently (revoke/cancel already handled its release):
                 // undo OUR reservation so no charge is orphaned; retain nothing.
                 budget.release(fullBytes)
                 return false
             }
-            val candidate = RetainedCandidate(observation.context).apply {
+            val candidate = RetainedCandidate(observation.context, allowanceMetadataCap = completionCap).apply {
                 pcm = owned
                 sampleRateHz = observation.sampleRateHz
                 wakeState = observation.wakeState
                 bytesCharged = fullBytes
                 incrementalSamplesAccounted = fullSamples.toLong()
             }
-            synchronized(lock) { candidates.addLast(candidate) }
+            synchronized(lock) {
+                // Copied from THIS capture's own prefix inside the SAME lock that ends prefix
+                // ownership - capture-owned, no shared scalar (reviewer be120bf2 #2).
+                candidates.addLast(candidate)
+            }
             return true
         }
         // No open prefix (already closed by revoke/cancel): plain full-size reservation.
@@ -430,6 +461,8 @@ open class ContributionRetentionSink(
             return false
         }
         val owned = flattenOwned(observation.frames, fullSamples)
+        // No-prefix completion: NO frozen authority exists for this capture - the candidate
+        // carries none and publication refuses fail-closed. No global "current cap" is consulted.
         val candidate = RetainedCandidate(observation.context).apply {
             pcm = owned
             sampleRateHz = observation.sampleRateHz
@@ -564,10 +597,12 @@ open class ContributionRetentionSink(
         true
     }
 
-    /** Test visibility: retains a candidate directly so outcome recording can be exercised. */
-    open fun retainCandidateForTest(captureId: UUID): Boolean = synchronized(lock) {
+    /** Test visibility: retains a candidate directly so outcome recording can be exercised. The
+     * frozen allowance cap is EXPLICIT: null (the default) refuses publication fail-closed. */
+    open fun retainCandidateForTest(captureId: UUID, allowanceMetadataCap: Int? = null): Boolean = synchronized(lock) {
         candidates += RetainedCandidate(
             context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset"),
+            allowanceMetadataCap = allowanceMetadataCap,
         )
         true
     }

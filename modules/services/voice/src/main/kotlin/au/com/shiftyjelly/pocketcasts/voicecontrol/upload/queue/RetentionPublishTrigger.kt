@@ -104,7 +104,12 @@ class RetentionPublishTrigger(
                 session = issued.sessionGeneration,
                 enrollmentEpoch = issued.enrollmentEpoch,
             )
-            // GUARD 3: observed per-capture model provenance is record truth.
+            // GUARD 3 (FAIL-CLOSED): the FROZEN allowance metadata cap, carried by the immutable
+            // candidate since admission. Missing metadata authority never means unconstrained
+            // (reviewer fde5349e): a capture that was never allowance-admitted refuses here,
+            // before any queue admission or write.
+            val metadataCapBytes = candidate.allowanceMetadataCap ?: return
+            // GUARD 4: observed per-capture model provenance is record truth.
             val asrModel = candidate.context.asrModel as? ModelRef.Named ?: return
             // TRANSLATION provenance comes from the OBSERVED record on the candidate, never
             // from the frozen context (which cannot know whether translation ran).
@@ -118,6 +123,7 @@ class RetentionPublishTrigger(
                     chunks,
                     fixedModels + listOf("asr" to asrModel, "translation" to translationModel),
                     stagesProvider(candidate),
+                    metadataCapBytes = metadataCapBytes,
                 )
                 true
             }

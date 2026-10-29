@@ -23,7 +23,7 @@ class CaptureAllowanceOwner(
     limits: AllowanceLimits,
     window: AllowanceWindow,
     provisioning: AllowanceProvisioning = AllowanceProvisioning.Unavailable,
-) {
+) : CaptureAllowanceAuthority {
     private val ledger = CaptureAllowanceLedger(area, account, limits, window, provisioning)
     private val limitsBinding = limits.binding()
 
@@ -76,6 +76,8 @@ class CaptureAllowanceOwner(
      * The admission call. Non-blocking and IO-free: one atomic check-and-take. Null means the capture
      * is refused and nothing was allocated or drained.
      */
+    override fun takePrepaidToken(): CaptureAllowanceToken? = takeToken()
+
     fun takeToken(): CaptureAllowanceToken? {
         // tryLock: never waits. A capture that arrives during a publication is refused, not queued.
         if (!lock.tryLock()) return null

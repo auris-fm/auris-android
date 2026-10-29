@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease
 import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.sync.TokenErrorNotification
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
 import com.automattic.eventhorizon.EventHorizon
 import java.util.concurrent.CountDownLatch
@@ -71,6 +72,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         // Hold the fence mid-handoff (simulating an in-flight copy), then race an expiry revoke.
         val ctx = observer.speechStartedAdmitting(1L, "Headset", 8)!!
@@ -128,6 +130,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
 
         // Two SEQUENTIAL denials: the first must leave nothing that blocks or contaminates the
@@ -182,6 +185,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         val ctx = observer.speechStartedAdmitting(1L, "Headset", 8)!!
         observer.adoptFirstChunk(ctx, ShortArray(8))
@@ -231,6 +235,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         val ctx = observer.speechStartedAdmitting(1L, "Headset", 8)!!
         observer.adoptFirstChunk(ctx, ShortArray(8))
@@ -275,6 +280,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         // Capture A opens and reserves a delta token; then it is revoked mid-copy (producer holds).
         val ctxA = observer.speechStartedAdmitting(1L, "Headset", 8)!!
@@ -293,6 +299,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         val ctxB = observerB.speechStartedAdmitting(2L, "Headset", 8)!!
         assertTrue(observerB.adoptFirstChunk(ctxB, ShortArray(8)))
@@ -338,6 +345,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         // A admits and holds its FIRST allocation (mid-copy): adopt deliberately NOT called yet.
         val admissionA = observer.speechStartedAdmitting(1L, "Headset", 8)!!
@@ -374,6 +382,7 @@ class CollectionFenceContractTest {
             fenceGate = object : FenceGate {
                 override fun <R> gate(block: () -> R): R = tx.transaction(block)
             },
+            allowance = PrepaidTestAllowance(),
         )
         val admission = observer.speechStartedAdmitting(1L, "Headset", 16)!!
         // Distinctive PCM in the valid prefix ONLY; tail is untouched zero padding.

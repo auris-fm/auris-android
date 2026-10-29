@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
@@ -161,6 +162,7 @@ class ObservedDisableBoundaryTest {
         gate = CollectionGate { it.shouldRetainNewWork },
         sink = sink,
         authority = live,
+        allowance = PrepaidTestAllowance(),
     )
 
     /** Retains REAL PCM through the production handoff, so retainedBytes() is genuinely nonzero. */

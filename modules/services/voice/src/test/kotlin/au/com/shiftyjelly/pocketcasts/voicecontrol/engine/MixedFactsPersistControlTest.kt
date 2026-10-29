@@ -21,6 +21,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentE
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceIntentDispatcher
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
@@ -144,6 +145,7 @@ class MixedFactsPersistControlTest {
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live ->
                 scope.completeUnderOwner(context, onset, end, wake, provider)
             },
+            allowance = PrepaidTestAllowance(),
         )
         private val nextId = AtomicLong(0L)
         lateinit var engine: VoiceAsrEngine

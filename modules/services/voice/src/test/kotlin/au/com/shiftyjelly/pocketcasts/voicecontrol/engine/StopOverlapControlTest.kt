@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
@@ -156,6 +157,7 @@ class StopOverlapControlTest {
                     handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live ->
                         scope.completeUnderOwner(context, onset, end, wake, provider)
                     },
+                    allowance = PrepaidTestAllowance(),
                 ),
                 context = mock(),
             )

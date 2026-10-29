@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
@@ -118,6 +119,7 @@ class InvocationSettlementRaceControlTest {
                 handoff = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff { context, onset, end, wake, provider, scope, live ->
                     scope.completeUnderOwner(context, onset, end, wake, provider)
                 },
+                allowance = PrepaidTestAllowance(),
             )
             return VoiceAsrEngine(
                 voiceAudioProcessor = org.mockito.kotlin.mock(),

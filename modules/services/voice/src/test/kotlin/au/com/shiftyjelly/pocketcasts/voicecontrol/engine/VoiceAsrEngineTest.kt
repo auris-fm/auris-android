@@ -34,6 +34,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
@@ -108,6 +109,7 @@ class VoiceAsrEngineTest {
         authority,
         issueAuthority = { issuedAuthorityForTests },
         handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+        allowance = PrepaidTestAllowance(),
     )
     private val translationStage = mock<TranslationStage>()
 
@@ -1592,6 +1594,7 @@ class VoiceAsrEngineTest {
             authority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = PrepaidTestAllowance(),
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -1733,6 +1736,7 @@ class VoiceAsrEngineTest {
             authority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = PrepaidTestAllowance(),
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -1809,6 +1813,7 @@ class VoiceAsrEngineTest {
             authority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = PrepaidTestAllowance(),
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -1996,6 +2001,7 @@ class VoiceAsrEngineTest {
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = PrepaidTestAllowance(),
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
@@ -2052,7 +2058,14 @@ class VoiceAsrEngineTest {
     fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
         val sink = EngineObservationSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        observer = SegmentObserver(CollectionGate { true }, sink, liveAuthority, { issuedAuthorityForTests }, CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) })
+        observer = SegmentObserver(
+            CollectionGate { true },
+            sink,
+            liveAuthority,
+            { issuedAuthorityForTests },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = PrepaidTestAllowance(),
+        )
         val pending = MutableSharedFlow<VoiceSegmenterResult>()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
@@ -2098,7 +2111,14 @@ class VoiceAsrEngineTest {
         val sink = EngineObservationSink()
         val deadSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-        observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority, { issuedAuthorityForTests }, CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) })
+        observer = SegmentObserver(
+            CollectionGate { false },
+            sink,
+            deadAuthority,
+            { issuedAuthorityForTests },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            allowance = PrepaidTestAllowance(),
+        )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
             observer,

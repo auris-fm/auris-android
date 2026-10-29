@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceIntentDispatcher
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
@@ -79,6 +80,7 @@ class ExecutionStageDecodeControlTest {
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live ->
                 scope.completeUnderOwner(context, onset, end, wake, provider)
             },
+            allowance = PrepaidTestAllowance(),
         )
         private val executor = mock<VoicePlaybackIntentExecutor>()
 

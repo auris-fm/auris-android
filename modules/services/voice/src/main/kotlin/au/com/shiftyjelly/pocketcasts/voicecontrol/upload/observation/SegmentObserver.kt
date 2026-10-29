@@ -30,6 +30,14 @@ class SegmentObserver(
     private val handoff: CompletionHandoff = RefuseAllCompletionHandoff,
     /** Collection-fence wrapper supplied by composition; identity when uncomposed (tests). */
     private val fenceGate: FenceGate = IdentityFenceGate,
+    /**
+     * Prepaid-admission authority (reviewer 2164aee3). FAIL-CLOSED default: with no authority
+     * composed, EVERY capture is refused before any sink reservation or engine allocation - the
+     * same shape as [RefuseAllCompletionHandoff]. Null from the authority REFUSES; it never
+     * preserves the old admission behavior as a bypass.
+     */
+    private val allowance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority =
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance,
 ) : ObserverHandoffScope {
 
     // All fields below are guarded by [lock]; external callers and the pipeline thread contend
@@ -101,16 +109,26 @@ class SegmentObserver(
     ): AdmissionHandle? = fenceGate.gate {
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel)?.let { AdmissionHandle(it, admissionToken) }
+        // GATE-OFF CONSUMES NOTHING. The single prepaid token is taken only after the live gate
+        // accepts, still BEFORE the observer monitor and BEFORE any sink reservation or engine
+        // allocation/drain. Null (unavailable/empty) REFUSES the capture fail-closed.
+        val prepaid = if (permitted) allowance.takePrepaidToken() else null
+        if (prepaid == null) return@gate null
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, prepaid)?.let { AdmissionHandle(it, admissionToken) }
     }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): CaptureContext? {
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, prepaid: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceToken): CaptureContext? {
         val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel)
         return synchronized(lock) {
             if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0
             val token = sink.admit(SegmentObservation.Admission(context, producerSize))
-            if (token == null) return@speechStartedAdmittingLocked null
+            if (token == null) {
+                // SINK REFUSAL BURNS the prepaid token, no refund (reviewer 2164aee3): the durable
+                // charge stays consumed even though no audio was admitted. The token object itself
+                // is not stored - the charge lives in the owner's ledger, not here.
+                return@speechStartedAdmittingLocked null
+            }
             admissionToken = token // producer-held initial reservation until adopt/release
             open = context
             context

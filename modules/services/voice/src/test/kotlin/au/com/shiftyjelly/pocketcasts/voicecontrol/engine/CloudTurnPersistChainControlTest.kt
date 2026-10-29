@@ -19,6 +19,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceIntentDispatcher
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
@@ -151,6 +152,7 @@ class CloudTurnPersistChainControlTest {
                     handoff = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff { context, onset, end, wake, provider, scope, live ->
                         scope.completeUnderOwner(context, onset, end, wake, provider)
                     },
+                    allowance = PrepaidTestAllowance(),
                 ),
                 context = mock(),
             )

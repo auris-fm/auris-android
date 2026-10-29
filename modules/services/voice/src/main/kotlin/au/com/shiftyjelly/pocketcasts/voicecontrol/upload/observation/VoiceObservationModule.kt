@@ -77,12 +77,24 @@ object VoiceObservationModule {
     @Singleton
     fun provideRetentionSink(budget: CollectionBudget): ContributionRetentionSink = ContributionRetentionSink(budget)
 
+    /**
+     * Production allowance authority binding. FAIL-CLOSED: no production limits, window or
+     * provisioning authority is selected, so the bound authority refuses EVERY capture before any
+     * sink reservation or engine allocation. Swapping in a real owner-backed authority (with its
+     * account/window/generation binding and retirement ownership on authority loss) is a separate
+     * reviewed change - never an implicit default swap.
+     */
+    @Provides
+    @Singleton
+    fun provideCaptureAllowanceAuthority(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance
+
     @Provides
     @Singleton
     fun provideSegmentObserver(
         authority: CollectionAuthority,
         sink: ContributionRetentionSink,
         collectionTx: CollectionAuthorityTransaction,
+        allowance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority,
     ): SegmentObserver = SegmentObserver(
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
@@ -97,6 +109,7 @@ object VoiceObservationModule {
         fenceGate = object : FenceGate {
             override fun <R> gate(block: () -> R): R = collectionTx.transaction(block)
         },
+        allowance = allowance,
     ).also { observer ->
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }

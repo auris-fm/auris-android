@@ -271,6 +271,64 @@ class CaptureAllowanceLifecycleTest {
         assertTrue(priorFired.await(2, TimeUnit.SECONDS))
     }
 
+    @Test
+    fun `a bind racing a paused stale revalidation survives the atomic guarded retirement`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val startup = startup()
+        val p = policyProvider(clock.now)
+        val w = watcher(lifecycle, startup, p, scope, clock)
+        w.start()
+
+        // Deterministic pause BETWEEN authoritative revalidation and the retirement call: the
+        // first revalidation to run sees a stale authority and parks in the seam.
+        val paused = CountDownLatch(1)
+        val resume = CountDownLatch(1)
+        val pauseArmed = java.util.concurrent.atomic.AtomicBoolean(true)
+        w.onRevalidatedForTest = {
+            if (pauseArmed.compareAndSet(true, false)) {
+                paused.countDown()
+                resume.await()
+            }
+        }
+        val background = thread(name = "stale-reconcile") {
+            // An expired authoritative snapshot drives reconcile() on THIS thread, which parks
+            // in the seam right after revalidation, BEFORE the retirement call.
+            publish(p, enabled = true, stamp = clock.now.get() - VoiceSharingPolicyProvider.DEFAULT_LEASE_MS - 10L, generation = 1L)
+        }
+        assertTrue("premise: reconcile is paused after revalidation, before retirement", paused.await(4, TimeUnit.SECONDS))
+
+        // While paused: a NEWER LIVE policy is published and a successor binds under it. The
+        // pause holds the watcher lock, so the bind runs on ANOTHER thread; the successor's
+        // binding generation (set before the bind hook runs) is the readiness signal.
+        val stampNew = clock.now.get()
+        publish(p, enabled = true, stamp = stampNew, generation = 2L)
+        val successor = provisionedOwner(tmp.newFolder())
+        assertTrue(successor.prepareToken())
+        val bindThread = thread(name = "racing-bind") { lifecycle.bind(successor) }
+        val deadlineForBind = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (lifecycle.currentGeneration() == 0L) {
+            check(System.nanoTime() < deadlineForBind) { "racing bind never became visible" }
+            Thread.sleep(10)
+        }
+        val genAtPauseEnd = lifecycle.currentGeneration()
+
+        resume.countDown()
+        background.join(4_000)
+        bindThread.join(4_000)
+        runBlocking { repeat(20) { delay(5) } } // let the re-decision settle
+
+        assertTrue("the racing bind completed", !bindThread.isAlive)
+        assertTrue("the successor bound under the NEWER live policy must survive the stale decision", successor.hasUsableToken())
+        assertEquals("the guarded retire refused the superseded generation", genAtPauseEnd, lifecycle.currentGeneration())
+
+        // SAME-EXPIRED-POLICY retirement is preserved: after the new lease lapses the successor retires.
+        clock.drainOne(deadlineFor(stampNew))
+        assertEquals("its own lease expiry still retires it", false, successor.hasUsableToken())
+        scope.cancel()
+    }
+
     private fun watcher(
         lifecycle: CaptureAllowanceLifecycle,
         startup: VoiceSharingAccountStartup,

@@ -111,40 +111,59 @@ class AllowanceRetirementWatcher(
     }
 
     /**
-     * THE retirement decision, always derived from the authoritative lease-evaluated snapshot —
-     * emissions and binds are only wakeups. See the class KDoc.
+     * Test seam (controls only): invoked between authoritative revalidation and the retirement
+     * decision, so the interleaving "revalidated stale → newer live policy published + successor
+     * bound → resumed" is deterministic. Null in production.
+     */
+    @Volatile internal var onRevalidatedForTest: (() -> Unit)? = null
+
+    /**
+     * THE retirement decision (reviewer 9da4d830): ATOMIC expected-generation retirement — no
+     * check-then-act. Re-read the authoritative lease-evaluated snapshot; on expiry retire
+     * through [CaptureAllowanceLifecycle.retireCurrent][retireCurrent] with the generation
+     * captured at decision time, which fails atomically if ANY bind raced the revalidation; a
+     * lost race re-decides against the LATEST authority by repeating the decision. This is NOT
+     * a bounded loop: under arbitrary concurrent binds the re-decision can repeat, and no
+     * bounded-execution claim is made. The deadline callback uses the same path, so every
+     * retirement is generation-guarded.
      */
     internal fun reconcile() {
         watcherLock.lock()
         try {
             if (disposed) return
-            val genBeforeRevalidation = lifecycle.currentGeneration()
-            val evaluated = policyProvider.snapshot()
-            if (!evaluated.enabled || evaluated.activatedAtMonotonicMs <= 0) {
-                // Authoritative policy expired or disabled: cancel any deadline and retire the
-                // bound authority (it is governed by this expired lease). A bind that raced the
-                // revalidation is re-reconciled instead of blindly retired.
-                cancelDeadlineLocked()
-                if (lifecycle.currentGeneration() == genBeforeRevalidation) {
-                    lifecycle.retireCurrent()
-                } else {
-                    armOrRetireLocked(evaluated = policyProvider.snapshot(), wakeStamp = evaluated.activatedAtMonotonicMs)
-                }
-                return
-            }
-            armOrRetireLocked(evaluated = evaluated, wakeStamp = evaluated.activatedAtMonotonicMs)
+            reconcileLocked()
         } finally {
             watcherLock.unlock()
         }
     }
 
-    /** Caller holds [watcherLock]. Arms the deadline for a LIVE policy stamp (superseding any
-     *  older stamp's deadline); an expired snapshot here retires the bound authority. */
-    private fun armOrRetireLocked(evaluated: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot, wakeStamp: Long) {
-        if (!evaluated.enabled || evaluated.activatedAtMonotonicMs <= 0) {
-            lifecycle.retireCurrent()
+    /** Caller holds [watcherLock]. */
+    private fun reconcileLocked() {
+        while (true) {
+            val genAtDecision = lifecycle.currentGeneration()
+            val evaluated = policyProvider.snapshot()
+            onRevalidatedForTest?.invoke()
+            if (!evaluated.enabled || evaluated.activatedAtMonotonicMs <= 0) {
+                // Authoritative policy expired or disabled: the bound authority is governed by
+                // this expired lease. The GUARDED retirement is atomic: it retires ONLY the
+                // binding generation we revalidated; a bind that raced in survives this call and
+                // is re-decided against the latest authority below.
+                cancelDeadlineLocked()
+                val retired = lifecycle.retireCurrent(genAtDecision)
+                if (retired) return
+                if (lifecycle.currentGeneration() == genAtDecision) {
+                    return // atomic refusal because nothing (or the default) is bound — done
+                }
+                continue // lost race against a raced bind: re-decide from the latest authority
+            }
+            armLocked(evaluated)
             return
         }
+    }
+
+    /** Caller holds [watcherLock]. Arms the deadline for a LIVE policy stamp, superseding any
+     *  older stamp's deadline. The firing callback RE-ENTERS the same atomic decision. */
+    private fun armLocked(evaluated: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot) {
         if (evaluated.activatedAtMonotonicMs == armedFor) return // already covered exactly once
         deadlineJob?.cancel()
         armedFor = evaluated.activatedAtMonotonicMs
@@ -154,16 +173,7 @@ class AllowanceRetirementWatcher(
             watcherLock.lock()
             try {
                 if (disposed || armedFor != evaluated.activatedAtMonotonicMs) return@launch // superseded
-                val genBeforeRevalidation = lifecycle.currentGeneration()
-                val authoritative = policyProvider.snapshot()
-                if (!authoritative.enabled || authoritative.activatedAtMonotonicMs <= 0) {
-                    if (lifecycle.currentGeneration() == genBeforeRevalidation) {
-                        lifecycle.retireCurrent()
-                    } else {
-                        // A bind raced the revalidation: reconcile for the NEW binding instead.
-                        reconcile()
-                    }
-                }
+                reconcileLocked() // same atomic revalidate-and-retire path as every wakeup
             } finally {
                 watcherLock.unlock()
             }

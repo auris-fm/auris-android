@@ -114,6 +114,18 @@ class PocketCastsApplication :
 
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
 
+    @Inject lateinit var voiceSharingPolicyStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyStartup
+
+    @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+
+    @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
+
+    @Inject lateinit var voiceUploadTrigger: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadTrigger
+
+    @Inject lateinit var voiceUploadScheduler: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadScheduler
+
+    @Inject lateinit var voiceUploadSchedulerBinding: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadSchedulerBinding
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -239,6 +251,18 @@ class PocketCastsApplication :
         applicationScope.launch {
             try {
                 defaultPlaylistsInitializer.initialize()
+                voiceSharingPolicyStartup.initializeOnAppStart()
+                voiceSharingAccountStartup.initializeOnAppStart()
+                // Loss subscriptions (accounts/enrollment/policy/lease-deadline) + sink wiring.
+                voiceCollectionStartup.initializeOnAppStart()
+                // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
+                // starting it puts nothing on the network until every eligibility gate opens.
+                voiceUploadTrigger.start()
+                // Platform deferred-transfer scheduling (spec voice-recording-uploads.md): ONE
+                // unique periodic drain under the validated `upload_network` constraint; the
+                // binding re-schedules on every policy transition (UPDATE rewrites the
+                // constraint, never stacks). No foreground mic service, no background timer.
+                voiceUploadSchedulerBinding.start()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

@@ -1,0 +1,7 @@
+android_source_head=06c044074d9e6ee42ff2fe391d1dc95f89a3c9f1
+android_source_clean=true
+probe_sha256=61d654870d705cd58f965511eee806c73053148d2b30c973c3fa59bbb8d13e48
+worker_root=/tmp/auris-cloud-pinned-3dd0c91d/worker
+worker_head=3dd0c91d095512e3c49108c25b726a3b66a66eef
+worker_reported_revision=# worker-revision	3dd0c91d095512e3c49108c25b726a3b66a66eef CLEAN
+rule_scope=combined c6f3bdf7/f8cac147/4d10275f intake: empty_result, completed-stage reason rule, translation skip reasons - emitted-byte parity only

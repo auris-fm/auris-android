@@ -1791,6 +1791,28 @@
     <string name="settings_title_privacy">Privacy</string>
     <string name="settings_title_manage_downloads" translatable="false">@string/settings_storage_downloaded_files</string>
     <string name="settings_title_notifications">Notifications</string>
+
+    <!-- Voice Sharing enrollment surface (task73). Base English only; translated locales are owned
+         separately and intentionally not edited here. Copy is the spec's exact wording:
+         title and setting name are fixed, and the supporting sentence must disclose that audio,
+         recognized text and command results leave the device. Benefits are described separately
+         from the collection permission and never as a condition of it. -->
+    <string name="voice_sharing_title">Help improve voice control</string>
+    <string name="voice_sharing_setting_share_recordings">Share voice recordings</string>
+    <string name="voice_sharing_disclosure_supporting">Send your voice recordings, recognized text and command results to help improve Auris.</string>
+    <string name="voice_sharing_disclosure_detail">Recordings may include background speech and speech that did not activate Auris. Your audio, the text Auris recognized, and the actions it took leave your device so the models can be improved.</string>
+    <string name="voice_sharing_benefits">Sharing is optional and does not change your plan. Pro features stay yours whether or not you share.</string>
+    <string name="voice_sharing_enroll_failed">Auris could not reach the server to turn sharing on. Nothing is being shared.</string>
+    <string name="voice_sharing_withdraw_failed">Auris could not reach the server to finish turning sharing off. Sharing is already off on this device and no new recordings will be sent.</string>
+    <string name="voice_sharing_enroll_pending">Turning sharing on for your account…</string>
+    <string name="voice_sharing_withdraw_pending">Turning sharing off on your account…</string>
+    <string name="voice_sharing_local_stop_failed">Sharing is on for your account, but this device could not release its local pause, so sharing stays paused here. Try turning the setting off and on again.</string>
+    <string name="voice_sharing_conflict">Your account changed while updating. Review the current setting and try again.</string>
+    <string name="voice_sharing_delete_action">Delete shared recordings</string>
+    <string name="voice_sharing_delete_confirm_title">Delete shared recordings?</string>
+    <string name="voice_sharing_delete_confirm_body">This requests deletion of voice recordings Auris already accepted. It does not turn off sharing, and new recordings can still be shared afterwards.</string>
+    <string name="voice_sharing_delete_pending">Deletion requested. Auris is still processing it.</string>
+    <string name="voice_sharing_delete_failed">The deletion request did not go through.</string>
     <string name="settings_title_playback">General</string>
     <string name="settings_title_signin" translatable="false">@string/sign_in</string>
     <string name="settings_title_signout" translatable="false">@string/sign_out</string>

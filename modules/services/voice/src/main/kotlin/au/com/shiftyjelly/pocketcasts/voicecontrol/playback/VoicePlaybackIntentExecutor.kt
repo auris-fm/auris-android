@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlinx.coroutines.sync.withLock
 
 class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackSink: VoicePlaybackSink,
@@ -30,14 +31,55 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     private val playbackManager: PlaybackManager,
 ) {
-    suspend fun execute(intent: VoiceIntent): VoiceResponse {
+    /**
+     * THE ACTION-RESULT CHANNEL (spec 03c96924, reviewer 3fb01865): the sink's structured fact
+     * travels through an INVOCATION-LOCAL callback parameter, never a mutable singleton slot —
+     * two overlapping dispatches each carry their own reporter, and one dispatch's cleanup can
+     * never detach another's.
+     */
+    suspend fun execute(
+        intent: VoiceIntent,
+        onOutcome: ((VoiceActionOutcome) -> Unit)? = null,
+    ): VoiceResponse {
+        // AUXILIARY vs PRIMARY (reviewer 8c77f5aa): a cloud turn's audio FOCUS is an AUXILIARY
+        // operation — its success says nothing about whether the turn's own actions ran. So
+        // primary results are tracked SEPARATELY from auxiliary ones: with no primary fact, the
+        // explicit NotObserved is appended even when a duck fact WAS reported. Treating "any
+        // fact" as sufficiency is exactly what let duck-success aggregate to Success.
+        var primaryReported = false
+        val observed: ((VoiceActionOutcome) -> Unit)? = onOutcome?.let { cb ->
+            { fact: VoiceActionOutcome ->
+                // DISPATCH IS NOT A RESULT (reviewer 00b0d7a9): Dispatched says the call was made,
+                // never that it took effect, so it must not clear the unobserved fallback — the
+                // dispatcher maps it to nothing, which would otherwise drop the only unknown marker.
+                if (fact.isObservedPrimaryResult()) primaryReported = true
+                cb(fact)
+            }
+        }
+        // GUARANTEED COMPLETION (reviewer 00b0d7a9): the fallback runs on EVERY exit — a normal
+        // return, a throw, or cancellation. A cloud duck can report its auxiliary grant and then
+        // the stream throws or cancels; the primary action's result is still unobserved then, and
+        // saying so is what prevents the auxiliary success from being published as the turn's
+        // outcome. Known facts are never overwritten: this only ADDS an observation.
+        return try {
+            executeIntent(intent, observed)
+        } finally {
+            if (onOutcome != null && !primaryReported) onOutcome(VoiceActionOutcome.NotObserved)
+        }
+    }
+
+    private suspend fun executeIntent(
+        intent: VoiceIntent,
+        onOutcome: ((VoiceActionOutcome) -> Unit)?,
+    ): VoiceResponse {
+        fun report(outcome: VoiceActionOutcome) = onOutcome?.invoke(outcome)
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
         // the player but not this counter is exactly the window where the turn
         // would resume over them.
         if (intent.changesPlayPauseState()) playbackManager.noteUserPlaybackCommand()
         val response = when (intent) {
-            is VoiceIntent.Playback -> executePlayback(intent)
+            is VoiceIntent.Playback -> executePlayback(intent, onOutcome)
 
             is VoiceIntent.Effects -> executeEffects(intent)
 
@@ -51,10 +93,10 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.CloudRoute -> {
                 val context = playbackContextProvider.current()
-                cloudRouteSink.routeToCloud(intent.request, intent.tier, context)
+                cloudRouteSink.routeToCloud(intent.request, intent.tier, context, onOutcome)
             }
 
-            is VoiceIntent.Queue -> executeQueue(intent)
+            is VoiceIntent.Queue -> executeQueue(intent, onOutcome)
 
             is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
 
@@ -67,10 +109,13 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         return response
     }
 
-    private suspend fun executePlayback(intent: VoiceIntent.Playback): VoiceResponse = when (intent) {
-        VoiceIntent.Playback.Pause -> playbackSink.pause()
+    private suspend fun executePlayback(intent: VoiceIntent.Playback, onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = when (intent) {
+        // DISPATCH, not effect: the suspend call returning proves the manager was asked, and these
+        // sinks render Silent either way. Reporting Dispatched (not Performed) keeps the fact to
+        // what this call site actually observes (spec 3ed49695).
+        VoiceIntent.Playback.Pause -> playbackSink.pause().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 
-        VoiceIntent.Playback.Resume -> playbackSink.resume()
+        VoiceIntent.Playback.Resume -> playbackSink.resume().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 
         is VoiceIntent.Playback.SeekRelative -> {
             // deltaSeconds in seconds; null means "no amount stated — sink
@@ -154,18 +199,32 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         VoiceIntent.Bookmark.QueryNearby -> bookmarkSink.queryNearby()
     }
 
-    private suspend fun executeQueue(intent: VoiceIntent.Queue): VoiceResponse = when (intent) {
+    private suspend fun executeQueue(intent: VoiceIntent.Queue, onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = when (intent) {
         is VoiceIntent.Queue.AddTop -> queueSink.addTop(intent.episode)
+
         is VoiceIntent.Queue.AddBottom -> queueSink.addBottom(intent.episode)
+
         is VoiceIntent.Queue.Remove -> queueSink.remove(intent.episode)
+
         is VoiceIntent.Queue.MoveToTop -> queueSink.moveToTop(intent.episode)
+
         is VoiceIntent.Queue.MoveToBottom -> queueSink.moveToBottom(intent.episode)
-        VoiceIntent.Queue.Clear -> queueSink.clear()
+
+        // DISPATCHED, not Performed: clearUpNextAsync() returning proves the clear was REQUESTED,
+        // not that the queue emptied (spec 3ed49695). The point of reporting at all is that the
+        // CONFIRM_REQUIRED earcon it renders afterwards says nothing about either.
+        VoiceIntent.Queue.Clear -> queueSink.clear().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
+
         is VoiceIntent.Queue.RemoveByPodcast -> queueSink.removeByPodcast(intent.podcast)
+
         is VoiceIntent.Queue.Sort -> queueSink.sort(intent.sortOrder)
+
         VoiceIntent.Queue.QueryContents -> queueSink.queryContents()
+
         VoiceIntent.Queue.QueryQueueNext -> queueSink.queryNext()
+
         VoiceIntent.Queue.QueryLength -> queueSink.queryLength()
+
         is VoiceIntent.Queue.QueryIsQueued -> queueSink.queryIsQueued(intent.episode)
     }
 
@@ -256,10 +315,15 @@ interface VoiceBookmarkSink {
 }
 
 interface VoiceCloudRouteSink {
+    /**
+     * [onDuck] is THE INVOCATION-LOCAL channel for the sink's OWN facts at its real decision
+     * points (e.g. the audio-focus duck outcome, spec 03c96924) — never presentation.
+     */
     suspend fun routeToCloud(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
+        onDuck: ((VoiceActionOutcome) -> Unit)? = null,
     ): VoiceResponse
 
     /**

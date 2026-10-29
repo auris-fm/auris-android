@@ -11,15 +11,20 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material.AlertDialog
+import androidx.compose.material.Text
+import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
@@ -37,6 +42,7 @@ import au.com.shiftyjelly.pocketcasts.compose.components.SettingRowToggle
 import au.com.shiftyjelly.pocketcasts.compose.extensions.contentWithoutConsumedInsets
 import au.com.shiftyjelly.pocketcasts.compose.preview.ThemePreviewParameterProvider
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.settings.rowModifier
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
@@ -47,8 +53,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSettingsUiState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSettingsViewModel
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.launch
+import au.com.shiftyjelly.pocketcasts.localization.R as LR
 
 @AndroidEntryPoint
 class VoiceControlSettingsFragment : BaseFragment() {
@@ -64,6 +74,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
     @Inject lateinit var listeningModePolicy: ListeningModePolicy
 
     @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
+
+    @Inject lateinit var voiceSharingSettings: VoiceSharingSettingsViewModel
 
     private fun Context.isRecordAudioGranted() = ContextCompat.checkSelfPermission(
         this,
@@ -106,6 +118,32 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 }
             }
 
+            // ONE SHARING SURFACE (spec directive): the reachable Settings section binds to the
+            // reviewed ViewModel — durable presentation, tap-time session capture, fenced outcome
+            // effects and the local-stop-first withdrawal all live there now.
+            val sharingState by voiceSharingSettings.state.collectAsStateWithLifecycle()
+            // The section only renders when it can be truthful: policy available AND an account
+            // projection actually observed (no switch without a projection to read it against).
+            val sharing = if (sharingState.settingAvailable && sharingState.projectionObserved) sharingState else null
+            // The destructive confirmation is OWNED BY THE VIEWMODEL and bound to the session that
+            // opened it (reviewer 20b681f0): confirming after an account switch is rejected, never
+            // silently re-owned by the new account.
+            if (sharingState.deleteConfirmationOpen) {
+                AlertDialog(
+                    onDismissRequest = { voiceSharingSettings.dismissDelete() },
+                    title = { Text(stringResource(LR.string.voice_sharing_delete_confirm_title)) },
+                    text = { Text(stringResource(LR.string.voice_sharing_delete_confirm_body)) },
+                    confirmButton = {
+                        TextButton(onClick = { voiceSharingSettings.confirmDelete() }) {
+                            Text(stringResource(LR.string.voice_sharing_delete_action))
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { voiceSharingSettings.dismissDelete() }) { Text("Cancel") }
+                    },
+                )
+            }
+
             VoiceControlSettingsPage(
                 enabled = !enabled,
                 modelReady = modelReady,
@@ -120,6 +158,13 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 onEnabledChange = { checked ->
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)
                 },
+                sharing = sharing,
+                onSharingChange = { checked ->
+                    // The ViewModel owns the ordering: withdraw records the LOCAL stop at the tap
+                    // (before any request) and enrolls release the stop only inside the fence.
+                    if (checked) voiceSharingSettings.enroll() else voiceSharingSettings.withdraw()
+                },
+                onDeleteSharedData = { voiceSharingSettings.requestDelete() },
                 onBackPress = { activity?.onBackPressedDispatcher?.onBackPressed() },
                 bottomInset = bottomInset.value.pxToDp(LocalContext.current).dp,
             )
@@ -133,10 +178,26 @@ private fun VoiceControlSettingsPage(
     modelReady: Boolean,
     modelState: ModelDownloadState,
     statusText: String,
+    sharing: VoiceSharingSettingsUiState?,
     onEnabledChange: (Boolean) -> Unit,
+    onSharingChange: (Boolean) -> Unit,
+    onDeleteSharedData: () -> Unit,
     onBackPress: () -> Unit,
     bottomInset: Dp,
 ) {
+    // Strings resolved eagerly in composition; the sharing copy mapping itself stays a pure,
+    // unit-tested function (VoiceSharingSettingsRowCopyTest).
+    val rowStrings = mapOf(
+        LR.string.voice_sharing_enroll_pending to stringResource(LR.string.voice_sharing_enroll_pending),
+        LR.string.voice_sharing_withdraw_pending to stringResource(LR.string.voice_sharing_withdraw_pending),
+        LR.string.voice_sharing_enroll_failed to stringResource(LR.string.voice_sharing_enroll_failed),
+        LR.string.voice_sharing_withdraw_failed to stringResource(LR.string.voice_sharing_withdraw_failed),
+        LR.string.voice_sharing_local_stop_failed to stringResource(LR.string.voice_sharing_local_stop_failed),
+        LR.string.voice_sharing_conflict to stringResource(LR.string.voice_sharing_conflict),
+        LR.string.voice_sharing_delete_pending to stringResource(LR.string.voice_sharing_delete_pending),
+        LR.string.voice_sharing_delete_failed to stringResource(LR.string.voice_sharing_delete_failed),
+    )
+    val copyResolver: (Int) -> String = { rowStrings[it].orEmpty() }
     Column(modifier = Modifier.padding(bottom = bottomInset)) {
         ThemedTopAppBar(
             title = "Voice Control",
@@ -177,6 +238,46 @@ private fun VoiceControlSettingsPage(
                     indent = false,
                 )
             }
+            // SHARING SURFACE — one surface, bound to the reviewed ViewModel. Only rendered once
+            // an account projection has been observed and the policy allows the setting.
+            if (sharing != null) {
+                item {
+                    SettingRow(
+                        primaryText = stringResource(LR.string.voice_sharing_title),
+                        secondaryText = sharing.disclosureDetail,
+                        toggle = SettingRowToggle.None,
+                        indent = false,
+                    )
+                }
+                item {
+                    val benefits = stringResource(LR.string.voice_sharing_benefits)
+                    SettingRow(
+                        primaryText = stringResource(LR.string.voice_sharing_setting_share_recordings),
+                        secondaryText = VoiceSharingSettingsRowCopy.switchSecondary(sharing, benefits, copyResolver),
+                        toggle = SettingRowToggle.Switch(checked = sharing.enrolled),
+                        modifier = Modifier.toggleable(
+                            value = sharing.enrolled,
+                            role = Role.Switch,
+                        ) { onSharingChange(it) },
+                        indent = false,
+                    )
+                }
+                // Deleting already-accepted data survives a withdrawal: eligibility is enrolled OR
+                // a recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
+                // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
+                if (sharing.deleteAvailable) {
+                    item {
+                        val deleteSecondary = VoiceSharingSettingsRowCopy.deleteSecondary(sharing, copyResolver)
+                        SettingRow(
+                            primaryText = stringResource(LR.string.voice_sharing_delete_action),
+                            secondaryText = deleteSecondary,
+                            toggle = SettingRowToggle.None,
+                            modifier = Modifier.rowModifier(onDeleteSharedData),
+                            indent = false,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -192,7 +293,10 @@ private fun VoiceControlSettingsPagePreview(
             modelReady = true,
             modelState = ModelDownloadState.Ready,
             statusText = "Active (wake word required)",
+            sharing = null,
             onEnabledChange = {},
+            onSharingChange = {},
+            onDeleteSharedData = {},
             onBackPress = {},
             bottomInset = 0.dp,
         )

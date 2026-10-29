@@ -7,6 +7,13 @@ plugins {
 
 android {
     namespace = "au.com.shiftyjelly.pocketcasts.voicecontrol"
+    testOptions {
+        unitTests {
+            // Needed ONLY by RealServiceLifecycleControlTest, which builds the production Service and
+            // therefore needs the real manifest and resources.
+            isIncludeAndroidResources = true
+        }
+    }
     buildFeatures {
         buildConfig = true
         prefab = true
@@ -46,13 +53,20 @@ dependencies {
     implementation(libs.coroutines.rx2)
     // onnxruntime .so provided by sherpa-onnx JNI libs in jniLibs/; headers are bundled in src/main/cpp/
     implementation(libs.timber)
+    // Platform deferred-transfer scheduling for the upload drain (spec: reuse existing scheduler).
+    implementation(libs.work.runtime)
+    implementation(libs.hilt.work)
     implementation(libs.mlkit.translate)
 
+    implementation(libs.moshi)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.config)
     implementation(projects.modules.services.analytics)
     implementation(projects.modules.services.coroutines)
     implementation(projects.modules.services.localization)
     implementation(projects.modules.services.preferences)
     implementation(projects.modules.services.repositories)
+    implementation(projects.modules.services.servers)
     implementation(projects.modules.services.utils)
 
     implementation(platform(libs.compose.bom))
@@ -67,6 +81,13 @@ dependencies {
     testImplementation(libs.mockito.kotlin)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.robolectric)
+    testImplementation(libs.dagger.hilt.android.testing)
+    kspTest(libs.dagger.hilt.compiler)
+    testImplementation(libs.work.test)
+    // Plain-JVM org.json implementation so unit tests exercise real JSON parsing (the
+    // android.jar org.json classes throw 'not mocked' without Robolectric).
+    testImplementation("org.json:json:20240303")
+    testImplementation(libs.okHttp.mockwebserver)
     testImplementation(libs.turbine)
     testImplementation(projects.modules.services.sharedtest)
 }
@@ -81,3 +102,6 @@ tasks.configureEach {
             .withPathSensitivity(PathSensitivity.RELATIVE)
     }
 }
+
+// Task-scoped approved-pin wiring for the Worker parity tests (see voice-upload-parity.gradle.kts).
+apply(from = "voice-upload-parity.gradle.kts")

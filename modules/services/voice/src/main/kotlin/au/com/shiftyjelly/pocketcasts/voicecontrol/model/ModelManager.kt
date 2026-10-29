@@ -223,9 +223,43 @@ class ModelManager @Inject constructor(
 
     // -- Generic ModelSpec download -----------------------------------------
 
+    /**
+     * Ready means every file exists AND, where the spec declares a sha256, the CACHED bytes
+     * actually hash to it (reviewer 704ef15a): an older cached artifact must not be labeled
+     * with the pinned manifest identity. Unverified files force the ensureModel re-download.
+     */
     fun isModelReady(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean {
         val targetDir = File(filesDir, spec.targetDir)
-        return spec.files.all { File(targetDir, it.filename).exists() }
+        return spec.files.all { file -> cachedFileVerified(targetDir, file) }
+    }
+
+    /** Digest check off the caller's thread (reviewer ff30b294: hashing a 240MB model must
+     *  never run on the main or audio path). */
+    suspend fun isModelReadyVerified(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean = withContext(Dispatchers.IO) { isModelReady(spec) }
+
+    /**
+     * P1 (reviewer a00bb77d, 98ed63b3): the manifest identity this manager verifies for [spec]'s
+     * bytes — or null when the cache does not currently match. It adds NO hashing implementation
+     * of its own, but it does reuse the single acceptance predicate, so it MAY hash a cached
+     * artifact and must never be called on the main/audio thread. Callers pair the identity with
+     * the very file that was checked, so no backend has to hash the artifact itself.
+     */
+    fun verifiedManifestId(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): String? {
+        val targetDir = File(filesDir, spec.targetDir)
+        val pinned = spec.files.firstOrNull()?.manifestId?.takeIf { it.isNotEmpty() } ?: return null
+        val allVerified = spec.files.all { cachedFileVerified(targetDir, it) }
+        return pinned.takeIf { allVerified }
+    }
+
+    /** THE one cache-acceptance predicate: exists AND, where a digest is declared, the CACHED
+     *  bytes hash to it (reviewer 704ef15a) — an older cached artifact cannot be labeled with
+     *  the pinned manifest identity. */
+    private fun cachedFileVerified(
+        targetDir: File,
+        file: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile,
+    ): Boolean {
+        val dest = File(targetDir, file.filename)
+        return dest.exists() && (file.sha256.isEmpty() || sha256Matches(dest, file.sha256))
     }
 
     /**
@@ -236,7 +270,10 @@ class ModelManager @Inject constructor(
         if (isModelReady(spec)) return@withContext Result.success(Unit)
         val targetDir = File(filesDir, spec.targetDir)
         downloadMutex.withLock {
-            if (spec.files.all { File(targetDir, it.filename).exists() }) {
+            // Same VERIFIED predicate inside the lock (reviewer 8e0f87c8): a stale cache must
+            // never early-return success here — it falls through to downloadFile, which
+            // re-verifies/replaces.
+            if (spec.files.all { file -> cachedFileVerified(targetDir, file) }) {
                 return@withContext Result.success(Unit)
             }
             try {

@@ -34,7 +34,7 @@ import org.robolectric.annotation.Config
  * lifetime ended could never clear.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class LiveConditionMonitorTest {
     private lateinit var context: Application
     private val castManager = mock<CastManager>()

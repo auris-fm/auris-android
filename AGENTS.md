@@ -157,6 +157,10 @@ to the release and which belong to the unrelated feature work. To avoid this:
   - All quality gates pass (`./gradlew spotlessCheck`, lint).
   - Unit and integration tests succeed.
 
+### Task workspace rule (one branch / worktree / PR per task per lane)
+
+Use one branch, one worktree and one PR per task per lane/repository. The branch name, worktree name (relative to the repository workspace root) and PR title must match exactly. Keep fixes and review corrections on that task's existing branch; do not create phase or diagnostic branches. Before consolidating an existing duplicate, inventory its committed and uncommitted work and preserve divergent content. A human's explicit task-specific branch instruction takes precedence.
+
 ### Technology Preferences
 
 **Use Jetpack Compose for new UI**:

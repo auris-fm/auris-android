@@ -17,6 +17,9 @@ import timber.log.Timber
 @Singleton
 class OpenWakeWordDetector @Inject constructor(
     @ApplicationContext private val context: Context,
+    // THE EXTERNAL-NATIVE BOUNDARY (see [WakeWordNative]). Injected, not referenced statically, so
+    // constructing this detector no longer decides WHEN libonnxruntime loads.
+    private val native: WakeWordNative,
 ) : WakeWordDetector {
 
     override val isReady: Boolean
@@ -37,7 +40,7 @@ class OpenWakeWordDetector @Inject constructor(
                 val embedModel = context.assets.open("oww/embedding_model.onnx").use { it.readBytes() }
                 val classifierModel = context.assets.open("oww/auris.onnx").use { it.readBytes() }
 
-                ready = WakeWordJni.nativeInit(melModel, embedModel, classifierModel, detectionThreshold)
+                ready = native.nativeInit(melModel, embedModel, classifierModel, detectionThreshold)
                 if (ready) {
                     Timber.i("OpenWakeWordDetector initialized (threshold=%.3f)", detectionThreshold)
                 } else {
@@ -63,7 +66,7 @@ class OpenWakeWordDetector @Inject constructor(
             try {
                 val outOffset = FloatArray(1)
                 val detectorSamples = onsetAlignedSamples(segment, speechOnsetSample)
-                val score = WakeWordJni.nativeDetect(detectorSamples, sampleRateHz, outOffset)
+                val score = native.nativeDetect(detectorSamples, sampleRateHz, outOffset)
                 when {
                     score < 0f -> WakeWordResult(detected = false, error = true)
 
@@ -94,7 +97,7 @@ class OpenWakeWordDetector @Inject constructor(
 
     override fun release() {
         try {
-            WakeWordJni.nativeRelease()
+            native.nativeRelease()
             ready = false
         } catch (e: Exception) {
             Timber.w(e, "Failed to release wake word detector")

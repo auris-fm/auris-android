@@ -28,8 +28,13 @@ class FirebaseRemoteFeatureProvider @Inject constructor(
 
     init {
         scope.launch {
+            // mapCatching, NOT map: getOrThrow THROWS inside the transform, and Result.map does
+            // not catch - a failed activation escaped this launch as an uncaught exception
+            // (crashing the app via the default handler) instead of reaching onFailure's logged
+            // fail-closed path. Kotlin exceptions also keep their CONSTRUCTION stack, which made
+            // this hard to see: the trace pointed at the mock's stub, not getOrThrow.
             firebaseRemoteConfig.fetchSuspending()
-                .map { firebaseRemoteConfig.activateSuspending().getOrThrow() }
+                .mapCatching { firebaseRemoteConfig.activateSuspending().getOrThrow() }
                 .onSuccess {
                     Timber.i("Firebase feature flag refreshed")
                     initialFetchComplete.complete(true)

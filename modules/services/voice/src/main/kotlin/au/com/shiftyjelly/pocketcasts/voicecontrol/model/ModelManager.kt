@@ -237,6 +237,20 @@ class ModelManager @Inject constructor(
      *  never run on the main or audio path). */
     suspend fun isModelReadyVerified(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean = withContext(Dispatchers.IO) { isModelReady(spec) }
 
+    /**
+     * P1 (reviewer a00bb77d, 98ed63b3): the manifest identity this manager verifies for [spec]'s
+     * bytes — or null when the cache does not currently match. It adds NO hashing implementation
+     * of its own, but it does reuse the single acceptance predicate, so it MAY hash a cached
+     * artifact and must never be called on the main/audio thread. Callers pair the identity with
+     * the very file that was checked, so no backend has to hash the artifact itself.
+     */
+    fun verifiedManifestId(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): String? {
+        val targetDir = File(filesDir, spec.targetDir)
+        val pinned = spec.files.firstOrNull()?.manifestId?.takeIf { it.isNotEmpty() } ?: return null
+        val allVerified = spec.files.all { cachedFileVerified(targetDir, it) }
+        return pinned.takeIf { allVerified }
+    }
+
     /** THE one cache-acceptance predicate: exists AND, where a digest is declared, the CACHED
      *  bytes hash to it (reviewer 704ef15a) — an older cached artifact cannot be labeled with
      *  the pinned manifest identity. */

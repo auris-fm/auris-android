@@ -476,7 +476,7 @@ class VoiceControlService : Service() {
             serviceScope.launch(Dispatchers.Main) { stopSelf() }
             return
         }
-        wireBackend(backend)
+        wireBackend(backend, backend.requiredModel)
         // The backend outlives individual listening sessions: the engine keeps it warm across
         // stop/start (releasing it there would force a model reload on every resume), so the
         // service holds it and releases it once, in teardown.
@@ -507,13 +507,31 @@ class VoiceControlService : Service() {
         Timber.i("Voice control models ready")
     }
 
-    private fun wireBackend(backend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend) {
-        val modelDir = java.io.File(filesDir, backend.requiredModel.targetDir)
-        val modelFile = backend.requiredModel.files.firstOrNull()?.let {
+    /**
+     * P1 (reviewer a00bb77d): wiring hands each backend WHAT IT NEEDS TO RUN, plus — where the
+     * bytes were verified — the manifest identity that verification already produced. The lookup
+     * reuses ModelManager's cache predicate and MAY hash a cached artifact, which is why its only
+     * caller is [ensureModelsReady] — reached from the start job launched on `Dispatchers.IO`
+     * above the admission gate — never the main/audio thread. No backend is refused for anything
+     * but its own readiness.
+     */
+    private fun wireBackend(
+        backend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend,
+        spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec,
+    ) {
+        val modelDir = java.io.File(filesDir, spec.targetDir)
+        val modelFile = spec.files.firstOrNull()?.let {
             java.io.File(modelDir, it.filename)
         }
         if (modelFile != null && backend is WhisperCppBackend) {
-            backend.setModelFile(modelFile)
+            // The identity travels WITH the same file it was verified for; without it the file
+            // is wired unnamed and the backend can never cite an artifact.
+            val manifestId = modelManager.verifiedManifestId(spec)
+            if (manifestId != null) {
+                backend.setVerifiedModelFile(modelFile, manifestId)
+            } else {
+                backend.setModelFile(modelFile)
+            }
         }
         if (backend is SenseVoiceBackend) {
             backend.setModelDir(modelDir)

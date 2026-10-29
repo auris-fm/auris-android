@@ -50,6 +50,15 @@ class CaptureAllowanceLifecycle : CaptureAllowanceAuthority {
      */
     @Volatile var onRetired: (() -> Unit)? = null
 
+    /**
+     * Invoked AFTER [bind] releases [lock] with the new binding generation (never under the
+     * lifecycle lock, so the watcher's reconcile keeps its one-directional watcher→lifecycle
+     * lock order). The retirement watcher uses this to give every NEW binding its own expiry
+     * coverage — a binding made after a policy publication does not escape that lease (reviewer
+     * 9d29473a #1).
+     */
+    @Volatile var onBound: ((Long) -> Unit)? = null
+
     override fun takePrepaidToken(): CaptureAllowanceToken? {
         // NON-WAITING (reviewer b256b011): contention with a retirement/rebind REFUSES the
         // capture. This try-acquisition is also half of the deadlock-freedom argument.
@@ -73,6 +82,8 @@ class CaptureAllowanceLifecycle : CaptureAllowanceAuthority {
      * binding generation. Refused after dispose.
      */
     fun bind(authority: CaptureAllowanceAuthority): Long {
+        val newGeneration: Long
+        val boundHook: ((Long) -> Unit)?
         lock.lock()
         try {
             checkGenerationNotOverflow()
@@ -80,10 +91,14 @@ class CaptureAllowanceLifecycle : CaptureAllowanceAuthority {
             retireLocked()
             current = authority
             generation += 1L
-            return generation
+            newGeneration = generation
+            boundHook = onBound
         } finally {
             lock.unlock()
         }
+        // Post-unlock (see KDoc): the hook runs OUTSIDE the lifecycle lock.
+        boundHook?.invoke(newGeneration)
+        return newGeneration
     }
 
     /**

@@ -128,6 +128,28 @@ object VoiceObservationModule {
     // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
     // production, bound HERE at the Android construction boundary. A failed clear still reports
     // false and sets the admission latch; there is no unsupported-runtime success fallback.
+
+    /**
+     * EXPLICIT provider for the retirement watcher (reviewer 9d29473a #3): the watcher's clock
+     * and sleep seams are function types WITHOUT Dagger bindings — Kotlin default arguments do
+     * not supply them — so this singleton is composed HERE with the production clock
+     * (SystemClock.elapsedRealtime / kotlinx delay). Tests inject a virtual clock through the
+     * plain constructor.
+     */
+    @Provides
+    @Singleton
+    fun provideAllowanceRetirementWatcher(
+        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
+        policyProvider: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider,
+        accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
+        @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceRetirementWatcher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceRetirementWatcher(
+        lifecycle = lifecycle,
+        policyProvider = policyProvider,
+        accountStartup = accountStartup,
+        scope = scope,
+    )
+
     @Provides
     @Singleton
     fun provideWithdrawalIntentPersistence(

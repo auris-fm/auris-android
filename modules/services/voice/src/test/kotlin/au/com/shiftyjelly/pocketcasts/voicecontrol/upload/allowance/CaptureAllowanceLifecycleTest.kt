@@ -121,9 +121,14 @@ class CaptureAllowanceLifecycleTest {
         startup.sessionEndedListener = { priorFired.countDown() }
         val clock = VirtualClock()
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
-        // The watcher starts BEFORE the bind: its initial disabled publication observes the
-        // unavailable default and must retire nothing.
-        watcher(lifecycle, startup, policyProvider(clock.now), scope, clock).start()
+        val p = policyProvider(clock.now)
+        // The watcher starts BEFORE the bind: its initial reconcile observes the unavailable
+        // default and must retire nothing.
+        watcher(lifecycle, startup, p, scope, clock).start()
+        // A binding must be governed by a LIVE policy: publish a fresh activation BEFORE binding
+        // (the bind reconciliation retires a binding under a disabled/expired policy).
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
         val owner = provisionedOwner(tmp.newFolder())
         assertTrue(owner.prepareToken())
         lifecycle.bind(owner)
@@ -157,7 +162,7 @@ class CaptureAllowanceLifecycleTest {
     }
 
     @Test
-    fun `exact lease expiry retires with NO publication, a paused stale callback never retires a successor, a newer activation supersedes`() {
+    fun `expiry covers publish-before-bind and same-lease rebinds, spares a successor under a NEWER valid policy, and re-arms after disable`() {
         val lifecycle = CaptureAllowanceLifecycle()
         val clock = VirtualClock()
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
@@ -165,52 +170,105 @@ class CaptureAllowanceLifecycleTest {
         val p = policyProvider(clock.now)
         watcher(lifecycle, startup, p, scope, clock).start()
 
-        // EXPIRY WITHOUT PUBLICATION: a genuinely FRESH activation arms the deadline; the virtual
-        // clock alone advances through the deadline. Live immediately before, retired after.
+        // (a) PUBLISH-BEFORE-BIND ESCAPE IS CLOSED: a fresh policy published while the slot is
+        // unavailable still retires an owner bound LATER under that same lease.
+        val stamp1 = clock.now.get()
+        publish(p, enabled = true, stamp = stamp1, generation = 1L)
         val owner1 = provisionedOwner(tmp.newFolder())
         assertTrue(owner1.prepareToken())
-        lifecycle.bind(owner1)
-        val stamp1 = clock.now.get()
-        val deadline1 = stamp1 + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1L
-        publish(p, enabled = true, stamp = stamp1, generation = 1L)
+        lifecycle.bind(owner1) // bound AFTER the publication that armed the deadline
         assertTrue("premise: live immediately before expiry", owner1.hasUsableToken())
-        clock.drainOne(deadline1) // advance exactly to the deadline; no publication in between
-        assertEquals("evaluated lease expiry must retire without any new publication", false, owner1.hasUsableToken())
+        clock.drainOne(deadlineFor(stamp1)) // exact expiry, no publication in between
+        assertEquals("a bind after the publication still expires with its lease", false, owner1.hasUsableToken())
         assertNull(lifecycle.takePrepaidToken())
 
-        // PAUSED STALE CALLBACK → SUCCESSOR BIND → CALLBACK RESUME: bind a fresh owner under a
-        // new activation; its deadline parks. THEN bind a successor (generation moves) and only
-        // afterwards drain the parked stale deadline: it must NOT retire the successor.
+        // (b) SAME-LEASE REBIND RETIRES: a successor bound under the SAME policy's lease is
+        // governed by it and retires at that lease's expiry.
+        val stamp2 = clock.now.get()
+        publish(p, enabled = true, stamp = stamp2, generation = 2L)
         val owner2 = provisionedOwner(tmp.newFolder())
         assertTrue(owner2.prepareToken())
         lifecycle.bind(owner2)
-        val stamp2 = clock.now.get()
-        publish(p, enabled = true, stamp = stamp2, generation = 2L)
-        val genAtArm = lifecycle.currentGeneration()
-        val successor = provisionedOwner(tmp.newFolder())
-        assertTrue(successor.prepareToken())
-        lifecycle.bind(successor) // successor bound while owner2's callback is PARKED
-        clock.drainOne(stamp2 + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1L) // owner2's deadline resumes NOW
-        assertTrue("a stale parked callback must not retire the successor bound after it", successor.hasUsableToken())
-        assertFalse("the generation guard refused the stale retirement", lifecycle.retireCurrent(genAtArm))
-        assertTrue("the successor still admits (its prepared token is intact)", successor.hasUsableToken())
+        val rebind = provisionedOwner(tmp.newFolder())
+        assertTrue(rebind.prepareToken())
+        lifecycle.bind(rebind) // same lease; the rebind itself retires owner2 (previous slot)
+        assertTrue("premise: the same-lease rebind is live before expiry", rebind.hasUsableToken())
+        clock.drainOne(deadlineFor(stamp2))
+        assertEquals("a successor using the SAME expired lease must retire", false, rebind.hasUsableToken())
 
-        // SUPERSESSION BY A NEWER ACTIVATION: republish under a newer stamp; the old deadline is
-        // cancelled and the new one is exact.
+        // (c) SUCCESSOR UNDER A NEWER VALID POLICY IS SPARED: the newer publication supersedes
+        // the old deadline; nothing is parked for the old stamp; expiry of the NEW lease is what
+        // finally retires.
         val stamp3 = clock.now.get()
-        publish(p, enabled = true, stamp = stamp3, generation = 3L)
-        // (the successor's prepared token from above is still outstanding and stays live)
-        clock.drainOne(stamp3 + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1L)
-        assertFalse("the newer activation's own expiry retires it exactly", successor.hasUsableToken())
+        publish(p, enabled = true, stamp = stamp3, generation = 3L) // arms deadline3
+        val spared = provisionedOwner(tmp.newFolder())
+        assertTrue(spared.prepareToken())
+        lifecycle.bind(spared)
+        val stamp4 = clock.now.get()
+        publish(p, enabled = true, stamp = stamp4, generation = 4L) // supersedes deadline3
+        clock.now.set(deadlineFor(stamp3)) // the OLD lease's expiry instant passes
+        runBlocking { repeat(10) { delay(5) } } // pump: only the superseded job could react — it was cancelled
+        assertTrue("a successor governed by a newer valid policy survives the old lease expiry", spared.hasUsableToken())
+        clock.drainOne(deadlineFor(stamp4))
+        assertEquals("its own lease expiry retires it exactly", false, spared.hasUsableToken())
 
-        // DISABLE retires (authoritative re-read, generation-guarded).
-        val last = provisionedOwner(tmp.newFolder())
-        assertTrue(last.prepareToken())
-        lifecycle.bind(last)
-        publish(p, enabled = false, stamp = 0L, generation = 4L)
-        assertEquals("policy disable must retire the bound owner", false, last.hasUsableToken())
-        assertNull(lifecycle.takePrepaidToken())
+        // (d) BIND UNDER AN ALREADY-EXPIRED POLICY RETIRES IMMEDIATELY via the bind
+        // reconciliation (no armed deadline needed).
+        val lapsed = provisionedOwner(tmp.newFolder())
+        assertTrue(lapsed.prepareToken())
+        lifecycle.bind(lapsed)
+        assertEquals("binding under an expired lease retires via reconciliation", false, lapsed.hasUsableToken())
+
+        // (e) DISABLE retires; DISABLE then ENABLE re-arms expiry coverage.
+        publish(p, enabled = false, stamp = 0L, generation = 5L)
+        val afterDisable = provisionedOwner(tmp.newFolder())
+        assertTrue(afterDisable.prepareToken())
+        lifecycle.bind(afterDisable)
+        assertEquals("a binding under a disabled policy retires", false, afterDisable.hasUsableToken())
+        val stamp5 = clock.now.get()
+        publish(p, enabled = true, stamp = stamp5, generation = 6L)
+        val revived = provisionedOwner(tmp.newFolder())
+        assertTrue(revived.prepareToken())
+        lifecycle.bind(revived)
+        assertTrue("premise: live under the re-enabled policy", revived.hasUsableToken())
+        clock.drainOne(deadlineFor(stamp5))
+        assertEquals("expiry coverage is re-armed after disable then enable", false, revived.hasUsableToken())
         scope.cancel()
+    }
+
+    @Test
+    fun `cancelling the OWNING SCOPE disposes the watcher - prepared owner retired, listener detached, use refused`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val priorFired = CountDownLatch(1)
+        val prior: () -> Unit = { priorFired.countDown() }
+        startup.sessionEndedListener = prior
+        val clock = VirtualClock()
+        val p = policyProvider(clock.now)
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val w = watcher(lifecycle, startup, p, scope, clock)
+        w.start()
+        publish(p, enabled = true, stamp = clock.now.get(), generation = 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        lifecycle.bind(owner)
+        assertTrue("premise: live before the owning scope is cancelled", owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // THE TEARDOWN: the owning scope's cancellation drives disposal (scope-completion
+        // hookup), not a manually invoked method.
+        scope.cancel()
+
+        assertTrue("scope cancellation must retire the bound owner", retired.await(2, TimeUnit.SECONDS))
+        assertFalse("the prepared token is retired", owner.hasUsableToken())
+        assertSame("the watcher's own chain link is detached, restoring the prior listener", prior, startup.sessionEndedListener)
+        assertNull("takes refuse after scope-driven disposal", lifecycle.takePrepaidToken())
+        val genAfter = lifecycle.currentGeneration()
+        assertEquals("binds refuse after scope-driven disposal", genAfter, lifecycle.bind(provisionedOwner(tmp.newFolder())))
+        // The restored prior listener still fires; the disposed watcher cannot react.
+        startup.sessionEndedListener?.invoke()
+        assertTrue(priorFired.await(2, TimeUnit.SECONDS))
     }
 
     private fun watcher(
@@ -224,6 +282,8 @@ class CaptureAllowanceLifecycleTest {
     @Test
     fun `a retirement invalidates the outstanding capture through the real shared fence - transfer after take`() {
         val lifecycle = CaptureAllowanceLifecycle()
+        val clock = VirtualClock()
+        publish(policyProvider(clock.now), enabled = true, stamp = clock.now.get(), generation = 1L)
         val owner = provisionedOwner(tmp.newFolder())
         assertTrue(owner.prepareToken())
         lifecycle.bind(owner)
@@ -267,6 +327,8 @@ class CaptureAllowanceLifecycleTest {
     @Test
     fun `admission NEVER blocks on the lifecycle lock - contention refuses, no deadlock cycle`() {
         val lifecycle = CaptureAllowanceLifecycle()
+        val clock = VirtualClock()
+        publish(policyProvider(clock.now), enabled = true, stamp = clock.now.get(), generation = 1L)
         val owner = provisionedOwner(tmp.newFolder())
         assertTrue(owner.prepareToken())
         lifecycle.bind(owner)
@@ -338,6 +400,8 @@ class CaptureAllowanceLifecycleTest {
         assertTrue(priorFired.await(2, TimeUnit.SECONDS))
         scope.cancel()
     }
+
+    private fun deadlineFor(stamp: Long) = stamp + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1L
 
     private fun publish(provider: VoiceSharingPolicyProvider, enabled: Boolean, stamp: Long, generation: Long) {
         provider.applySnapshotForTest(PolicySnapshot(enabled = enabled, activatedAtMonotonicMs = stamp, activationGeneration = generation))

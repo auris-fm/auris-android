@@ -100,6 +100,8 @@ class CaptureAllowanceOwner(
      * Retires the pending handoff without refund: a preparation in flight for an older generation will
      * no longer publish, and any token already minted becomes unusable.
      */
+    override fun retireForLifecycle() = retire()
+
     fun retire() {
         lock.lock()
         try {

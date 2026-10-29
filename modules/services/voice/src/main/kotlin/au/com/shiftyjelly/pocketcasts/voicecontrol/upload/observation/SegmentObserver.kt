@@ -485,6 +485,7 @@ class SegmentObserver(
             "policy-disable",
             "lease-deadline",
             "policy-inactive",
+            "allowance-retired", // allowance lifecycle retirement invalidates an outstanding capture
         )
     }
 }

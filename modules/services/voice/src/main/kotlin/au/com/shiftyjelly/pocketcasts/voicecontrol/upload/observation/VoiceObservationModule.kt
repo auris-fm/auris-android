@@ -79,20 +79,25 @@ object VoiceObservationModule {
 
     /**
      * Production allowance authority binding. FAIL-CLOSED: no production limits, window or
-     * provisioning authority is selected, so the bound authority refuses EVERY capture before any
-     * sink reservation or engine allocation. Swapping in a real owner-backed authority is a
-     * separate reviewed change - never an implicit default swap.
-     *
-     * OPEN ACTIVATION PREREQUISITES (reviewer 174083e0): (a) owner-backed LIFECYCLE composition -
-     * the composition that swaps the authority on account/policy change and automatically retires
-     * the previous owner - does not exist yet (today's authority is stateless-refusing); (b)
-     * metadata-bound enforcement at the persistence stage: the SELECTED metadata bound is frozen
-     * on the AdmissionHandle but the persistence composition that must enforce it is not wired.
-     * Both must land (reviewed) before activation.
+     * provisioning authority is selected, so the LIFECYCLE SLOT (reviewer c5d94af4 #4) starts at
+     * [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance]
+     * and refuses EVERY capture before any sink reservation or engine allocation. The lifecycle
+     * slot is the composition that retires the bound authority on account/policy/lease/rebind
+     * lifecycle inputs (AllowanceRetirementWatcher); binding a real owner-backed authority is
+     * still a separate reviewed change - never an implicit default swap. Binding a real
+     * owner-backed authority through [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
+     * .CaptureAllowanceLifecycle.bind] remains the reviewed activation step; production values
+     * stay unavailable.
      */
     @Provides
     @Singleton
-    fun provideCaptureAllowanceAuthority(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance
+    fun provideCaptureAllowanceLifecycle(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle()
+
+    @Provides
+    @Singleton
+    fun provideCaptureAllowanceAuthority(
+        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority = lifecycle
 
     @Provides
     @Singleton

@@ -2,8 +2,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCandidate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SealedCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
@@ -28,12 +29,24 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
  */
 object EngineStageProvenance {
 
-    fun stagesFor(candidate: RetainedCandidate): List<Pair<StageName, StageEntry>> {
+    fun stagesFor(sealed: SealedCapture): List<Pair<StageName, StageEntry>> {
         // HISTORY, not [outcome] (reviewer 54635caa): the terminal Executed join overwrites
-        // [outcome]; the Recognized/Routed joins are read from the retained join history.
-        val history = candidate.stageOutcomes + listOfNotNull(candidate.outcome)
+        // [outcome]; the Recognized/Routed joins are read from the sealed join history.
+        val candidate = sealed // stage reads below use the snapshot's observed fields only
+        val history = sealed.stageHistory + listOfNotNull(sealed.outcome)
         val recognized = history.filterIsInstance<CollectionOutcome.Recognized>().firstOrNull()
         val routed = history.filterIsInstance<CollectionOutcome.Routed>().firstOrNull()
+        // BATCH B (reviewer be6bb62e #1/#4): only a capture whose wait GENUINELY EXPIRED
+        // (cause outcome_wait_expired) types its unresolved stages by the expired wait. An
+        // early-completed capture (cause terminal) keeps the pre-Batch-B
+        // `observation_unavailable` typing — its absence is not an expiry fact, and known
+        // no-ASR/empty/skip facts are preserved either way.
+        val unresolvedReason =
+            if (sealed.cause == SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED) {
+                RecordNode.Str(SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED)
+            } else {
+                RecordNode.Str("observation_unavailable")
+            }
         return listOf(
             StageName.Wake to when (candidate.wakeState) {
                 SegmentObservation.WakeState.Detected ->
@@ -59,18 +72,24 @@ object EngineStageProvenance {
             // production fact into an unavailable observation.
             StageName.Bleed to if (
                 (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed" ||
-                candidate.stageOutcomes.any {
+                sealed.stageHistory.any {
                     (it as? CollectionOutcome.NotCollected)?.reason == "bleed"
                 }
             ) {
                 StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("overlap")))
             } else {
-                StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
+                StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
             },
-            StageName.Asr to if (recognized != null) {
-                StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str(recognized.transcript)))
-            } else {
-                StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("provider_error")))
+            StageName.Asr to when {
+                recognized != null ->
+                    StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str(recognized.transcript)))
+
+                // BATCH B: an expired-wait record's ASR stage carries the genuine wait fact,
+                // not a provider error (early-completed records keep the pre-Batch-B typing).
+                sealed.cause == SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED ->
+                    StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
+
+                else -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("provider_error")))
             },
             // TRANSLATION: only OBSERVED truth (reviewer 8288ac15). A produced result is
             // completed with the observed target language; no observation at all is UNKNOWN —
@@ -78,28 +97,18 @@ object EngineStageProvenance {
             // BOTH schema fields, from SEPARATE observations (reviewer 57719ad2): translated_text
             // is the result text itself, target_language the language it was produced in. A
             // produced result missing either observed half is not a completable record.
-            StageName.Translation to when {
-                candidate.translation?.producedResult == true &&
-                    candidate.translation?.translatedText != null &&
-                    candidate.translation?.targetLanguage != null ->
-                    StageEntry(
-                        StageState.Completed,
-                        mapOf(
-                            "translated_text" to RecordNode.Str(candidate.translation!!.translatedText!!),
-                            "target_language" to RecordNode.Str(candidate.translation!!.targetLanguage!!),
-                        ),
-                    )
+            // delta736d3180 + BATCH B: translation unobserved at finalization is an honest
+            // unknown; for a sealed record the reason is the expired wait itself (see
+            // [translationStage] for the full observed-truth mapping).
+            StageName.Translation to translationStage(sealed.translation, unresolvedReason),
+            StageName.Routing to when {
+                routed != null ->
+                    StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str(routed.intentCategory)))
 
-                candidate.translation != null -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text")))
+                sealed.cause == SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED ->
+                    StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
 
-                // delta736d3180: translation unobserved at finalization — honest unknown, now
-                // schema-valid.
-                else -> StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
-            },
-            StageName.Routing to if (routed != null) {
-                StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str(routed.intentCategory)))
-            } else {
-                StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates")))
+                else -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates")))
             },
             // THE EXECUTOR'S OWN RESULT when it actually reported one (spec audit, action-result
             // channel): the outcome is what the executor returned/threw, never an inference. A
@@ -107,7 +116,7 @@ object EngineStageProvenance {
             // not prove execution (delta736d3180).
             StageName.Execution to when (val reported = candidate.executionOutcome) {
                 null, ExecutionOutcome.NotObserved ->
-                    StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
+                    StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
 
                 ExecutionOutcome.Success -> StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success")))
 
@@ -119,5 +128,27 @@ object EngineStageProvenance {
                 ExecutionOutcome.Cancelled -> StageEntry(StageState.Cancelled, mapOf("reason" to RecordNode.Str("cancelled_by_user")))
             },
         )
+    }
+
+    /** TRANSLATION (reviewer 57719ad2 semantics, unchanged): only OBSERVED truth — a produced
+     *  result is completed with BOTH observed halves; a present-but-empty observation is
+     *  `not_run/no_text`; no observation at all is UNKNOWN with the sealed cause's reason. */
+    private fun translationStage(
+        translation: TranslationProvenance?,
+        unresolvedReason: RecordNode.Str,
+    ): StageEntry = when {
+        translation != null && translation.producedResult &&
+            translation.translatedText != null && translation.targetLanguage != null ->
+            StageEntry(
+                StageState.Completed,
+                mapOf(
+                    "translated_text" to RecordNode.Str(translation.translatedText),
+                    "target_language" to RecordNode.Str(translation.targetLanguage),
+                ),
+            )
+
+        translation != null -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text")))
+
+        else -> StageEntry(StageState.Unknown, mapOf("reason" to unresolvedReason))
     }
 }

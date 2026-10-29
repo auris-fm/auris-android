@@ -6,7 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Collection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCandidate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SealedCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
@@ -203,7 +203,7 @@ class EngineToProducerPublishTest {
         producerAccount: () -> String = { "a@x" },
         producerSession: () -> Long = { 7L },
         /** Override the engine's stage provenance (default is the fixed fixture list). */
-        stagesForTest: ((RetainedCandidate) -> List<Pair<StageName, StageEntry>>)? = null,
+        stagesForTest: ((SealedCapture) -> List<Pair<StageName, StageEntry>>)? = null,
     ) = RetentionPublishTrigger(
         sink,
         producer(store, account = producerAccount, session = producerSession),
@@ -505,7 +505,7 @@ class EngineToProducerPublishTest {
         // THE PRODUCTION JOIN, verbatim from VoiceAsrEngine.transcribeSegment's bleed branch.
         assertTrue(sink.joinOutcome(CollectionOutcome.NotCollected(ctx.captureId, "bleed")))
 
-        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
+        val candidate = sink.sealedSnapshotForTest(ctx.captureId)!!
         val stages = EngineStageProvenance.stagesFor(candidate)
         val bleed = stages.toMap().getValue(StageName.Bleed)
         assertEquals("an observed bleed rejection is a COMPLETED check, not an unavailable one", StageState.Completed, bleed.state)
@@ -573,7 +573,7 @@ class EngineToProducerPublishTest {
         assertTrue(sink.noteExecutionOutcome(ctx.captureId, ExecutionOutcome.Success))
         // The ENGINE's provenance, not the shared stage fixture: the fixture is a fixed list that
         // bypasses stagesFor entirely, which is what let the execution branch go unexercised.
-        trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
+        trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
         val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
@@ -592,7 +592,7 @@ class EngineToProducerPublishTest {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         retainCapture(sink, ctx)
-        trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
+        trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
         val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
@@ -622,7 +622,7 @@ class EngineToProducerPublishTest {
         // begins at the retention sink, so the assertion is about what an unobserved action
         // publishes, not about an auxiliary/primary pair.
         assertTrue(sink.noteExecutionOutcome(ctx.captureId, ExecutionOutcome.NotObserved))
-        trigger(sink, store, stagesForTest = { candidate -> EngineStageProvenance.stagesFor(candidate) }).attach()
+        trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
         val execution = publishedExecution(root, store, ctx.captureId)
@@ -687,7 +687,7 @@ class EngineToProducerPublishTest {
                 wakeState = SegmentObservation.WakeState.DetectorFailed,
             ),
         )
-        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
+        val candidate = sink.sealedSnapshotForTest(ctx.captureId)!!
         val stages = EngineStageProvenance.stagesFor(candidate)
         val wake = stages.toMap().getValue(StageName.Wake)
         assertEquals("a thrown detector is a KNOWN failure", StageState.Failed, wake.state)
@@ -737,12 +737,13 @@ class EngineToProducerPublishTest {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         retainCapture(sink, ctx)
-        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
-
         assertTrue(sink.joinOutcome(CollectionOutcome.Recognized(ctx.captureId, "skip this ad", "en")))
         assertTrue(sink.joinOutcome(CollectionOutcome.Routed(ctx.captureId, "playback", emptyMap())))
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
+        // BATCH B: snapshot AFTER the joins — the snapshot is immutable, so it must be taken
+        // once the stage history is complete (an earlier snapshot would freeze empty history).
+        val candidate = sink.sealedSnapshotForTest(ctx.captureId)!!
         val byName = EngineStageProvenance.stagesFor(candidate).toMap()
         assertEquals(StageState.Completed, byName.getValue(StageName.Wake).state)
         assertEquals(StageState.Unknown, byName.getValue(StageName.Bleed).state)
@@ -835,9 +836,8 @@ class EngineToProducerPublishTest {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         retainCapture(sink, ctx)
-        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
         // No observation yet: translation is honest UNKNOWN (not an invented not_run reason).
-        assertEquals(StageState.Unknown, EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation).state)
+        assertEquals(StageState.Unknown, EngineStageProvenance.stagesFor(sink.sealedSnapshotForTest(ctx.captureId)!!).toMap().getValue(StageName.Translation).state)
         // An OBSERVED produced result completes with BOTH schema fields from their OWN
         // observations (reviewer 57719ad2): translated_text is the result text, target_language
         // the language — DISTINCT values so a cross-write cannot pass this control.
@@ -852,7 +852,7 @@ class EngineToProducerPublishTest {
                 ),
             ),
         )
-        val observed = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation)
+        val observed = EngineStageProvenance.stagesFor(sink.sealedSnapshotForTest(ctx.captureId)!!).toMap().getValue(StageName.Translation)
         assertEquals(StageState.Completed, observed.state)
         assertEquals("the shelves are empty", (observed.fields.getValue("translated_text") as RecordNode.Str).value)
         assertEquals("en", (observed.fields.getValue("target_language") as RecordNode.Str).value)
@@ -866,14 +866,13 @@ class EngineToProducerPublishTest {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val ctx = context()
         retainCapture(sink, ctx)
-        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
         assertTrue(
             sink.noteTranslation(
                 ctx.captureId,
                 TranslationProvenance(ModelRef.None, producedResult = true, targetLanguage = "en"),
             ),
         )
-        val observed = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation)
+        val observed = EngineStageProvenance.stagesFor(sink.sealedSnapshotForTest(ctx.captureId)!!).toMap().getValue(StageName.Translation)
         assertEquals(StageState.NotRun, observed.state)
         assertEquals("no_text", (observed.fields.getValue("reason") as RecordNode.Str).value)
     }

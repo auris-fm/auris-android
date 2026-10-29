@@ -86,6 +86,15 @@ class RetainedCandidate internal constructor(
      * (null = the executor never reported one; never invented).
      */
     var executionOutcome: ExecutionOutcome? = null
+
+    /**
+     * BATCH B SEAL STATE, independent of any single observation (reviewer 399cb2e6 #2): set
+     * EXACTLY ONCE under the sink lock, by the outcome-wait deadline ([sealExpiredOutcome]).
+     * Recognized/Routed joins and wake-only/empty terminals do NOT seal and do NOT cancel the
+     * bounded wait; only actual sealing (this flag) or retention end does.
+     */
+    var sealed: Boolean = false
+        internal set
     var incrementalSamplesAccounted: Long = 0L
     var bytesCharged: Long = 0L
 }
@@ -101,11 +110,32 @@ class RetainedCandidate internal constructor(
 open class ContributionRetentionSink(
     private val budget: CollectionBudget,
     private val maxBytesPerClip: Long = SegmentObserver.DEFAULT_MAX_RETAINED_BYTES,
+    /** Injectable monotonic clock (Batch B): the outcome-wait deadline is frozen at REAL
+     *  completion time in THIS clock domain, so delayed registration cannot extend the wait. */
+    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
 ) : SegmentSink,
     RevocationAware {
 
     /** Invoked when the sink ends retention for a capture (budget/cap refusal), post-terminal. */
     var onRetentionEnded: ((CaptureContext) -> Unit)? = null
+
+    /**
+     * BATCH B hooks for the bounded outcome finalizer. Each fires OUTSIDE the sink lock, exactly
+     * once per event, ONLY while attached (null otherwise — behavior unchanged).
+     *  - [onCandidateRetained]: (captureId, purgeGeneration at retain) — the finalizer arms the
+     *    capture's finite deadline and re-validates liveness against that generation, so a
+     *    callback that straddles a purge cannot resurrect a timer for a purged capture.
+     *  - [onCaptureReleased]: retention ENDED for the capture (release, evict, revoke) — the
+     *    ONLY non-purge timer cancellation.
+     *  - [onPurged]: full revocation cancelled everything — all timers drop.
+     * NONTERMINAL joins (Recognized/Routed) and non-publishable terminal joins (wake-only,
+     * empty) fire NO hook: the bounded wait continues for unresolved required observations
+     * (reviewer 399cb2e6 #2).
+     */
+    var onCandidateRetained: ((UUID, Long, Long) -> Unit)? = null
+    var onCaptureReleased: ((UUID) -> Unit)? = null
+    var onCaptureSealed: ((UUID) -> Unit)? = null
+    var onPurged: (() -> Unit)? = null
 
     /**
      * THE GUARDED PUBLISH HOOK (task73): invoked ONCE outside the sink lock when a retained
@@ -114,9 +144,12 @@ open class ContributionRetentionSink(
      * fire it. The receiver owns the candidate snapshot (re-reads [RetainedCandidate.pcm],
      * finishes with [releaseRetained]); invocations are dispatched, never run under `lock`.
      */
-    var onReadyForPublication: ((RetainedCandidate) -> Unit)? = null
+    var onReadyForPublication: ((SealedCapture) -> Unit)? = null
 
     private val lock = Any()
+
+    /** BATCH B: increments on every full revocation; deadline registration is generation-checked. */
+    private var purgeGeneration: Long = 0L
     private var openPrefix: OpenPrefix? = null
     private val candidates = ArrayDeque<RetainedCandidate>()
 
@@ -441,6 +474,7 @@ open class ContributionRetentionSink(
                 budget.release(fullBytes)
                 return false
             }
+            val completedAtMs = nowMs() // REAL completion time: frozen under this lock
             val candidate = RetainedCandidate(observation.context, allowanceMetadataCap = completionCap).apply {
                 pcm = owned
                 sampleRateHz = observation.sampleRateHz
@@ -448,11 +482,14 @@ open class ContributionRetentionSink(
                 bytesCharged = fullBytes
                 incrementalSamplesAccounted = fullSamples.toLong()
             }
+            val gen: Long
             synchronized(lock) {
                 // Copied from THIS capture's own prefix inside the SAME lock that ends prefix
                 // ownership - capture-owned, no shared scalar (reviewer be120bf2 #2).
                 candidates.addLast(candidate)
+                gen = purgeGeneration
             }
+            onCandidateRetained?.invoke(candidate.context.captureId, gen, completedAtMs)
             return true
         }
         // No open prefix (already closed by revoke/cancel): plain full-size reservation.
@@ -469,7 +506,13 @@ open class ContributionRetentionSink(
             wakeState = observation.wakeState
             bytesCharged = fullBytes
         }
-        synchronized(lock) { candidates.addLast(candidate) }
+        val completedAtMs = nowMs() // REAL completion time: frozen under this lock
+        val gen: Long
+        synchronized(lock) {
+            candidates.addLast(candidate)
+            gen = purgeGeneration
+        }
+        onCandidateRetained?.invoke(candidate.context.captureId, gen, completedAtMs)
         return true
     }
 
@@ -500,6 +543,7 @@ open class ContributionRetentionSink(
     /** FULL REVOCATION: every retained byte (prefix + ready) is released immediately. */
     override fun purgeAllForRevocation(reason: String) {
         synchronized(lock) {
+            purgeGeneration += 1
             openPrefix?.let { prefix ->
                 // Finished-buffer bytes release immediately on revocation; the separate
                 // outstanding-lease charge (pendingDeltaBytes) survives until the producer drops.
@@ -517,6 +561,8 @@ open class ContributionRetentionSink(
             }
             _lossEvents.add("purge-all:$reason")
         }
+        // BATCH B: every deadline is moot after a purge (outside the lock).
+        onPurged?.invoke()
     }
 
     /** NETWORK/BUDGET DEFERRAL: retained ready entries stay exactly as they are. */
@@ -524,9 +570,12 @@ open class ContributionRetentionSink(
 
     /** Join an outcome by the FROZEN capture id; unknown/evicted ids are refused, never guessed. */
     fun joinOutcome(outcome: CollectionOutcome): Boolean {
-        var fired: RetainedCandidate? = null
+        var fired: SealedCapture? = null
         synchronized(lock) {
             val candidate = candidates.find { it.context.captureId == outcome.captureId } ?: return false
+            if (candidate.sealed) {
+                return false // BATCH B: sealed immutable record — late outcomes REFUSED
+            }
             if (candidate.outcome is CollectionOutcome.Executed || candidate.outcome is CollectionOutcome.NotCollected) {
                 return false // terminal outcome already recorded
             }
@@ -535,31 +584,106 @@ open class ContributionRetentionSink(
             // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1): a bleed rejection is a publishable
             // observation like Executed — the provenance record is the only durable witness that the
             // correlator made a real decision. Other NotCollected reasons stay unpublished: the
-            // directed change covers the bleed lifecycle only, not a general re-scope of terminal
-            // outcomes. Publication still passes every trigger guard (frozen identity, consent,
-            // eligibility) unchanged.
-            fired =
-                if (
-                    (
-                        outcome is CollectionOutcome.Executed ||
-                            (outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
-                        ) &&
-                    candidate.pcm != null
-                ) {
-                    candidate
-                } else {
-                    null
-                }
+            // bounded wait continues (no seal, no hook). Publication still passes every trigger
+            // guard (frozen identity, consent, eligibility) unchanged.
+            val publishable = outcome is CollectionOutcome.Executed ||
+                (outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
+            if (publishable) {
+                // ONE SEAL OPERATION for BOTH completion paths (reviewer be6bb62e #1): early
+                // completion seals and snapshots under THIS sink lock BEFORE dispatch, with
+                // cause terminal — the deadline later finds sealed and refuses; no async reader
+                // can observe the mutable candidate mid-publication.
+                candidate.sealed = true
+                fired = snapshot(candidate, SealedCapture.CAUSE_TERMINAL)
+            }
         }
-        // HOOK OUTSIDE THE LOCK (dispatched, never re-entrant): receiver re-validates state.
-        if (fired != null) onReadyForPublication?.invoke(fired)
+        // HOOK OUTSIDE THE LOCK (dispatched, never re-entrant): the receiver reads ONLY the
+        // immutable snapshot.
+        // ACCEPTANCE is independent of publication/sealing (reviewer 6a45f411): every accepted
+        // join (nonterminal AND sealing) returns true; only the refusal branches above are false.
+        if (fired != null) {
+            // BATCH B (reviewer 62023896 #2): actual sealing cancels the capture's timer too.
+            onCaptureSealed?.invoke(outcome.captureId)
+            onReadyForPublication?.invoke(fired)
+        }
         return true
     }
 
+    /** IMMUTABLE publication snapshot, built under the sink lock from the candidate's current
+     *  state. The candidate is never dispatched; async publication reads this only. */
+    private fun snapshot(candidate: RetainedCandidate, cause: String): SealedCapture = SealedCapture(
+        captureId = candidate.context.captureId,
+        context = candidate.context,
+        pcm = candidate.pcm ?: ShortArray(0),
+        sampleRateHz = candidate.sampleRateHz,
+        wakeState = candidate.wakeState,
+        outcome = candidate.outcome,
+        stageHistory = candidate.stageOutcomes.toList(),
+        translation = candidate.translation,
+        executionOutcome = candidate.executionOutcome,
+        allowanceMetadataCap = candidate.allowanceMetadataCap,
+        cause = cause,
+    )
+
     /**
-     * Ends retention for one capture after the publish attempt: releases the retained charge
-     * EXACTLY ONCE, drops the PCM, and removes the candidate. Idempotent by capture id.
+     * BATCH B EXACTLY-ONCE SEALING, ATOMIC WITH VALIDATION (reviewer be6bb62e #3): the
+     * deadline's firing validates generation + presence + not-already-sealed and seals under
+     * THIS ONE sink-lock boundary — there is no check-then-fire window for a purge, an early
+     * completion, or a racing deadline to slip into. Returns the immutable publication
+     * snapshot (cause [SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED]) which the caller dispatches,
+     * or null when: the generation is stale (the capture was revoked between registration and
+     * firing — reviewer 399cb2e6 #3), the id is unknown/evicted, already sealed (exactly-once:
+     * whichever of timer/terminal sealed first wins), or already carried a publishable
+     * terminal (Executed/bleed — its publication already ran at the join).
+     *
+     * Sealing preserves every known fact: a wake-only/empty NotCollected terminal keeps its
+     * reason; only a capture with NO terminal observation records the expired wait as its
+     * outcome. Unresolved stages are typed by [EngineStageProvenance] from the snapshot cause.
      */
+    fun sealExpiredOutcome(captureId: UUID, atGeneration: Long): SealedCapture? {
+        var fired: SealedCapture? = null
+        synchronized(lock) {
+            if (purgeGeneration != atGeneration) return null // stale registration: revoked meanwhile
+            val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return null
+            if (candidate.sealed) return null // already sealed: exactly-once
+            if (candidate.outcome is CollectionOutcome.Executed ||
+                (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
+            ) {
+                return null // publishable terminal sealed first: its publication already ran
+            }
+            candidate.sealed = true
+            if (candidate.outcome == null) {
+                candidate.outcome = CollectionOutcome.NotCollected(captureId, SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED)
+            }
+            fired = snapshot(candidate, SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED)
+        }
+        // HOOK OUTSIDE THE LOCK: the sealed snapshot goes through the REAL publication path.
+        if (fired != null) {
+            onCaptureSealed?.invoke(captureId)
+            onReadyForPublication?.invoke(fired)
+        }
+        return fired
+    }
+
+    /** BATCH B: the current purge generation, for timer ownership decisions. */
+    fun currentPurgeGeneration(): Long = synchronized(lock) { purgeGeneration }
+
+    /**
+     * BATCH B REGISTRATION VALIDATION (reviewer 62023896 #2): a retained callback delivered
+     * AFTER an early seal/release in the SAME generation must not arm a timer. True only when
+     * the generation still matches AND the capture is present AND unsealed AND did not carry a
+     * publishable terminal. The atomic firing check in [sealExpiredOutcome] is unaffected.
+     */
+    fun canAcceptOutcomeWaitRegistration(captureId: UUID, atGeneration: Long): Boolean = synchronized(lock) {
+        if (purgeGeneration != atGeneration) return false
+        val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        if (candidate.sealed) return false
+        !(
+            candidate.outcome is CollectionOutcome.Executed ||
+                (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
+            )
+    }
+
     fun releaseRetained(captureId: UUID): Boolean {
         synchronized(lock) {
             val removed = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
@@ -568,6 +692,8 @@ open class ContributionRetentionSink(
             removed.bytesCharged = 0L
             removed.pcm = null
         }
+        // BATCH B: retention ended — the finalizer cancels this capture's deadline.
+        onCaptureReleased?.invoke(captureId)
         return true
     }
 
@@ -580,6 +706,7 @@ open class ContributionRetentionSink(
      */
     fun noteTranslation(captureId: UUID, provenance: TranslationProvenance): Boolean = synchronized(lock) {
         val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        if (candidate.sealed) return false // BATCH B: sealed immutable record
         candidate.translation = provenance
         true
     }
@@ -592,6 +719,7 @@ open class ContributionRetentionSink(
      */
     open fun noteExecutionOutcome(captureId: UUID, outcome: ExecutionOutcome): Boolean = synchronized(lock) {
         val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        if (candidate.sealed) return false // BATCH B: sealed immutable record
         if (candidate.executionOutcome != null) return false
         candidate.executionOutcome = outcome
         true
@@ -599,12 +727,18 @@ open class ContributionRetentionSink(
 
     /** Test visibility: retains a candidate directly so outcome recording can be exercised. The
      * frozen allowance cap is EXPLICIT: null (the default) refuses publication fail-closed. */
-    open fun retainCandidateForTest(captureId: UUID, allowanceMetadataCap: Int? = null): Boolean = synchronized(lock) {
-        candidates += RetainedCandidate(
-            context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset"),
-            allowanceMetadataCap = allowanceMetadataCap,
-        )
-        true
+    open fun retainCandidateForTest(captureId: UUID, allowanceMetadataCap: Int? = null): Boolean {
+        val completedAtMs = nowMs()
+        val gen: Long
+        synchronized(lock) {
+            candidates += RetainedCandidate(
+                context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset"),
+                allowanceMetadataCap = allowanceMetadataCap,
+            )
+            gen = purgeGeneration
+        }
+        onCandidateRetained?.invoke(captureId, gen, completedAtMs)
+        return true
     }
 
     /** Test visibility: the live candidate for a retained capture, WITHOUT copying its PCM. */
@@ -616,6 +750,15 @@ open class ContributionRetentionSink(
     }
 
     fun retainedSnapshot(): List<RetainedCandidate> = synchronized(lock) { candidates.toList() }
+
+    /**
+     * Test seam: the publication snapshot VIEW of a live candidate with the pre-Batch-B
+     * (early-completion) cause, for controls that build records from unsealed candidates.
+     * Real publication always snapshots under the seal operation; this never dispatches.
+     */
+    fun sealedSnapshotForTest(captureId: UUID): SealedCapture? = synchronized(lock) {
+        candidates.firstOrNull { it.context.captureId == captureId }?.let { snapshot(it, SealedCapture.CAUSE_TERMINAL) }
+    }
 
     /** Charge currently carried by the OPEN prefix for [context] (0 when none/other). */
     fun prefixBytesChargedForTest(context: CaptureContext): Long = synchronized(lock) {

@@ -150,6 +150,28 @@ object VoiceObservationModule {
         scope = scope,
     )
 
+    /**
+     * BATCH B bounded outcome finalization (reviewer c5d94af4 #1): composed with NO selected
+     * wait — production limits/window/provisioning are unavailable, so no outcome-wait
+     * selection exists. THIS CLOSES CONTRIBUTION ADMISSION fail-closed (spec cf1b9809):
+     * CollectionStartup wires the observer's admission guard to [CaptureOutcomeFinalizer.limitsSelected],
+     * so a null selection refuses every capture rather than admitting captures with an
+     * unbounded wait. Selecting a wait is a separate reviewed change constructing
+     * OutcomeWaitLimits explicitly; never an implicit default.
+     */
+    @Provides
+    @Singleton
+    fun provideCaptureOutcomeFinalizer(
+        sink: ContributionRetentionSink,
+        @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer(
+        sink = sink,
+        waitLimits = null,
+        scope = scope,
+        // Same monotonic domain the sink composes by default (production clock).
+        nowMs = { System.nanoTime() / 1_000_000L },
+    )
+
     @Provides
     @Singleton
     fun provideWithdrawalIntentPersistence(

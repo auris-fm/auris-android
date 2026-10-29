@@ -102,7 +102,10 @@ class ExecutionStageDecodeControlTest {
         /** Decoded from the SERIALIZED record: the bytes that would be published. */
         // The Execution stage's own recorded fields, read out of the canonicalised record.
         fun builtExecutionStage(): Map<String, RecordNode> {
-            val candidate = sink.retainedSnapshot().single()
+            val live = sink.retainedSnapshot().single()
+            // BATCH B: the provenance mapper now reads the immutable SealedCapture; a live
+            // candidate is snapshotted with the early-completion cause (pre-Batch-B typing).
+            val candidate = sink.sealedSnapshotForTest(live.context.captureId)!!
             val builder = ContributionRecordBuilder(
                 captureId = candidate.context.captureId.toString(),
                 enrollmentEpoch = "epoch-1",
@@ -114,7 +117,7 @@ class ExecutionStageDecodeControlTest {
                 platform = "android",
                 appVersion = "1.0",
                 build = "1",
-                audio = audioBlockFor(candidate),
+                audio = audioBlockFor(live),
             )
             // Round-trip through canonical JSON so the assertion reads the recorded bytes, not the
             // in-memory entry the builder was handed.

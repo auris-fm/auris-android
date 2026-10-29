@@ -121,6 +121,14 @@ class SegmentObserver(
         (sink as? ContributionRetentionSink)?.noteExecutionOutcome(captureId, outcome)
     }
 
+    /**
+     * BATCH B OUTCOME-WAIT ADMISSION GUARD (spec cf1b9809): when wired (production), admission
+     * REFUSES unless a bounded outcome wait is selected — a missing bounded wait must close
+     * contribution admission, never leave an unbounded positive path. Test fixtures that do not
+     * compose the finalizer leave this null (pre-Batch-B behavior unchanged).
+     */
+    var outcomeWaitGuard: (() -> Boolean)? = null
+
     fun speechStartedAdmitting(
         captureSession: Long,
         routeClass: String,
@@ -128,6 +136,9 @@ class SegmentObserver(
         asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
     ): AdmissionHandle? = fenceGate.gate {
+        // BATCH B: fail-closed BEFORE consuming anything (no token burn — the capture never
+        // starts, so no prepaid token is taken below when this refuses).
+        outcomeWaitGuard?.let { guard -> if (!guard()) return@gate null }
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
         // GATE-OFF CONSUMES NOTHING. The single prepaid token is taken only after the live gate

@@ -23,6 +23,7 @@ class CollectionStartup @Inject constructor(
     private val observer: SegmentObserver,
     private val allowanceLifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
     private val allowanceRetirement: AllowanceRetirementWatcher,
+    private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
 ) {
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {
@@ -37,5 +38,10 @@ class CollectionStartup @Inject constructor(
         // needs no hook - the prepared token is lost by design).
         allowanceLifecycle.onRetired = { observer.revoked("allowance-retired") }
         allowanceRetirement.start()
+        // BATCH B (reviewer 399cb2e6 / spec cf1b9809): bounded outcome finalization hooks onto
+        // the sink, and the ADMISSION GUARD is fail-closed: with no selected wait limits the
+        // finalizer never arms and contribution admission REFUSES — no unbounded positive path.
+        observer.outcomeWaitGuard = { outcomeFinalizer.limitsSelected }
+        outcomeFinalizer.start()
     }
 }

@@ -2,7 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCandidate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SealedCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
@@ -40,8 +40,8 @@ class RetentionPublishTrigger(
     private val producer: ContributionCaptureProducer,
     /** The models that did NOT vary per capture (fixed app deployments: vad/wake/router). */
     private val fixedModels: List<Pair<String, ModelRef>>,
-    /** Stage outcomes for THIS candidate, supplied by the pipeline at publish time. */
-    private val stagesProvider: (RetainedCandidate) -> List<Pair<StageName, StageEntry>>,
+    /** Stage outcomes for THIS sealed capture, supplied by the pipeline at publish time. */
+    private val stagesProvider: (SealedCapture) -> List<Pair<StageName, StageEntry>>,
     /**
      * THE ATOMIC PUBLICATION SECTION (reviewer 8288ac15): [block] runs ENTIRELY inside ONE owner
      * transaction — validation of the frozen tuple AND the producer's own live reads — so no
@@ -66,12 +66,12 @@ class RetentionPublishTrigger(
         sink.onReadyForPublication = ::onCandidate
     }
 
-    private fun onCandidate(candidate: RetainedCandidate) {
-        val id = candidate.context.captureId
+    private fun onCandidate(sealed: SealedCapture) {
+        val id = sealed.captureId
         // REJECTION/CANCEL-BEFORE-START: if the dispatch itself throws synchronously (rejected
         // executor, closed scope), the body never runs — release HERE and surface the failure.
         val job = try {
-            dispatch { publishBody(candidate, id) }
+            dispatch { publishBody(sealed, id) }
         } catch (t: Throwable) {
             sink.releaseRetained(id)
             throw t
@@ -87,15 +87,14 @@ class RetentionPublishTrigger(
         job.invokeOnCompletion { cause -> if (cause != null) sink.releaseRetained(id) }
     }
 
-    private fun publishBody(candidate: RetainedCandidate, id: UUID) {
+    private fun publishBody(sealed: SealedCapture, id: UUID) {
         try {
-            val issued = candidate.context.issuedAuthority
-            val pcm = candidate.pcm
-            // GUARD 1: a publishable terminal outcome (Executed, or the terminal bleed rejection)
-            // with retained audio. Same consent/eligibility guards as every publication.
-            val publishable = candidate.outcome is CollectionOutcome.Executed ||
-                (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
-            if (!publishable || pcm == null) return
+            val issued = sealed.context.issuedAuthority
+            val pcm = sealed.pcm
+            // GUARD 1: the capture arrives ALREADY SEALED (reviewer be6bb62e #1 — ONE seal
+            // operation for both completion paths; the sink dispatches only sealed snapshots).
+            // Every guard below (frozen identity, consent, eligibility, caps) applies unchanged.
+            if (sealed.pcm.isEmpty()) return
             // GUARD 2: the frozen tuple IS the publication owner; validation and the producer's
             // live reads happen inside ONE owner transaction (no check-then-use window).
             if (issued == null || issued.enrollmentEpoch == null) return
@@ -108,21 +107,28 @@ class RetentionPublishTrigger(
             // candidate since admission. Missing metadata authority never means unconstrained
             // (reviewer fde5349e): a capture that was never allowance-admitted refuses here,
             // before any queue admission or write.
-            val metadataCapBytes = candidate.allowanceMetadataCap ?: return
-            // GUARD 4: observed per-capture model provenance is record truth.
-            val asrModel = candidate.context.asrModel as? ModelRef.Named ?: return
-            // TRANSLATION provenance comes from the OBSERVED record on the candidate, never
-            // from the frozen context (which cannot know whether translation ran).
-            val translationModel = candidate.translation?.model ?: ModelRef.None
+            val metadataCapBytes = sealed.allowanceMetadataCap ?: return
+            // GUARD 4: observed per-capture model provenance is record truth. A Named ref is
+            // required for EARLY-COMPLETED records (execution implies observed ASR). An
+            // outcome-wait-expired record may carry NO observed ASR model (the wait expired
+            // before one joined): that absence is honest and the ASR stage is typed by its
+            // cause — publication with ModelRef.None, never fabricated provenance (reviewer
+            // 399cb2e6 #1: retaining legitimate no-ASR outcomes cannot be deferred).
+            val observedAsr = sealed.context.asrModel as? ModelRef.Named
+            if (observedAsr == null && sealed.cause != SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED) return
+            val asrModel = observedAsr ?: ModelRef.None
+            // TRANSLATION provenance comes from the OBSERVED record on the sealed snapshot,
+            // never from the frozen context (which cannot know whether translation ran).
+            val translationModel = sealed.translation?.model ?: ModelRef.None
             val chunks = listOf(pcm to pcm.size)
             val commit = {
                 producer.publish(
                     id.toString(),
                     frozen.enrollmentEpoch,
-                    candidate.sampleRateHz,
+                    sealed.sampleRateHz,
                     chunks,
                     fixedModels + listOf("asr" to asrModel, "translation" to translationModel),
-                    stagesProvider(candidate),
+                    stagesProvider(sealed),
                     metadataCapBytes = metadataCapBytes,
                 )
                 true

@@ -19,6 +19,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink.Companion.ActionOutcome
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -705,6 +706,74 @@ class CloudRouteSinkTest {
                 "(calls=${deps.playback.calls} recorded=${state.snapshot("B").recentReferencePositions})",
             !deps.playback.calls.any { it.startsWith("seekTo:") },
         )
+    }
+
+    @Test
+    fun `an unsupported cloud action is refused as a typed outcome, not silently ignored`() = runTest {
+        // "We would not act" is a different fact from "we did not act": every NON-PLAYBACK tool is
+        // typed Refused, and a turn whose only action was refused must NOT pass for a turn that
+        // delivered something — it falls through to the empty-turn error, same as no action at all.
+        // No execution path exists for these tools (operation-ID/journal prerequisite), so nothing
+        // can half-execute either.
+        listOf(
+            CloudRouteEvent.Action(tool = "chapter", action = "next", params = emptyMap()),
+            CloudRouteEvent.Action(tool = "queue", action = "add_bottom", params = mapOf("episode" to "Episode B")),
+            CloudRouteEvent.Action(tool = "queue", action = "query_contents", params = emptyMap()),
+            CloudRouteEvent.Action(tool = "sleep", action = "end_of_episode", params = emptyMap()),
+        ).forEach { event ->
+            val deps = TestDeps(
+                events = flowOf(event, CloudRouteEvent.Done(1, 0)),
+            )
+            val sink = deps.sink()
+
+            val feedback = sink.routeToCloud(
+                "do the thing",
+                VoiceIntent.CloudTier.Premium,
+                PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+                admitted = testWireId,
+            ).feedback
+
+            assertEquals("$event: typed refusal", ActionOutcome.Refused, sink.lastActionOutcome)
+            assertTrue(
+                "$event: a refused-only turn must not count as delivered (feedback=$feedback)",
+                feedback !is VoiceResponse.Silent,
+            )
+        }
+    }
+
+    @Test
+    fun `playback handling is unchanged from main — missing parameters still return None, not Refused`() = runTest {
+        // EXACT PRESERVATION: the typed refusal exists only at the tool gate. Every playback
+        // branch inside executeAction — including missing-parameter and unknown-action cases —
+        // keeps main's None, so no existing playback behavior changed in this increment.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(tool = "playback", action = "seek_to", params = emptyMap()),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "seek somewhere",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+            admitted = testWireId,
+        ).feedback
+
+        assertEquals(ActionOutcome.None, sink.lastActionOutcome)
+    }
+
+    @Test
+    fun `action outcome merging keeps refusal below unknown and both below confirmed`() {
+        // Precedence is evidence strength: a confirmed action outranks an unobserved dispatch,
+        // which outranks an explicit refusal, which outranks nothing.
+        assertEquals(ActionOutcome.Confirmed, CloudRouteSink.mergeActionOutcome(ActionOutcome.Confirmed, ActionOutcome.Refused))
+        assertEquals(ActionOutcome.Unknown, CloudRouteSink.mergeActionOutcome(ActionOutcome.Unknown, ActionOutcome.Refused))
+        assertEquals(ActionOutcome.Refused, CloudRouteSink.mergeActionOutcome(ActionOutcome.Refused, ActionOutcome.None))
+        assertEquals(ActionOutcome.None, CloudRouteSink.mergeActionOutcome(ActionOutcome.None, ActionOutcome.None))
+        // A refusal can never upgrade a turn into delivered territory by itself.
+        assertTrue(CloudRouteSink.mergeActionOutcome(ActionOutcome.Refused, ActionOutcome.Refused) != ActionOutcome.Confirmed)
     }
 
     @Test

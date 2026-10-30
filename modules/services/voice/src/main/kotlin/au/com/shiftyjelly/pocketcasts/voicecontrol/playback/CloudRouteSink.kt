@@ -778,7 +778,10 @@ class CloudRouteSink internal constructor(
                             // reported as delivered too -- the turn DID dispatch it, and saying "nothing
                             // happened" would invite a repeat -- but the two are distinguished in the
                             // value rather than merged, so a caller can tell them apart.
-                            actionOutcome != ActionOutcome.None || handledResult -> VoiceResponse.Silent
+                            // A REFUSED action is NOT delivery: "unsupported" is not "performed", and a
+                            // turn whose only action was refused falls through to the empty-turn error
+                            // below rather than passing for a turn that delivered something.
+                            (actionOutcome != ActionOutcome.None && actionOutcome != ActionOutcome.Refused) || handledResult -> VoiceResponse.Silent
 
                             else -> {
                                 // No audio and nothing done: an unexpected empty turn, not a search
@@ -1010,6 +1013,7 @@ class CloudRouteSink internal constructor(
         ActionOutcome.None -> CloudRouteActionOutcome.None
         ActionOutcome.Unknown -> CloudRouteActionOutcome.Unknown
         ActionOutcome.Confirmed -> CloudRouteActionOutcome.Confirmed
+        ActionOutcome.Refused -> CloudRouteActionOutcome.Refused
     }
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
@@ -1160,7 +1164,14 @@ class CloudRouteSink internal constructor(
         myId: Long,
         plannedEpisodeId: String?,
     ): ActionOutcome {
-        if (tool != "playback") return ActionOutcome.None
+        // Non-playback tools are REFUSED as a typed outcome, not silently ignored: the client can
+        // tell "unsupported here" apart from "attempted, outcome unknown". (The owning contract
+        // says unknown tool/action combinations are ignored for forward compatibility; this refusal
+        // is internal typing of exactly that, with no wire reply.) NEW MUTATING TOOLS (chapter,
+        // queue, ...) have NO execution path on this legacy path: the app-operation
+        // protocol/journal is not implemented here, so no helper is added and the tool is
+        // refused, never half-executed. Playback arms below are UNCHANGED from main.
+        if (tool != "playback") return ActionOutcome.Refused
 
         // AN ACTION BELONGS TO THE EPISODE IT WAS PLANNED AGAINST. Turn ownership is not enough:
         // selecting another episode opens NO new cloud turn, so `activeTurnId` still names this one and
@@ -1416,7 +1427,10 @@ class CloudRouteSink internal constructor(
                 }
 
                 // An action this build does not know: nothing happened, and the turn must not be
-                // counted as delivered on the strength of it.
+                // counted as delivered on the strength of it. UNCHANGED FROM MAIN: every
+                // missing-parameter playback branch here still returns None, exactly as before —
+                // the typed Refused outcome exists only at the tool gate above, never inside the
+                // playback arms.
                 else -> ActionOutcome.None
             }
         }
@@ -1616,6 +1630,16 @@ class CloudRouteSink internal constructor(
 
             /** The action was CONFIRMED performed. */
             Confirmed,
+
+            /**
+             * The action was REFUSED by this client: an unsupported NON-PLAYBACK tool on this
+             * legacy action path. No missing-parameter playback branch is affected (those keep
+             * [None]), and no wire acknowledgement is implemented — this is local typing only.
+             * Distinct from [None] on purpose: "we would not act" and "we did not act" are
+             * different facts, and a refusal must never satisfy the delivered-turn check that a
+             * performed action satisfies.
+             */
+            Refused,
         }
 
         // Combines two action outcomes, keeping the STRONGEST evidence but never downgrading an observation.
@@ -1655,6 +1679,7 @@ class CloudRouteSink internal constructor(
         internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
             previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
             previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
+            previous == ActionOutcome.Refused || next == ActionOutcome.Refused -> ActionOutcome.Refused
             else -> ActionOutcome.None
         }
     }

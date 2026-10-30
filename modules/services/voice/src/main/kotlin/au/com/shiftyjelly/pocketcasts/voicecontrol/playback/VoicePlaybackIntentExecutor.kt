@@ -645,6 +645,9 @@ enum class CloudRouteActionOutcome {
 
     /** The action was CONFIRMED performed. */
     Confirmed,
+
+    /** The action was REFUSED by this client: an unsupported non-playback tool on this legacy path. */
+    Refused,
 }
 
 interface VoiceCloudRouteSink {

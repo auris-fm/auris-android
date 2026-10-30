@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.JniWakeWordNative
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.OpenWakeWordDetector
 import java.io.File
 import java.security.MessageDigest
@@ -49,7 +50,9 @@ class WakeWordBenchmark {
         require(sha256(manifestFile.readBytes()) == manifestSha256) {
             "benchmark manifest SHA-256 mismatch"
         }
-        detector = OpenWakeWordDetector(context)
+        // The native boundary is INJECTED (OpenWakeWordDetector's ctor), never referenced
+        // statically: this benchmark exercises the production JNI adapter explicitly.
+        detector = OpenWakeWordDetector(context, JniWakeWordNative())
         assertTrue("wake word detector failed to initialize", detector.isReady)
     }
 

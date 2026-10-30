@@ -57,6 +57,10 @@ internal class SyncAccountTest {
             context = context,
             settings = mock(),
             syncAccountManager = syncAccountManager,
+            // The real account manager IS the credential-ownership authority (same pattern as
+            // SyncManagerImplCredentialFlowTest); a mock would sever the identity this test signs
+            // out with.
+            credentialOwnership = syncAccountManager,
             syncServiceManager = syncServiceManager,
             moshi = moshi,
             notificationManager = mock(),

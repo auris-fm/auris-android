@@ -12,7 +12,7 @@ import com.squareup.moshi.JsonClass
 data class CloudSearchResults(
     val kind: String,
     @Json(name = "scope") val scope: String,
-    @Json(name = "items") val items: List<CloudSearchEvidenceItem> = emptyList(),
+    @Json(name = "items") val items: List<CloudSearchEvidenceItem>,
     @Json(name = "next_cursor") val nextCursor: String? = null,
 ) {
     companion object {

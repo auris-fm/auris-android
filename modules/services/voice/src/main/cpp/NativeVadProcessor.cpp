@@ -14,8 +14,6 @@
 extern float sileroVadPredict(const int16_t* samples, int32_t count);
 extern void sileroVadResetState();
 
-using Clock = std::chrono::steady_clock;
-
 // ---------------------------------------------------------------------------
 // NativeVadProcessor
 // ---------------------------------------------------------------------------
@@ -69,14 +67,16 @@ void NativeVadProcessor::stop() {
     mSpeechOnsetSample = 0;
                     mSpeechEndSample = 0;
     mSpeechActive = false;
+    mFaultLatched = false; // a new session starts with no terminal cause latched
+    mLoopExited.store(false, std::memory_order_release); // and no stale completion flag
     mConsecutiveSilentFrames = 0;
     mDrainRemaining = 0;
-    mCooldownUntilUs = 0;
 
     {
         std::lock_guard<std::mutex> lock(mSpeechMutex);
         mSnapshotBuffer.clear();
         mSnapshotSpeechOnsetSample = 0;
+        mSnapshotSpeechEndStreamPosition = 0;
     }
 
     LOGI("VAD processor thread stopped");
@@ -94,6 +94,38 @@ int NativeVadProcessor::waitForEvent(int32_t timeoutMs) {
     mPendingEvent = 0;
     mEventReady = false;
     return event;
+}
+
+bool NativeVadProcessor::awaitRunLoopExitForTest(int maxMs) {
+    // Waits for the runLoop's final act (mLoopExited, set under mEventMutex AFTER the terminal
+    // cause is settled). No stop(), no touching mPendingEvent: reading the terminal cause only
+    // after this returns true is synchronized by worker completion, not by racing notifications.
+    for (int waited = 0; waited < maxMs; waited += 5) {
+        if (mLoopExited.load(std::memory_order_acquire)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
+NativeVadProcessor::VadDiagnostics NativeVadProcessor::getDiagnostics() {
+    VadDiagnostics d;
+    d.lastRms = mLastRms.load(std::memory_order_relaxed);
+    d.lastScore = mLastScore.load(std::memory_order_relaxed);
+    d.lastGatePassed = mLastGatePassed.load(std::memory_order_relaxed);
+    d.lastIsSpeech = mLastIsSpeech.load(std::memory_order_relaxed);
+    d.speechFrames = mDiagSpeechFrames.load(std::memory_order_relaxed);
+    d.speechActive = mDiagSpeechActive.load(std::memory_order_relaxed);
+    d.silentFrames = mDiagSilentFrames.load(std::memory_order_relaxed);
+    d.drainRemaining = mDiagDrainRemaining.load(std::memory_order_relaxed);
+    return d;
+}
+
+void NativeVadProcessor::setDiagnosticsEnabled(bool enabled) {
+    mDiagnosticsEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+int64_t NativeVadProcessor::getFramesConsumed() {
+    return mFramesConsumed.load(std::memory_order_relaxed);
 }
 
 int32_t NativeVadProcessor::getSpeechPcmSize() {
@@ -123,6 +155,11 @@ int32_t NativeVadProcessor::getSpeechOnsetSample() {
     return mSnapshotSpeechOnsetSample;
 }
 
+int64_t NativeVadProcessor::getSpeechEndStreamPosition() {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    return mSnapshotSpeechEndStreamPosition;
+}
+
 // ---------------------------------------------------------------------------
 // energyGate — fast RMS check to skip Silero VAD for silent frames
 // ---------------------------------------------------------------------------
@@ -133,6 +170,12 @@ bool NativeVadProcessor::energyGate(const int16_t* samples, int32_t count) {
         sum += v * v;
     }
     double rms = std::sqrt(sum / static_cast<double>(count));
+    // Record the value this gate compared when diagnostics are on, so the diagnosis reports the gate's
+    // own number rather than recomputing it: two copies of one formula drift apart the moment either
+    // frame size or threshold changes.
+    if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
+        mLastRms.store(rms, std::memory_order_relaxed);
+    }
     return rms >= kRmsThreshold;
 }
 
@@ -202,56 +245,78 @@ void NativeVadProcessor::runLoop() {
         if (read < kVadFrameSize) {
             continue; // timeout — retry
         }
+        // A full frame was read: count it, so callers can tell "capture is running" from "captured
+        // audio is actually reaching the VAD" even while no speech event fires.
+        mFramesConsumed.fetch_add(1, std::memory_order_relaxed);
+        // The chunk's absolute end in RING accounting -- the read cursor after this read -- is the
+        // sample position the segment anchor is derived from. This is the ring's own read position,
+        // not a count of successful reads: the two coincide only while nothing is dropped, which is
+        // exactly the condition the finalize path checks.
+        mLastChunkEndPosition = mCapture->lastReadEndPosition();
 
 
-        // 2. Cooldown gate — discard frames while cooldown is active.
-        int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            Clock::now().time_since_epoch()).count();
-        if (nowUs < mCooldownUntilUs) {
-            // Still in cooldown: add to context buffer (so we have pre-speech
-            // audio when cooldown expires) but don't process.
-            addToContext(mContextBuffer, mContextHead, mContextCount,
-                chunk, kMaxContextFrames, kVadFrameSize);
-            continue;
-        }
+        // 2. No cooldown gate and no forced duration endpoint. Internal framing retains and joins
+        // audio until the natural endpoint, so no captured frames are discarded and no truncated
+        // request is ever published. A duration limit, if one is introduced, must surface as an
+        // explicit fault rather than a silent endpoint (see the guard below).
 
-        // 3. Max-duration check.
-        if (mSpeechActive && mSpeechFrames >= kMaxSpeechFrames) {
-            LOGI("VAD: max duration exceeded (%d frames), finalizing",
+        // 3. Fault guard — a detector stuck active past a hard ceiling is a surfaced fault, not
+        // ordinary long speech. It must NOT emit a completed utterance: the frames are neither
+        // finalised nor handed to ASR. Returning the stop sentinel ends the stream so the caller
+        // sees a fault instead of a plausible-looking truncated segment.
+        if (mSpeechActive && mSpeechFrames >= kStuckDetectorFrameLimit) {
+            LOGE("VAD: detector stuck active (%d frames); surfacing fault, no segment emitted",
                 mSpeechFrames);
-
             {
                 std::lock_guard<std::mutex> lock(mSpeechMutex);
-                mSnapshotBuffer = std::move(mSpeechBuffer);
-                mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
-                        mSnapshotSpeechEndSample = mSpeechEndSample;
+                mSnapshotBuffer.clear();
+                mSnapshotSpeechOnsetSample = 0;
+                mSnapshotSpeechEndSample = 0;
+                mSnapshotSpeechEndStreamPosition = 0;
                 mSpeechBuffer.clear();
             }
-
             mSpeechFrames = 0;
             mSpeechOnsetSample = 0;
-                    mSpeechEndSample = 0;
+            mSpeechEndSample = 0;
             mSpeechActive = false;
             mConsecutiveSilentFrames = 0;
             mDrainRemaining = 0;
             mContextCount = 0;
             mContextHead = 0;
-            mCooldownUntilUs = nowUs + kCooldownMs * 1000;
 
             std::lock_guard<std::mutex> lock(mEventMutex);
-            mPendingEvent = 2; // speech ended
+            // NOT the stop sentinel. `-1` means "the stream was stopped" and the consumer treats it
+            // as an ordinary end, so emitting it here made a fault indistinguishable from a normal
+            // shutdown: no error, no result, no state change, no recovery when the noise stops. A
+            // distinct value is what makes the fault visible at the boundary.
+            mPendingEvent = kFaultEvent; // fault: surfaced, not an ordinary end
             mEventReady = true;
+            mFaultLatched = true; // preserve the terminal cause through loop exit
+            // The processor is STOPPED by the fault: clear mActive BEFORE unlocking so a later
+            // start() cannot report already-running against an exiting worker (b124a183).
+            mActive.store(false, std::memory_order_release);
             mEventCv.notify_one();
-
-            continue;
+            break;
         }
 
         // 4. Energy gate — skip Silero VAD for silent frames.
         bool hasEnergy = energyGate(chunk, kVadFrameSize);
+        float prob = 0.0f;
         bool isSpeech = false;
         if (hasEnergy) {
-            float prob = sileroVadPredict(chunk, kVadFrameSize);
+            prob = sileroVadPredict(chunk, kVadFrameSize);
             isSpeech = (prob >= kSpeechThreshold);
+        }
+        // Diagnosis only, and only when enabled: the values the detector compared for this frame. The
+        // RMS comes from the gate itself (recorded above), so there is one formula, not two.
+        if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
+            mLastScore.store(prob, std::memory_order_relaxed);
+            mLastGatePassed.store(hasEnergy, std::memory_order_relaxed);
+            mLastIsSpeech.store(isSpeech, std::memory_order_relaxed);
+            mDiagSpeechFrames.store(mSpeechFrames, std::memory_order_relaxed);
+            mDiagSpeechActive.store(mSpeechActive, std::memory_order_relaxed);
+            mDiagSilentFrames.store(mConsecutiveSilentFrames, std::memory_order_relaxed);
+            mDiagDrainRemaining.store(mDrainRemaining, std::memory_order_relaxed);
         }
 
         // 5. Speech detected.
@@ -326,11 +391,30 @@ void NativeVadProcessor::runLoop() {
                 if (mDrainRemaining <= 0) {
                     // Drain complete — finalize the utterance.
 
+                    // The finalize point IS the sample-accounting anchor: this thread just
+                    // consumed the frame containing the segment's last sample, and the ring's read
+                    // cursor after that read is the segment's absolute end position. Recorded HERE,
+                    // under the same lock as the snapshot, because the callback keeps advancing the
+                    // ring afterwards -- a position read later would include that lag. If any write
+                    // has dropped samples, cursor continuity with real stream positions is broken
+                    // and 0 is recorded instead: the Kotlin side treats that as "timing
+                    // unavailable" and falls back to offset matching, which is honest rather than
+                    // confidently wrong.
+                    // Revalidate the xrun evidence AFTER the segment was collected, not before it:
+                    // a single poll taken on the way in would miss an overrun that happened during
+                    // the extraction, which is precisely the window that displaces a position. The
+                    // poll runs on this thread (never the audio callback) and is idempotent -- it
+                    // compares against the epoch baseline set at stream start.
+                    mCapture->sampleXrunContinuity();
+                    const int64_t accountedEnd = mCapture->sampleAccountingContinuous()
+                        ? mLastChunkEndPosition
+                        : 0;
                     {
                         std::lock_guard<std::mutex> lock(mSpeechMutex);
                         mSnapshotBuffer = std::move(mSpeechBuffer);
                         mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
                         mSnapshotSpeechEndSample = mSpeechEndSample;
+                        mSnapshotSpeechEndStreamPosition = accountedEnd;
                         mSpeechBuffer.clear();
                     }
 
@@ -342,7 +426,6 @@ void NativeVadProcessor::runLoop() {
                     mDrainRemaining = 0;
                     mContextCount = 0;
                     mContextHead = 0;
-                    mCooldownUntilUs = nowUs + kCooldownMs * 1000;
 
                     std::lock_guard<std::mutex> lock(mEventMutex);
                     mPendingEvent = 2; // speech ended
@@ -362,8 +445,18 @@ void NativeVadProcessor::runLoop() {
     // believing capture is running, with no restart.
     {
         std::lock_guard<std::mutex> lock(mEventMutex);
-        mPendingEvent = -1;
-        mEventReady = true;
+        // PRESERVE THE TERMINAL CAUSE. Overwriting unconditionally replaced a published
+        // kFaultEvent with -1 whenever the consumer had not read it yet -- the fault became
+        // scheduling-dependent. A latched fault stays what it is; only an unconsumed ordinary
+        // exit gets the terminal stop sentinel.
+        if (!mFaultLatched) {
+            mPendingEvent = -1;
+            mEventReady = true;
+        }
+        // FINAL ACT, after the terminal cause is settled: publish worker completion for the test
+        // boundary (and any future observer). Set UNDER the event lock so an observer that sees
+        // the flag also sees the published event state.
+        mLoopExited.store(true, std::memory_order_release);
         mEventCv.notify_all();
     }
 }

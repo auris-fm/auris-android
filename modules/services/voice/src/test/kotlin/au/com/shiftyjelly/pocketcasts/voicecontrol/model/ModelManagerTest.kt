@@ -2,6 +2,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import java.io.File
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -24,33 +26,17 @@ class ModelManagerTest {
     }
 
     @Test
-    fun `reports not ready when moonshine model not downloaded`() {
-        val manager = ModelManager(context).apply {
-            filesDir = tempDir.root
-        }
-        assertFalse(manager.isMoonshineModelReady())
-    }
-
-    @Test
-    fun `reports ready when all moonshine model files exist`() {
-        val moonshineDir = File(tempDir.root, "moonshine-model").apply { mkdirs() }
-        val files = listOf(
-            "adapter.ort",
-            "cross_kv.ort",
-            "decoder_kv.ort",
-            "decoder_kv_with_attention.ort",
-            "encoder.ort",
-            "frontend.ort",
-            "streaming_config.json",
-            "tokenizer.bin",
+    fun `reports a backend model as ready only when every required file is present`() {
+        val manager = ModelManager(context).apply { filesDir = tempDir.root }
+        val spec = ModelSpec(
+            files = listOf(ModelFile(url = "https://example/a.ort", filename = "a.ort")),
+            targetDir = "sensevoice-model",
         )
-        for (file in files) {
-            File(moonshineDir, file).writeText("fake model")
-        }
+        assertFalse(manager.isModelReady(spec))
 
-        val manager = ModelManager(context).apply {
-            filesDir = tempDir.root
-        }
-        assertTrue(manager.isMoonshineModelReady())
+        val dir = File(tempDir.root, "sensevoice-model").apply { mkdirs() }
+        File(dir, "a.ort").writeText("fake model")
+
+        assertTrue(manager.isModelReady(spec))
     }
 }

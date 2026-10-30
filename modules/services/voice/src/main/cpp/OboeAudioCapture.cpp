@@ -1,5 +1,6 @@
 #include "OboeAudioCapture.h"
 #include <android/log.h>
+#include <ctime>
 
 #define LOG_TAG "OboeCapture"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -24,12 +25,19 @@ int32_t RingBuffer::write(const int16_t* data, int32_t numSamples) {
     int64_t available = capacity - used;
 
     if (available <= 0) {
-        // Buffer full — drop samples. Acceptable for ASR.
+        // Buffer full — drop samples. Acceptable for ASR, but NOT for timing: a drop breaks the
+        // cursors' continuity with real stream positions, so the accounting is flagged and every
+        // later sample position is reported as unavailable rather than wrong.
+        mSamplesDropped.store(true, std::memory_order_release);
         return 0;
     }
 
     int32_t toWrite = static_cast<int32_t>(
         (numSamples < available) ? numSamples : available);
+    if (toWrite < numSamples) {
+        // A partial write drops the remainder -- same continuity break as a full drop.
+        mSamplesDropped.store(true, std::memory_order_release);
+    }
 
     for (int32_t i = 0; i < toWrite; ++i) {
         int32_t idx = static_cast<int32_t>((writeCursor + i) % kRingBufferCapacity);
@@ -70,6 +78,9 @@ int32_t RingBuffer::available() const {
 void RingBuffer::reset() {
     mWriteCursor.store(0, std::memory_order_relaxed);
     mReadCursor.store(0, std::memory_order_relaxed);
+    // A new session is a new position epoch: cursors and continuity restart together, matching the
+    // new stream's timestamp epoch.
+    mSamplesDropped.store(false, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +129,10 @@ bool OboeAudioCapture::open() {
     // Record actual parameters (may differ from requested)
     mSampleRate = mStream->getSampleRate();
     mChannelCount = mStream->getChannelCount();
+    // The ACTUAL routed device, read only after open. It can differ from a requested device, and the
+    // OpenSL ES backend reports kUnspecified, so callers must treat kUnspecified as unknown rather
+    // than substituting an enumerated one.
+    mRoutedDeviceId.store(mStream->getDeviceId(), std::memory_order_release);
 
     LOGI("Opened input stream: %d Hz, %d channels",
          mSampleRate, mChannelCount);
@@ -131,9 +146,31 @@ bool OboeAudioCapture::start() {
         return false;
     }
 
+    // A new stream is a new continuity epoch: the xrun counter restarts with the stream, so the
+    // previous epoch's evidence must not carry over into this one.
+    mXrunBaselineValid.store(false, std::memory_order_release);
+    mXrunBreaksContinuity.store(false, std::memory_order_release);
+
+    // A test-installed placeholder cannot be started (requestStart is pure virtual; calling
+    // through it is undefined) -- the same accommodation close() makes. Marking active directly
+    // is exactly what a successful requestStart would have done.
+    if (mTestStreamInstalled) {
+        mActive.store(true, std::memory_order_release);
+        return true;
+    }
+
+    // BASELINE BEFORE requestStart. A successful start does not prove no xrun occurred: the stream
+    // is live the moment it starts, and a baseline read afterwards absorbs anything the HAL dropped
+    // in the interim, reporting a compromised epoch as continuous. Reading before start is the only
+    // ordering where "unchanged since baseline" really does mean "nothing was dropped while live".
+    sampleXrunContinuityLocked();
+
     oboe::Result result = mStream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start stream: %s", oboe::convertToText(result));
+        // A stream that never started must not leave a usable continuity claim behind.
+        mXrunBaselineValid.store(false, std::memory_order_release);
+        mXrunBreaksContinuity.store(true, std::memory_order_release);
         return false;
     }
 
@@ -150,6 +187,9 @@ int32_t OboeAudioCapture::readData(int16_t* outBuffer, int32_t maxFrames) {
 void OboeAudioCapture::stop() {
     mActive.store(false, std::memory_order_release);
     mDataCv.notify_all();
+    // The routed device is a fact about a live stream: once capture stops there is no observed
+    // capture route, and reporting the last one would be a stale observation.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
@@ -171,14 +211,26 @@ void OboeAudioCapture::close() {
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
-        mStream->requestStop();
-        mStream->close();
+        // A test-installed stream is not a real one: `requestStop` is pure virtual, so calling through
+        // it on a placeholder is undefined behaviour. The test's stream is dropped rather than closed.
+        if (!mTestStreamInstalled) {
+            mStream->requestStop();
+            mStream->close();
+        }
         mStream = nullptr;
     }
 
     mRingBuffer.reset();
+    // A closed capture has no stream, so it has no xrun evidence: the epoch's baseline is void.
+    // Leaving it valid would let the NEXT session inherit a continuity claim measured against a
+    // stream that no longer exists -- the same stale-observation defect the restart path guards.
+    mXrunBaselineValid.store(false, std::memory_order_release);
+    mXrunBreaksContinuity.store(false, std::memory_order_release);
     mSampleRate = kSampleRate;
     mChannelCount = kChannelCount;
+    // No stream, no observed capture device. Clearing here covers the explicit close path the same
+    // way stop() and the error path do, so every way a stream ends leaves no observation behind.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
 
     LOGI("Capture closed");
 }
@@ -191,6 +243,108 @@ int32_t OboeAudioCapture::getDeviceId() {
     return mStream->getDeviceId();
 }
 
+void OboeAudioCapture::sampleXrunContinuity() {
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    sampleXrunContinuityLocked();
+}
+
+void OboeAudioCapture::sampleXrunContinuityLocked() {
+    // PRECONDITION: the caller holds mStreamMutex. start() holds it for its whole body, and the
+    // mutex is not recursive, so that path must come through here rather than re-locking.
+    int32_t count = 0;
+    bool supported = false;
+
+    if (mStream == nullptr) {
+        // No live stream: there is no evidence to establish continuity from.
+        supported = false;
+    } else if (mTestStreamInstalled) {
+        supported = mTestXrunSupported;
+        count = mTestXrunCount;
+    } else if (mStream->isXRunCountSupported()) {
+        auto xruns = mStream->getXRunCount();
+        if (xruns) {
+            supported = true;
+            count = xruns.value();
+        }
+        // An error is NOT zero: it is the absence of evidence, handled by the unsupported path.
+    }
+
+    if (!supported) {
+        // Could not establish the baseline. Continuity is unavailable for this epoch, and stays
+        // unavailable: "unknown" must never be reported as "continuous".
+        mXrunBaselineValid.store(false, std::memory_order_release);
+        mXrunBreaksContinuity.store(true, std::memory_order_release);
+        return;
+    }
+
+    if (!mXrunBaselineValid.load(std::memory_order_acquire)) {
+        // First observation of this epoch -- the baseline. Only sound if it is taken before audio
+        // flows; start() takes it there, so a first VAD-thread call means start() could not, and the
+        // epoch is already suspect.
+        mXrunBaseline = count;
+        mXrunBaselineValid.store(true, std::memory_order_release);
+        return;
+    }
+
+    if (count != mXrunBaseline) {
+        // The count moved: the HAL discarded input somewhere the ring never saw. Every position
+        // derived from these cursors afterwards is untrustworthy for the rest of the epoch.
+        mXrunBreaksContinuity.store(true, std::memory_order_release);
+    }
+}
+
+OboeAudioCapture::CaptureClock OboeAudioCapture::captureClock() const {
+    CaptureClock clock;
+    clock.sampleRate = mSampleRate;
+
+    // The fallback: the producer's own monotonic sample counter, which is always available and is a
+    // real position in the capture stream. The stream's timestamp is preferred only because the clock
+    // is what the OTHER side of the alignment is measured against.
+    clock.framePosition = mRingBuffer.writeCursor();
+
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream == nullptr) {
+        // No live stream: the counter is the honest answer and the timestamp is unavailable rather
+        // than invented.
+        return clock;
+    }
+    if (mTestStreamInstalled) {
+        // A test's placeholder cannot be interrogated, so its observation is supplied instead. The
+        // consumption branch below is the same one a real stream takes.
+        if (mTestTimestampAvailable) {
+            clock.framePosition = mTestTimestampFrame;
+            clock.timestampNs = mTestTimestampNs;
+            clock.observable = true;
+        }
+        return clock;
+    }
+    auto timestamp = mStream->getTimestamp(CLOCK_MONOTONIC);
+    if (timestamp) {
+        clock.framePosition = timestamp.value().position;
+        clock.timestampNs = timestamp.value().timestamp;
+        clock.observable = true;
+    }
+    return clock;
+}
+int32_t OboeAudioCapture::getRoutedDeviceId() const {
+    // Ask the LIVE stream when there is one. A cached value goes stale the moment the platform
+    // reroutes an open stream -- a scenario distinct from a disconnect, where the stream stays open
+    // and its routed device changes -- and a stale device is worse than a missing one because it
+    // reads as a confirmed observation. The cache is only the fallback for the stop/close window,
+    // where it is deliberately kUnspecified.
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream != nullptr) {
+        // A test's placeholder cannot be interrogated (AudioStream has pure virtuals), so it reports
+        // the id its seam supplied. A REAL stream is asked LIVE -- returning the test id here is what
+        // made routedCaptureDeviceId() always null on device, classifying every wired/BLE headset as
+        // microphone-less and refusing to start voice control (reviewer 4356625267).
+        if (mTestStreamInstalled) {
+            return mTestReportedDeviceId;
+        }
+        return mStream->getDeviceId();
+    }
+    return mRoutedDeviceId.load(std::memory_order_acquire);
+}
 bool OboeAudioCapture::isActive() const {
     return mActive.load(std::memory_order_acquire)
         && !mClosed.load(std::memory_order_acquire);
@@ -215,7 +369,14 @@ int32_t OboeAudioCapture::readRingBuffer(int16_t* outData, int32_t maxSamples, i
         return 0;
     }
 
-    return mRingBuffer.read(outData, maxSamples);
+    const int32_t read = mRingBuffer.read(outData, maxSamples);
+    if (read > 0) {
+        // The read cursor IS the absolute stream position of this chunk's last sample (while the
+        // accounting is continuous). Recorded at the read, so the VAD can bind a finalized segment
+        // to the position its final chunk actually ended at -- not to any later clock read.
+        mLastReadEndPosition.store(mRingBuffer.readCursor(), std::memory_order_release);
+    }
+    return read;
 }
 
 oboe::DataCallbackResult OboeAudioCapture::onAudioReady(
@@ -233,16 +394,32 @@ oboe::DataCallbackResult OboeAudioCapture::onAudioReady(
 }
 
 void OboeAudioCapture::onErrorAfterClose(
-    oboe::AudioStream* /*audioStream*/,
+    oboe::AudioStream* failedStream,
     oboe::Result error)
 {
-    mActive.store(false, std::memory_order_release);
-
     if (mClosed.load(std::memory_order_acquire)) {
+        mActive.store(false, std::memory_order_release);
         return; // close() already cleaned up
     }
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
+    // Only the CURRENT stream's failure may act on this object's state. A replaced stream's delayed
+    // callback would otherwise erase the observation its successor published -- a late event acting on
+    // state that is no longer its own.
+    //
+    // The ACTIVE flag is part of that state, not an exception to it: clearing it here would stop a
+    // capture whose own stream is still running, and refuse every later read with "stream is not
+    // active" while audio is arriving. The guard has to cover both fields or it covers neither -- a
+    // late callback that leaves the device intact but stops the stream is the same defect half-fixed.
+    if (failedStream != mStream) {
+        LOGE("Ignoring error-after-close from a replaced stream: %s", oboe::convertToText(error));
+        return;
+    }
+    mActive.store(false, std::memory_order_release);
     mStream = nullptr;
+    // The stream is gone, so the device it reported is no longer an observation. Leaving it set
+    // would present a dead stream's routing as the live capture route -- the stale-observation
+    // failure, on a disconnect or a route change that closed the stream.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
     LOGE("Stream error after close: %s", oboe::convertToText(error));
 }

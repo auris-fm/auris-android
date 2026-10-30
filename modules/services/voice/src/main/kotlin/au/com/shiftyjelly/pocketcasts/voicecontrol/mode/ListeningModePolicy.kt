@@ -54,14 +54,19 @@ class ListeningModePolicy @Inject constructor(
     private val gracePeriodSignal: GracePeriodSignal,
     @ApplicationScope private val scope: CoroutineScope,
 ) {
+    // ELIGIBILITY READS AVAILABILITY, NOT THE OBSERVATION. The observed route is Unknown until a
+    // stream is routed or SCO opens, and SCO only opens once acquisition runs -- which waits for this
+    // mode to leave Off. Reading the observation here would deadlock connected AirPods in Off forever.
+    // `availability` answers the policy's actual question: is an external microphone candidate
+    // present (or already the selected input).
     val mode: StateFlow<ListeningMode> = combine(
         gate.state,
-        audioRouteMonitor.route,
+        audioRouteMonitor.availability,
         gracePeriodSignal.isActive,
-    ) { gateState, route, isGracePeriodActive ->
+    ) { gateState, availability, isGracePeriodActive ->
         resolve(
             gateState = gateState,
-            micExposure = route.toMicExposure(),
+            micExposure = availability.toMicExposure(),
             isGracePeriodActive = isGracePeriodActive,
         )
     }.stateIn(
@@ -69,7 +74,7 @@ class ListeningModePolicy @Inject constructor(
         started = SharingStarted.Eagerly,
         initialValue = resolve(
             gateState = gate.state.value,
-            micExposure = audioRouteMonitor.route.value.toMicExposure(),
+            micExposure = audioRouteMonitor.availability.value.toMicExposure(),
             isGracePeriodActive = gracePeriodSignal.isActive.value,
         ),
     )

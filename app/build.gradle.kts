@@ -22,7 +22,11 @@ android {
     }
 
     sourceSets {
+        getByName("test") {
+            kotlin.srcDir("src/sharedTest/kotlin")
+        }
         getByName("androidTest") {
+            kotlin.srcDir("src/sharedTest/kotlin")
             assets.directories.add("$rootDir/modules/services/model/schemas")
         }
     }
@@ -159,6 +163,7 @@ dependencies {
     androidTestImplementation(libs.androidx.test.junit.ext)
     androidTestImplementation(libs.androidx.test.rules)
     androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.lifecycle.process)
     androidTestImplementation(libs.androidx.uiautomator)
     androidTestImplementation(libs.compose.activity)
     androidTestImplementation(libs.compose.ui.test.junit)

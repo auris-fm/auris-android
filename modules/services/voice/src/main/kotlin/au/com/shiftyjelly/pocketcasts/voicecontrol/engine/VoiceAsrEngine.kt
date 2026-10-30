@@ -3,12 +3,14 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
@@ -18,6 +20,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
@@ -32,12 +35,14 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import timber.log.Timber
 
 /** How close the completion band must sit to speech end for a capture to be the wake word alone. */
@@ -70,9 +75,10 @@ class VoiceAsrEngine @Inject constructor(
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
 ) {
+
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
-    private var playbackBufferProvider: (() -> FloatArray)? = null
+    private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null
     private var onIntent: ((VoiceIntent) -> Unit)? = null
@@ -86,7 +92,7 @@ class VoiceAsrEngine @Inject constructor(
         backend: AsrBackend,
         audioRoute: AudioRoute,
         listeningMode: ListeningMode,
-        playbackBufferProvider: () -> FloatArray,
+        playbackBufferProvider: () -> PlaybackReference,
         micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
@@ -118,6 +124,12 @@ class VoiceAsrEngine @Inject constructor(
             // as attached. The caller hands the stream over only on a true signal, so a start
             // that ends here leaves the stream owned by the caller and closed, never live with
             // no consumer.
+            //
+            // SCO ownership: a Bluetooth candidate is ACQUIRED before the engine starts, and the
+            // stream opened by acquisition is the one this pipeline attaches to. Opening SCO here
+            // would deadlock under the isolated-microphone rule (voice-control-core.md > Route
+            // acquisition), so the engine does not perform its own SCO setup even when the route
+            // is BluetoothA2dpOnly.
             if (!voiceAudioProcessor.attachCapture()) {
                 Timber.e("[VoicePipeline] capture attach failed — not listening")
                 return@launch
@@ -189,6 +201,14 @@ class VoiceAsrEngine @Inject constructor(
         val completionSample: Int = 0,
         val speechEndSample: Int = 0,
         val sampleRateHz: Int = 16000,
+        /**
+         * MINTED AT CAPTURE ADMISSION: the shared utterance identity for this
+         * logical turn. Created when the segment is admitted for transcription,
+         * before ASR/trim/translation/routing, so every diagnostic and log from
+         * this point forward can name the same request. Carried through to the
+         * wire request_id unchanged.
+         */
+        val admittedId: String = java.util.UUID.randomUUID().toString(),
     )
 
     /**
@@ -200,6 +220,23 @@ class VoiceAsrEngine @Inject constructor(
     private fun isWakeOnly(request: TranscribeRequest): Boolean = request.speechEndSample > 0 &&
         request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
         request.speechEndSample
+
+    /**
+     * True when [text] carries at least one Unicode letter or number (any script).
+     * Iterates code points rather than UTF-16 Char units so supplementary letters
+     * and numbers (e.g. U+20000 𠀀, U+1D7DF 𝟟) are recognised correctly.
+     */
+    private fun hasLetterOrNumber(text: String): Boolean {
+        var i = 0
+        while (i < text.length) {
+            val cp = Character.codePointAt(text, i)
+            if (Character.isLetter(cp) || Character.isDigit(cp)) return true
+            val cat = Character.getType(cp)
+            if (cat == Character.LETTER_NUMBER.toInt() || cat == Character.OTHER_NUMBER.toInt()) return true
+            i += Character.charCount(cp)
+        }
+        return false
+    }
 
     private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): TranscribeRequest? {
         // Build float samples from the segment
@@ -249,7 +286,7 @@ class VoiceAsrEngine @Inject constructor(
             gracePeriodSignal.onWakeWordDetected()
 
             // Always acknowledge detection with the WAKE_WORD earcon
-            audioFeedbackRenderer.playEarcon(EarconId.WAKE_WORD)
+            audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
 
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
@@ -286,9 +323,21 @@ class VoiceAsrEngine @Inject constructor(
         val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
         val floatSamples = request.samples
 
-        // Filter out playback bleed before transcribing
-        val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
-        if (!utteranceFilter.shouldProcess(floatSamples, false, 0, playbackBuffer)) {
+        // Filter out playback bleed before transcribing. The player's reference window carries its
+        // own timeline position, and the segment carries the capture clock, so the correlator can
+        // compare the two at a SHARED instant instead of at raw buffer offsets. When the stream
+        // reports no timestamp, the capture time stays unknown and the correlator falls back to
+        // offset matching, which is the behaviour from before a clock existed.
+        val playbackReference = playbackBufferProvider?.invoke()
+            ?: PlaybackReference(FloatArray(0), sampleRateHz, startPositionMs = null)
+        // Named `Ms` because the correlator's clock is in milliseconds: the capture observation is
+        // nanoseconds and the conversion happens here, so a reader cannot pair the two domains by
+        // accident. The comment on the helper says the same thing at the point of the division.
+        // The anchor describes SAMPLE 0 of the buffer the filter receives (pre-roll included):
+        // the correlator aligns the whole buffer against the reference window, so the anchor must
+        // be the buffer's own start, not the speech onset inside it.
+        val micPositionMs = segment.captureTimeOfSegmentStartMs()
+        if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference, micPositionMs)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
             return
         }
@@ -325,6 +374,23 @@ class VoiceAsrEngine @Inject constructor(
             // already acknowledged detection.)
             return
         }
+        // Task #78: a transcript with no content -- punctuation, symbols or whitespace only,
+        // after the wake trim -- is not a user request. Discard it silently BEFORE translation,
+        // routing or any feedback: no dialog consumption, no grace extension, no error cue.
+        // Content is any Unicode letter or number, so CJK particles (停, 嗯) and digit
+        // lookalikes (², ½) count as content while ".", "…" and "?!" do not.
+        if (!hasLetterOrNumber(transcript)) {
+            Timber.i(
+                "[VoicePipeline] asr %s %dms lang=%s id=%s '%s'%s → drop (non-content)",
+                b::class.simpleName,
+                asrMs,
+                asrResult.detectedLanguage ?: "?",
+                request.admittedId,
+                transcript,
+                trimNote?.let { " $it" } ?: "",
+            )
+            return
+        }
         // Translate to English when the ASR backend did not already translate and
         // the detected language is not English (the SenseVoice CJK path).
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
@@ -335,10 +401,11 @@ class VoiceAsrEngine @Inject constructor(
         //   lang=en 'Play.' translate=yue→en '播放。'
         // read as English ASR that somehow translated into Chinese.
         Timber.i(
-            "[VoicePipeline] asr %s %dms lang=%s '%s'%s%s",
+            "[VoicePipeline] asr %s %dms lang=%s id=%s '%s'%s%s",
             b::class.simpleName,
             asrMs,
             trimmedResult.detectedLanguage ?: "?",
+            request.admittedId,
             trimmedResult.text,
             trimNote?.let { " $it" } ?: "",
             routePrep.translateNote?.let { " $it" } ?: "",
@@ -346,16 +413,16 @@ class VoiceAsrEngine @Inject constructor(
         if (routePrep.dropWithError) {
             // Don't feed untranslated CJK into the English-only intent model.
             Timber.i("[VoicePipeline] → drop (%s)", routePrep.translateNote)
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
             return
         }
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
-        processUtterance(routePrep.input!!, addressed = request.wakePositive)
+        processUtterance(routePrep.input!!, addressed = request.wakePositive, admittedId = request.admittedId)
     }
 
-    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {
+    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, admittedId: String) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
@@ -367,7 +434,7 @@ class VoiceAsrEngine @Inject constructor(
             // so — silence here is the complaint this change exists to remove.
             // Deliberately not escalated: a capability failure would turn a
             // broken install into cloud traffic (see CloudEscalationPolicy).
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
             return
         }
 
@@ -376,7 +443,17 @@ class VoiceAsrEngine @Inject constructor(
             listeningMode = currentMode,
             micExposure = micExposureProvider?.invoke() ?: MicExposure.Exposed,
         )
-        val outcome = recognizer.recognize(input, ctx)
+        // CAPTURED BEFORE the recognition suspends. Recognition can take seconds, and a wake that
+        // arrives while it runs opens a NEW window: stamping the intent afterwards would attach it to
+        // the window that opened during the wait, so a request issued before a successor wake would
+        // act as though it belonged to the successor.
+        val windowAtRequest = gracePeriodSignal.capturedGeneration()
+        // THE ADMITTED IDENTITY arrives from capture admission (TranscribeRequest.admittedId),
+        // minted BEFORE ASR/trim/translation so every diagnostic from that point forward names
+        // the same request. A retry of the same request reuses this value; two separate user acts
+        // that happen to say the same words do not. The dialog path mints its own for
+        // clarification flows; this is the producer for a plain utterance.
+        val outcome = recognizer.recognize(input, ctx, admittedId)
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
         val diagnostic = outcome.diagnostic
@@ -390,7 +467,24 @@ class VoiceAsrEngine @Inject constructor(
             )
             // A cloud turn outlives the window it was issued in, so it carries
             // that window's identity and cannot extend a later one.
-            handler(intent.stampedForWindow(gracePeriodSignal.currentGeneration))
+            handler(
+                // Bind the immutable input for this recognition, not model-authored cloud text.
+                // Local intents keep their English routing protocol unchanged.
+                (
+                    if (intent is VoiceIntent.CloudRoute) {
+                        intent.copy(
+                            request = input.sourceTranscript ?: input.routerTranscript,
+                            sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
+                        )
+                    } else {
+                        intent
+                    }
+                    )
+                    .stampedForWindow(windowAtRequest)
+                    // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
+                    // prepared once and may be retried. A local intent has no wire identity to reuse.
+                    .let { it.withLogicalRequest(admittedId) },
+            )
             return
         }
 
@@ -411,16 +505,20 @@ class VoiceAsrEngine @Inject constructor(
             // did not cover in its own segment, or speech caught from the room.
             // Heard something we could not route and the user was not addressing us: a tone is
             // all that is warranted.
-            CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            CloudEscalation.EARCON -> audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
 
             CloudEscalation.SILENT -> Unit
 
             // They addressed us and we could not place it: say so in their language, falling back
             // to the earcon in a locale this build has no line for.
             CloudEscalation.SPEAK_UNROUTED -> {
-                val line = SpokenLine.forKey(KEY_CLOUD_UNROUTED, templateResolver, currentLocale())
+                val line = SpokenLine.forKey(
+                    KEY_CLOUD_UNROUTED,
+                    templateResolver,
+                    diagnostic?.sourceLanguage,
+                )
                 if (line.isBlank()) {
-                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                 } else {
                     audioFeedbackRenderer.render(VoiceResponse.Spoken(line))
                 }
@@ -428,29 +526,38 @@ class VoiceAsrEngine @Inject constructor(
 
             // Nothing was sent, but a turn happened: the earcon table already
             // requires a tone for this case.
-            CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
 
             // The client has no answer of its own, so the service gets asked —
             // through the same handler a chosen `cloud_route` uses, so
             // superseded-turn cancellation and the auto-pause obligation apply.
             CloudEscalation.DISPATCH -> {
-                val issuedUnder = gracePeriodSignal.issueEscalation()
-                if (issuedUnder == null) {
-                    // No open window, or this window's one dispatch is spent.
+                // THE ORIGIN IS THE ONE CAPTURED AT REGISTRATION, not the window that happens to be
+                // live now. Recognition can take seconds, and a wake arriving meanwhile opens a NEW
+                // window: escalating under that window would let OLD recognition consume its
+                // successor's conversation. A stale origin is rejected before dispatch.
+                if (!gracePeriodSignal.isCurrent(windowAtRequest)) {
                     Timber.i(
-                        "[VoicePipeline] cloud escalation skipped (%s)",
-                        gracePeriodSignal.escalationRefusal(),
+                        "[VoicePipeline] cloud escalation skipped: origin %d is no longer live",
+                        windowAtRequest,
                     )
-                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                     return
                 }
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
                 handler(
                     VoiceIntent.CloudRoute(
-                        request = input.routerTranscript,
+                        request = input.sourceTranscript ?: input.routerTranscript,
+                        sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
                         tier = VoiceIntent.CloudTier.Unknown,
-                        windowGeneration = issuedUnder,
+                        // STAMPED WITH THE CAPTURED ORIGIN, matching the window this recognition was
+                        // issued under -- the same value the chosen-route path uses.
+                        windowGeneration = windowAtRequest,
                         origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                        // THE REGISTERED IDENTITY, not a second one: this escalation belongs to the SAME
+                        // logical request as the recognition it follows, so a retry of that request
+                        // names one identity rather than two.
+                        logicalRequestId = admittedId,
                     ),
                 )
             }
@@ -466,18 +573,6 @@ class VoiceAsrEngine @Inject constructor(
         backend: AsrBackend,
     ): RoutePrep {
         val detected = trimmed.detectedLanguage?.lowercase()
-        if (detected == null) {
-            return RoutePrep(
-                input = IntentRoutingInput(
-                    sourceTranscript = trimmed.text,
-                    sourceLanguage = null,
-                    routerTranscript = trimmed.text,
-                    translationKind = TranslationKind.NONE,
-                ),
-                translateNote = "translate=skip(no lang)",
-                dropWithError = false,
-            )
-        }
         // Backend-native English (Canary de/es/fr→en) before the native-English branch:
         // Canary reports configured source language with English text.
         if (backend.capabilities.canTranslateToEnglish) {
@@ -489,6 +584,18 @@ class VoiceAsrEngine @Inject constructor(
                     translationKind = TranslationKind.BACKEND,
                 ),
                 translateNote = "translate=skip(backend)",
+                dropWithError = false,
+            )
+        }
+        if (detected == null) {
+            return RoutePrep(
+                input = IntentRoutingInput(
+                    sourceTranscript = trimmed.text,
+                    sourceLanguage = null,
+                    routerTranscript = trimmed.text,
+                    translationKind = TranslationKind.NONE,
+                ),
+                translateNote = "translate=skip(no lang)",
                 dropWithError = false,
             )
         }

@@ -14,6 +14,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -23,18 +27,20 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
-import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AcquisitionResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.keepsPendingAcquisition
@@ -53,6 +59,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
 @AndroidEntryPoint
 class VoiceControlService : Service() {
@@ -64,6 +71,17 @@ class VoiceControlService : Service() {
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
 
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
+
+    /**
+     * The clarification-dialog owner, injected so its abandonment reports can be bound to the cloud
+     * sink's retention release.
+     *
+     * Field injection rather than a constructor dependency: the ROUTER already reaches this manager,
+     * and the sink is reachable from it, so making the sink depend on the manager closes a cycle Hilt
+     * rejects outright.
+     */
+    @Inject lateinit var voiceDialogManager:
+        au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
 
@@ -114,6 +132,9 @@ class VoiceControlService : Service() {
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
+    /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
+    private var lastObservedRoute: AudioRoute? = null
+
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
@@ -136,6 +157,71 @@ class VoiceControlService : Service() {
         return START_NOT_STICKY
     }
 
+    /**
+     * Drives one turn's spoken response through the renderer with this service's failure handling
+     * attached. Extracted from the coroutine so the production connection — the assignment below —
+     * is observable to a test, which must fail if it is removed: a test that installs its own
+     * callback verifies the callback, not that the service installs one.
+     */
+    internal suspend fun renderWithFailureHandling(
+        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+        // THE REQUEST-OWNED OUTCOME, supplied by the caller that dispatched this turn. The value belongs
+        // to the REQUEST: a field on the executor would be shared between turns, and a later reader could
+        // not tell whose outcome it was.
+        turnOutcome: VoicePlaybackIntentExecutor.TurnOutcome = VoicePlaybackIntentExecutor.TurnOutcome(),
+    ) {
+        VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
+        // The transport can throw: its channel closes with a cause when a terminal event is refused,
+        // and `execute` has no try/catch. Left uncaught the throw escapes this method, so the user
+        // hears nothing for a command they did give -- and at the call site it also skips the
+        // turn's grace cleanup, which runs after this returns. Feedback is the user-facing contract,
+        // so the failure is turned into one here rather than propagated.
+        // THE REQUEST-OWNED ACTION OUTCOME IS CONSUMED HERE, at the production caller, and it CHANGES
+        // WHAT IS REPORTED. `execute` returns the FEEDBACK; the outcome is a separate fact about whether
+        // the action it dispatched actually ran. Reading only the feedback would let an action whose
+        // outcome could not be established pass as a delivered turn.
+        val response = try {
+            voicePlaybackIntentExecutor.execute(intent, turnOutcome)
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
+            // have transferred this turn's hold to the renderer path. Rethrow without releasing and
+            // the hold is orphaned — the render handoff below never runs. Release whatever was
+            // transferred (a no-op when nothing was), then rethrow so structured concurrency unwinds.
+            val cancelledIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
+            gracePeriodSignal.releaseUnhandedOffHold(cancelledIntent?.logicalRequestId, cancelled = true)
+            throw cancellation
+        } catch (failure: Exception) {
+            Timber.w(failure, "[VoicePipeline] command failed")
+            VoiceResponse.Earcon(EarconId.ERROR)
+        }
+        // Carry the cloud turn's request ID into the renderer for diagnostic join.
+        val cloudIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
+        val renderRequestId = cloudIntent?.logicalRequestId
+        // THE UTTERANCE'S LANGUAGE drives TTS (spec 54287f13): the reply — including a localized
+        // refusal — is spoken in the language the user spoke, not the device locale. Falls back
+        // to English when the ASR detected nothing this build understands.
+        // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
+        // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
+        // local defaults to English, never the raw detected language nor the device locale.
+        val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
+        // ACKNOWLEDGED HANDOFF (reviewer 664f82d0): the renderer accepts ownership of the hold by
+        // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
+        // service releases the transferred hold here at the actual failure boundary — never leaving
+        // it in the map. Cancellation is re-thrown after release so structured concurrency still
+        // unwinds; other failures are logged and the hold is released as cancelled.
+        try {
+            if (!audioFeedbackRenderer.render(response, language = renderLanguage, requestId = renderRequestId)) {
+                gracePeriodSignal.releaseUnhandedOffHold(renderRequestId, cancelled = true)
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            gracePeriodSignal.releaseUnhandedOffHold(renderRequestId, cancelled = true)
+            throw cancellation
+        } catch (failure: Exception) {
+            Timber.w(failure, "[VoicePipeline] render failed")
+            gracePeriodSignal.releaseUnhandedOffHold(renderRequestId, cancelled = true)
+        }
+    }
+
     private fun startVoiceControl() {
         if (engineStart.isStarted) {
             Timber.i("Voice control already started")
@@ -153,6 +239,9 @@ class VoiceControlService : Service() {
         try {
             val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
+            // Record the playback reference for the lifetime of this capture session, so the
+            // signal filter has what the client submitted for playback to correlate against.
+            playbackBufferRecorder.start(serviceScope)
             // Only now is the service really running: Android refuses a microphone foreground
             // service started from an ineligible app state, and that refusal throws below.
             voiceControlServiceController.onServiceStarted()
@@ -187,6 +276,13 @@ class VoiceControlService : Service() {
                     captureRestartSignal,
                 ) { mode, _, _, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
+                    // A route change alters the acoustic path, so the recorded reference no longer
+                    // describes what reaches the microphone at that delay. Retire it (keeping only
+                    // the delay tail) rather than letting a stale reference match later speech.
+                    if (route != lastObservedRoute) {
+                        if (lastObservedRoute != null) playbackBufferRecorder.retire()
+                        lastObservedRoute = route
+                    }
                     val micExposure = route.toMicExposure()
                     // Transitions, not repeated evaluations: the gate also emits for changes that
                     // leave this tuple alone (other rule state), and the composite decision — mode,
@@ -195,21 +291,37 @@ class VoiceControlService : Service() {
                     val decision = "mode=$mode route=$route exposure=$micExposure " +
                         "gateAllowed=${gate.state.value.allowed} acquiring=${acquisitionJob != null}"
                     if (decision != lastObserverDecision) {
+                        Trace.record(
+                            Event(
+                                Kind.Eligibility, Reason.Observed, Source.ServiceObserver,
+                                generation = gracePeriodSignal.currentGeneration, owner = engineStart.generation().toLong(), gate = Trace.gateMask(gate.state.value),
+                                previousMode = currentMode, mode = mode, previousCapture = engineStart.isStarted,
+                                route = route, availability = audioRouteMonitor.availability.value, acquiring = acquisitionJob != null,
+                            ),
+                        )
                         lastObserverDecision = decision
                         Timber.d("[VoicePipeline] observer: %s", decision)
                     }
-                    // A pending acquisition stays valid while its candidate is present or has
-                    // become the selected external microphone: the selection callbacks publish
-                    // `Headset` while acquisition is still confirming, and cancelling on any
-                    // non-candidate route would abort the acquisition that just succeeded and
-                    // release the routing it acquired. Only actual device loss ends it; a gate
-                    // blocker is handled by the gateAllows predicate inside acquisition.
-                    if (!route.keepsPendingAcquisition()) {
+                    // WHICH SURFACE KEEPS AN ACQUISITION ALIVE IS A SEPARATE QUESTION FROM WHAT ROUTE
+                    // IS OBSERVED. `availability` is the enumeration-based surface: it answers "is the
+                    // candidate still present, or has it become the selected external microphone", which
+                    // is what a pending acquisition needs. `route` is the OBSERVATION and stays Unknown
+                    // without one; reading it here would either abort a succeeding acquisition or force
+                    // the observation to carry availability, which is the inference PR #56 removed.
+                    if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
                     }
                     when (mode) {
                         ListeningMode.Off -> {
+                            // Re-read eligibility: a queued Off emission is not itself a blocker.
+                            // Grace selects a listening mode and never contributes capture context.
+                            val gateState = gate.state.value
+                            if (!gateState.allowed ||
+                                audioRouteMonitor.availability.value.toMicExposure() != MicExposure.Isolated
+                            ) {
+                                gracePeriodSignal.onCaptureDisallowed()
+                            }
                             // A gate loss, route change, or Off can arrive while a start is
                             // still suspended in ensureReady(); the acquisition caller clears
                             // its own job before that suspension, so nothing else can cancel
@@ -231,13 +343,10 @@ class VoiceControlService : Service() {
                                     it == EnabledByUserCondition.ID
                                 }
                                 logCaptureStopped(reasons, isUserRequested)
-                                stopEngine()
-                            } else if (route is AudioRoute.BluetoothA2dpOnly && gate.state.value.allowed) {
-                                // The route is a candidate and every non-route gate question passes:
-                                // acquire the external microphone, then capture. Without this the route
-                                // stays Exposed and the mode never leaves Off — the deadlock.
-                                acquireCandidate(route)
-                            } else if (!captureWasEverActive && !acquisitionLogged) {
+                                stopEngine(Reason.EligibilityOff)
+                            } else if (!acquireExternalMicrophoneIfCandidate() &&
+                                !captureWasEverActive && !acquisitionLogged
+                            ) {
                                 // Capture never started — log once, not on every recomputation
                                 acquisitionLogged = true
                                 val gateState = gate.state.value
@@ -349,6 +458,30 @@ class VoiceControlService : Service() {
         }
         Timber.i("Intent router initialized")
 
+        // THE PRODUCTION COMPOSITION CALL, installed once the router is ready and the sink is live.
+        // Before this, a dialog's abandoned request kept its prepared turn: nothing was told to forget
+        // it, so a later dispatch naming a finished request could be admitted as a retry of work that
+        // is done.
+        voicePlaybackIntentExecutor.bindDialogAbandonment(voiceDialogManager)
+
+        // THE PRODUCTION RECEIVER for a failed release. The hook existed with nothing bound to it, so a
+        // release failure was logged and otherwise invisible -- and a release that fails leaves the
+        // prepared turn retained for the life of the process. The session owner is where that is
+        // visible, because the session is what the retention belongs to.
+        voicePlaybackIntentExecutor.onRetirementFailure = { logical, cause ->
+            Timber.w(cause, "[VoiceControl] releasing the turn retained for %s failed", logical)
+        }
+
+        // EVERY WAY A WINDOW ENDS RETIRES WHAT IT WAS HOLDING -- privacy close, route change, or the
+        // timeout -- because retryability is about the window, not about why it closed. Binding it here
+        // rather than at each closing site is what keeps the rule in one place.
+        gracePeriodSignal.onWindowEnded = { ended ->
+            val retired = voicePlaybackIntentExecutor.endWindow(ended)
+            if (retired.isNotEmpty()) {
+                Timber.i("[VoiceControl] window %d ended, retired %d prepared turn(s)", ended, retired.size)
+            }
+        }
+
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")
     }
@@ -438,7 +571,7 @@ class VoiceControlService : Service() {
                         backend = backend,
                         audioRoute = audioRouteMonitor.route.value,
                         listeningMode = mode,
-                        playbackBufferProvider = playbackBufferRecorder::snapshot,
+                        playbackBufferProvider = playbackBufferRecorder::reference,
                         micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
                         onIntent = { intent -> handleIntent(intent) },
                         onTerminated = {
@@ -497,6 +630,14 @@ class VoiceControlService : Service() {
                     wakeWordRequired = mode == ListeningMode.WakeWord,
                 )
                 notificationManager.notify(notification)
+                Trace.record(
+                    Event(
+                        Kind.Capture, Reason.CaptureStarted, Source.ServiceObserver,
+                        generation = gracePeriodSignal.currentGeneration, owner = generation.toLong(), gate = Trace.gateMask(gate.state.value),
+                        previousMode = currentMode, mode = mode, previousCapture = false, capture = true,
+                        route = audioRouteMonitor.route.value, availability = audioRouteMonitor.availability.value,
+                    ),
+                )
                 Timber.i("[VoicePipeline] engine started mode=%s", mode)
             },
         )
@@ -529,6 +670,13 @@ class VoiceControlService : Service() {
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
         logCaptureStopped(REASON_CAPTURE_FAILURE, isUserRequested = false)
+        Trace.record(
+            Event(
+                Kind.Capture, Reason.PipelineTerminated, Source.CapturePipeline,
+                generation = gracePeriodSignal.currentGeneration, owner = generation.toLong(), gate = Trace.gateMask(gate.state.value),
+                previousMode = currentMode, mode = ListeningMode.Off, previousCapture = engineStart.isStarted, capture = false,
+            ),
+        )
         clearCaptureState()
         recoverCapture()
     }
@@ -575,6 +723,24 @@ class VoiceControlService : Service() {
     }
 
     /**
+     * THE OFF BRANCH'S CANDIDATE IS AVAILABILITY'S (owner-reported regression, 2026-10-16): the branch
+     * fires because `availability` answers `BluetoothA2dpOnly`, but the OBSERVED route is `Unknown`
+     * until SCO opens -- and [RouteAcquisition.acquire] refuses any route that is not
+     * `BluetoothA2dpOnly`. Passing the observation turned acquisition into a SILENT `NotNeeded`
+     * no-op: the microphone never opened and nothing logged. The candidate must reach `acquire` from
+     * the same surface that triggered the branch.
+     *
+     * @return whether an acquisition attempt was started (the caller logs a skip only when it was not).
+     */
+    internal fun acquireExternalMicrophoneIfCandidate(): Boolean {
+        val candidateRoute = audioRouteMonitor.availability.value
+        if (candidateRoute !is AudioRoute.BluetoothA2dpOnly) return false
+        if (!gate.state.value.allowed) return false
+        acquireCandidate(candidateRoute)
+        return true
+    }
+
+    /**
      * Acquires an external Bluetooth microphone for a candidate route, then starts capture.
      * Acquisition is bounded and cancellable; when it fails or is cancelled no capture runs and
      * routing is released.
@@ -587,7 +753,7 @@ class VoiceControlService : Service() {
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
         val gateAllows = {
-            gate.state.value.allowed && audioRouteMonitor.route.value.keepsPendingAcquisition()
+            gate.state.value.allowed && audioRouteMonitor.availability.value.keepsPendingAcquisition()
         }
         acquisitionJob = serviceScope.launch {
             try {
@@ -633,7 +799,15 @@ class VoiceControlService : Service() {
                         )
                     }
 
-                    AcquisitionResult.Cancelled, AcquisitionResult.NotNeeded -> Unit
+                    AcquisitionResult.Cancelled -> Unit
+
+                    // A silent NotNeeded is what hid the route/availability divergence: the branch
+                    // decided to acquire and acquisition answered "not needed" without a trace.
+                    AcquisitionResult.NotNeeded -> Timber.w(
+                        "[VoicePipeline] acquisition not needed for route=%s (availability=%s)",
+                        route,
+                        audioRouteMonitor.availability.value,
+                    )
                 }
             } finally {
                 if (acquisitionJob === currentCoroutineContext()[Job]) {
@@ -643,20 +817,37 @@ class VoiceControlService : Service() {
         }
     }
 
-    private fun stopEngine() {
+    private fun stopEngine(reason: Reason = Reason.ServiceStopped) {
         acquisitionJob?.cancel()
         acquisitionJob = null
         // Stop the engine before releasing acquisition routing: the engine tears down the
         // stream it owns in its own flow `finally`, and release() must never delete a live
         // capture. After hand-off release() only undoes the acquired routing.
         if (engineStart.isStarted) {
+            val priorMode = currentMode
+            val priorOwner = engineStart.generation().toLong()
             voiceAsrEngine.get().stop()
             clearCaptureState()
+            Trace.record(
+                Event(
+                    Kind.Capture, reason, if (reason == Reason.EligibilityOff) Source.ServiceObserver else Source.ServiceStop,
+                    generation = gracePeriodSignal.currentGeneration, owner = priorOwner, gate = Trace.gateMask(gate.state.value),
+                    previousMode = priorMode, mode = ListeningMode.Off, previousCapture = true, capture = false,
+                ),
+            )
             Timber.i("[VoicePipeline] engine stopped")
         } else {
             routeAcquisition.release()
         }
     }
+
+    /**
+     * The production command entry point, exposed so a test can drive the real path -- including the
+     * grace cleanup that runs after execution, which is the part a throw used to skip.
+     */
+    internal fun handleIntentForTest(
+        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+    ) = handleIntent(intent)
 
     private fun handleIntent(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
@@ -671,12 +862,28 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
-            val response = voicePlaybackIntentExecutor.execute(intent)
-            audioFeedbackRenderer.render(response)
-            gracePeriodSignal.onCommandRecognized(
-                fromGeneration = intent.windowGenerationOf(),
-                restoresAllowance = intent.restoresAllowance(),
-            )
+            // ONE failure boundary, and it lives in renderWithFailureHandling: that call converts an
+            // ordinary command failure into feedback and returns normally, so the cleanup below runs for
+            // a command the user did give.
+            //
+            // There is deliberately NO catch here. A catch whose only action is to re-throw is dead --
+            // the exception propagates identically without it -- and a `catch (CancellationException)
+            // { throw }` is the same edit again. What keeps a cancelled turn from reaching the cleanup
+            // below is that `renderWithFailureHandling` RETHROWS cancellation rather than converting it,
+            // which it does at its own boundary; adding a second handler here would put that decision in
+            // two places without changing any outcome.
+            // THE CALLER MINTS THE OUTCOME IT WILL READ, so the value belongs to THIS turn rather than
+            // to the executor object. A field on the executor is shared: two turns would race for one
+            // slot, and the reader could not tell whose outcome it was.
+            val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
+            renderWithFailureHandling(intent, turnOutcome)
+            // RECOGNITION IS THE EXECUTOR'S DECISION, made where it acts, using the same request-owned
+            // outcome. A second guard here would be a copy of the rule -- and a copy can drift from the
+            // one that actually grants the privileges. What this caller observes is the decision, not a
+            // restatement of it.
+            if (!voicePlaybackIntentExecutor.capabilityOf(intent, turnOutcome).allowsRecognition) {
+                Timber.i("[VoicePipeline] turn not recognized: its action outcome is unknown")
+            }
         }
     }
 
@@ -712,14 +919,25 @@ class VoiceControlService : Service() {
     private fun stopVoiceControl() {
         Timber.i("Stopping voice control service")
         modeJob?.cancel()
+        playbackBufferRecorder.stop()
         stopEngine()
         wiredBackend?.release()
         wiredBackend = null
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
+        // REMOVED WITH THE SESSION. A binding left behind would point the manager at a sink whose
+        // session has ended, and one cleared too early would lose the notifications it exists for.
+        // REMOVED WITH THE SESSION, both hooks: one left behind would report into a session that has
+        // ended, and the failure receiver is the same shape of leak.
+        voicePlaybackIntentExecutor.unbindDialogAbandonment()
+        voicePlaybackIntentExecutor.onRetirementFailure = null
+        gracePeriodSignal.onWindowEnded = null
         voiceRecognizer.release()
-        audioFeedbackRenderer.release()
+        // END THE SESSION, do not dispose. This runs on every stop, and the renderer is a Hilt
+        // @Singleton shared by successive Service instances. onDestroy also ends a session; it is
+        // not the end of the renderer's process lifetime.
+        audioFeedbackRenderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.SessionEnded)
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
@@ -736,6 +954,8 @@ class VoiceControlService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopVoiceControl()
+        // stopVoiceControl ended this session. The renderer and TTS engine remain owned by Hilt's
+        // singleton component and will be reused by the next Service instance.
         // The controller keeps its own record of whether this service is running; without this it
         // would believe a service that the system killed is still alive and never start it again.
         voiceControlServiceController.onServiceStopped()

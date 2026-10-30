@@ -1,14 +1,20 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
 /**
  * Tracks the conversation grace period that starts/resets when a command is recognized
@@ -39,33 +45,286 @@ class GracePeriodSignal @Inject constructor() {
      * window for anything that outlives it, such as a cloud turn still in
      * flight. A completion that carries a stale generation extends nothing: a
      * count of what has been spent in a window cannot tell one window from the
-     * next, so an old request could otherwise re-arm a new session's allowance.
+     * next, so an old completion cannot extend a successor's listening window.
      */
     private var generation = 0L
 
+    /** The most recent generation opened BY A WAKE; a turn captured under it starts a conversation. */
+    private var wakeGeneration = 0L
+
+    /** The generation whose first request has already been prepared, so later ones continue. */
+    private var requestPreparedForGeneration = -1L
+
+    /**
+     * The window's identity, for a caller that must CAPTURE it at registration and act on it later.
+     *
+     * A dialog request is prepared at one moment and executed at another; the window it belongs to is
+     * the one that was live when the REQUEST was registered, not whichever is live when it finally
+     * runs. Reading `isActive` at execution time cannot express that -- a fresh wake would look like a
+     * continuation of the previous conversation.
+     */
+    fun capturedGeneration(): Long = synchronized(windowLock) { generation }
+
+    /** The timer job, so a case can assert the pointer was preserved across a delayed arm. */
+    internal fun timerJobForTest(): Job? = synchronized(windowLock) { timerJob }
+
+    /**
+     * Invokes the protected arm for [ownedGeneration], as a delayed completion would.
+     *
+     * Exposed so a case can reach the assignment AFTER the caller has released the monitor -- which is
+     * the seam the liveness check exists for, and which no ordinary call can reproduce.
+     */
+    internal fun armTimerForLockedForTest(ownedGeneration: Long) = armTimerForLocked(ownedGeneration)
+
+    /** The wake-originated generation, so a case can see what the marker names right now. */
+    internal fun wakeOriginatedGenerationForTest(): Long = synchronized(windowLock) { wakeGeneration }
+
+    /**
+     * Advances the window WITHOUT cancelling the outstanding timer.
+     *
+     * This exists so a case can put a timer in the position it must refuse from: still scheduled, no
+     * longer owning the window. Normal paths cancel the timer under the same monitor, so they never
+     * exercise the ownership check on its own -- and without a way to reach that state, the check has no
+     * case that can fail for it.
+     */
+    internal fun replaceWindowWithoutCancellingTimer() {
+        synchronized(windowLock) {
+            generation += 1
+            _isActive.value = true
+        }
+    }
+
+    /**
+     * Whether [captured] names the window that is live right now.
+     *
+     * A request whose captured window is no longer current has been superseded, and must not act on
+     * the current one -- including when a newer window is open and active.
+     */
+    fun isCurrent(captured: Long): Boolean = synchronized(windowLock) {
+        // A privacy close invalidates pending work even when its generation still matches.
+        // Comparing numbers alone would admit a request whose window has ended.
+        captured == generation && _isActive.value && !closedByPrivacy
+    }
+
+    /**
+     * Whether the request being prepared is the FIRST of its window, so it begins a conversation.
+     *
+     * PER REQUEST, not a property of the window: a window is opened by a wake, but the wake's own
+     * request is only the first one. A wake-free follow-up inside the same window is a CONTINUATION,
+     * and reading "this window was opened by a wake" for it would make every follow-up look like a
+     * fresh user act.
+     *
+     * [isFirstRequestOfWindow] is therefore what the caller passes, and this only checks that the
+     * window it belongs to is still the current one.
+     */
+    fun isWakeOriginated(captured: Long, isFirstRequestOfWindow: Boolean): Boolean = synchronized(windowLock) { isFirstRequestOfWindow && captured == wakeGeneration }
+
+    /**
+     * Whether [captured]'s window has ALREADY had a request prepared under it.
+     *
+     * The caller asks this to decide whether the request it is preparing is the first of the window:
+     * the first one begins a conversation, later ones continue it. Kept here rather than derived from
+     * `isActive`, because the window being open says nothing about whether anything has been sent in it.
+     */
+    fun hasPreparedRequest(captured: Long): Boolean = synchronized(windowLock) { requestPreparedForGeneration == captured }
+
+    /**
+     * Records that a request has been prepared under [captured], so a later one knows it is a
+     * continuation rather than the wake's own request.
+     */
+    fun notePreparedRequest(captured: Long) {
+        // UNDER THE SAME MONITOR as every other writer. `@Synchronized` takes the INSTANCE monitor, which
+        // is a DIFFERENT lock from [windowLock] -- so it serialized this write against other
+        // `@Synchronized` members and against nothing that matters, while the transitions it must be
+        // ordered with took [windowLock]. Two locks for one state is not synchronization.
+        synchronized(windowLock) { requestPreparedForGeneration = captured }
+    }
+
     /**
      * True once a privacy event has closed the window and no wake has opened a
-     * new one. A close is final: neither a completion that lands afterwards nor
-     * a command can reopen it, because the whole point of the close is that
-     * nothing keeps listening after the app was backgrounded or the audio route
-     * changed. Only a new wake opens a window again.
+     * new one. Capture blockers and route changes invalidate the window: neither a late completion
+     * nor a command can reopen it. Backgrounding alone preserves an active cloud hold.
+     * Only a new wake opens an invalidated window again.
      */
     private var closedByPrivacy = false
 
     /**
-     * One escalation to the cloud service is allowed per grace window: the
-     * window is the user-initiated act, and this bounds a routing failure (or a
-     * deliberate `no_match`) to a single dispatch per act rather than a stream.
-     * Reset by anything that opens or resets the window — a wake or a
-     * recognised command — never by the failure itself.
+     * True when the window is closed because a privacy event ended it and no wake has reopened it.
+     *
+     * Exposed because a privacy closure does not pass through the playback layer, so code that
+     * restores playback state cannot detect it via the playback command revision.
      */
-    private var escalationUsed = false
+    fun isClosedByPrivacy(): Boolean = synchronized(windowLock) { closedByPrivacy }
 
-    /** The window the allowance was spent in, so it is spent once per generation. */
-    private var escalatedGeneration = -1L
+    /**
+     * How many times a privacy event has closed the window. Monotonic and never reset by a wake, so a
+     * caller that read it when it took an obligation can tell that a privacy event happened since —
+     * a live boolean cannot answer that, because a wake clears it before a suspended caller resumes.
+     */
+    fun privacyClosureCount(): Long = privacyClosures.get()
+
+    private val privacyClosures = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
+     * How many closures coincided with the host's audio actually stopping.
+     *
+     * Distinct from [privacyClosureCount]: window closures do not necessarily stop playback, so a
+     * caller holding a playback obligation must not treat them as a fact about playback. Incremented by [noteHostPlaybackStopped], called from where the host's
+     * own state is observable, at the boundary that owns the distinction.
+     */
+    private val playbackStopClosures = java.util.concurrent.atomic.AtomicLong(0)
+
+    fun playbackStopClosureCount(): Long = playbackStopClosures.get()
+
+    /**
+     * Records that the host's playback stopped while the window was closed by a privacy event.
+     *
+     * Called by the playback-context layer when it observes the stop, so the closure kinds are
+     * separated at the event boundary rather than inferred from a count that increments on
+     * visibility changes alone.
+     */
+
+    // Records that the host's playback stopped while the window was closed by a privacy event.
+    // Called by the playback-context layer when it observes the stop, so the closure kinds are
+    // separated at the event boundary rather than inferred from a count that increments on
+    // visibility changes alone.
+    fun noteHostPlaybackStopped() {
+        playbackStopClosures.incrementAndGet()
+    }
 
     private var timerJob: Job? = null
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
+
+    /**
+     * All window transitions and liveness checks share this monitor. Dispatch ownership belongs to
+     * the prepared request, not the grace timer.
+     */
+    private val windowLock = Any()
+
+    /** Opaque ownership for work that must finish before the inactivity countdown resumes. */
+    class CloudTurnHold internal constructor(internal val generation: Long, internal val owner: Long?)
+
+    private val cloudTurns = mutableSetOf<CloudTurnHold>()
+
+    /** Holds only an already-live window; an old request cannot borrow its successor's grace. */
+    fun holdCloudTurn(fromGeneration: Long? = null, owner: Long? = null): CloudTurnHold? = synchronized(windowLock) {
+        val refusal = when {
+            closedByPrivacy -> Reason.HoldRejectedPrivacy
+            !_isActive.value -> Reason.HoldRejectedInactive
+            fromGeneration != null && fromGeneration != generation -> Reason.HoldRejectedGeneration
+            else -> null
+        }
+        if (refusal != null) {
+            Trace.record(
+                Event(
+                    Kind.Hold, refusal, Source.Grace, generation = generation, active = _isActive.value,
+                    holdsBefore = cloudTurns.size, holdsAfter = cloudTurns.size, owner = owner, requestedGeneration = fromGeneration,
+                ),
+            )
+            return@synchronized null
+        }
+        val before = cloudTurns.size
+        CloudTurnHold(generation, owner).also {
+            cloudTurns += it
+            timerJob?.cancel()
+            timerJob = null
+            Trace.record(
+                Event(
+                    Kind.Hold, Reason.HoldAcquired, Source.Grace, generation = generation, active = true,
+                    holdsBefore = before, holdsAfter = cloudTurns.size, owner = owner, requestedGeneration = fromGeneration,
+                ),
+            )
+        }
+    }
+
+    /**
+     * The request-owned holds handed to the FEEDBACK RENDERER (spec ruling 7a6a62e3): a turn whose
+     * feedback is spoken/earcon keeps its hold past sink completion — sink return is NOT the output
+     * boundary — until the renderer's actual output terminal (completion, failure, or clear).
+     * Keyed by the same request ID the renderer observes, so sink and renderer meet without a
+     * shared call chain.
+     */
+    private val outputHolds = mutableMapOf<String, CloudTurnHold>()
+
+    /**
+     * ACKNOWLEDGED HANDOFF: the sink hands its hold to the renderer path before returning. The hold
+     * stays continuously held (no unheld gap); if the window was retired meanwhile (privacy/route),
+     * the hold finishes immediately — retirement wins over output.
+     */
+    fun transferHoldToOutput(requestId: String, hold: CloudTurnHold) = synchronized(windowLock) {
+        if (closedByPrivacy || !_isActive.value || hold.generation != generation) {
+            // Already under windowLock: remove directly, no re-entrant synchronized needed.
+            val retired = cloudTurns.remove(hold)
+            if (retired) {
+                Trace.record(
+                    Event(
+                        Kind.Hold, Reason.HoldReleased, Source.Grace, generation = generation,
+                        active = _isActive.value, holdsBefore = cloudTurns.size + 1, holdsAfter = cloudTurns.size,
+                        owner = hold.owner, requestId = requestId,
+                    ),
+                )
+            }
+            return@synchronized
+        }
+        outputHolds[requestId] = hold
+    }
+
+    /**
+     * The renderer's OUTPUT TERMINAL: completion, failure, or clear. Releases exactly once — a late
+     * or duplicate callback finds nothing and is ignored. [cancelled] marks an output that was
+     * stopped rather than finished.
+     */
+    fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
+        val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
+    }
+
+    /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
+    fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
+
+    /**
+     * EXPLICIT NO-HANDOFF RELEASE (reviewer 664f82d0): the service could not hand off to the renderer
+     * (render threw, was cancelled before render, or the response was non-spoken so no renderer path
+     * exists). The sink already transferred the hold; releasing here closes it at the actual failure
+     * boundary rather than leaving it in the map. Exactly once — a late duplicate finds nothing.
+     */
+    fun releaseUnhandedOffHold(requestId: String?, cancelled: Boolean) {
+        if (requestId == null) return
+        val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
+    }
+
+    /** Called after turn termination and local playback drain/clear, including failure cleanup. */
+    fun finishCloudTurn(hold: CloudTurnHold, cancelled: Boolean = false, requestId: String? = null) {
+        val armFor = synchronized(windowLock) {
+            val before = cloudTurns.size
+            val removed = cloudTurns.remove(hold)
+            Trace.record(
+                Event(
+                    Kind.Hold,
+                    if (!removed) {
+                        Reason.HoldReleaseIgnored
+                    } else if (cancelled) {
+                        Reason.HoldCancelled
+                    } else {
+                        Reason.HoldReleased
+                    },
+                    Source.Grace, generation = generation, active = _isActive.value, holdsBefore = before, holdsAfter = cloudTurns.size,
+                    owner = hold.owner, requestedGeneration = hold.generation,
+                    requestId = requestId,
+                ),
+            )
+            if (!removed) return@synchronized null
+            if (hold.generation != generation || closedByPrivacy || !_isActive.value || cloudTurns.isNotEmpty()) {
+                return@synchronized null
+            }
+            generation
+        } ?: return
+        armTimerForLocked(armFor)
+    }
+
+    // The monitor itself, so a test can hold it and observe whether a transition waits for it.
+    internal fun windowMonitorForTest(): Any = windowLock
 
     /**
      * Called when a command is recognized — starts/resets the grace period.
@@ -79,25 +338,53 @@ class GracePeriodSignal @Inject constructor() {
      *
      * [fromGeneration] is the window the handled command was issued under, or
      * null when the app handled a command locally as a fresh act.
-     *
-     * [restoresAllowance] applies only to a dispatched turn: true for one the
-     * router chose, false for the routing-failure fallback.
      */
-    fun onCommandRecognized(fromGeneration: Long? = null, restoresAllowance: Boolean = true) {
+    fun onCommandRecognized(fromGeneration: Long? = null) {
         // A completion that names its window may extend that window only while
         // it is still the current one and still open. It never opens one and
         // never resurrects a window a privacy event ended — including when a
         // later wake has opened a new one.
         if (fromGeneration != null) {
-            if (fromGeneration != generation || !_isActive.value) return
-            startOrReset()
-            // Restoring is a separate question from touching the window: a
-            // deliberate route earns the next dispatch, an escalation does not.
-            if (restoresAllowance) escalatedGeneration = -1L
+            // VALIDATE AND EXTEND IN ONE TRANSACTION. Checking the origin and liveness BEFORE taking the
+            // lock let a completion that arrived while the window was still open be PARKED at the lock,
+            // then resume after a privacy close or a replacement and EXTEND THE WRONG WINDOW -- measured
+            // by @reviewer as listening reopening after privacy closed it. The check an earlier moment
+            // authorises is not authorisation at the moment of the act, so both happen under the monitor
+            // or the check does not constrain the act at all.
+            val armFor = synchronized(windowLock) {
+                if (fromGeneration != generation || !_isActive.value) return@synchronized null
+                Trace.record(
+                    Event(
+                        Kind.Window,
+                        Reason.Extended,
+                        Source.Grace,
+                        generation = generation,
+                        previousActive = _isActive.value,
+                        active = true,
+                        holdsBefore = cloudTurns.size,
+                        holdsAfter = cloudTurns.size,
+                    ),
+                )
+                _isActive.value = true
+                generation
+            } ?: return
+            // ARMED OUTSIDE the monitor: `armTimer` launches and reads the coroutine context, and a
+            // suspension point inside a critical section is the interleaving the lock exists to prevent.
+            // Arming takes the monitor itself and re-checks ownership, so a transition landing between
+            // the two steps cannot leave an unowned timer behind.
+            armTimerForLocked(armFor)
             return
         }
-        if (closedByPrivacy) return
-        openWindow()
+        // The privacy refusal and the open are one decision, so they take the monitor together: a
+        // privacy close landing between them would otherwise open a window the close had just ended.
+        val ended = synchronized(windowLock) {
+            if (closedByPrivacy) return@synchronized null
+            openWindowLocked(Reason.RecognizedCommand)
+        }
+        // THE REPLACED WINDOW IS REPORTED HERE TOO. This branch was discarding the return, so an
+        // unstamped command that REPLACED a window retired nothing -- the same "a replacement is an
+        // ending" rule as every other open, reached by the one path that ignored it.
+        ended?.let { notifyIfEnded(it) }
     }
 
     /**
@@ -105,71 +392,212 @@ class GracePeriodSignal @Inject constructor() {
      * privacy close, since a fresh wake is a new user act.
      */
     fun onWakeWordDetected() {
-        closedByPrivacy = false
-        openWindow()
+        // ONE TRANSITION. The markers and the opening are the SAME act, so they must not be separable:
+        // setting them around `openWindow()` left a moment where the window was open with the previous
+        // marker, and a concurrent reader could observe it. A FRESH WAKE BEGINS A NEW USER ACT and
+        // therefore a new conversation -- the window it opens is marked wake-originated so a turn
+        // captured under it prepares CREATE even if an older conversation handle exists.
+        val ended = synchronized(windowLock) {
+            closedByPrivacy = false
+            val previous = openWindowLocked(Reason.Wake)
+            wakeGeneration = generation
+            previous
+        }
+        notifyIfEnded(ended)
     }
 
-    /**
-     * Why a dispatch would be refused right now, for the log line: the two
-     * causes are different problems (nothing is listening vs this window has
-     * already spent its one dispatch) and conflating them made a real run hard
-     * to read.
-     */
-    fun escalationRefusal(): String = when {
-        closedByPrivacy -> "no open window (closed by a privacy event)"
-        !_isActive.value -> "no open window"
-        escalationUsed && escalatedGeneration == generation -> "allowance spent in this window"
-        else -> "available"
-    }
-
-    /** The window a dispatch issued now would belong to. */
-    val currentGeneration: Long get() = generation
-
-    /**
-     * Issues the window's single escalation, returning the generation it was
-     * issued under, or null when it is refused.
-     *
-     * Refused when no window is open — an utterance with no act behind it has
-     * nothing to spend against — and when this generation has already spent its
-     * one dispatch.
-     *
-     * This does **not** constrain a false wake. A false wake is a wake
-     * detection, so it opens a window and its one utterance is the residual we
-     * accepted knowingly; what this refuses is an utterance arriving with no
-     * window at all.
-     */
-    fun issueEscalation(): Long? {
-        if (!_isActive.value || closedByPrivacy) return null
-        if (escalationUsed && escalatedGeneration == generation) return null
-        escalationUsed = true
-        escalatedGeneration = generation
-        return generation
-    }
+    /** The grace window a request captured now belongs to; independent from request identity. */
+    val currentGeneration: Long get() = synchronized(windowLock) { generation }
 
     /** A new act opens a window and begins its generation. */
     private fun openWindow() {
-        generation += 1
-        startOrReset()
+        val ending = synchronized(windowLock) { openWindowLocked() }
+        notifyIfEnded(ending)
     }
 
-    private fun startOrReset() {
+    /**
+     * [openWindow]'s body, for a caller already holding the monitor.
+     *
+     * Returns the generation that ENDED, which the caller reports OUTSIDE the monitor: a callback that
+     * runs other components' code inside the lock could deadlock against a component calling back in.
+     */
+    private fun openWindowLocked(reason: Reason = Reason.RecognizedCommand): Long {
+        // OPENING A WINDOW ENDS THE PREVIOUS ONE. A wake replaces the window in force, so whatever that
+        // window was holding stops being retryable at THIS moment -- not when some later request happens
+        // to be admitted. Without it, a replaced window whose successor never runs a request kept its
+        // prepared turn indefinitely: the ordinary ending, reached by replacement.
+        //
+        // THE TRANSITION IS UNDER THE MONITOR AND THE CALLBACK IS NOT: a notification delivered while
+        // holding the lock would run other components' code inside it, and a component that calls back
+        // in would deadlock. The ENDED generation is READ under the monitor and the callback then runs
+        // AFTER the counter has advanced -- the notification reports the window that ended, which is the
+        // previous generation, not the one now current.
+        val previous = generation
+        val wasActive = _isActive.value
+        val held = cloudTurns.size
+        cloudTurns.clear()
+        generation += 1
         _isActive.value = true
-        timerJob?.cancel()
-        timerJob = scope.launch {
-            delay(timeoutMs)
-            _isActive.value = false
+        armTimerForLocked(ownedGeneration = generation)
+        val transitionReason = if (wasActive) {
+            if (reason == Reason.Wake) Reason.SuccessorWake else Reason.SuccessorCommand
+        } else {
+            reason
+        }
+        Trace.record(
+            Event(
+                Kind.Window, transitionReason, Source.Grace, generation = generation, previousGeneration = previous,
+                previousActive = wasActive, active = true, holdsBefore = held, holdsAfter = 0,
+            ),
+        )
+        return previous
+    }
+
+    /** Reports [ended] to the window-ended observer, unless no window ended. */
+    private fun notifyIfEnded(ended: Long) {
+        if (ended != 0L) onWindowEnded?.invoke(ended)
+    }
+
+    // Arms this window's timer, OWNED by [ownedGeneration].
+    //
+    // THE TIMER MUST KNOW WHICH WINDOW IT BELONGS TO. Reading the live generation at expiry would let a
+    // timer that was CANCELLED (because its window was extended or replaced) close its successor: by the
+    // time it fires, `generation` names a different window, and closing on that is closing the wrong one.
+    // The ownership is checked UNDER the monitor together with the close, so the check and the close are
+    // one step and a successor cannot slip between them.
+    //
+    // It also CLEARS `isActive` when it owns the window: an expired window is not open. The reset path
+    // relied on this too, and a version that only notified left an expired extension reading as open.
+
+    /**
+     * Arms the timer for [ownedGeneration] under the monitor.
+     *
+     * The launch itself happens outside it -- `armTimer` reads the coroutine context, which suspends --
+     * but the ASSIGNMENT takes the monitor and re-checks that the window is still [ownedGeneration], so a
+     * transition landing in between cannot leave a timer owned by a window that has already ended.
+     */
+    private fun armTimerForLocked(ownedGeneration: Long) {
+        val job = armTimer(ownedGeneration)
+        synchronized(windowLock) {
+            // OWNERSHIP IS GENERATION **AND** LIVENESS. Generation alone is not enough: a PRIVACY CLOSE
+            // preserves the generation -- it ends the window without advancing it -- so a completion that
+            // was valid when it started could still arm this window's timer AFTER the window was closed.
+            // The closed window then holds a live timer owned by nobody, and the timer reports an ENDING
+            // for a window that already ended: two endings for one window.
+            //
+            // The check runs here, in the protected assignment, because the caller releases windowLock
+            // before arming -- so this really is the last point at which ownership can be established.
+            if (ownedGeneration == generation && _isActive.value && cloudTurns.isEmpty()) {
+                timerJob?.cancel()
+                timerJob = job
+            } else {
+                // A REFUSED TIMER IS CANCELLED WITHOUT EVER RUNNING. Its coroutine is launched and then
+                // immediately cancelled, so its completion handler fires on the scope's dispatcher -- and
+                // an unobserved cancellation there surfaces as an exception in a LATER test, not this one.
+                // Cancelling the whole child chain makes the cancellation self-contained.
+                job.cancel(kotlinx.coroutines.CancellationException("window no longer owns this timer"))
+            }
         }
     }
 
+    private fun armTimer(ownedGeneration: Long): Job = scope.launch {
+        // THIS job, captured OUTSIDE the critical section: `currentCoroutineContext()` suspends, and a
+        // suspension point inside a lock is the very interleaving the lock exists to prevent.
+        val thisTimer = currentCoroutineContext()[Job]
+        delay(timeoutMs)
+        val ended = synchronized(windowLock) {
+            if (ownedGeneration != generation) return@synchronized null
+            if (timerJob !== thisTimer) return@synchronized null
+            if (cloudTurns.isNotEmpty()) return@synchronized null
+            Trace.record(
+                Event(
+                    Kind.Window,
+                    Reason.Timeout,
+                    Source.Grace,
+                    generation = generation,
+                    previousActive = _isActive.value,
+                    active = false,
+                    holdsBefore = cloudTurns.size,
+                    holdsAfter = 0,
+                ),
+            )
+            _isActive.value = false
+            ownedGeneration
+        } ?: return@launch
+        // DELIVERED OUTSIDE the monitor: a callback running other components' code inside the lock could
+        // deadlock against a component that calls back in.
+        onWindowEnded?.invoke(ended)
+    }
+
+    private fun startOrReset() {
+        // UNDER THE MONITOR: extending a window is a transition of the same state the claim reads, so it
+        // must not interleave with one. The timer is ARMED with this window's generation, so an expired
+        // extension closes the window it belongs to and cannot touch a successor.
+        synchronized(windowLock) {
+            _isActive.value = true
+            // ARMED THROUGH armTimerForLocked, like every other open: arming directly here skipped the
+            // ownership re-check, so this one path could install a timer owned by a window that a
+            // concurrent transition had already replaced.
+            armTimerForLocked(ownedGeneration = generation)
+        }
+    }
+
+    /**
+     * Told which window ended, whenever it ends: a privacy close, a route change, or the timeout.
+     *
+     * ONE notification for EVERY ending, rather than a branch per cause, because the retryability rule
+     * is about the window rather than about why it closed.
+     */
+    var onWindowEnded: ((generation: Long) -> Unit)? = null
+
     /** Called when audio route changes — immediately ends grace period. */
-    fun onAudioRouteChanged() = closeByPrivacy()
+    fun onAudioRouteChanged(source: Source = Source.Route) = closeByPrivacy(Reason.RouteChanged, source)
 
-    /** Called when app goes to background — immediately ends grace period. */
-    fun onAppBackgrounded() = closeByPrivacy()
+    /** Backgrounding preserves an existing cloud/audio hold; otherwise it ends grace immediately. */
+    fun onAppBackgrounded() = closeByPrivacy(Reason.Backgrounded, Source.Foreground, preserveHeld = true)
 
-    private fun closeByPrivacy() {
-        timerJob?.cancel()
-        _isActive.value = false
-        closedByPrivacy = true
+    /** Capture blockers invalidate even a held window; clearing a blocker cannot reopen it. */
+    fun onCaptureDisallowed() = closeByPrivacy(Reason.EligibilityOff, Source.Gate)
+
+    private fun closeByPrivacy(reason: Reason, source: Source, preserveHeld: Boolean = false) {
+        val ended = synchronized(windowLock) {
+            if (reason == Reason.EligibilityOff && closedByPrivacy) return@synchronized null
+            // Test the hold under the same lock as closure: completion and background cannot disagree
+            // about which transition happened first.
+            if (preserveHeld && cloudTurns.isNotEmpty()) {
+                Trace.record(
+                    Event(
+                        Kind.Window,
+                        Reason.BackgroundHoldPreserved,
+                        source,
+                        generation = generation,
+                        previousActive = _isActive.value,
+                        active = _isActive.value,
+                        holdsBefore = cloudTurns.size,
+                        holdsAfter = cloudTurns.size,
+                    ),
+                )
+                return@synchronized null
+            }
+            Trace.record(
+                Event(
+                    Kind.Window,
+                    reason,
+                    source,
+                    generation = generation,
+                    previousActive = _isActive.value,
+                    active = false,
+                    holdsBefore = cloudTurns.size,
+                    holdsAfter = 0,
+                ),
+            )
+            privacyClosures.incrementAndGet()
+            timerJob?.cancel()
+            cloudTurns.clear()
+            closedByPrivacy = true
+            _isActive.value = false
+            generation
+        } ?: return
+        onWindowEnded?.invoke(ended)
     }
 }

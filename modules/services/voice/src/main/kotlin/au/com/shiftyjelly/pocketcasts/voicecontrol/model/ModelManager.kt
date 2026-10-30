@@ -80,20 +80,6 @@ class ModelManager @Inject constructor(
 ) {
     private val downloadMutex = Mutex()
     companion object {
-        private const val MOONSHINE_BASE_URL =
-            "https://download.moonshine.ai/model/small-streaming-en/quantized"
-
-        private val MOONSHINE_FILES = listOf(
-            "adapter.ort",
-            "cross_kv.ort",
-            "decoder_kv.ort",
-            "decoder_kv_with_attention.ort",
-            "encoder.ort",
-            "frontend.ort",
-            "streaming_config.json",
-            "tokenizer.bin",
-        )
-
         // Use hf-mirror.com for faster/reliable downloads from HuggingFace
         private const val HF_MIRROR = "https://hf-mirror.com"
 
@@ -119,8 +105,6 @@ class ModelManager @Inject constructor(
 
     @VisibleForTesting
     internal var filesDir: File = context.filesDir
-
-    val moonshineDir get() = File(filesDir, "moonshine-model")
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotStarted)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
@@ -248,29 +232,6 @@ class ModelManager @Inject constructor(
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "Model download failed for %s", spec.targetDir)
-                Result.failure(e)
-            }
-        }
-    }
-
-    // -- Moonshine model ---------------------------------------------------
-
-    fun isMoonshineModelReady(): Boolean = MOONSHINE_FILES.all { File(moonshineDir, it).exists() }
-
-    suspend fun ensureMoonshineModel(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isMoonshineModelReady()) return@withContext Result.success(Unit)
-        downloadMutex.withLock {
-            if (isMoonshineModelReady()) return@withContext Result.success(Unit)
-            try {
-                moonshineDir.mkdirs()
-                for (file in MOONSHINE_FILES) {
-                    val url = "$MOONSHINE_BASE_URL/$file"
-                    val dest = File(moonshineDir, file)
-                    downloadFile(url, dest, "Moonshine/$file", expectedSha256 = "")
-                }
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Timber.e(e, "Moonshine model download failed")
                 Result.failure(e)
             }
         }

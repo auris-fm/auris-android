@@ -25,29 +25,60 @@ internal object CloudRouteEvents {
                 "action" -> CloudRouteJson.flexibleMapAdapter.fromJson(payload)
                     ?.let { map ->
                         CloudRouteEvent.Action(
-                            tool = map["tool"] as? String ?: "",
-                            action = map["action"] as? String ?: "",
-                            params = (map["params"] as? Map<String, Any?>).orEmpty(),
+                            tool = (map["tool"] as? String)?.takeIf { it.isNotBlank() } ?: return null,
+                            action = (map["action"] as? String)?.takeIf { it.isNotBlank() } ?: return null,
+                            params = map["params"] as? Map<String, Any?> ?: return null,
+                            // Read from the frame, and absent on user actions -- the distinction the
+                            // contract turns on. Not defaulted to a sentinel: an unprefixed absence is
+                            // what makes "not a user action" different from "this turn's hold".
+                            turnId = map["turn_id"] as? String,
                         )
                     }
 
                 "result" -> CloudRouteJson.resultAdapter.fromJson(payload)
+                    ?.takeIf {
+                        it.kind == CloudSearchResults.KIND_EPISODE_RESULTS &&
+                            it.scope in setOf(CloudSearchResults.SCOPE_LIBRARY, CloudSearchResults.SCOPE_GLOBAL, CloudSearchResults.SCOPE_CURRENT_EPISODE)
+                    }
                     ?.let { CloudRouteEvent.Result(it) }
 
-                "done" -> CloudRouteJson.doneAdapter.fromJson(payload)
-                    ?.let { CloudRouteEvent.Done(inputTokens = it.inputTokens, outputTokens = it.outputTokens) }
+                "done" -> decodeDone(payload)
 
                 "error" -> CloudRouteJson.errorAdapter.fromJson(payload)
                     ?.let { CloudRouteEvent.Error(code = it.code, message = it.message) }
 
                 // The handshake carries the negotiated codec; there is no separate `auth` frame.
                 "connected" -> CloudRouteJson.connectedAdapter.fromJson(payload)
-                    ?.let { CloudRouteEvent.Connected(codec = it.codec.orEmpty()) }
+                    ?.takeIf { it.codec.isNotBlank() && it.reservationId.isNotBlank() }
+                    ?.let { CloudRouteEvent.Connected(codec = it.codec) }
 
                 else -> null
             }
         }.getOrNull()
     }
+
+    /** Required nullable members must be present: omission is not measured unknown usage. */
+    private fun decodeDone(payload: String): CloudRouteEvent.Done? {
+        val frame = CloudRouteJson.flexibleMapAdapter.fromJson(payload) ?: return null
+        val outcome = when (frame["outcome"]) {
+            "completed" -> CloudRouteEvent.Outcome.Completed
+            "interrupted" -> CloudRouteEvent.Outcome.Interrupted
+            else -> return null
+        }
+        val usage = frame["usage"] as? Map<*, *> ?: return null
+        if (!usage.keys.containsAll(listOf("input_tokens", "output_tokens", "speech"))) return null
+        val speech = usage["speech"] as? Map<*, *> ?: return null
+        if (!speech.containsKey("amount") || (speech["unit"] as? String).isNullOrBlank()) return null
+        val amount = speech["amount"]
+        if (amount != null && (amount !is Number || !amount.toDouble().isFinite() || amount.toDouble() < 0)) return null
+        val input = usage["input_tokens"]
+        val output = usage["output_tokens"]
+        if (!validCount(input) || !validCount(output)) return null
+        return CloudRouteEvent.Done((input as? Number)?.toInt(), (output as? Number)?.toInt(), outcome)
+    }
+
+    private fun validCount(value: Any?): Boolean = value == null ||
+        (value is Number && value.toDouble().isFinite() && value.toDouble() in 0.0..Int.MAX_VALUE.toDouble() && value.toDouble() == value.toInt().toDouble())
 
     /**
      * Return the JSON frame without its `type` discriminator so adapters that do not expect

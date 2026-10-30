@@ -89,21 +89,75 @@ class AppOperationJournalStore(
     private fun recordName(claim: AppOperationJournal.Claim): String = MessageDigest.getInstance("SHA-256").digest(claim.key.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
 
-    override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean = try {
-        locked {
-            try {
-                if (!root.exists() && !root.mkdirs()) return@locked false
-                val target = recordFile(claim)
-                if (target.exists()) return@locked false
-                // Capacity is decided HERE, inside the same serialized section as the create below.
-                if (recordCount() >= maxRecords) return@locked false
-                linkNewRecord(target, baseRecord(claim, contentsDigest))
-            } catch (_: Exception) {
-                false
+    override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean = claimOperation(claim, contentsDigest) is AppOperationJournal.ClaimResult.Claimed
+
+    /**
+     * The exclusive create, the operation-id binding check and the capacity decision all inside ONE
+     * root-locked section.
+     *
+     * The binding check is a scan of the owner's records under the SAME lock as the create: two turns
+     * presenting the same operation id therefore serialize, and the second one sees the first one's
+     * record instead of both observing "not bound".
+     */
+    override fun claimOperation(
+        claim: AppOperationJournal.Claim,
+        contentsDigest: String,
+    ): AppOperationJournal.ClaimResult = try {
+        locked<AppOperationJournal.ClaimResult> {
+            if (!root.exists() && !root.mkdirs()) return@locked AppOperationJournal.ClaimResult.CapacityExhausted
+            val target = recordFile(claim)
+            if (target.exists()) return@locked AppOperationJournal.ClaimResult.AlreadyClaimed
+            // An operation id is bound to the turn that first claimed it. A different turn presenting
+            // the same id is refused here, before any effect, not by hashing into a different key.
+            // A binding that cannot be READ is not an absent binding. Skipping an unreadable record
+            // would erase the protection the record exists for and let a second turn execute the same
+            // operation id, so any unreadable or unenumerable state refuses the claim outright.
+            val boundElsewhere = boundKeyLocked(claim.operationId, claim.key)
+            if (boundElsewhere != null) return@locked AppOperationJournal.ClaimResult.BoundElsewhere(boundElsewhere)
+            if (recordCount() >= maxRecords) return@locked AppOperationJournal.ClaimResult.CapacityExhausted
+            if (!linkNewRecord(target, baseRecord(claim, contentsDigest))) {
+                return@locked AppOperationJournal.ClaimResult.CapacityExhausted
             }
+            AppOperationJournal.ClaimResult.Claimed
         }
     } catch (_: LockUnavailable) {
-        false
+        AppOperationJournal.ClaimResult.CapacityExhausted
+    } catch (_: AppOperationJournal.CorruptStorageException) {
+        // Unreadable journal state is NOT capacity. The caller must answer it as corrupt storage
+        // rather than as a transient refusal, and must never treat it as "nothing is bound".
+        AppOperationJournal.ClaimResult.Unreadable
+    }
+
+    /**
+     * The locked-section form of the operation-id binding lookup.
+     *
+     * Global rather than owner-scoped: the operation ID is the identity, so a record carrying this id
+     * under ANY owner/conversation/turn is the binding, and a different owner presenting the same id
+     * must be refused rather than served a fresh claim under a key that merely hashes differently.
+     */
+    private fun boundKeyLocked(operationId: String, ownKey: String): String? {
+        // `listFiles()` returns null for a directory that cannot be enumerated -- I/O failure or
+        // absence -- and both mean the set of existing bindings is unknown, which must not read as
+        // "nothing is bound".
+        val entries = root.listFiles() ?: throw AppOperationJournal.CorruptStorageException("journal directory unreadable")
+        for (file in entries) {
+            if (!file.isFile || !file.name.endsWith(".json")) continue
+            // A record whose identity cannot be established refuses the claim. Specifically: a record
+            // that will not parse, has no `operation_id`, or carries a malformed identity may BE the
+            // binding for this operation id, and there is no safe way to decide that it is not.
+            val record = try {
+                JSONObject(JSONTokener(file.readText()))
+            } catch (e: Exception) {
+                throw AppOperationJournal.CorruptStorageException("unreadable record ${file.name}: ${e.message}")
+            }
+            val storedId = record.strictOrNull("operation_id")
+                ?: throw AppOperationJournal.CorruptStorageException("record ${file.name} without operation id")
+            val storedKey = record.strictOrNull("key")
+                ?: throw AppOperationJournal.CorruptStorageException("record ${file.name} without key")
+            if (storedId != operationId) continue
+            if (storedKey != ownKey) return storedKey
+        }
+        return null
     }
 
     override fun markInProgress(claim: AppOperationJournal.Claim): Boolean = try {
@@ -169,12 +223,6 @@ class AppOperationJournalStore(
         }
     } catch (_: LockUnavailable) {
         null
-    }
-
-    override fun mayClaimNew(): Boolean = try {
-        locked { recordCount() < maxRecords }
-    } catch (_: LockUnavailable) {
-        false
     }
 
     private fun recordCount(): Int = root.listFiles()?.count { it.name.endsWith(".json") } ?: 0

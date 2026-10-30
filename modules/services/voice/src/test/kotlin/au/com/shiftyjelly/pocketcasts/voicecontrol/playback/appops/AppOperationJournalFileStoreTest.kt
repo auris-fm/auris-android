@@ -181,7 +181,10 @@ class AppOperationJournalFileStoreTest {
         assertFalse(s.claim(claim, "d1"))
         assertFalse(AppOperationJournal.settle(claim, "d1", AppOperationV1.OUTCOME_SUCCEEDED, null, JSONObject(), s))
         assertNull(s.read(claim))
-        assertFalse(s.mayClaimNew())
+        assertEquals(
+            AppOperationJournal.ClaimResult.CapacityExhausted,
+            s.claimOperation(claim, "d1"),
+        )
         assertEquals(0, root.listFiles()!!.count { it.name.endsWith(".json") })
     }
 
@@ -262,6 +265,78 @@ class AppOperationJournalFileStoreTest {
         val replay = AppOperationJournal.admit(claim, "d1", store()) as AppOperationJournal.Verdict.Replay
         assertEquals(AppOperationV1.OUTCOME_UNKNOWN, replay.outcome)
         assertTrue(staged.exists())
+    }
+
+    // --- Prior binding must be READ before it can be relied on ---------------------------------------
+
+    private val conflictingTurn = claim.copy(turn = "turn-2")
+
+    @Test
+    fun `a corrupt prior record refuses a new turn instead of reading as unbound`() {
+        // The record for this operation id exists but cannot be parsed. Skipping it would look exactly
+        // like "nothing is bound to this id", and the second turn would execute. It must not.
+        val s = store()
+        AppOperationJournal.admit(claim, "d1", s)
+        recordFile().writeText("{ this is not json")
+        // A DIFFERENT turn, same operation id: the binding it would collide with is the unreadable one.
+        val verdict = AppOperationJournal.admit(conflictingTurn, "d1", store())
+        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, verdict)
+        assertFalse(verdict is AppOperationJournal.Verdict.Execute)
+    }
+
+    @Test
+    fun `a prior record with no operation id refuses a new turn`() {
+        val s = store()
+        AppOperationJournal.admit(claim, "d1", s)
+        recordFile().writeText(JSONObject().put("key", claim.key).put("digest", "d1").toString())
+        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, AppOperationJournal.admit(conflictingTurn, "d1", store()))
+    }
+
+    @Test
+    fun `a prior record with a malformed identity refuses a new turn`() {
+        val s = store()
+        AppOperationJournal.admit(claim, "d1", s)
+        recordFile().writeText(
+            JSONObject().put("key", 7).put("operation_id", claim.operationId).put("digest", "d1").toString(),
+        )
+        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, AppOperationJournal.admit(conflictingTurn, "d1", store()))
+    }
+
+    @Test
+    fun `an unreadable record of another operation refuses too`() {
+        // The unreadable record cannot be shown to be unrelated, so no claim is safe against it.
+        val s = store()
+        AppOperationJournal.admit(other, "d1", s)
+        recordFile().writeText("not json at all")
+        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, AppOperationJournal.admit(claim, "d1", store()))
+    }
+
+    @Test
+    fun `concurrent cross-turn claims over the file store produce exactly one Execute`() {
+        // The property the sepals earlier split into read-then-claim: with binding and create in one
+        // locked section, two turns presenting the same id cannot both observe "not bound".
+        val rounds = 12
+        repeat(rounds) { round ->
+            val dir = Files.createTempDirectory("appops-cross-turn").toFile()
+            try {
+                val latch = CountDownLatch(1)
+                val results = java.util.Collections.synchronizedList(mutableListOf<AppOperationJournal.Verdict>())
+                val turns = listOf(claim.copy(turn = "turn-a-$round"), claim.copy(turn = "turn-b-$round"))
+                val threads = turns.map { c ->
+                    Thread {
+                        latch.await()
+                        results += AppOperationJournal.admit(c, "d1", AppOperationJournalStore(dir, maxRecords = 512))
+                    }.also { it.start() }
+                }
+                latch.countDown()
+                threads.forEach { it.join(10_000) }
+                val executes = results.count { it is AppOperationJournal.Verdict.Execute }
+                assertEquals("round $round: $results", 1, executes)
+                assertEquals("round $round: $results", 2, results.size)
+            } finally {
+                dir.deleteRecursively()
+            }
+        }
     }
 
     private fun recordFile(): File = root.listFiles()!!.single { it.name.endsWith(".json") }

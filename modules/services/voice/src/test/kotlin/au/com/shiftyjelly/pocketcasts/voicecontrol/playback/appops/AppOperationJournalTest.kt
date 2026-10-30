@@ -62,7 +62,20 @@ class AppOperationJournalTest {
             return records[claim.key]
         }
 
-        override fun mayClaimNew(): Boolean = capacity
+        override fun claimOperation(
+            claim: AppOperationJournal.Claim,
+            contentsDigest: String,
+        ): AppOperationJournal.ClaimResult {
+            if (corrupt) return AppOperationJournal.ClaimResult.Unreadable
+            if (records.containsKey(claim.key)) return AppOperationJournal.ClaimResult.AlreadyClaimed
+            // An operation id is bound globally, not per owner: the id itself is the identity, so a
+            // different owner presenting it is a conflict rather than a fresh claim.
+            val bound = records.keys.firstOrNull { key -> key.endsWith("\u0000${claim.operationId}") }
+            if (bound != null) return AppOperationJournal.ClaimResult.BoundElsewhere(bound)
+            if (!capacity || claimFails) return AppOperationJournal.ClaimResult.CapacityExhausted
+            records[claim.key] = AppOperationJournal.Record(contentsDigest, inProgress = true, outcome = null, reason = null, state = null)
+            return AppOperationJournal.ClaimResult.Claimed
+        }
     }
 
     @Test
@@ -218,18 +231,60 @@ class AppOperationJournalTest {
         assertNull(store.records.getValue(claim.key).outcome)
     }
 
+    /**
+     * The cross-turn rule, at its decisive point: an operation id belongs to the turn that first
+     * claimed it, so a redelivery to a DIFFERENT turn is refused rather than executed again. A
+     * different record key is not a different operation.
+     */
     @Test
-    fun `an operation is scoped to owner conversation and turn`() {
+    fun `an operation id redelivered to a different turn is refused rather than claimed afresh`() {
         val store = FakeStore()
-        AppOperationJournal.admit(claim, "d1", store)
-        assertTrue(AppOperationJournal.admit(claim.copy(turn = "turn-2"), "d1", store) is AppOperationJournal.Verdict.Execute)
-        assertTrue(AppOperationJournal.admit(claim.copy(owner = "user-2"), "d1", store) is AppOperationJournal.Verdict.Execute)
-        assertNotEquals(claim.key, claim.copy(turn = "turn-2").key)
+        assertTrue(AppOperationJournal.admit(claim, "d1", store) is AppOperationJournal.Verdict.Execute)
+        AppOperationJournal.settle(claim, "d1", AppOperationV1.OUTCOME_SUCCEEDED, null, JSONObject(), store)
+
+        assertEquals(
+            AppOperationJournal.Verdict.IdentityConflict,
+            AppOperationJournal.admit(claim.copy(turn = "turn-2"), "d1", store),
+        )
+        assertEquals(1, store.records.size)
+    }
+
+    /** The same id under a different owner is likewise not a new operation. */
+    @Test
+    fun `an operation id redelivered under a different owner is refused`() {
+        val store = FakeStore()
+        assertTrue(AppOperationJournal.admit(claim, "d1", store) is AppOperationJournal.Verdict.Execute)
+        assertEquals(
+            AppOperationJournal.Verdict.IdentityConflict,
+            AppOperationJournal.admit(claim.copy(owner = "user-2"), "d1", store),
+        )
+        assertEquals(1, store.records.size)
+    }
+
+    /** Same owner, same turn, same id: the duplicate is a REPLAY, never a second execution. */
+    @Test
+    fun `an exact duplicate in the same turn replays instead of executing`() {
+        val store = FakeStore()
+        assertTrue(AppOperationJournal.admit(claim, "d1", store) is AppOperationJournal.Verdict.Execute)
+        AppOperationJournal.settle(claim, "d1", AppOperationV1.OUTCOME_SUCCEEDED, null, JSONObject(), store)
+        val second = AppOperationJournal.admit(claim, "d1", store)
+        assertTrue(second is AppOperationJournal.Verdict.Replay)
+        assertEquals(AppOperationV1.OUTCOME_SUCCEEDED, (second as AppOperationJournal.Verdict.Replay).outcome)
     }
 
     @Test
     fun `no new operation is claimed when retention capacity is exhausted`() {
         val store = FakeStore().apply { capacity = false }
         assertEquals(AppOperationJournal.Verdict.PersistenceUnavailable, AppOperationJournal.admit(claim, "d1", store))
+    }
+
+    @Test
+    fun `an unreadable journal refuses the claim rather than treating it as empty`() {
+        val store = FakeStore()
+        store.corrupt = true
+        // The claim path, not only the read path: a store that cannot answer "is this id bound" must
+        // never be taken to mean "it is free".
+        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, AppOperationJournal.admit(claim, "d1", store))
+        assertTrue(store.records.isEmpty())
     }
 }

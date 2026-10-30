@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudCredential
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
@@ -3472,9 +3473,40 @@ class CloudRouteSinkTest {
         ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
         transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
+        /** The account a v1 operation is bound to; null models "no stable identity". */
+        private val appOpsAccount: String? = "account-1",
+        /**
+         * Whether the pause sink actually changes the reported state. False models a player that
+         * accepted the call and kept playing -- the case reported as `pause_not_observed`.
+         */
+        private val pauseDoesNotTake: Boolean = false,
+        /** Whether the provider can report any state at all; false models an unreadable engine. */
+        private val observedStateAvailable: Boolean = true,
+        /**
+         * Whether the reported state is missing `playing` (or carries a non-boolean there), modelling
+         * an engine whose observation cannot be read as a measurement.
+         */
+        private val malformedPlaying: Boolean = false,
+        /** The exact state a malformed-reporting fixture emits, so a control can choose the shape. */
+        private val observedStateOverride: org.json.JSONObject? = null,
+        /**
+         * Whether this fixture states the token/account ASSOCIATION.
+         *
+         * Opt-in so the deliberate refusal cases stay deliberate: a missing-token fixture and an
+         * unassociated-account fixture must keep exercising the refusal, not be silently associated.
+         */
+        private val associateCredential: Boolean = false,
+        /** The journal directory; null models "no persistence". */
+        private val appOpsRoot: java.io.File? = null,
+        /**
+         * True when this fixture BELONGS to the app-operation controls, which drive the production
+         * openRoute path. Every other fixture in this suite injects a conversational invoker, and a
+         * transport factory left beside it would shadow that invoker and break the case.
+         */
+        private val appOpsTransportFactory: Boolean = false,
     ) {
         /** The host's playback state, moved by the fake sink the way a player would. */
-        val host = HostPlaybackState(hostPlaying)
+        val host = HostPlaybackState(hostPlaying, pauseDoesNotTake)
         val playback = FakePlaybackSink(host)
         val analytics = FakeCloudRouteAnalytics()
         val routeCalls = mutableListOf<String>()
@@ -3502,6 +3534,29 @@ class CloudRouteSinkTest {
                 episodeId = liveEpisodeId,
                 clientPositionMs = clientPositionMs,
             )
+
+            // App-operation results rest on MEASUREMENT, so the provider must report the host's real
+            // state here: a fixture that answered a constant would make every result look observed.
+            override fun currentObservedState(): org.json.JSONObject? {
+                // "WE COULD NOT LOOK" is its own case, distinct from "we looked and it is unchanged":
+                // an unreadable state must never be reported as an observation.
+                if (!observedStateAvailable) return null
+                val episode = liveEpisodeId ?: return null
+                // A MALFORMED or MISSING `playing` is a separate case from "we could not look":
+                // the state exists but carries no usable measurement. Placed AFTER the episode read,
+                // because it reuses it -- the state is about a real episode with an unreadable flag.
+                if (malformedPlaying) {
+                    return observedStateOverride
+                        ?: org.json.JSONObject().put("episode_id", episode).put("position_ms", clientPositionMs)
+                }
+                return org.json.JSONObject()
+                    .put("episode_id", episode)
+                    .put("position_ms", clientPositionMs)
+                    // The contract names this field `playing` (voice-intents.md 818c8f75). A fixture
+                    // that emitted the old name would make the sink look correct while failing the
+                    // documented shape, so the fake speaks the contract's vocabulary.
+                    .put("playing", host.playing)
+            }
         }
 
         /** The admission component the sink uses, so a case can declare its live window. */
@@ -3513,6 +3568,29 @@ class CloudRouteSinkTest {
                 // Mirrors what the legacy identity path returned, so the suite keeps asserting the
                 // same requests while the sink takes its credential from the injected provider.
                 override suspend fun currentToken(): String? = userId.takeIf { it.isNotBlank() }
+
+                // The ACCOUNT is a separate seam from the token on purpose: an app operation is bound
+                // to it, and a provider that cannot name one returns null so v1 execution refuses.
+                override suspend fun currentAccountId(): String? = appOpsAccount
+
+                /**
+                 * The token and its account as ONE association, which is what `CloudTurnRoute.openTurn`
+                 * actually reads.
+                 *
+                 * Overriding `currentAccountId()` alone is not enough: the interface's default
+                 * `currentCredential()` REPORTS accountId = null on purpose, because an independently
+                 * overridden account getter cannot prove it belongs to the token being sent. So a
+                 * fixture that wants v1 execution must state the pairing here, and one that does not
+                 * keeps the refusal.
+                 */
+                override suspend fun currentCredential(): CloudCredential = if (associateCredential) {
+                    CloudCredential(
+                        token = userId.takeIf { it.isNotBlank() },
+                        accountId = appOpsAccount,
+                    )
+                } else {
+                    super.currentCredential()
+                }
             },
             playbackSink = playback,
             fingerprintTimingManager = fingerprintTimingManager,
@@ -3520,7 +3598,7 @@ class CloudRouteSinkTest {
             conversationAdmission = conversationAdmission,
             cloudPlaybackContextState = cloudPlaybackContextState,
             analytics = analytics,
-            routeInvoker = if (explicitTransportFactory != null && explicitInvoker == null) {
+            routeInvoker = if ((explicitTransportFactory != null && explicitInvoker == null) || appOpsTransportFactory) {
                 // Transport tests need the real openRoute path; don't shadow with the default invoker.
                 null
             } else {
@@ -3542,11 +3620,28 @@ class CloudRouteSinkTest {
             audioPlayer = audioPlayer,
             transportFactory = explicitTransportFactory,
             gracePeriodSignal = gracePeriodSignal,
+            appOperationSupport = if (appOpsRoot == null) {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationSupport.Unwired
+            } else {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationSupport(
+                    ownerProvider = { appOpsAccount },
+                    journalRoot = appOpsRoot,
+                )
+            },
         )
     }
 
-    /** Models the host player's state so pause/resume can be observed, and moved. */
-    private class HostPlaybackState(var playing: Boolean)
+    /**
+     * The host's playing state, so pause/resume can be observed, and moved.
+     *
+     * [pauseDoesNotTake] models a player that accepted the pause call and kept playing: the mutation
+     * runs (so the fixture is not simply ignoring the sink) and the observed state is unchanged.
+     */
+    private class HostPlaybackState(var playing: Boolean, private val pauseDoesNotTake: Boolean = false) {
+        fun onPause() {
+            if (!pauseDoesNotTake) playing = false
+        }
+    }
 
     private class FakePlaybackSink(private val host: HostPlaybackState? = null) : VoicePlaybackSink {
         val calls = mutableListOf<String>()
@@ -3582,7 +3677,9 @@ class CloudRouteSinkTest {
         override suspend fun pauseAsHold(): VoiceResponse = pause()
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
-            host?.playing = false
+            // Through the host so a fixture can model a pause that was accepted and did not take;
+            // setting `playing = false` directly would make every pause succeed by construction.
+            host?.onPause()
             pauseCalls += 1
             if (throwOnPauseCall == pauseCalls) error("pause failed")
             pauseStarted.complete(Unit)
@@ -4999,5 +5096,462 @@ class CloudRouteSinkTest {
             "You have reached your Auris free daily limit. Please try again tomorrow.",
             (feedback as VoiceResponse.Spoken).text,
         )
+    }
+
+    // --- App-operation protocol v1: admission, binding, refusal, result send ----------------------
+    //
+    // The sink answers a v1 operation on the turn's own socket, exactly once, and only after the
+    // outcome is durable. These controls use the REAL journal store in a temp directory, so a
+    // replayed result is a replayed DUPLICATE rather than a second execution.
+
+    private fun opFrame(
+        operationId: String = "11111111-2222-3333-4444-555555555555",
+        tool: String = "playback",
+        action: String = "pause",
+        params: String = "{}",
+        precondition: String? = null,
+    ): CloudRouteEvent.AppOperation {
+        val json = buildString {
+            append("""{"operation_id":"$operationId","capability_version":"app-ops/1","type":"action","tool":"$tool","action":"$action","params":$params""")
+            if (precondition != null) append(""","precondition":$precondition""")
+            append("}")
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val adapter = com.squareup.moshi.Moshi.Builder().build()
+            .adapter<Map<String, Any?>>(Map::class.java as Class<Map<String, Any?>>)
+        return CloudRouteEvent.AppOperation(
+            operationId = operationId,
+            capabilityVersion = "app-ops/1",
+            tool = tool,
+            action = action,
+            params = adapter.fromJson(params) ?: emptyMap(),
+            precondition = precondition?.let { adapter.fromJson(it) },
+            rawBytes = json.toByteArray(),
+        )
+    }
+
+    /** Records what the sink sent, and reaches a socket only because it IS this turn's sender. */
+    private class RecordingSender : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.ResultSender {
+        val sent = mutableListOf<String>()
+        override fun sendResult(
+            result: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.AppOperationResult,
+        ): Boolean {
+            sent += result.payloadJson
+            return true
+        }
+    }
+
+    /**
+     * A transport whose events are supplied by the test and whose turn has a real sender.
+     *
+     * A transport fake is the seam that exercises the production `senderFor` binding; a fresh
+     * instance per sink models separate turns over the same journal directory.
+     */
+    private class AppOpsTransport(
+        private val events: List<CloudRouteEvent>,
+        /**
+         * This fake turn's ownership.
+         *
+         * FRESH PER TURN, and modelling the contract rather than approximating it: it admits only while
+         * live, then refuses for ever once retirement is established, and its retirement has a real
+         * bounded deadline. A fake that admitted indefinitely and never retired would let the sink's
+         * drain logic either cancel admitted work immediately or never notice a retirement bug at all --
+         * it would be testing a turn that cannot end.
+         */
+        private val ownership: FakeTurnOwnership = FakeTurnOwnership(),
+    ) : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
+        /** The sender for THIS turn, paired with the ownership above. */
+        val sender = RecordingSender()
+
+        override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow { events.forEach { emit(it) } }
+
+        override fun sessionFor(
+            requestId: String,
+        ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.ResultSender = sender
+
+        override fun openTurn(frame: CloudTurnFrame): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.TurnSession = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.TurnSession(
+            events = exchange(frame),
+            sender = sender,
+            ownership = ownership,
+        )
+    }
+
+    /**
+     * A fake turn ownership that follows the real contract's shape.
+     *
+     * `Live` admits; establishing retirement moves to `Retiring` and fixes ONE bounded deadline, after
+     * which admission is refused for ever. Leases are granted only while live and must be released for
+     * the turn to observe that it is idle -- so a sink that leaks a lease is visible here rather than
+     * silently tolerated.
+     */
+    private class FakeTurnOwnership(
+        private val graceMs: Long = 2_000L,
+    ) : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.TurnOwnership {
+        private enum class State { Live, Retiring }
+
+        private val lock = Any()
+        private var state = State.Live
+        private var deadlineMs = 0L
+        private var leases = 0
+
+        /** Leases still outstanding: a leak is observable, not swallowed. */
+        fun outstandingLeases(): Int = synchronized(lock) { leases }
+
+        override fun admit(): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.TurnLease? {
+            synchronized(lock) {
+                if (state != State.Live) return null
+                leases++
+            }
+            var released = false
+            return au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.TurnLease {
+                synchronized(lock) {
+                    if (!released) {
+                        released = true
+                        leases--
+                    }
+                }
+            }
+        }
+
+        override fun establishRetirement(): Long = synchronized(lock) {
+            if (deadlineMs == 0L) {
+                state = State.Retiring
+                deadlineMs = System.currentTimeMillis() + graceMs
+            }
+            deadlineMs
+        }
+
+        override fun retirementDeadlineMs(): Long = synchronized(lock) { deadlineMs }
+
+        override fun earlierRetainedDeadlineMs(): Long = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.NO_EARLIER_DEADLINE
+    }
+
+    private fun appOpsDeps(
+        transport: AppOpsTransport,
+        root: java.io.File?,
+        account: String? = "account-1",
+        hostPlaying: Boolean = true,
+        pauseDoesNotTake: Boolean = false,
+        observedStateAvailable: Boolean = true,
+        malformedPlaying: Boolean = false,
+        observedStateOverride: org.json.JSONObject? = null,
+        /**
+         * Off only for the fixtures that deliberately withhold the token/account ASSOCIATION (or the
+         * token itself) so the refusal they assert is a real refusal rather than a missing seam.
+         */
+        associateCredential: Boolean = true,
+    ): TestDeps = TestDeps(
+        hostPlaying = hostPlaying,
+        pauseDoesNotTake = pauseDoesNotTake,
+        observedStateAvailable = observedStateAvailable,
+        malformedPlaying = malformedPlaying,
+        observedStateOverride = observedStateOverride,
+        appOpsAccount = account,
+        appOpsRoot = root,
+        appOpsTransportFactory = true,
+        associateCredential = associateCredential,
+        transportFactory = { _, _, _ -> transport },
+    )
+
+    private fun tempJournal(): java.io.File = java.nio.file.Files.createTempDirectory("appops-sink").toFile().also { it.deleteOnExit() }
+
+    private fun resultOf(payloadJson: String): org.json.JSONObject = org.json.JSONObject(org.json.JSONTokener(payloadJson))
+
+    @Test
+    fun `a supported operation is executed once and answered on the turn's own socket`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertEquals(1, deps.playback.calls.count { it == "pause" })
+        assertEquals(1, transport.sender.sent.size)
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        assertEquals("11111111-2222-3333-4444-555555555555", result.getString("operation_id"))
+        // The observed state is the evidence a success rests on, and it comes from the player. The
+        // field is the contract's `playing` (voice-intents.md 818c8f75), not the engine's own name.
+        assertEquals(false, result.getJSONObject("state").getBoolean("playing"))
+    }
+
+    /**
+     * The decisive cross-turn control: the same operation id delivered to a DIFFERENT turn is refused
+     * and does not run a second time. A separate binding read plus claim lets both turns pass.
+     */
+    @Test
+    fun `an operation id redelivered to another turn is refused and not executed twice`() = runTest {
+        val root = tempJournal()
+        val first = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val second = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+
+        val firstDeps = appOpsDeps(first, root)
+        firstDeps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+        assertEquals(1, firstDeps.playback.calls.count { it == "pause" })
+
+        val secondDeps = appOpsDeps(second, root)
+        secondDeps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-2")
+
+        assertEquals(0, secondDeps.playback.calls.count { it == "pause" })
+        val result = resultOf(second.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("identity_conflict", result.getString("reason"))
+    }
+
+    @Test
+    fun `the same operation redelivered in the same turn replays the stored result and does not execute again`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(opFrame(action = "pause"), opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertEquals(1, deps.playback.calls.count { it == "pause" })
+        assertEquals(2, transport.sender.sent.size)
+        assertEquals(transport.sender.sent[0], transport.sender.sent[1])
+    }
+
+    @Test
+    fun `an unsupported operation refuses before any effect`() = runTest {
+        val root = tempJournal()
+        // A well-formed operation this client does not implement. The codec's own precondition rules
+        // are a separate gate: a frame that fails those is `invalid_request`, and this one must reach
+        // the support check instead so the reason names the real cause.
+        val transport = AppOpsTransport(
+            listOf(
+                opFrame(tool = "chapter", action = "next", precondition = """{"episode_id":"episode-id"}"""),
+                CloudRouteEvent.Done(0, 0),
+            ),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("clear the queue", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.isEmpty())
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("unsupported_operation", result.getString("reason"))
+    }
+
+    /** No stable account identity: the operation is answered, and NOTHING executes. */
+    @Test
+    fun `with no stable owner the operation refuses persistence_unavailable and does not execute`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        // NO ASSOCIATION AND NO OWNER, both stated: the refusal must come from the identity being
+        // absent, not from the fixture failing to associate a credential in the first place.
+        val deps = appOpsDeps(transport, root, account = null, associateCredential = false)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.isEmpty())
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("persistence_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `with no journal the operation refuses rather than executing unrecorded`() = runTest {
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        // Unwired: no journal root, so nothing can be made durable.
+        val deps = appOpsDeps(transport, root = null)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.isEmpty())
+        assertEquals("persistence_unavailable", resultOf(transport.sender.sent.single()).getString("reason"))
+    }
+
+    /**
+     * A pause against a player that is NOT playing changes nothing, so it is refused with the reason
+     * rather than reported as a success: a command that would be a no-op is not an observed outcome.
+     */
+    @Test
+    fun `an already-paused player satisfies pause as an idempotent success`() = runTest {
+        // voice-intents.md (818c8f75): "an already paused engine satisfies this idempotent
+        // operation". Success rests on the OBSERVED state, not on a change having occurred, so the
+        // sink still runs and the result reports the state it measured.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = false)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        assertFalse(result.getJSONObject("state").getBoolean("playing"))
+    }
+
+    @Test
+    fun `a pause still playing afterwards is failed as pause_not_observed`() = runTest {
+        // The pause did not take: the engine reports playing afterwards. This is FAILED, not unknown
+        // -- we looked, and the effect was not observed -- and a non-success carries no state.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = true, pauseDoesNotTake = true)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("failed", result.getString("outcome"))
+        assertEquals("pause_not_observed", result.getString("reason"))
+        assertFalse("a non-success carries no state", result.has("state"))
+    }
+
+    @Test
+    fun `a pause whose observation omits playing is unknown, not evidence it still plays`() = runTest {
+        // `optBoolean(key)` would answer false for a MISSING key, turning "we could not tell" into
+        // "the engine is paused" -- a fabricated success. It must be unavailable instead.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, malformedPlaying = true)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `a pause whose playing flag is not a boolean is unknown`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(
+            transport,
+            root,
+            malformedPlaying = true,
+            observedStateOverride = org.json.JSONObject()
+                .put("episode_id", "episode-id")
+                .put("position_ms", 0)
+                // A string is not a measurement, and reading it as `true` would report failed.
+                .put("playing", "yes"),
+        )
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `a pause whose state cannot be read is unknown with playback_state_unavailable`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, observedStateAvailable = false)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+        assertFalse("a non-success carries no state", result.has("state"))
+    }
+
+    /** A request naming a different episode than the one playing is refused before the effect. */
+    @Test
+    fun `a resume observed to reach playing succeeds with the observed state`() = runTest {
+        // Regression for the pre-state read: resume's precondition now uses the contract's `playing`
+        // key with a strict boolean read, so the ordinary paused -> playing path must still succeed
+        // and still rest on the state observed AFTER the effect.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = false)
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertEquals(1, deps.playback.calls.count { it == "resume" })
+        assertEquals(1, transport.sender.sent.size)
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        assertTrue(result.getJSONObject("state").getBoolean("playing"))
+    }
+
+    @Test
+    fun `a resume with an unreadable pre-state is refused not_paused before any effect`() = runTest {
+        // An unreadable flag is NOT a paused player: resume refuses on its own precondition rather
+        // than proceeding on a measurement it never took. The refusal precedes the effect.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = false, observedStateAvailable = false)
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertFalse(
+            "the precondition refuses before the effect runs",
+            deps.playback.calls.any { it == "resume" },
+        )
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("not_paused", result.getString("reason"))
+    }
+
+    @Test
+    fun `a request targeting another episode is refused before the effect`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(opFrame(action = "pause", params = """{"episode_id":"another-episode"}"""), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.isEmpty())
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("target_mismatch", result.getString("reason"))
+    }
+
+    /** A malformed claiming frame with a recoverable id is answered, never left unanswered. */
+    @Test
+    fun `a malformed v1 frame with a recoverable id is refused invalid_request`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(
+                CloudRouteEvent.MalformedAppOperation("11111111-2222-3333-4444-555555555555", ByteArray(0)),
+                CloudRouteEvent.Done(0, 0),
+            ),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("something", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.isEmpty())
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("invalid_request", result.getString("reason"))
+    }
+
+    /** With no recoverable id there is nothing to address, so nothing is sent. */
+    @Test
+    fun `a malformed v1 frame without an identity is not answered`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(CloudRouteEvent.MalformedAppOperation(null, ByteArray(0)), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("something", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(transport.sender.sent.isEmpty())
+    }
+
+    /**
+     * OVERLAPPING TURNS: each turn's session is a local of its own collection, so a second turn cannot
+     * rebind the first turn's owner, conversation or sender. This is what a sink-wide field broke: the
+     * second turn's `withOwner` would replace the value the first turn reads at delivery time.
+     */
+    @Test
+    fun `an overlapping turn cannot answer on, or rebind, the other turn's session`() = runTest {
+        val root = tempJournal()
+        val first = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val second = AppOpsTransport(listOf(opFrame(action = "pause"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(first, root)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+        // A turn under a DIFFERENT account and a different sender follows immediately.
+        val secondDeps = appOpsDeps(second, root, account = "account-2")
+        secondDeps.playback.calls.clear()
+        secondDeps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-2")
+
+        // Each turn answered exactly once, on its own socket, and neither borrowed the other's account.
+        assertEquals(1, first.sender.sent.size)
+        assertEquals(1, second.sender.sent.size)
+        val firstResult = resultOf(first.sender.sent.single())
+        val secondResult = resultOf(second.sender.sent.single())
+        assertEquals("succeeded", firstResult.getString("outcome"))
+        // The second turn presents the SAME operation id under another account: refused as a conflict
+        // rather than executed, which is the account-binding half of the same property.
+        assertEquals("refused", secondResult.getString("outcome"))
+        assertEquals("identity_conflict", secondResult.getString("reason"))
+        assertEquals(0, secondDeps.playback.calls.count { it == "pause" })
     }
 }

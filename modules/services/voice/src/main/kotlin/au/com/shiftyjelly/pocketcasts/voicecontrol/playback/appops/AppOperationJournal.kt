@@ -75,8 +75,18 @@ object AppOperationJournal {
         /** @return the record, or null when nothing is stored for this key. Corruption is not null. */
         fun read(claim: Claim): Record?
 
-        /** Whether a new operation may be claimed at all under current capacity/retention limits. */
-        fun mayClaimNew(): Boolean
+        /**
+         * Claims [claim] AND enforces the operation-id binding rule in ONE atomic step.
+         *
+         * An operation id belongs to the owner/conversation/turn that first claimed it. A separate
+         * "is it bound?" read followed by a claim is two steps, and two DIFFERENT turns can both
+         * observe "not bound" before either writes - which would release the effect twice. Binding is
+         * decided inside the exclusive create, under the same root lock.
+         *
+         * Capacity belongs here too: it must be decided in the same serialized section as the create,
+         * or two claims can both pass it at the last slot.
+         */
+        fun claimOperation(claim: Claim, contentsDigest: String): ClaimResult
     }
 
     /**
@@ -94,6 +104,30 @@ object AppOperationJournal {
     )
 
     class CorruptStorageException(message: String) : Exception(message)
+
+    /** The outcome of one atomic claim attempt. */
+    sealed class ClaimResult {
+        /** This key now owns the operation id; execute once. */
+        object Claimed : ClaimResult()
+
+        /** This exact key already exists: re-read it and replay or refuse. */
+        object AlreadyClaimed : ClaimResult()
+
+        /** The operation id is bound to a different owner/conversation/turn: refuse, no effect. */
+        class BoundElsewhere(val existingKey: String) : ClaimResult()
+
+        /** Retention is at capacity: refuse rather than evict a live identity. */
+        object CapacityExhausted : ClaimResult()
+
+        /**
+         * Prior state could not be read, so no claim can be shown to be free.
+         *
+         * Distinct from [CapacityExhausted] on purpose: capacity is a transient condition the caller
+         * reports as `persistence_unavailable`, while unreadable state is damage the caller must report
+         * as `StorageCorrupt`. Conflating them would let a corrupt binding read as an empty journal.
+         */
+        object Unreadable : ClaimResult()
+    }
 
     /**
      * Machine reason returned for a durable claim that has no recorded outcome. The published
@@ -124,23 +158,34 @@ object AppOperationJournal {
             // permits answering unknown rather than waiting, and it is never re-executed.
             return Verdict.Replay(AppOperationV1.OUTCOME_UNKNOWN, UNRESOLVED_REASON, null)
         }
-        if (!store.mayClaimNew()) return Verdict.PersistenceUnavailable
-        if (!store.claim(claim, digest)) {
-            // Lost a race against a concurrent claim in the shared store: re-read the winner.
-            val raced = try {
-                store.read(claim)
-            } catch (_: CorruptStorageException) {
-                return Verdict.StorageCorrupt
-            } ?: return Verdict.PersistenceUnavailable
-            if (raced.contentsDigest != digest) return Verdict.IdentityConflict
-            return if (raced.outcome != null) {
-                Verdict.Replay(raced.outcome, raced.reason, raced.state)
-            } else {
-                Verdict.Replay(AppOperationV1.OUTCOME_UNKNOWN, UNRESOLVED_REASON, null)
+        when (val claimed = store.claimOperation(claim, digest)) {
+            is ClaimResult.BoundElsewhere -> return Verdict.IdentityConflict
+
+            is ClaimResult.CapacityExhausted -> return Verdict.PersistenceUnavailable
+
+            is ClaimResult.Unreadable -> return Verdict.StorageCorrupt
+
+            is ClaimResult.Claimed -> {
+                if (!store.markInProgress(claim)) return Verdict.PersistenceUnavailable
+                return Verdict.Execute(claim)
+            }
+
+            is ClaimResult.AlreadyClaimed -> {
+                // A concurrent duplicate that lost the create: re-read the winner and replay it under
+                // the same storage rules. It never executes again.
             }
         }
-        if (!store.markInProgress(claim)) return Verdict.PersistenceUnavailable
-        return Verdict.Execute(claim)
+        val raced = try {
+            store.read(claim)
+        } catch (_: CorruptStorageException) {
+            return Verdict.StorageCorrupt
+        } ?: return Verdict.PersistenceUnavailable
+        if (raced.contentsDigest != digest) return Verdict.IdentityConflict
+        return if (raced.outcome != null) {
+            Verdict.Replay(raced.outcome, raced.reason, raced.state)
+        } else {
+            Verdict.Replay(AppOperationV1.OUTCOME_UNKNOWN, UNRESOLVED_REASON, null)
+        }
     }
 
     /**

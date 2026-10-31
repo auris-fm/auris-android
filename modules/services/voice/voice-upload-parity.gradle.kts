@@ -12,4 +12,16 @@ val pinValue: String = providers.gradleProperty("aurisCloudWorkerRoot")
     .get()
 tasks.withType<Test>().configureEach {
     environment("AURIS_CLOUD_WORKER_ROOT", pinValue)
+    // EXPLICIT per-key tracking of the six joined-run loopback inputs (supervisor driverEnv keys).
+    // Each providers.environmentVariable read is a named configuration-cache input: when a key's
+    // value changes between invocations, Gradle invalidates the stored entry and reconfigures, so
+    // the serialized Test environment carries THIS invocation's values. Absent keys are set to the
+    // empty string - deliberately NOT falling back to any inherited value - and the driver treats
+    // blanks as absent (System.getenv(...)?.takeIf { it.isNotBlank() }).
+    val loopbackKeys = listOf(
+        "AURIS_LOOPBACK_UPLOAD", "AURIS_LOOPBACK_ACCOUNT", "AURIS_LOOPBACK_OBSERVE",
+        "AURIS_LOOPBACK_BEARER", "AURIS_LOOPBACK_ACCOUNT_ID", "AURIS_LOOPBACK_DISCLOSURE",
+    )
+    loopbackKeys.associateWith { key -> providers.environmentVariable(key).getOrElse("") }
+        .forEach { (key, value) -> environment(key, value) }
 }

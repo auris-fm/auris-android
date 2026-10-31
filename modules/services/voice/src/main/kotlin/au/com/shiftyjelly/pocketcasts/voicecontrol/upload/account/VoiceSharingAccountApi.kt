@@ -89,7 +89,7 @@ sealed interface VoiceSharingMutationResult {
 }
 
 /** 202 receipt of the separate deletion workflow: distinct from withdrawal, which never deletes. */
-data class DeletionReceipt(val deletionRequestId: String, val status: String)
+data class DeletionReceipt(val deletionRequestId: String, val status: String, val cutoff: String? = null)
 
 /**
  * Account operations (Task 2; reviewer rounds 3-4). Contract:
@@ -329,13 +329,19 @@ class VoiceSharingAccountOperations(
         return buffer.readByteString().toRequestBody(jsonMediaType)
     }
 
-    /** 202 deletion_pending receipt: strict complete parse, exact types/keys, numeric schema. */
+    /**
+     * 202 deletion_pending receipt: strict complete parse, exact types/keys, numeric schema.
+     * `cutoff` is an OPTIONAL RFC3339 instant (spec ruling 9f7505d6): when present it must parse as
+     * a real instant or the body is malformed; when absent the receipt stays valid. Never skipped
+     * silently — an unknown key is still rejected.
+     */
     private fun parseDeletionReceipt(json: String): DeletionReceipt? = try {
         val reader = JsonReader.of(okio.Buffer().writeUtf8(json))
         reader.beginObject()
         var schemaOk = false
         var id: String? = null
         var status: String? = null
+        var cutoff: String? = null
         val seen = HashSet<String>()
         while (reader.hasNext()) {
             val key = reader.nextName()
@@ -351,14 +357,23 @@ class VoiceSharingAccountOperations(
 
                 "status" -> status = reader.nonEmptyString()
 
+                "cutoff" -> {
+                    val raw = reader.nonEmptyString() ?: return null
+                    // A cutoff that cannot parse as a real instant is a malformed receipt, not an
+                    // optional field to ignore.
+                    runCatching { java.time.Instant.parse(raw) }.getOrNull() ?: return null
+                    cutoff = raw
+                }
+
                 else -> reader.skipValue()
             }
         }
         reader.endObject()
         if (reader.peek() != com.squareup.moshi.JsonReader.Token.END_DOCUMENT) return null
-        if (!schemaOk || seen != setOf("schema_version", "deletion_request_id", "status")) return null
+        val required = setOf("schema_version", "deletion_request_id", "status")
+        if (!schemaOk || !(required.all { it in seen } && seen.all { it in required + "cutoff" })) return null
         if (id == null || status != "deletion_pending") return null
-        DeletionReceipt(deletionRequestId = id, status = status)
+        DeletionReceipt(deletionRequestId = id, status = status, cutoff = cutoff)
     } catch (_: Exception) {
         null
     }

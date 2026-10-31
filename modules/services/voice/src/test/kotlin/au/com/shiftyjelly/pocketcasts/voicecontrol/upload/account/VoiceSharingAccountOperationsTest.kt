@@ -315,6 +315,71 @@ class VoiceSharingAccountOperationsTest {
     }
 
     @Test
+    fun `deletion receipt cutoff is optional, validated when present, rejected when malformed`() = runTest {
+        val receipt202: suspend (String) -> DeletionReceipt? = { body: String ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+            server.enqueue(MockResponse().setResponseCode(202).setBody(body))
+            assertTrue(operations.refreshProjection(token))
+            val r = operations.deleteData(token)
+            server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
+            server.takeRequest(5, TimeUnit.SECONDS)!! // drain the DELETE
+            r
+        }
+        // OPTIONAL present + valid RFC3339: accepted and carried.
+        val withCutoff = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-1\",\"cutoff\":\"2026-10-31T06:00:00Z\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(withCutoff != null)
+        assertEquals("2026-10-31T06:00:00Z", requireNotNull(withCutoff).cutoff)
+        // ABSENT: still valid (spec 9f7505d6: missing cutoff remains compatible).
+        val withoutCutoff = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-2\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(withoutCutoff != null && withoutCutoff.cutoff == null)
+        // MALFORMED cutoff: a non-instant value is a malformed receipt, never ignored.
+        val malformed = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-3\",\"cutoff\":\"not-a-time\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue("a malformed cutoff must not yield a receipt", malformed == null)
+        // RFC3339Nano fractional seconds and an OFFSET timestamp are real instants: accepted.
+        val nano = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-5\",\"cutoff\":\"2026-10-31T06:00:00.123456789Z\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(nano != null && nano.cutoff == "2026-10-31T06:00:00.123456789Z")
+        val offset = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-6\",\"cutoff\":\"2026-10-31T14:00:00+08:00\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(offset != null && offset.cutoff == "2026-10-31T14:00:00+08:00")
+        // JSON null / non-string / EMPTY cutoff values: all malformed, never tolerated.
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-7\",\"cutoff\":null,\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-8\",\"cutoff\":17,\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-9\",\"cutoff\":\"\",\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        // DUPLICATE cutoff member: the strict decoder refuses duplicate keys.
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-10\",\"cutoff\":\"2026-10-31T06:00:00Z\",\"cutoff\":\"2026-11-01T06:00:00Z\",\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        // UNKNOWN key: still rejected (the strict key set grows only by the ruled member).
+        val unknownKey = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-4\",\"status\":\"deletion_pending\",\"surprise\":1}",
+        )
+        assertTrue("an unknown key must not yield a receipt", unknownKey == null)
+    }
+
+    @Test
     fun `bounded immutable retry reuses the same request_id and captured revision`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))

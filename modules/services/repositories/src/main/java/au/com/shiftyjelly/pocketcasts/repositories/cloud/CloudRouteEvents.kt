@@ -10,8 +10,48 @@ import okio.Buffer
  * a line prefix; the existing [CloudRouteJson] adapters do the decoding.
  */
 internal object CloudRouteEvents {
+    /**
+     * The transport-level app-operation envelope bound, applied to each COMPLETE delivered text frame
+     * before any general JSON work. OkHttp reassembles WebSocket protocol fragments before `onMessage`,
+     * so one delivered message is one envelope; this is a bound on that message, and it is explicitly
+     * NOT a claim about any other transport buffer.
+     */
+    const val MAX_APP_OPERATION_ENVELOPE_BYTES = 16 * 1024
+
+    /**
+     * The two top-level names that make a frame an app-operation envelope.
+     *
+     * Presence of EITHER name is a claim of v1 identity, and a claiming frame is never handled as
+     * legacy playback or as this turn's hold: the pair is what the contract pins, and a frame carrying
+     * half of it is a defect the server must hear about rather than a frame to reinterpret.
+     */
+    private const val FIELD_OPERATION_ID = "operation_id"
+    private const val FIELD_CAPABILITY_VERSION = "capability_version"
+
     @Suppress("UNCHECKED_CAST") // The flexible map adapter yields Any? for the nested params map.
     fun decode(text: String): CloudRouteEvent? {
+        // THE BYTE BOUND COMES FIRST, on the complete delivered text, before any parser sees a byte.
+        // OkHttp reassembles WebSocket protocol fragments before `onMessage`, so one delivered message
+        // is one envelope. Oversized text is never parsed, so nothing in it can be recovered from it:
+        // an oversized control frame is answered unidentified, and an oversized frame that is not a
+        // JSON object keeps the legacy silent drop.
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size > MAX_APP_OPERATION_ENVELOPE_BYTES) {
+            return if (text.trimStart().startsWith("{")) {
+                CloudRouteEvent.MalformedAppOperation(operationId = null, rawBytes = bytes)
+            } else {
+                null
+            }
+        }
+        if (text.isBlank()) return null
+
+        // ONE parse of the bounded text. Identity is read from the parsed TOP-LEVEL names -- never from
+        // a substring scan, which could not distinguish a name from a value elsewhere in the document.
+        val root = runCatching { CloudRouteJson.rootAdapter.fromJson(text) }.getOrNull()
+        val claimsV1 = root != null &&
+            (FIELD_OPERATION_ID in root || FIELD_CAPABILITY_VERSION in root)
+        if (claimsV1) return decodeAppOperation(text, bytes)
+
         val json = runCatching { JsonReader.of(Buffer().writeUtf8(text)) }.getOrNull() ?: return null
         return runCatching {
             json.beginObject()
@@ -55,6 +95,43 @@ internal object CloudRouteEvents {
                 else -> null
             }
         }.getOrNull()
+    }
+
+    /**
+     * A frame that carries app-operation identity, decoded as a v1 operation or as malformed.
+     *
+     * Reached only for a frame the probe found v1-shaped and only after the envelope bound, so a
+     * partial identity pair can never be resolved as legacy playback or a hold.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun decodeAppOperation(text: String, bytes: ByteArray): CloudRouteEvent {
+        val frame = runCatching { CloudRouteJson.flexibleMapAdapter.fromJson(peel(text)) }.getOrNull()
+            ?: return CloudRouteEvent.MalformedAppOperation(operationId = null, rawBytes = bytes)
+        val operationId = (frame["operation_id"] as? String)?.takeIf { it.isNotBlank() }
+        val version = (frame["capability_version"] as? String)?.takeIf { it.isNotBlank() }
+        // BOTH fields are required for an operation; a partial pair is malformed, never legacy.
+        if (operationId == null || version == null) {
+            return CloudRouteEvent.MalformedAppOperation(operationId = operationId, rawBytes = bytes)
+        }
+        val tool = (frame["tool"] as? String)?.takeIf { it.isNotBlank() }
+        val action = (frame["action"] as? String)?.takeIf { it.isNotBlank() }
+        val params = frame["params"] as? Map<String, Any?>
+        if (tool == null || action == null || params == null) {
+            return CloudRouteEvent.MalformedAppOperation(operationId = operationId, rawBytes = bytes)
+        }
+        val precondition = frame["precondition"]
+        if (precondition != null && precondition !is Map<*, *>) {
+            return CloudRouteEvent.MalformedAppOperation(operationId = operationId, rawBytes = bytes)
+        }
+        return CloudRouteEvent.AppOperation(
+            operationId = operationId,
+            capabilityVersion = version,
+            tool = tool,
+            action = action,
+            params = params,
+            precondition = precondition as? Map<String, Any?>,
+            rawBytes = bytes,
+        )
     }
 
     /** Required nullable members must be present: omission is not measured unknown usage. */

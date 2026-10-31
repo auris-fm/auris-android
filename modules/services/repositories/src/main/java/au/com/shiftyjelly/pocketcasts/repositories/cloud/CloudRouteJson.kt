@@ -11,10 +11,36 @@ internal object CloudRouteJson {
 
     val authenticateAdapter: JsonAdapter<CloudTurnFrame.Authenticate> =
         CloudTurnAuthenticateJsonAdapter(moshi)
+    val appOperationResultAdapter: JsonAdapter<CloudTurnFrame.AppOperationResult> =
+        CloudTurnAppOperationResultJsonAdapter(moshi)
     val connectedAdapter: JsonAdapter<CloudRouteConnectedPayload> = CloudRouteConnectedPayloadJsonAdapter(moshi)
     val errorAdapter: JsonAdapter<CloudRouteErrorPayload> = CloudRouteErrorPayloadJsonAdapter(moshi)
     val httpErrorAdapter: JsonAdapter<CloudRouteHttpErrorPayload> = CloudRouteHttpErrorPayloadJsonAdapter(moshi)
     val flexibleMapAdapter: JsonAdapter<Map<String, Any?>> = FlexibleMapAdapter()
+
+    /**
+     * The TOP-LEVEL NAMES of a delivered frame, from a single parse.
+     *
+     * Used only to decide whether a frame claims app-operation identity. Values are skipped, never
+     * materialized, so a large document costs nothing beyond the walk itself. Null when the text is
+     * not a single JSON object; a frame that cannot be parsed as one carries no identity to find.
+     */
+    val rootAdapter: JsonAdapter<Set<String>> = object : JsonAdapter<Set<String>>() {
+        override fun fromJson(reader: JsonReader): Set<String>? {
+            val names = HashSet<String>()
+            reader.beginObject()
+            while (reader.hasNext()) {
+                names += reader.nextName()
+                reader.skipValue()
+            }
+            reader.endObject()
+            return names
+        }
+
+        override fun toJson(writer: JsonWriter, value: Set<String>?) {
+            throw UnsupportedOperationException("rootAdapter is decode-only")
+        }
+    }
 
     val resultAdapter: JsonAdapter<CloudSearchResults> = CloudSearchResultsJsonAdapter(moshi)
     val prefetchRequestAdapter: JsonAdapter<CloudPrefetchRequest> = CloudPrefetchRequestJsonAdapter(moshi)

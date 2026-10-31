@@ -8,7 +8,9 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
@@ -25,21 +27,39 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSigna
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationDelivery
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationJournal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationSupport
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationV1
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONObject
 import timber.log.Timber
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
+/**
+ * Broadcasts what a voice command produced to the cloud turn that asked for it.
+ *
+ * A turn is opened once and carries its own events and sender; nothing about a turn is stored on
+ * this sink, so two concurrent turns cannot answer each other's sockets.
+ */
 @Singleton
 class CloudRouteSink internal constructor(
     private val resolveBaseUrl: () -> String,
@@ -89,6 +109,11 @@ class CloudRouteSink internal constructor(
     private val gracePeriodSignal: GracePeriodSignal? = null,
     /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
+    /**
+     * The journal-backed app-operation seam. Its default is [AppOperationSupport.Unwired]: no owner,
+     * no store, so every v1 operation refuses rather than executing without a durable record.
+     */
+    private val appOperationSupport: AppOperationSupport = AppOperationSupport.Unwired,
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -561,7 +586,10 @@ class CloudRouteSink internal constructor(
                 routeHint = hint,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
-            val events = openRoute(turn)
+            // THE import-triggering reference (see openRoute's OpenedTurn): the events flow and the
+            // session it belongs to are produced by one call and held here, in this coroutine, so no
+            // other turn can see or replace them.
+            val opened = openRoute(turn)
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
             // to restore it. Taken under the same mutex as registration so a predecessor's
@@ -601,291 +629,386 @@ class CloudRouteSink internal constructor(
                 }
             }
 
-            // Flow.collect's action is crossinline — cannot return@routeTurn from it.
-            events.collect { event ->
-                if (outcome != null) return@collect
-                when (event) {
-                    is CloudRouteEvent.Connected -> {
-                        // Handshake acknowledgement, and the frame that carries the codec the
-                        // server negotiated. Propagate it so the player builds the right decoder
-                        // and sample rate before any binary frame arrives.
-                        audioPlayer?.setCodec(event.codec)
-                        // Auth/socket diagnostics are recorded by the transport observer at
-                        // actual onOpen/send callbacks, not here at the sink's Connected event.
-                    }
-
-                    is CloudRouteEvent.Action -> {
-                        // A deterministic HOLD carries `turn_id` and is the turn's own: the engine
-                        // sends it at its delivery commitment, meaning "this turn is about to speak".
-                        // It is attributed by that identity rather than by arrival order, because the
-                        // terminal rule is "release nothing unless THIS turn took the hold, and never
-                        // release a successor's" -- which arrival order cannot answer once two turns
-                        // overlap. A hold for another turn is ignored outright: it belongs to a turn
-                        // that is not this one, so acting on it would take or drop a hold we do not own.
-                        //
-                        // A frame WITHOUT `turn_id` is an app operation, answered with a typed result,
-                        // and it keeps the existing path unchanged.
-                        if (event.turnId != null && event.turnId != myRequestId) {
-                            return@collect
-                        }
-                        // The delivery commitment ACTIVATES this turn's hold: it is the moment the
-                        // server commits to a long answer, so the user's place is now taken. This is
-                        // the ONLY place the turn pauses -- turn start records the metadata and does
-                        // not touch playback, so a short answer keeps the ducking it is entitled to.
-                        //
-                        // The reservation is spent here, which is what keeps an unactivated one
-                        // distinguishable from a taken hold: an unactivated reservation is dropped at
-                        // the turn's end without a pause ever having happened, and nothing auto-resumes
-                        // it.
-                        if (event.turnId != null && event.action == "pause") {
-                            turnMutex.withLock {
-                                if (activeTurnId == myId && pauseReserved && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
-                                    pauseReserved = false
-                                    playerAutoPaused = true
-                                    // Declared as an ownership fact, not inferred from the tag: the
-                                    // user's own pause reaches the player through the same
-                                    // VOICE_COMMANDS interface.
-                                    playbackSink.pauseAsHold()
-                                }
-                            }
-                            return@collect
-                        }
-                        // Only a *performed* action counts: executeAction ignores an unknown tool,
-                        // an unknown action, missing parameters and superseded turns, and an ignored
-                        // action followed by a blank Done must not pass for a turn that delivered
-                        // something.
-                        val actionResult = executeAction(
-                            event.tool,
-                            event.action,
-                            event.params,
-                            turnState,
-                            myId,
-                            plannedEpisodeId = context.episodeId,
-                        )
-                        // THE BOOLEAN IS NOT EVIDENCE OF CONFIRMATION. `executeAction` returns true
-                        // for an action it DISPATCHED, including one whose outcome is unknown -- so
-                        // noting Confirmed from `true` and then noting Unknown recorded BOTH for a
-                        // single unknown action, and Confirmed is the one a caller reads as success.
-                        //
-                        // ORDERED, NOT MERGED: an unknown outcome suppresses the confirmation claim,
-                        // because the stronger observation is the one that says "we could not tell".
-                        // THE TYPED RESULT IS THE ANSWER, consumed directly: Confirmed only for an action
-                        // the sink OBSERVED, Unknown for one it dispatched without learning the outcome,
-                        // None otherwise. No `true`-then-Unknown ordering is needed or wanted.
-                        noteOutcome(actionResult)
-                    }
-
-                    is CloudRouteEvent.AudioFrame -> {
-                        // Binary audio on the turn socket: submit to the player for buffered
-                        // playback (the assistant's reply is delivered as audio, not tokens).
-                        // Duck the host player on the first frame; restore on Done.
-                        //
-                        // OWNERSHIP-SERIALIZED MUTATION (reviewer faeb2546): the ownership check
-                        // AND the duck/submit/play mutation run inside the same turnMutex block
-                        // the successor's transfer uses, so a predecessor already processing a
-                        // frame cannot submit or play AFTER the successor's transfer stop and
-                        // restart stale buffered audio. Holding the lock for a standalone check
-                        // alone could still race the transfer; the mutation itself must be inside.
-                        turnMutex.withLock {
-                            if (activeTurnId != myId) return@collect
-                            if (!audioPlayed) {
-                                audioPlayed = true
-                                playbackSink.duck()
-                                ducked = true
-                                // The obligation outlives this invocation: a successor inherits it.
-                                duckReserved = true
-                            }
-                            audioPlayer?.submitFrame(event.bytes)
-                            audioPlayer?.play()
-                            // Audio submission boundary: play() called on the cloud audio player.
-                            // This is a submission/request, not confirmed audible output.
-                            if (audioPlayer != null) {
-                                Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
-                            }
-                        }
-                    }
-
-                    is CloudRouteEvent.Done -> {
-                        sawDone = true
-                        if (event.outcome == CloudRouteEvent.Outcome.Completed) sawDoneCompleted = true
-                        // Terminal diagnostics are recorded at the actual decode point in
-                        // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
-                        val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
-                        analytics.recordTurn(
-                            outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
-                            inputTokens = event.inputTokens,
-                            outputTokens = event.outputTokens,
-                        )
-                        val interrupted = event.outcome == CloudRouteEvent.Outcome.Interrupted
-                        if (interrupted) audioPlayer?.stop()
-                        // Restore the host player to full volume.
-                        if (ducked) {
-                            playbackSink.restore()
-                            ducked = false
-                            duckReserved = false
-                        }
-                        // Wait for the output to be OBSERVED to have played the submitted frames.
-                        // drainAndStop submitted the frames and stopped immediately -- submission is
-                        // not playback, and the tail still in the device buffer was cut off. Per the
-                        // completion ruling, the turn ends normally only when the playback head
-                        // reaches what was written; an unconsumed or unmeasurable result is recorded
-                        // on the local axis, like a refused write, without rewriting the server's
-                        // terminal outcome.
-                        if (audioPlayed && !interrupted) {
-                            val sink = audioPlayer
-                            val completion = sink?.let {
-                                try {
-                                    it.drainAndAwaitCompletion()
-                                } catch (c: kotlinx.coroutines.CancellationException) {
-                                    throw c
-                                } catch (e: Exception) {
-                                    Timber.w(e, "[CloudRoute] awaiting playback completion failed")
-                                    CloudAudioPlayer.Completion.Unknown
-                                }
-                            } ?: CloudAudioPlayer.Completion.Unknown
-                            if (completion != CloudAudioPlayer.Completion.Consumed) {
-                                Timber.w(
-                                    "[CloudRoute] playback ended %s (head unobserved or lagging)",
-                                    completion,
-                                )
-                                localPlaybackFailed = localPlaybackFailed ||
-                                    completion == CloudAudioPlayer.Completion.Unconsumed
-                            }
-                        }
-                        // The local playback failure is reported on its own axis, so the server's
-                        // terminal outcome is preserved rather than being rewritten by a local
-                        // fault. It is not a replay trigger either: the answer is simply reported
-                        // as not fully delivered.
-                        if (localPlaybackFailed) {
-                            Timber.w("[CloudRoute] turn completed on the server but its audio was cut short locally")
-                        }
-                        outcome = when {
-                            interrupted -> VoiceResponse.Silent
-
-                            localPlaybackFailed -> VoiceResponse.Earcon(EarconId.ERROR)
-
-                            audioPlayer?.audioWritten == true -> VoiceResponse.Silent
-
-                            audioPlayer != null -> {
-                                // WebSocket path expected audio but none arrived —
-                                // explicit failure rather than speaking leftover tokens.
-                                VoiceResponse.Earcon(EarconId.ERROR)
-                            }
-
-                            // The turn delivered something else — an action it actually performed,
-                            // or a result it rendered. Silence is right: that was the answer.
-                            // A CONFIRMED action or a rendered result is the answer. An UNKNOWN action is
-                            // reported as delivered too -- the turn DID dispatch it, and saying "nothing
-                            // happened" would invite a repeat -- but the two are distinguished in the
-                            // value rather than merged, so a caller can tell them apart.
-                            actionOutcome != ActionOutcome.None || handledResult -> VoiceResponse.Silent
-
-                            else -> {
-                                // No audio and nothing done: an unexpected empty turn, not a search
-                                // that found nothing. The server's guard should make this
-                                // unreachable; malformed empty turns fail explicitly. Same
-                                // localized-or-earcon rule as the other spoken fallbacks: never
-                                // speak base-language prose on a device set to another language.
-                                val resolved = resolveLocalizedLine(KEY_CLOUD_INCOMPLETE_TURN, turn.sourceLanguage)
-                                refusedTerminal = true
-                                spokenLanguage = resolved.languageTag
-                                if (resolved.text.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(resolved.text)
-                            }
-                        }
-                        // Transport boundary: feedback/render decision made for this turn.
-                        val doneFeedbackKind = when (outcome) {
-                            is VoiceResponse.Silent -> "silent"
-                            is VoiceResponse.Spoken -> "spoken"
-                            is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
-                            else -> outcome?.let { it::class.simpleName } ?: "unknown"
-                        }
-                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = doneFeedbackKind))
-                    }
-
-                    is CloudRouteEvent.Result -> {
-                        // Renderer is present iff we advertised the capability;
-                        // results never auto-play. Only the negotiated result kind is rendered.
-                        val renderer = searchResultsRenderer
-                        if (renderer != null &&
-                            event.results.kind == CloudSearchResults.KIND_EPISODE_RESULTS
-                        ) {
-                            if (event.results.items.isEmpty()) {
-                                renderer.renderEmpty(event.results.scope)
-                            } else {
-                                renderer.renderResults(event.results)
-                            }
-                            // Rendered is delivered: the no-match state is the answer, so a blank
-                            // Done after it must not also speak the incomplete-turn line.
-                            handledResult = true
-                        }
-                    }
-
-                    is CloudRouteEvent.Error -> {
-                        // Terminal diagnostics are recorded at the actual decode point in
-                        // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
-                        // Local Error events (missing-token, parse) do NOT fire server terminal.
-                        endReason = Reason.TurnFailed
-                        // Genuinely unavailable evidence is a state the results
-                        // renderer owns whenever it is present AND this turn had a
-                        // results surface (three states, not two).
-                        // Capability advertisement is client-scoped (a client
-                        // advertises only what it can render), so the renderer
-                        // check is the whole gate — see advertisedCapabilities().
-                        if (searchResultsRenderer != null &&
-                            event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
-                        ) {
-                            searchResultsRenderer.renderUnavailable()
-                            // Rendered, so the user has been told; a spoken line on top of it would
-                            // say the same thing twice in different words.
-                            handledResult = true
-                        }
-                        // Code only: the server's message can carry upstream
-                        // detail derived from the user's request or account,
-                        // and it is already spoken/shown where it belongs.
-                        // A server-signalled result state, not a client defect:
-                        // keep it visible without putting a normal turn outcome
-                        // at error level.
-                        Timber.w(
-                            "CloudRouteSink: turn error code=%s",
-                            CloudRouteErrorCodes.normalizeForLog(event.code),
-                        )
-                        analytics.recordTurn(outcome = "error")
-                        // The client speaks its own words for every failure and never the server's
-                        // `message`. That field is user-facing on the edge and upstream detail on the
-                        // assistant ("catalog provider: status 401 for
-                        // /api/catalog/podcasts/<uuid>/episodes"), and no client can tell those two
-                        // apart without knowing which service it reached. So: a template for the
-                        // code, then a generic local line, then the earcon — untrusted text is never
-                        // spoken, and a code nobody has seen yet still says something.
-                        // THE UTTERANCE'S LANGUAGE, not the device locale: the refusal is spoken
-                        // in the language the user spoke (spec 54287f13). Falls back to the default
-                        // line when the language is missing or unsupported.
-                        val resolvedError = if (handledResult) {
-                            ResolvedSpokenLine("", "en")
-                        } else {
-                            resolveLocalizedLine(KEY_CLOUD_ERROR_PREFIX + event.code, turn.sourceLanguage)
-                                .takeIf { it.text.isNotBlank() }
-                                ?: resolveLocalizedLine(KEY_CLOUD_ERROR_GENERIC, turn.sourceLanguage)
-                        }
-                        spokenLanguage = resolvedError.languageTag
-                        val spoken = resolvedError.text
-                        // Rendered already means the user was told; adding a sound would say it again.
-                        outcome = when {
-                            handledResult -> VoiceResponse.Silent
-                            spoken.isBlank() -> VoiceResponse.Earcon(EarconId.ERROR)
-                            else -> VoiceResponse.Spoken(spoken)
-                        }
-                        // Transport boundary: feedback/render decision made for error turn.
-                        val errorFeedbackKind = when (outcome) {
-                            is VoiceResponse.Silent -> "silent"
-                            is VoiceResponse.Spoken -> "spoken"
-                            is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
-                            else -> outcome.let { it::class.simpleName } ?: "unknown"
-                        }
-                        refusedTerminal = true
-                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = errorFeedbackKind))
+            // App-operation work admitted during this turn, settled and written on this turn's socket.
+            //
+            // ONE deadline governs it, and the deadline belongs to the SESSION, not to this collection:
+            // the transport derives it once when retirement starts and enforces it on its own cleanup,
+            // so the sink's wait here and the transport's release cannot drift apart. Waiting is not
+            // permission either -- the lease is what lets an admitted answer reach the socket, and the
+            // transport refuses a lease taken after the deadline.
+            val admittedWork: MutableSet<Job> = ConcurrentHashMap.newKeySet()
+            val admittedScope = CoroutineScope(currentCoroutineContext() + SupervisorJob())
+            fun launchAdmitted(block: suspend () -> Unit): Boolean {
+                // THE LEASE IS TAKEN HERE, while the turn is still admitting work, and is held across
+                // the effect observation and the result send. Taking it only around the send would let
+                // the transport observe no outstanding work and retire the socket mid-operation.
+                val lease = opened.turnSession.ownership?.admit() ?: return false
+                val job = admittedScope.launch {
+                    try {
+                        block()
+                    } finally {
+                        lease.release()
                     }
                 }
+                admittedWork += job
+                job.invokeOnCompletion { admittedWork -= job }
+                return true
+            }
+
+            // Flow.collect's action is crossinline — cannot return@routeTurn from it.
+            try {
+                opened.flow.collect { event ->
+                    if (outcome != null) return@collect
+                    when (event) {
+                        is CloudRouteEvent.Connected -> {
+                            // Handshake acknowledgement, and the frame that carries the codec the
+                            // server negotiated. Propagate it so the player builds the right decoder
+                            // and sample rate before any binary frame arrives.
+                            audioPlayer?.setCodec(event.codec)
+                            // Auth/socket diagnostics are recorded by the transport observer at
+                            // actual onOpen/send callbacks, not here at the sink's Connected event.
+                        }
+
+                        is CloudRouteEvent.Action -> {
+                            // A deterministic HOLD carries `turn_id` and is the turn's own: the engine
+                            // sends it at its delivery commitment, meaning "this turn is about to speak".
+                            // It is attributed by that identity rather than by arrival order, because the
+                            // terminal rule is "release nothing unless THIS turn took the hold, and never
+                            // release a successor's" -- which arrival order cannot answer once two turns
+                            // overlap. A hold for another turn is ignored outright: it belongs to a turn
+                            // that is not this one, so acting on it would take or drop a hold we do not own.
+                            //
+                            // A frame without an app-operation identity is handled exactly as before: the
+                            // v1 recognition happens at decode, on field presence, so no legacy frame can
+                            // reach the AppOperation branch below.
+                            if (event.turnId != null && event.turnId != myRequestId) {
+                                return@collect
+                            }
+                            // The delivery commitment ACTIVATES this turn's hold: it is the moment the
+                            // server commits to a long answer, so the user's place is now taken. This is
+                            // the ONLY place the turn pauses -- turn start records the metadata and does
+                            // not touch playback, so a short answer keeps the ducking it is entitled to.
+                            //
+                            // The reservation is spent here, which is what keeps an unactivated one
+                            // distinguishable from a taken hold: an unactivated reservation is dropped at
+                            // the turn's end without a pause ever having happened, and nothing auto-resumes
+                            // it.
+                            if (event.turnId != null && event.action == "pause") {
+                                turnMutex.withLock {
+                                    if (activeTurnId == myId && pauseReserved && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
+                                        pauseReserved = false
+                                        playerAutoPaused = true
+                                        // Declared as an ownership fact, not inferred from the tag: the
+                                        // user's own pause reaches the player through the same
+                                        // VOICE_COMMANDS interface.
+                                        playbackSink.pauseAsHold()
+                                    }
+                                }
+                                return@collect
+                            }
+                            // Only a *performed* action counts: executeAction ignores an unknown tool,
+                            // an unknown action, missing parameters and superseded turns, and an ignored
+                            // action followed by a blank Done must not pass for a turn that delivered
+                            // something.
+                            val actionResult = executeAction(
+                                event.tool,
+                                event.action,
+                                event.params,
+                                turnState,
+                                myId,
+                                plannedEpisodeId = context.episodeId,
+                            )
+                            // THE BOOLEAN IS NOT EVIDENCE OF CONFIRMATION. `executeAction` returns true
+                            // for an action it DISPATCHED, including one whose outcome is unknown -- so
+                            // noting Confirmed from `true` and then noting Unknown recorded BOTH for a
+                            // single unknown action, and Confirmed is the one a caller reads as success.
+                            //
+                            // ORDERED, NOT MERGED: an unknown outcome suppresses the confirmation claim,
+                            // because the stronger observation is the one that says "we could not tell".
+                            // THE TYPED RESULT IS THE ANSWER, consumed directly: Confirmed only for an action
+                            // the sink OBSERVED, Unknown for one it dispatched without learning the outcome,
+                            // None otherwise. No `true`-then-Unknown ordering is needed or wanted.
+                            noteOutcome(actionResult)
+                        }
+
+                        is CloudRouteEvent.AudioFrame -> {
+                            // Binary audio on the turn socket: submit to the player for buffered
+                            // playback (the assistant's reply is delivered as audio, not tokens).
+                            // Duck the host player on the first frame; restore on Done.
+                            //
+                            // OWNERSHIP-SERIALIZED MUTATION (reviewer faeb2546): the ownership check
+                            // AND the duck/submit/play mutation run inside the same turnMutex block
+                            // the successor's transfer uses, so a predecessor already processing a
+                            // frame cannot submit or play AFTER the successor's transfer stop and
+                            // restart stale buffered audio. Holding the lock for a standalone check
+                            // alone could still race the transfer; the mutation itself must be inside.
+                            turnMutex.withLock {
+                                if (activeTurnId != myId) return@collect
+                                if (!audioPlayed) {
+                                    audioPlayed = true
+                                    playbackSink.duck()
+                                    ducked = true
+                                    // The obligation outlives this invocation: a successor inherits it.
+                                    duckReserved = true
+                                }
+                                audioPlayer?.submitFrame(event.bytes)
+                                audioPlayer?.play()
+                                // Audio submission boundary: play() called on the cloud audio player.
+                                // This is a submission/request, not confirmed audible output.
+                                if (audioPlayer != null) {
+                                    Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
+                                }
+                            }
+                        }
+
+                        is CloudRouteEvent.AppOperation -> {
+                            // A v1 operation is admitted, settled and answered inside the turn session that
+                            // delivered it: no transcript, no duck, no hold, no ad hoc command, and no work
+                            // outliving the connection. Everything durable is in the journal.
+                            val turnId = myRequestId ?: return@collect
+                            val session = opened.turnSession
+                            // A refusal means the turn is retiring: nothing new may begin behind a
+                            // connection that is on its way out, so this operation is left unanswered
+                            // rather than half-started.
+                            if (!launchAdmitted {
+                                    val answer = deliverAppOperation(event, session, turnId, context.episodeId)
+                                    if (answer != null) {
+                                        session.sender?.sendResult(
+                                            CloudTurnFrame.AppOperationResult(
+                                                requestId = turnId,
+                                                operationId = event.operationId,
+                                                payloadJson = answer.resultJson,
+                                            ),
+                                        )
+                                    }
+                                }
+                            ) {
+                                // The transport refused the lease, so the turn is past the point where new
+                                // work may begin: answer nothing and start nothing.
+                                return@collect
+                            }
+                        }
+
+                        is CloudRouteEvent.MalformedAppOperation -> {
+                            // A claiming frame that could not be understood is still answerable when an
+                            // identity was recovered: refuse it, never leave the server waiting, and never
+                            // treat it as legacy playback. With no recoverable id there is nothing to
+                            // address, and silence is the only honest answer.
+                            val operationId = event.operationId ?: return@collect
+                            val turnId = myRequestId ?: return@collect
+                            val session = opened.turnSession
+                            if (!launchAdmitted {
+                                    AppOperationDelivery.refused(
+                                        operationId,
+                                        AppOperationDelivery.REASON_INVALID_REQUEST,
+                                        replayed = false,
+                                    )?.let { answer ->
+                                        session.sender?.sendResult(
+                                            CloudTurnFrame.AppOperationResult(
+                                                requestId = turnId,
+                                                operationId = operationId,
+                                                payloadJson = answer.resultJson,
+                                            ),
+                                        )
+                                    }
+                                }
+                            ) {
+                                return@collect
+                            }
+                        }
+
+                        is CloudRouteEvent.Done -> {
+                            sawDone = true
+                            if (event.outcome == CloudRouteEvent.Outcome.Completed) sawDoneCompleted = true
+                            // Terminal diagnostics are recorded at the actual decode point in
+                            // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
+                            val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
+                            analytics.recordTurn(
+                                outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
+                                inputTokens = event.inputTokens,
+                                outputTokens = event.outputTokens,
+                            )
+                            val interrupted = event.outcome == CloudRouteEvent.Outcome.Interrupted
+                            if (interrupted) audioPlayer?.stop()
+                            // Restore the host player to full volume.
+                            if (ducked) {
+                                playbackSink.restore()
+                                ducked = false
+                                duckReserved = false
+                            }
+                            // Wait for the output to be OBSERVED to have played the submitted frames.
+                            // drainAndStop submitted the frames and stopped immediately -- submission is
+                            // not playback, and the tail still in the device buffer was cut off. Per the
+                            // completion ruling, the turn ends normally only when the playback head
+                            // reaches what was written; an unconsumed or unmeasurable result is recorded
+                            // on the local axis, like a refused write, without rewriting the server's
+                            // terminal outcome.
+                            if (audioPlayed && !interrupted) {
+                                val sink = audioPlayer
+                                val completion = sink?.let {
+                                    try {
+                                        it.drainAndAwaitCompletion()
+                                    } catch (c: kotlinx.coroutines.CancellationException) {
+                                        throw c
+                                    } catch (e: Exception) {
+                                        Timber.w(e, "[CloudRoute] awaiting playback completion failed")
+                                        CloudAudioPlayer.Completion.Unknown
+                                    }
+                                } ?: CloudAudioPlayer.Completion.Unknown
+                                if (completion != CloudAudioPlayer.Completion.Consumed) {
+                                    Timber.w(
+                                        "[CloudRoute] playback ended %s (head unobserved or lagging)",
+                                        completion,
+                                    )
+                                    localPlaybackFailed = localPlaybackFailed ||
+                                        completion == CloudAudioPlayer.Completion.Unconsumed
+                                }
+                            }
+                            // The local playback failure is reported on its own axis, so the server's
+                            // terminal outcome is preserved rather than being rewritten by a local
+                            // fault. It is not a replay trigger either: the answer is simply reported
+                            // as not fully delivered.
+                            if (localPlaybackFailed) {
+                                Timber.w("[CloudRoute] turn completed on the server but its audio was cut short locally")
+                            }
+                            outcome = when {
+                                interrupted -> VoiceResponse.Silent
+
+                                localPlaybackFailed -> VoiceResponse.Earcon(EarconId.ERROR)
+
+                                audioPlayer?.audioWritten == true -> VoiceResponse.Silent
+
+                                audioPlayer != null -> {
+                                    // WebSocket path expected audio but none arrived —
+                                    // explicit failure rather than speaking leftover tokens.
+                                    VoiceResponse.Earcon(EarconId.ERROR)
+                                }
+
+                                // The turn delivered something else — an action it actually performed,
+                                // or a result it rendered. Silence is right: that was the answer.
+                                // A CONFIRMED action or a rendered result is the answer. An UNKNOWN action is
+                                // reported as delivered too -- the turn DID dispatch it, and saying "nothing
+                                // happened" would invite a repeat -- but the two are distinguished in the
+                                // value rather than merged, so a caller can tell them apart.
+                                // A REFUSED action is NOT delivery: "unsupported" is not "performed", and a
+                                // turn whose only action was refused falls through to the empty-turn error
+                                // below rather than passing for a turn that delivered something.
+                                (actionOutcome != ActionOutcome.None && actionOutcome != ActionOutcome.Refused) || handledResult -> VoiceResponse.Silent
+
+                                else -> {
+                                    // No audio and nothing done: an unexpected empty turn, not a search
+                                    // that found nothing. The server's guard should make this
+                                    // unreachable; malformed empty turns fail explicitly. Same
+                                    // localized-or-earcon rule as the other spoken fallbacks: never
+                                    // speak base-language prose on a device set to another language.
+                                    val resolved = resolveLocalizedLine(KEY_CLOUD_INCOMPLETE_TURN, turn.sourceLanguage)
+                                    refusedTerminal = true
+                                    spokenLanguage = resolved.languageTag
+                                    if (resolved.text.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(resolved.text)
+                                }
+                            }
+                            // Transport boundary: feedback/render decision made for this turn.
+                            val doneFeedbackKind = when (outcome) {
+                                is VoiceResponse.Silent -> "silent"
+                                is VoiceResponse.Spoken -> "spoken"
+                                is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
+                                else -> outcome?.let { it::class.simpleName } ?: "unknown"
+                            }
+                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = doneFeedbackKind))
+                        }
+
+                        is CloudRouteEvent.Result -> {
+                            // Renderer is present iff we advertised the capability;
+                            // results never auto-play. Only the negotiated result kind is rendered.
+                            val renderer = searchResultsRenderer
+                            if (renderer != null &&
+                                event.results.kind == CloudSearchResults.KIND_EPISODE_RESULTS
+                            ) {
+                                if (event.results.items.isEmpty()) {
+                                    renderer.renderEmpty(event.results.scope)
+                                } else {
+                                    renderer.renderResults(event.results)
+                                }
+                                // Rendered is delivered: the no-match state is the answer, so a blank
+                                // Done after it must not also speak the incomplete-turn line.
+                                handledResult = true
+                            }
+                        }
+
+                        is CloudRouteEvent.Error -> {
+                            // Terminal diagnostics are recorded at the actual decode point in
+                            // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
+                            // Local Error events (missing-token, parse) do NOT fire server terminal.
+                            endReason = Reason.TurnFailed
+                            // Genuinely unavailable evidence is a state the results
+                            // renderer owns whenever it is present AND this turn had a
+                            // results surface (three states, not two).
+                            // Capability advertisement is client-scoped (a client
+                            // advertises only what it can render), so the renderer
+                            // check is the whole gate — see advertisedCapabilities().
+                            if (searchResultsRenderer != null &&
+                                event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
+                            ) {
+                                searchResultsRenderer.renderUnavailable()
+                                // Rendered, so the user has been told; a spoken line on top of it would
+                                // say the same thing twice in different words.
+                                handledResult = true
+                            }
+                            // Code only: the server's message can carry upstream
+                            // detail derived from the user's request or account,
+                            // and it is already spoken/shown where it belongs.
+                            // A server-signalled result state, not a client defect:
+                            // keep it visible without putting a normal turn outcome
+                            // at error level.
+                            Timber.w(
+                                "CloudRouteSink: turn error code=%s",
+                                CloudRouteErrorCodes.normalizeForLog(event.code),
+                            )
+                            analytics.recordTurn(outcome = "error")
+                            // The client speaks its own words for every failure and never the server's
+                            // `message`. That field is user-facing on the edge and upstream detail on the
+                            // assistant ("catalog provider: status 401 for
+                            // /api/catalog/podcasts/<uuid>/episodes"), and no client can tell those two
+                            // apart without knowing which service it reached. So: a template for the
+                            // code, then a generic local line, then the earcon — untrusted text is never
+                            // spoken, and a code nobody has seen yet still says something.
+                            // THE UTTERANCE'S LANGUAGE, not the device locale: the refusal is spoken
+                            // in the language the user spoke (spec 54287f13). Falls back to the default
+                            // line when the language is missing or unsupported.
+                            val resolvedError = if (handledResult) {
+                                ResolvedSpokenLine("", "en")
+                            } else {
+                                resolveLocalizedLine(KEY_CLOUD_ERROR_PREFIX + event.code, turn.sourceLanguage)
+                                    .takeIf { it.text.isNotBlank() }
+                                    ?: resolveLocalizedLine(KEY_CLOUD_ERROR_GENERIC, turn.sourceLanguage)
+                            }
+                            spokenLanguage = resolvedError.languageTag
+                            val spoken = resolvedError.text
+                            // Rendered already means the user was told; adding a sound would say it again.
+                            outcome = when {
+                                handledResult -> VoiceResponse.Silent
+                                spoken.isBlank() -> VoiceResponse.Earcon(EarconId.ERROR)
+                                else -> VoiceResponse.Spoken(spoken)
+                            }
+                            // Transport boundary: feedback/render decision made for error turn.
+                            val errorFeedbackKind = when (outcome) {
+                                is VoiceResponse.Silent -> "silent"
+                                is VoiceResponse.Spoken -> "spoken"
+                                is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
+                                else -> outcome.let { it::class.simpleName } ?: "unknown"
+                            }
+                            refusedTerminal = true
+                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = errorFeedbackKind))
+                        }
+                    }
+                }
+            } finally {
+                // BOUNDED DRAIN: a terminal frame can arrive while an admitted operation is still
+                // settling. The transport closes this turn's socket the moment this collection ends, so
+                // the sink waits -- bounded -- for admitted work to settle and send against the socket
+                // it was admitted on. Whatever does not finish in time keeps its durable record and is
+                // replayed by a redelivery; it is never re-executed and never loses its claim.
+                drainAdmittedOperations(admittedWork, opened.turnSession.ownership)
             }
         } catch (cancelled: CancellationException) {
             endReason = Reason.TurnCancelled
@@ -1001,6 +1124,244 @@ class CloudRouteSink internal constructor(
     }
 
     /**
+     * Waits, briefly, for app-operation work admitted during this turn to finish.
+     *
+     * The deadline is the SESSION's: the transport derives it once when retirement starts, exposes it
+     * through `TurnSession.ownership`, and enforces the same instant when it releases the registration.
+     * This wait is therefore a courtesy to the transport, never an extension of it — a task that
+     * outlives the deadline is left to finish on its own, its settlement stays durable, its outcome
+     * stays unknown, and a redelivery replays it instead of executing it again.
+     */
+    private suspend fun drainAdmittedOperations(admitted: Set<Job>, ownership: CloudTurnTransport.TurnOwnership?) {
+        if (admitted.isEmpty()) return
+        withContext(NonCancellable) {
+            // ESTABLISH, THEN WAIT. Retirement is established synchronously here -- the sink reaches
+            // the boundary first when the collection ends -- and only then is the remaining time read.
+            // Reading first would observe 0 and skip the wait, and the transport's own cleanup would
+            // arrive later to find work it had already been told was finished.
+            val deadline = ownership?.establishRetirement() ?: 0L
+            if (deadline > 0L) {
+                withTimeoutOrNull(maxOf(0L, deadline - System.currentTimeMillis())) {
+                    admitted.toList().forEach { it.join() }
+                }
+            } else {
+                // No retirement deadline known: do not invent one. Joining without a bound would be a
+                // second timer by omission, so the work is left to finish on its own.
+                admitted.toList().forEach { if (it.isCompleted) it.join() }
+            }
+        }
+    }
+
+    /**
+     * Admits one v1 operation and returns the result document to send, or null when there is nothing
+     * addressable to send it for.
+     *
+     * Every failure inside this method becomes a fail-closed RESULT rather than an exception that
+     * escapes the turn: a storage fault must not end the turn with the operation unanswered.
+     */
+    private suspend fun deliverAppOperation(
+        event: CloudRouteEvent.AppOperation,
+        session: TurnSession?,
+        myTurnId: String,
+        plannedEpisodeId: String?,
+    ): AppOperationDelivery.Delivery? {
+        return try {
+            // A syntactically decodable frame is not an executable operation: the v1 codec is the
+            // authority on identity, bounds and required fields, and an operation it rejects is
+            // refused with its recoverable id rather than dropped.
+            when (val parsed = AppOperationV1.parse(event.rawBytes.decodeToString())) {
+                is AppOperationV1.Parsed.Invalid -> {
+                    // The codec's own bounded identity, or — when it refused before reading one — the
+                    // identity the socket recovered from field presence. Both are validated ids.
+                    val operationId = parsed.operationId ?: event.operationId
+                    AppOperationDelivery.refused(operationId, AppOperationDelivery.REASON_INVALID_REQUEST, replayed = false)
+                }
+
+                is AppOperationV1.Parsed.Valid -> {
+                    val owner = session?.owner
+                    val conversation = session?.conversationId
+                    val ownership = session?.ownership
+                    if (owner == null || conversation == null || ownership == null) {
+                        // No stable account, no conversation bound to this turn, or -- on a path with no
+                        // transport turn -- no ownership to take an admission lease from. Executing
+                        // would either produce an effect this device could never answer for later, or
+                        // run with no lease binding it to the connection its answer must travel on.
+                        // ABSENT IS REFUSED, never stood in for by an invented ownership.
+                        AppOperationDelivery.refused(parsed.request.operationId, AppOperationDelivery.REASON_PERSISTENCE_UNAVAILABLE, replayed = false)
+                    } else {
+                        val claim = AppOperationJournal.Claim(
+                            owner = owner,
+                            conversation = conversation,
+                            turn = myTurnId,
+                            operationId = parsed.request.operationId,
+                        )
+                        AppOperationDelivery.deliver(
+                            request = parsed.request,
+                            claim = claim,
+                            store = appOperationSupport.store(),
+                        ) {
+                            observeAppOperation(parsed.request, plannedEpisodeId)
+                        }
+                    }
+                }
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: Exception) {
+            // A fault HERE is a PRE-EFFECT admission failure: parsing, the owner/conversation check,
+            // or opening the store. Nothing has been executed, so `refused` is truthful and the id
+            // stays claimable. Faults AFTER the effect has run are handled inside
+            // `AppOperationDelivery.deliver`, which knows the boundary and answers `unknown` --
+            // claiming a refusal there would invite a retry of an operation that may already have
+            // taken effect.
+            Timber.w(e, "[CloudRoute] app operation failed closed before any effect")
+            AppOperationDelivery.refused(event.operationId, AppOperationDelivery.REASON_PERSISTENCE_UNAVAILABLE, replayed = false)
+        }
+    }
+
+    /**
+     * The journal-protected adapter to the existing executor: the only place an app operation may
+     * cause an effect.
+     *
+     * Supported actions are the two whose resulting state can be READ BACK. An action that is not in
+     * [SUPPORTED_APP_OPERATIONS] refuses without touching playback, and an action whose result cannot
+     * be observed settles `unknown` rather than success — a dispatched command is not an observed
+     * outcome, and neither an earcon nor an earlier Confirmed says anything about this operation.
+     */
+    private suspend fun observeAppOperation(
+        request: AppOperationV1.Request,
+        plannedEpisodeId: String?,
+    ): AppOperationDelivery.Observation {
+        val action = "${request.tool}.${request.action}"
+        if (action !in SUPPORTED_APP_OPERATIONS) {
+            return AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_UNSUPPORTED)
+        }
+        // THE PRECONDITION IS CHECKED IMMEDIATELY BEFORE THE EFFECT, against state read now. Not
+        // earlier: a check performed when the frame arrived says nothing about the player a moment
+        // before the mutation, and the selection can change in between.
+        val claimedEpisode = claimedTargetEpisode(request)
+        val observedBefore = currentObservedState()
+        val currentEpisode = observedBefore?.optString("episode_id")?.takeIf { it.isNotBlank() }
+        if (claimedEpisode != null && claimedEpisode != currentEpisode) {
+            // The request targets an episode that is not the one playing: operate on nothing rather
+            // than on a different recording than the one asked for.
+            return AppOperationDelivery.Observation.Refused(REASON_TARGET_MISMATCH)
+        }
+        return when (action) {
+            "playback.pause" -> {
+                // AN ALREADY-PAUSED PLAYER IS AN IDEMPOTENT SUCCESS, not a refusal: the contract's
+                // post-condition is the observed state, not a change (voice-intents.md, committed
+                // 818c8f75). Pausing something already paused still satisfies it, so there is no
+                // pre-check here -- the sink runs and the observation decides.
+                playbackSink.pause()
+                // Whatever the sink answered, the result is what the engine reports NOW, and that is
+                // the only evidence a success may rest on.
+                observedAfterPause()
+            }
+
+            "playback.resume" -> {
+                // Idempotent by observation (voice-intents.md df5def09): an ALREADY-PLAYING engine
+                // satisfies resume, so there is no paused precondition here — the sink runs and the
+                // fresh post-effect observation decides. Supplied target/identity requirements
+                // (claimedEpisode vs the playing episode) ran above; owner and deadline gates live
+                // outside this path. Legacy local/answer-hold behavior is unchanged.
+                when (playbackSink.resume(expectedEpisodeId = currentEpisode)) {
+                    is EpisodeOperationResult.Accepted -> observedAfterResume()
+
+                    is EpisodeOperationResult.Refused -> AppOperationDelivery.Observation.Refused(REASON_PLAYER_REFUSED)
+
+                    is EpisodeOperationResult.Unknown ->
+                        AppOperationDelivery.Observation.Unconfirmed(AppOperationDelivery.REASON_UNOBSERVED)
+                }
+            }
+
+            else -> AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_UNSUPPORTED)
+        }
+    }
+
+    /** The episode this request claims to act on, or null when it names none. */
+    private fun claimedTargetEpisode(request: AppOperationV1.Request): String? {
+        val params = request.params
+        val claimed = params.optString("episode_id").takeIf { it.isNotBlank() }
+            ?: request.precondition?.optString("episode_id")?.takeIf { it.isNotBlank() }
+        return claimed
+    }
+
+    /**
+     * Player state read NOW, or null when it cannot be read.
+     *
+     * Null is not "nothing is playing": an unreadable state means no observation was made, and a
+     * caller that treats it as evidence is claiming a measurement it never took.
+     */
+    private fun currentObservedState(): JSONObject? = try {
+        playbackContextProvider.currentObservedState()
+    } catch (e: Exception) {
+        Timber.w(e, "[CloudRoute] observed state unavailable")
+        null
+    }
+
+    /**
+     * `playback.pause`'s three contract outcomes (voice-intents.md, committed 818c8f75).
+     *
+     * No observation available => `unknown`/`playback_state_unavailable`. Still playing => `failed`/
+     * `pause_not_observed`. Otherwise the engine reports paused and this is a SUCCESS carrying that
+     * observed state. The three are distinguished here because only this function sees the
+     * observation; folding them into one `Unconfirmed` would report a failed pause as an unknown one.
+     */
+    private fun observedAfterPause(): AppOperationDelivery.Observation {
+        val after = currentObservedState()
+            ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        return when (observedPlaying(after)) {
+            // We looked, and it is still running: the pause did not take.
+            true -> AppOperationDelivery.Observation.Failed(REASON_PAUSE_NOT_OBSERVED)
+
+            false -> AppOperationDelivery.Observation.Observed(after)
+
+            // The field is missing or not a boolean, so there is no measurement to rest on. It is
+            // NOT evidence the engine is still playing.
+            null -> AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        }
+    }
+
+    /**
+     * The observed `playing` flag, or null when the observation does not carry one.
+     *
+     * Strict on purpose: `optBoolean(key)` answers false for an ABSENT key and for one of the wrong
+     * type, which would turn "we could not tell" into "the engine is paused" — a fabricated
+     * measurement. Only a real JSON boolean is an observation.
+     */
+    private fun observedPlaying(state: JSONObject): Boolean? {
+        if (!state.has(PLAYING_FIELD)) return null
+        return when (val value = state.opt(PLAYING_FIELD)) {
+            is Boolean -> value
+            else -> null
+        }
+    }
+
+    /**
+     * `playback.resume`'s three contract outcomes (voice-intents.md, df5def09).
+     *
+     * No observation available => `unknown`/`playback_state_unavailable`. Not playing => `failed`/
+     * `resume_not_observed`. Otherwise the engine reports playing and this is a SUCCESS carrying that
+     * observed state — including when playback was already running before the effect landed, because
+     * the evidence is the fresh observation, not the effect.
+     */
+    private fun observedAfterResume(): AppOperationDelivery.Observation {
+        val after = currentObservedState()
+            ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        return when (observedPlaying(after)) {
+            // We looked, and the player is not running: the resume did not take.
+            false -> AppOperationDelivery.Observation.Failed(REASON_RESUME_NOT_OBSERVED)
+
+            true -> AppOperationDelivery.Observation.Observed(after)
+
+            // The field is missing or not a boolean, so there is no measurement to rest on. It is
+            // NOT evidence the resume failed.
+            null -> AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        }
+    }
+
+    /**
      * The turn's accumulated outcome, in the form a caller outside this class can consume.
      *
      * The mapping lives in ONE place so no call site can drift from it -- and so the accumulated value
@@ -1010,10 +1371,66 @@ class CloudRouteSink internal constructor(
         ActionOutcome.None -> CloudRouteActionOutcome.None
         ActionOutcome.Unknown -> CloudRouteActionOutcome.Unknown
         ActionOutcome.Confirmed -> CloudRouteActionOutcome.Confirmed
+        ActionOutcome.Refused -> CloudRouteActionOutcome.Refused
     }
 
-    private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
-        routeInvoker?.let { return it(turn) }
+    /**
+     * Everything one turn must answer with, captured when the turn opens and handed to that turn's
+     * own collection closure.
+     *
+     * Immutable by construction: a v1 operation arriving later in this turn answers on the socket
+     * this turn opened, under the account this turn authenticated as, in the conversation this turn
+     * was admitted under — regardless of what a newer turn has since set. It is never stored on the
+     * sink, so two overlapping turns cannot observe or overwrite each other's session.
+     */
+    private class TurnSession(
+        /** The account this turn authenticated as; null refuses v1 execution. */
+        val owner: String?,
+        val conversationId: String,
+        /** Reaches this turn's socket, or null when this path has no socket to answer on. */
+        val sender: CloudTurnTransport.ResultSender?,
+        /**
+         * THE TRANSPORT'S OWN ownership contract for this turn, carried verbatim.
+         *
+         * Not a second lease source and not derived from anything: it is the same object
+         * `CloudTurnTransport.TurnSession.ownership` that the transport itself uses to decide when the
+         * connection stops belonging to the turn. The sink takes its admission leases from THIS, so a
+         * lease the sink holds is a lease the transport knows about -- an independent one would let the
+         * transport retire a connection the sink still believed it owned.
+         *
+         * ABSENT WHERE THERE IS NO TRANSPORT TURN. The injected-invoker path has no socket and no
+         * transport session, so this stays null there; v1 execution fails closed on that absence rather
+         * than borrowing an ownership from somewhere else.
+         */
+        val ownership: CloudTurnTransport.TurnOwnership?,
+    )
+
+    /**
+     * A turn's events plus the immutable session they belong to. The session travels WITH the flow so
+     * it cannot be reached from any other turn: no sink-wide field exists to overwrite.
+     */
+    private class OpenedTurn(
+        /** The session this turn's events belong to; never read from shared state. */
+        val turnSession: TurnSession,
+        /** Everything the server sends for this turn. */
+        val flow: Flow<CloudRouteEvent>,
+    )
+
+    private suspend fun openRoute(turn: CloudRouteTurn): OpenedTurn {
+        routeInvoker?.let { invoker ->
+            // An injected invoker has no socket of its own to answer on, so the sender is absent and a
+            // result simply cannot be sent. The ACCOUNT still comes from the same support the
+            // production path uses: v1 execution must read one owner source, not a per-path guess.
+            val session = TurnSession(
+                owner = appOperationSupport.owner(),
+                conversationId = turn.conversationId,
+                sender = null,
+                // NO TRANSPORT TURN EXISTS ON THIS PATH, so there is no ownership to carry and none is
+                // invented. v1 execution fails closed on this absence.
+                ownership = null,
+            )
+            return OpenedTurn(turnSession = session, flow = invoker(turn))
+        }
         // Production runs over the WebSocket only (cloud-assistant.md, owner's ruling): a refused
         // upgrade fails the turn visibly rather than falling back, so a completed turn is evidence
         // the negotiated path served it. The choice lives in one place rather than beside a second
@@ -1051,7 +1468,22 @@ class CloudRouteSink internal constructor(
             }
         }
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)
-        return CloudTurnRoute(resolveBaseUrl(), tokenProvider, transport = transport, observer = transportObserver).route(turn)
+        val route = CloudTurnRoute(resolveBaseUrl(), tokenProvider, transport = transport, observer = transportObserver)
+        // The turn is opened HERE, once, before any event is consumed: the account and the socket
+        // sender must exist before a v1 frame can arrive, and both must come from the same transport
+        // call. Holding them in this closure -- not on the sink -- is what keeps two overlapping turns
+        // from binding each other's owner or answering on each other's socket.
+        val opened = route.openTurn(turn)
+        val session = TurnSession(
+            owner = opened.accountId,
+            conversationId = turn.conversationId,
+            sender = opened.session.sender,
+            // THE SAME OBJECT the transport uses: `openTurn` returns one session whose ownership is the
+            // transport's own decision maker, so the sink's leases and the transport's retirement are
+            // two views of one clock, not two clocks.
+            ownership = opened.session.ownership,
+        )
+        return OpenedTurn(turnSession = session, flow = opened.session.events)
     }
 
     /** Advertise a capability only when its renderer is actually available. */
@@ -1160,7 +1592,14 @@ class CloudRouteSink internal constructor(
         myId: Long,
         plannedEpisodeId: String?,
     ): ActionOutcome {
-        if (tool != "playback") return ActionOutcome.None
+        // Non-playback tools are REFUSED as a typed outcome, not silently ignored: the client can
+        // tell "unsupported here" apart from "attempted, outcome unknown". (The owning contract
+        // says unknown tool/action combinations are ignored for forward compatibility; this refusal
+        // is internal typing of exactly that, with no wire reply.) NEW MUTATING TOOLS (chapter,
+        // queue, ...) have NO execution path on this legacy path: the app-operation
+        // protocol/journal is not implemented here, so no helper is added and the tool is
+        // refused, never half-executed. Playback arms below are UNCHANGED from main.
+        if (tool != "playback") return ActionOutcome.Refused
 
         // AN ACTION BELONGS TO THE EPISODE IT WAS PLANNED AGAINST. Turn ownership is not enough:
         // selecting another episode opens NO new cloud turn, so `activeTurnId` still names this one and
@@ -1416,7 +1855,10 @@ class CloudRouteSink internal constructor(
                 }
 
                 // An action this build does not know: nothing happened, and the turn must not be
-                // counted as delivered on the strength of it.
+                // counted as delivered on the strength of it. UNCHANGED FROM MAIN: every
+                // missing-parameter playback branch here still returns None, exactly as before —
+                // the typed Refused outcome exists only at the tool gate above, never inside the
+                // playback arms.
                 else -> ActionOutcome.None
             }
         }
@@ -1616,6 +2058,16 @@ class CloudRouteSink internal constructor(
 
             /** The action was CONFIRMED performed. */
             Confirmed,
+
+            /**
+             * The action was REFUSED by this client: an unsupported NON-PLAYBACK tool on this
+             * legacy action path. No missing-parameter playback branch is affected (those keep
+             * [None]), and no wire acknowledgement is implemented — this is local typing only.
+             * Distinct from [None] on purpose: "we would not act" and "we did not act" are
+             * different facts, and a refusal must never satisfy the delivered-turn check that a
+             * performed action satisfies.
+             */
+            Refused,
         }
 
         // Combines two action outcomes, keeping the STRONGEST evidence but never downgrading an observation.
@@ -1655,7 +2107,30 @@ class CloudRouteSink internal constructor(
         internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
             previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
             previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
+            previous == ActionOutcome.Refused || next == ActionOutcome.Refused -> ActionOutcome.Refused
             else -> ActionOutcome.None
         }
     }
 }
+
+/*
+ * Refusal reasons this client can state from what it observed, with no invented wire vocabulary: each
+ * says what was seen ("not playing", "player refused"), not a guess at a server code.
+ */
+
+/** How long a finished turn waits for work it already admitted, before its socket is closed. */
+
+private const val REASON_TARGET_MISMATCH = "target_mismatch"
+private const val REASON_PLAYBACK_STATE_UNAVAILABLE = "playback_state_unavailable"
+private const val REASON_PAUSE_NOT_OBSERVED = "pause_not_observed"
+private const val REASON_RESUME_NOT_OBSERVED = "resume_not_observed"
+
+/** The field the engine's observed state carries. The contract names it `playing`. */
+private const val PLAYING_FIELD = "playing"
+private const val REASON_PLAYER_REFUSED = "player_refused"
+
+/**
+ * The only actions this client executes from a v1 operation: the two whose resulting state can be READ
+ * BACK from the player. Anything else refuses before any effect is released.
+ */
+private val SUPPORTED_APP_OPERATIONS = setOf("playback.pause", "playback.resume")

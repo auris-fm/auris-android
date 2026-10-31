@@ -1260,14 +1260,11 @@ class CloudRouteSink internal constructor(
             }
 
             "playback.resume" -> {
-                // Resume is the one action whose own precondition names a state: nothing to resume
-                // unless the player is paused. An UNREADABLE flag is not a paused player, so it
-                // refuses rather than pretending the precondition held.
-                if (observedBefore == null || observedPlaying(observedBefore) != false) {
-                    return AppOperationDelivery.Observation.Refused(REASON_NOT_PAUSED)
-                }
-                // The SAME episode the pre-check validated, passed through so validation and mutation
-                // remain one decision inside the owner.
+                // Idempotent by observation (voice-intents.md df5def09): an ALREADY-PLAYING engine
+                // satisfies resume, so there is no paused precondition here — the sink runs and the
+                // fresh post-effect observation decides. Supplied target/identity requirements
+                // (claimedEpisode vs the playing episode) ran above; owner and deadline gates live
+                // outside this path. Legacy local/answer-hold behavior is unchanged.
                 when (playbackSink.resume(expectedEpisodeId = currentEpisode)) {
                     is EpisodeOperationResult.Accepted -> observedAfterResume()
 
@@ -1341,14 +1338,27 @@ class CloudRouteSink internal constructor(
         }
     }
 
-    /** Success only if the player now reports playing; otherwise the outcome is unobserved. */
+    /**
+     * `playback.resume`'s three contract outcomes (voice-intents.md, df5def09).
+     *
+     * No observation available => `unknown`/`playback_state_unavailable`. Not playing => `failed`/
+     * `resume_not_observed`. Otherwise the engine reports playing and this is a SUCCESS carrying that
+     * observed state — including when playback was already running before the effect landed, because
+     * the evidence is the fresh observation, not the effect.
+     */
     private fun observedAfterResume(): AppOperationDelivery.Observation {
         val after = currentObservedState()
-            ?: return AppOperationDelivery.Observation.Unconfirmed(AppOperationDelivery.REASON_UNOBSERVED)
-        if (observedPlaying(after) != true) {
-            return AppOperationDelivery.Observation.Unconfirmed(AppOperationDelivery.REASON_UNOBSERVED)
+            ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        return when (observedPlaying(after)) {
+            // We looked, and the player is not running: the resume did not take.
+            false -> AppOperationDelivery.Observation.Failed(REASON_RESUME_NOT_OBSERVED)
+
+            true -> AppOperationDelivery.Observation.Observed(after)
+
+            // The field is missing or not a boolean, so there is no measurement to rest on. It is
+            // NOT evidence the resume failed.
+            null -> AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
         }
-        return AppOperationDelivery.Observation.Observed(after)
     }
 
     /**
@@ -2113,10 +2123,10 @@ class CloudRouteSink internal constructor(
 private const val REASON_TARGET_MISMATCH = "target_mismatch"
 private const val REASON_PLAYBACK_STATE_UNAVAILABLE = "playback_state_unavailable"
 private const val REASON_PAUSE_NOT_OBSERVED = "pause_not_observed"
+private const val REASON_RESUME_NOT_OBSERVED = "resume_not_observed"
 
 /** The field the engine's observed state carries. The contract names it `playing`. */
 private const val PLAYING_FIELD = "playing"
-private const val REASON_NOT_PAUSED = "not_paused"
 private const val REASON_PLAYER_REFUSED = "player_refused"
 
 /**

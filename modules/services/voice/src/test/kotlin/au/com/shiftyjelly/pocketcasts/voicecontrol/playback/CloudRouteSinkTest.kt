@@ -3480,6 +3480,8 @@ class CloudRouteSinkTest {
          * accepted the call and kept playing -- the case reported as `pause_not_observed`.
          */
         private val pauseDoesNotTake: Boolean = false,
+        /** Models a resume that was accepted but did not itself start playback (external play). */
+        private val resumeDoesNotTake: Boolean = false,
         /** Whether the provider can report any state at all; false models an unreadable engine. */
         private val observedStateAvailable: Boolean = true,
         /**
@@ -3489,6 +3491,10 @@ class CloudRouteSinkTest {
         private val malformedPlaying: Boolean = false,
         /** The exact state a malformed-reporting fixture emits, so a control can choose the shape. */
         private val observedStateOverride: org.json.JSONObject? = null,
+        /** Whether the POST-effect observation is unreadable (pre-state stays readable/paused). */
+        private val postStateUnavailable: Boolean = false,
+        /** The exact state reported AFTER the resume effect ran (entry state unaffected). */
+        private val postStateOverride: org.json.JSONObject? = null,
         /**
          * Whether this fixture states the token/account ASSOCIATION.
          *
@@ -3507,7 +3513,13 @@ class CloudRouteSinkTest {
     ) {
         /** The host's playback state, moved by the fake sink the way a player would. */
         val host = HostPlaybackState(hostPlaying, pauseDoesNotTake)
-        val playback = FakePlaybackSink(host)
+        val playback = FakePlaybackSink(host, resumeDoesNotTake)
+
+        /** Every state read the provider made, and those taken after the resume effect ran. */
+        var observationReadCount = 0
+            private set
+        var postEffectObservationReads = 0
+            private set
         val analytics = FakeCloudRouteAnalytics()
         val routeCalls = mutableListOf<String>()
         val routeContexts = mutableListOf<CloudRouteContext>()
@@ -3538,9 +3550,17 @@ class CloudRouteSinkTest {
             // App-operation results rest on MEASUREMENT, so the provider must report the host's real
             // state here: a fixture that answered a constant would make every result look observed.
             override fun currentObservedState(): org.json.JSONObject? {
+                observationReadCount += 1
                 // "WE COULD NOT LOOK" is its own case, distinct from "we looked and it is unchanged":
                 // an unreadable state must never be reported as an observation.
                 if (!observedStateAvailable) return null
+                // POST-effect shaping: only once the resume effect has run. Resume has no paused
+                // precondition (df5def09 idempotency), so this isolates the POST-effect observation
+                // without constraining what the operation path saw on entry.
+                val resumed = playback.calls.any { it == "resume" }
+                if (resumed) postEffectObservationReads += 1
+                if (resumed && postStateUnavailable) return null
+                if (resumed && postStateOverride != null) return postStateOverride
                 val episode = liveEpisodeId ?: return null
                 // A MALFORMED or MISSING `playing` is a separate case from "we could not look":
                 // the state exists but carries no usable measurement. Placed AFTER the episode read,
@@ -3643,7 +3663,12 @@ class CloudRouteSinkTest {
         }
     }
 
-    private class FakePlaybackSink(private val host: HostPlaybackState? = null) : VoicePlaybackSink {
+    private class FakePlaybackSink(
+        private val host: HostPlaybackState? = null,
+        /** When true, resume() is accepted but does NOT itself start playback: the observed state
+         *  afterwards is whatever the host was driven to by other means (models external play). */
+        private val resumeDoesNotTake: Boolean = false,
+    ) : VoicePlaybackSink {
         val calls = mutableListOf<String>()
 
         /** When set, resume() suspends until released (models play-queue loads). */
@@ -3691,7 +3716,9 @@ class CloudRouteSinkTest {
             resumeStarted.complete(Unit)
             resumeGate?.await()
             calls += "resume"
-            host?.playing = true
+            // Through the host, exactly like pause: a fixture that set `playing = true` directly
+            // would make every resume succeed by construction.
+            if (!resumeDoesNotTake) host?.playing = true
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
 
@@ -5134,10 +5161,14 @@ class CloudRouteSinkTest {
     /** Records what the sink sent, and reaches a socket only because it IS this turn's sender. */
     private class RecordingSender : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport.ResultSender {
         val sent = mutableListOf<String>()
+
+        /** Completes when the FIRST result is sent, so a control can act between deliveries. */
+        val firstSent = kotlinx.coroutines.CompletableDeferred<Unit>()
         override fun sendResult(
             result: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.AppOperationResult,
         ): Boolean {
             sent += result.payloadJson
+            firstSent.complete(Unit)
             return true
         }
     }
@@ -5160,11 +5191,20 @@ class CloudRouteSinkTest {
          * it would be testing a turn that cannot end.
          */
         private val ownership: FakeTurnOwnership = FakeTurnOwnership(),
+        /** When set, pauses the event stream BEFORE the event at [gateBeforeIndex], so a control
+         *  can act (flip live state, snapshot counters) between two deliveries of the SAME turn. */
+        private val gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null,
+        private val gateBeforeIndex: Int = Int.MAX_VALUE,
     ) : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
         /** The sender for THIS turn, paired with the ownership above. */
         val sender = RecordingSender()
 
-        override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow { events.forEach { emit(it) } }
+        override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+            events.forEachIndexed { index, event ->
+                if (gate != null && index == gateBeforeIndex) gate.await()
+                emit(event)
+            }
+        }
 
         override fun sessionFor(
             requestId: String,
@@ -5233,9 +5273,12 @@ class CloudRouteSinkTest {
         account: String? = "account-1",
         hostPlaying: Boolean = true,
         pauseDoesNotTake: Boolean = false,
+        resumeDoesNotTake: Boolean = false,
         observedStateAvailable: Boolean = true,
         malformedPlaying: Boolean = false,
         observedStateOverride: org.json.JSONObject? = null,
+        postStateUnavailable: Boolean = false,
+        postStateOverride: org.json.JSONObject? = null,
         /**
          * Off only for the fixtures that deliberately withhold the token/account ASSOCIATION (or the
          * token itself) so the refusal they assert is a real refusal rather than a missing seam.
@@ -5244,9 +5287,12 @@ class CloudRouteSinkTest {
     ): TestDeps = TestDeps(
         hostPlaying = hostPlaying,
         pauseDoesNotTake = pauseDoesNotTake,
+        resumeDoesNotTake = resumeDoesNotTake,
         observedStateAvailable = observedStateAvailable,
         malformedPlaying = malformedPlaying,
         observedStateOverride = observedStateOverride,
+        postStateUnavailable = postStateUnavailable,
+        postStateOverride = postStateOverride,
         appOpsAccount = account,
         appOpsRoot = root,
         appOpsTransportFactory = true,
@@ -5445,9 +5491,9 @@ class CloudRouteSinkTest {
     /** A request naming a different episode than the one playing is refused before the effect. */
     @Test
     fun `a resume observed to reach playing succeeds with the observed state`() = runTest {
-        // Regression for the pre-state read: resume's precondition now uses the contract's `playing`
-        // key with a strict boolean read, so the ordinary paused -> playing path must still succeed
-        // and still rest on the state observed AFTER the effect.
+        // Ordinary paused -> playing resume: the sink runs (no paused precondition — df5def09 makes
+        // already-playing idempotent success) and the result rests on the state observed AFTER the
+        // effect, under the contract's strict `playing` boolean read.
         val root = tempJournal()
         val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
         val deps = appOpsDeps(transport, root, hostPlaying = false)
@@ -5461,21 +5507,200 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a resume with an unreadable pre-state is refused not_paused before any effect`() = runTest {
-        // An unreadable flag is NOT a paused player: resume refuses on its own precondition rather
-        // than proceeding on a measurement it never took. The refusal precedes the effect.
+    fun `a resume with an unreadable pre-state proceeds and the post-effect observation decides`() = runTest {
+        // df5def09 removed the paused precondition: an unreadable pre-state no longer refuses. With
+        // no claimed episode there is nothing to target-match, so the effect runs and the (here
+        // equally unreadable) post-effect observation classifies the outcome.
         val root = tempJournal()
         val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
         val deps = appOpsDeps(transport, root, hostPlaying = false, observedStateAvailable = false)
         deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
 
-        assertFalse(
-            "the precondition refuses before the effect runs",
-            deps.playback.calls.any { it == "resume" },
-        )
+        assertEquals(listOf("resume"), deps.playback.calls)
         val result = resultOf(transport.sender.sent.single())
-        assertEquals("refused", result.getString("outcome"))
-        assertEquals("not_paused", result.getString("reason"))
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+    }
+
+    // ---- playback.resume result arms (voice-intents.md df5def09) ----
+
+    @Test
+    fun `a resume whose fresh observation reports playing succeeds with that observed state`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = false)
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertEquals(listOf("resume"), deps.playback.calls)
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        // The ENTIRE captured state is the success state, field for field: exactly one post-effect
+        // read supplies it, and it is the provider's full shape, not a hand-built excerpt.
+        assertEquals(1, deps.postEffectObservationReads)
+        assertEquals(
+            org.json.JSONObject()
+                .put("episode_id", "episode-id")
+                .put("position_ms", 50_000)
+                .put("playing", true)
+                .toString(),
+            result.getJSONObject("state").toString(),
+        )
+    }
+
+    @Test
+    fun `an already-playing engine satisfies resume through the real path`() = runTest {
+        // df5def09: "an already playing engine satisfies this idempotent operation". The request
+        // ENTERS with playback already running (no paused precondition), runs the real admission →
+        // effect → observation path, and succeeds on the fresh observation it measures.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = true)
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertEquals(listOf("resume"), deps.playback.calls)
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        assertEquals(1, deps.postEffectObservationReads)
+        assertTrue(result.getJSONObject("state").getBoolean("playing"))
+    }
+
+    @Test
+    fun `a resume whose post-effect observation shows running playback succeeds regardless of cause`() = runTest {
+        // The observation, not the effect, is the evidence: here the resume call itself does not
+        // start playback (something else did by the time the state is read), and the fresh true
+        // observation still settles the operation as a success carrying THAT state.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(
+            transport,
+            root,
+            hostPlaying = false,
+            resumeDoesNotTake = true,
+            postStateOverride = org.json.JSONObject()
+                .put("episode_id", "episode-id")
+                .put("position_ms", 0)
+                .put("playing", true),
+        )
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        assertEquals(1, deps.postEffectObservationReads)
+        assertTrue(result.getJSONObject("state").getBoolean("playing"))
+    }
+
+    @Test
+    fun `a resume observed still paused is failed as resume_not_observed`() = runTest {
+        // The engine reports not-playing afterwards: we looked, and the resume did not take. This is
+        // FAILED, not unknown, and a non-success carries no state.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(
+            transport,
+            root,
+            hostPlaying = false,
+            resumeDoesNotTake = true,
+            postStateOverride = org.json.JSONObject()
+                .put("episode_id", "episode-id")
+                .put("position_ms", 0)
+                .put("playing", false),
+        )
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("failed", result.getString("outcome"))
+        assertEquals("resume_not_observed", result.getString("reason"))
+        assertFalse("a non-success carries no state", result.has("state"))
+    }
+
+    @Test
+    fun `a resume whose post-effect state cannot be read is unknown with playback_state_unavailable`() = runTest {
+        // The pre-state read succeeded (resume has no paused precondition to refuse on), but the
+        // state read AFTER the effect is unreadable: no measurement, so unknown, never a fabricated
+        // success or failure.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root, hostPlaying = false, postStateUnavailable = true)
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+        assertFalse("a non-success carries no state", result.has("state"))
+    }
+
+    @Test
+    fun `a resume whose post-effect playing flag is not a boolean is unknown`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(
+            transport,
+            root,
+            hostPlaying = false,
+            postStateOverride = org.json.JSONObject()
+                .put("episode_id", "episode-id")
+                .put("position_ms", 0)
+                .put("playing", "yes"),
+        )
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+        assertFalse("a non-success carries no state", result.has("state"))
+    }
+
+    @Test
+    fun `a resume whose post-effect state omits playing is unknown`() = runTest {
+        // A MISSING flag is its own case from a wrong-typed one, and neither is a measurement:
+        // reading an absent key as false would fabricate a failed resume out of an unreadable one.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(
+            transport,
+            root,
+            hostPlaying = false,
+            postStateOverride = org.json.JSONObject()
+                .put("episode_id", "episode-id")
+                .put("position_ms", 0),
+        )
+        deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("playback_state_unavailable", result.getString("reason"))
+        assertFalse("a non-success carries no state", result.has("state"))
+    }
+
+    @Test
+    fun `a redelivered resume replays the stored result and does not execute again`() = runTest {
+        // Replay is a SAME-TURN redelivery: cross-turn reuse of an operation id is an identity
+        // conflict (its own control). The gated event source lets this control flip LIVE playback
+        // and snapshot the read counter AFTER the first result is sent but BEFORE the second frame
+        // is emitted, so the comparison cannot race the first effect/observation.
+        val gate = CompletableDeferred<Unit>()
+        val transport = AppOpsTransport(
+            listOf(opFrame(action = "resume"), opFrame(action = "resume"), CloudRouteEvent.Done(0, 0)),
+            gate = gate,
+            gateBeforeIndex = 1,
+        )
+        val deps = appOpsDeps(transport, root = tempJournal(), hostPlaying = false)
+        val turn = launch { deps.sink().routeToCloud("resume it", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1") }
+
+        transport.sender.firstSent.await()
+        deps.host.playing = false
+        val readsAtRedelivery = deps.observationReadCount
+        gate.complete(Unit)
+        turn.join()
+
+        assertEquals("replay executes the effect ONCE", 1, deps.playback.calls.count { it == "resume" })
+        assertEquals(2, transport.sender.sent.size)
+        assertEquals(transport.sender.sent[0], transport.sender.sent[1])
+        assertEquals(
+            "replay performs ZERO new state reads after the live flip",
+            readsAtRedelivery,
+            deps.observationReadCount,
+        )
     }
 
     @Test

@@ -32,6 +32,12 @@ class UpNextQueueSink @Inject constructor(
         return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
+    /**
+     * THE PRESENTATION/OUTCOME SEPARATION (spec 03c96924): this clears the queue and THEN renders
+     * CONFIRM_REQUIRED, so its earcon reads as a refusal while the action really happened. That is
+     * exactly why the outcome is not inferred from the response — the executor reports Performed
+     * for this intent at the call site, and this sink keeps its existing presentation untouched.
+     */
     override fun clear(): VoiceResponse {
         playbackManager.clearUpNextAsync()
         return VoiceResponse.Earcon(EarconId.CONFIRM_REQUIRED)

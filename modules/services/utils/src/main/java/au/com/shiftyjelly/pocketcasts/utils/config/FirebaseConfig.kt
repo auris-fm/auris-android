@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.utils.config
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.Feature
 
 object FirebaseConfig {
+    const val VOICE_SHARING_ENABLED = "voice_sharing_enabled"
     const val PERIODIC_SAVE_TIME_MS = "periodic_playback_save_ms"
     const val PLAYER_RELEASE_TIME_OUT_MS = "player_release_time_out_ms"
     const val PODCAST_SEARCH_DEBOUNCE_MS = "podcast_search_debounce_ms"
@@ -28,6 +29,7 @@ object FirebaseConfig {
         EXOPLAYER_CACHE_ENTIRE_PLAYING_EPISODE_SETTING_DEFAULT to true,
         PLAYBACK_EPISODE_POSITION_CHANGED_ON_SYNC_THRESHOLD_SECS to 5L,
         FINGERPRINT_POLICY_OVERRIDE to "",
+        VOICE_SHARING_ENABLED to false,
     ) + Feature.entries
         .filter { it.hasFirebaseRemoteFlag }
         .associate { it.key to it.defaultValue }

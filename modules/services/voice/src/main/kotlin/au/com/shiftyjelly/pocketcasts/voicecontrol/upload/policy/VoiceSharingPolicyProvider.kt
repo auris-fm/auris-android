@@ -1,0 +1,336 @@
+package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy
+
+import au.com.shiftyjelly.pocketcasts.utils.config.FirebaseConfig
+import au.com.shiftyjelly.pocketcasts.utils.featureflag.providers.FirebaseRemoteFeatureProvider
+import com.google.firebase.remoteconfig.FirebaseRemoteConfig
+import com.google.firebase.remoteconfig.FirebaseRemoteConfigValue
+import javax.inject.Inject
+import javax.inject.Singleton
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * Voice-sharing remote policy (Task 1 of docs/plans/android/voice-recording-uploads.md).
+ *
+ * Fail-closed at every step, and FRESHNESS IS REAL SDK EVIDENCE (reviewer efd5e29f): the
+ * snapshot is enabled only while
+ *  - the remote fetch bookkeeping ADVANCED since the last observed refresh
+ *    ([FirebaseRemoteConfig.getInfo] reports a strictly larger `fetchTimeMillis` with SUCCESS
+ *    status — a cached success is not fresh and never renews the lease),
+ *  - activation through the real adapter composition succeeded,
+ *  - the value was read from the REMOTE source with strict Boolean decoding ("true"/"false"
+ *    exactly; permissive encodings and non-remote values disable), and
+ *  - the monotonic-time lease has not expired.
+ *
+ * The provider is lifecycle-owned: on construction it joins the application scope and observes
+ * the real [FirebaseRemoteFeatureProvider] initial fetch/activation, refreshing once that
+ * completes. Production callers ([VoiceSharingController]) invoke [refresh] before admitting
+ * another segment or starting another upload. A scheduled monotonic invalidation publishes the
+ * disabled snapshot at lease expiry, so a plain [policy] subscriber observes the disable with
+ * no refresh and no read.
+ *
+ * Overlapping refreshes are fenced: each refresh captures its request generation BEFORE its
+ * first await and publishes only if it is still the newest request — an older true can never
+ * overwrite a newer disabled. All awaits are bounded `suspendCancellableCoroutine` work; the
+ * refresh path never blocks a thread.
+ *
+ * Only `voice_sharing_enabled` is a remote key; every numeric limit is a compiled default
+ * validated against a compiled ceiling (tracked separately, not part of this claim).
+ */
+class VoiceSharingPolicyProvider(
+    private val remoteConfig: FirebaseRemoteConfig,
+    private val featureProvider: FirebaseRemoteFeatureProvider,
+    private val scope: CoroutineScope,
+    private val nowMs: () -> Long,
+    private val sleepMs: suspend (Long) -> Unit = { delay(it) },
+    private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
+    /** SHARED serialization primitive: MUST be the SAME object as the account tier's
+     * collectionSharedLock (reviewer 23cae70e b1). NO default — an independent fallback lock
+     * would silently deserialize policy publication from account transitions. Composition passes
+     * the owner-provided primitive explicitly. */
+    private val sharedCollectionLock: Any,
+) {
+    private val state = MutableStateFlow(DISABLED)
+
+    /** Observable at the collection boundary: a refresh emits here before another segment/upload. */
+    val policy: StateFlow<PolicySnapshot> = state
+
+    /** Newest refresh request; captured before any await, used to fence stale publications. */
+    private var requestGeneration = 0L
+
+    /** Generation of the activation currently published; fences invalidation against renewals. */
+    private var activationGeneration = 0L
+
+    private var invalidationJob: Job? = null
+
+    /**
+     * Serializes generation allocation, conditional publication, and timer install/cancel.
+     * Declared BEFORE the init block: the lifecycle join can begin refresh work the moment the
+     * instance is constructed (an already-completed adapter enters refresh immediately), so
+     * every field refresh uses must already be initialized.
+     */
+    private val fence = Any()
+    private val directExecutor = java.util.concurrent.Executor { command -> command.run() }
+
+    init {
+        // Lifecycle-owned composition: the join on the real provider's own fetch+activation
+        // sequence gates the first policy read, but is BOUNDED — this provider never depends on
+        // the init outcome for authority (its activated value is nonauthoritative here), and
+        // refresh() itself performs a genuine fetch whose bookkeeping is judged on its own.
+        scope.launch {
+            runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(INIT_AWAIT_MS) { featureProvider.awaitInitialization() }
+            }
+            refresh()
+        }
+    }
+
+    /** Raw published state WITHOUT lease evaluation: lets deadline consumers read the stamp. */
+    val publishedPolicy: StateFlow<PolicySnapshot> get() = state
+
+    /**
+     * TEST SEAM: install an explicitly enabled snapshot without a remote fetch. Controls use this to
+     * exercise the OPEN path; production can only reach an enabled snapshot through a validated
+     * fetch/activation (the compiled default is disabled).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun applySnapshotForTest(snapshot: PolicySnapshot) {
+        state.value = snapshot
+    }
+
+    fun snapshot(): PolicySnapshot {
+        val value = state.value
+        val now = nowMs()
+        return if (
+            value.activatedAtMonotonicMs > 0 &&
+            now >= value.activatedAtMonotonicMs && // a clock before the activation stamp is not fresh
+            now - value.activatedAtMonotonicMs <= DEFAULT_LEASE_MS
+        ) {
+            value
+        } else {
+            DISABLED
+        }
+    }
+
+    /**
+     * One refresh, in order: fetch status must report SUCCESS, the fetch timestamp must advance
+     * beyond anything previously observed (cached success is not fresh), activation must
+     * succeed, and the value must come from the REMOTE source with strict Boolean decoding. Any
+     * failure publishes disabled — fenced so a slower older refresh cannot overwrite a newer
+     * disabled publication.
+     */
+    suspend fun refresh(): PolicySnapshot {
+        val requestGen: Long = synchronized(fence) { ++requestGeneration }
+        // The WHOLE refresh is bounded: a fetch or activation that never completes cannot hang
+        // the caller; on deadline it fails closed (fenced).
+        return withTimeoutOrNull(refreshTimeoutMs) { runRefresh(requestGen) }
+            ?: publishDisabled(requestGen)
+    }
+
+    private suspend fun runRefresh(requestGen: Long): PolicySnapshot {
+        // Capture the SDK's PRE-EXISTING fetch bookkeeping BEFORE this refresh's request — even
+        // when this provider has never refreshed before — so a cached success (the SDK already
+        // fetched earlier and nothing advanced since) cannot pass as fresh on a first refresh.
+        // An unreadable baseline is NOT a pass: fail closed.
+        val baseline = attemptFinite { remoteConfig.info }
+            ?.let { info -> attemptFinite { info.fetchTimeMillis } }
+            ?: return publishDisabled(requestGen)
+
+        // A genuine new fetch request, awaited before its bookkeeping is judged.
+        val fetched = attemptFinite { taskSuccess(remoteConfig.fetch()) }
+        if (fetched != true) {
+            return publishDisabled(requestGen)
+        }
+
+        val info = attemptFinite { remoteConfig.info } ?: return publishDisabled(requestGen)
+        val statusOk = attemptFinite { info.lastFetchStatus == FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS } == true
+        val postFetchTimeMs = attemptFinite { info.fetchTimeMillis }
+        if (!statusOk || postFetchTimeMs == null || postFetchTimeMs <= baseline) {
+            // Failure, or a cached success whose bookkeeping never advanced: not fresh, and the
+            // lease must not renew.
+            return publishDisabled(requestGen)
+        }
+
+        val activated = attemptFinite { taskSuccess(remoteConfig.activate()) }
+        if (activated != true) {
+            return publishDisabled(requestGen)
+        }
+
+        val value = attemptFinite { remoteConfig.getValue(FirebaseConfig.VOICE_SHARING_ENABLED) }
+            ?: return publishDisabled(requestGen)
+        val strictBoolean = attemptFinite {
+            when (value.asString()) {
+                "true" -> true
+                "false" -> false
+                else -> null
+            }
+        } ?: return publishDisabled(requestGen)
+        val enabled = strictBoolean && attemptFinite { value.source } == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE
+
+        val snapshot = PolicySnapshot(
+            enabled = enabled,
+            activatedAtMonotonicMs = nowMs(),
+            activationGeneration = requestGen,
+        )
+        // Generation allocation and conditional publication share one lock, so a newer request
+        // can never interleave between this refresh's check and its publication.
+        synchronized(sharedCollectionLock) {
+            synchronized(fence) {
+                if (requestGen != requestGeneration) {
+                    return DISABLED // a newer refresh superseded this one while it was awaiting
+                }
+                activationGeneration = requestGen
+                state.value = snapshot
+                // Timer ownership is serialized WITH publication under the same fences: a
+                // superseded refresh never reaches this line, so it can never cancel a newer
+                // timer or install a stale one; a renewal cancels the previous timer here first.
+                installInvalidationLocked(snapshot)
+            }
+        }
+        return snapshot
+    }
+
+    /** Publishes disabled unless a newer refresh request has started (generation fence). */
+    private fun publishDisabled(requestGen: Long): PolicySnapshot {
+        synchronized(sharedCollectionLock) {
+            synchronized(fence) {
+                if (requestGen == requestGeneration) {
+                    activationGeneration = 0L
+                    state.value = DISABLED
+                    invalidationJob?.cancel()
+                    invalidationJob = null
+                }
+            }
+        }
+        return DISABLED
+    }
+
+    /** MUST be called while holding [fence]: timer install/cancel is part of publication. */
+    private fun installInvalidationLocked(snapshot: PolicySnapshot) {
+        invalidationJob?.cancel()
+        if (!snapshot.enabled) {
+            invalidationJob = null
+            return
+        }
+        val gen = snapshot.activationGeneration
+        invalidationJob = scope.launch {
+            while (true) {
+                val before = nowMs()
+                val due = snapshot.activatedAtMonotonicMs + DEFAULT_LEASE_MS - before
+                if (due <= 0) {
+                    break
+                }
+                sleepMs(due)
+                // No-progress guard: a sleep that returns without the monotonic clock moving
+                // cannot prove the lease is alive, and spinning would hang the dispatcher. Fail
+                // closed: publish disabled (fenced).
+                if (nowMs() <= before) break
+            }
+            synchronized(sharedCollectionLock) {
+                synchronized(fence) {
+                    // Fenced on the ACTIVATION generation only: when this schedule's own lease truly
+                    // expires, the policy MUST disable — an in-flight renewal is not a fresh policy,
+                    // and subscribers must see disabled until the renewal installs a valid lease.
+                    // The stale-timer hazard (an old wake AFTER a renewal installed a fresh lease,
+                    // before that lease's deadline) is prevented by the renewal cancelling this job
+                    // inside the fence at publication; if a late wake still slips through (cancellation
+                    // lost the race), the activation-generation check refuses to tear down the renewal.
+                    if (activationGeneration == gen) {
+                        state.value = DISABLED
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs [block], converting ordinary failures into null — but CancellationException is
+     * rethrown: a cancelled refresh is a cancellation (e.g. the whole-refresh deadline), never
+     * an ordinary failure to publish over.
+     */
+    private inline fun <T> attemptFinite(block: () -> T): T? = try {
+        block()
+    } catch (cancellation: kotlinx.coroutines.CancellationException) {
+        throw cancellation
+    } catch (error: Exception) {
+        null
+    }
+
+    /**
+     * Completes with whether the task itself succeeded — typed results are not needed here.
+     * A direct executor is required: the no-executor overload routes completion through the
+     * Android main looper, and this path must be able to run on any thread. Bounded
+     * cancellable suspension; no blocking.
+     */
+    private suspend fun <T> taskSuccess(task: com.google.android.gms.tasks.Task<T>): Boolean = suspendCancellableCoroutine { continuation ->
+        task.addOnCompleteListener(directExecutor) { t ->
+            continuation.resume(t.isSuccessful)
+        }
+    }
+
+    companion object {
+        /** How long a successfully activated snapshot stays valid in monotonic time. */
+        const val DEFAULT_LEASE_MS: Long = 15 * 60 * 1000L
+
+        /** Bound on joining the underlying provider's initial fetch/activation sequence. */
+        const val INIT_AWAIT_MS: Long = 2_000L
+
+        /** Bound on a whole refresh: pending fetch/activate tasks cannot suspend it forever. */
+        const val REFRESH_TIMEOUT_MS: Long = 10_000L
+
+        private val DISABLED = PolicySnapshot(enabled = false, activatedAtMonotonicMs = 0L, activationGeneration = 0L)
+    }
+}
+
+/**
+ * Immutable compiled policy view. `voice_sharing_enabled` is the only remote input; every
+ * numeric value here is a compiled default validated against a compiled ceiling at
+ * construction — they are deliberately NOT Firebase keys.
+ */
+data class PolicySnapshot(
+    val enabled: Boolean,
+    val activatedAtMonotonicMs: Long,
+    val activationGeneration: Long,
+    /**
+     * THE allowed upload networks (`upload_network`, spec §73/§152). The compiled default is
+     * [UploadNetwork.ANY]; the value is a validated LOCAL policy input, not a remote key (there is
+     * no `upload_network` field in the published snapshot yet — reviewer 177645cc: it must still
+     * gate BOTH the scheduler constraint and EACH actual attempt, which it now does).
+     */
+    val uploadNetwork: UploadNetwork = UploadNetwork.ANY,
+)
+
+/**
+ * THE allowed upload networks (`upload_network`, spec voice-recording-uploads.md §73/§152).
+ *
+ * A CLOSED set on purpose: the validated policy may only express constraints this client already
+ * implements, so activation cannot strand the queue behind a network rule nobody honours. The
+ * compiled default is [ANY]; nothing stricter is invented here (spec 89b4760b — in particular no
+ * charging or unmetered requirement unless the validated policy says so).
+ */
+enum class UploadNetwork {
+    /** Any connected network. */
+    ANY,
+
+    /** Unmetered networks only (a validated policy may require this). */
+    UNMETERED,
+    ;
+
+    companion object {
+        /**
+         * The compiled default when the snapshot expresses no network restriction. NOTE: the
+         * published snapshot does not yet carry an `upload_network` field (it is a validated local
+         * default, not a remote key — spec §73), so callers use THIS value until activation defines
+         * one; the closed set above is what that value may ever be.
+         */
+        fun compiledDefault(): UploadNetwork = ANY
+    }
+}

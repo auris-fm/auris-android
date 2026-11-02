@@ -256,6 +256,8 @@ class VoiceControlCaptureRestartTest {
             return true
         }
 
+        override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = 0
+
         override fun stopCaptureAndVad() {
             vadStopCount++
             capturing = false
@@ -451,6 +453,9 @@ class VoiceControlCaptureRestartTest {
                 override suspend fun ensureReady(sourceLanguage: String) = Result.success(Unit)
                 override suspend fun translate(text: String, sourceLanguage: String): Result<String> = Result.failure(IllegalStateException("unused"))
             },
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
 

@@ -138,6 +138,9 @@ abstract class RepositoryModule {
     abstract fun providesSyncAccountManager(syncAccountManagerImpl: SyncAccountManagerImpl): SyncAccountManager
 
     @Binds
+    abstract fun providesCredentialOwnershipOwner(syncAccountManagerImpl: SyncAccountManagerImpl): au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
+
+    @Binds
     @Singleton
     abstract fun providesAccountStatusInfo(accountManagerStatusInfo: AccountManagerStatusInfo): AccountStatusInfo
 

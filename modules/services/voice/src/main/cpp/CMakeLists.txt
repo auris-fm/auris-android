@@ -79,6 +79,9 @@ FetchContent_Declare(
 set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(whispercpp)
 
+# A one-function library carrying the compiled O_DIRECTORY authority (DirectoryFlagJni.cpp).
+add_library(pocketcasts_voice_flags SHARED DirectoryFlagJni.cpp)
+
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp

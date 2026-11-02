@@ -44,6 +44,9 @@ class SyncManagerImplTest {
     private lateinit var syncAccountManager: SyncAccountManager
 
     @Mock
+    private lateinit var credentialOwnership: CredentialOwnershipOwner
+
+    @Mock
     private lateinit var syncServiceManager: SyncServiceManager
 
     @Mock
@@ -64,6 +67,7 @@ class SyncManagerImplTest {
             context = context,
             settings = settings,
             syncAccountManager = syncAccountManager,
+            credentialOwnership = credentialOwnership,
             syncServiceManager = syncServiceManager,
             moshi = moshi,
             notificationManager = notificationManager,

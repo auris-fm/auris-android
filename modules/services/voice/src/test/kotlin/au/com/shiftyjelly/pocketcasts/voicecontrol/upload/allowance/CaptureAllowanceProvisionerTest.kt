@@ -119,7 +119,7 @@ class CaptureAllowanceProvisionerTest {
         failRead: Boolean = false,
         installAuthority: (suspend (CaptureAllowanceOwner, Long, Long, String, String, CaptureAllowanceProvisioner.Grant, () -> Unit) -> Boolean)? = null,
         identityStore: CaptureAllowanceAllocationIdentityStore? = null,
-        accountingDay: () -> String = { "2026-11-04" },
+        identityConflict: () -> Unit = {},
     ): Triple<CaptureAllowanceProvisioner, CaptureAllowanceLifecycle, MutableList<Long>> {
         val t = RecordingTransport(code, body, echoOverride, requestId, failRead)
         lastTransport = t
@@ -144,7 +144,7 @@ class CaptureAllowanceProvisionerTest {
             beginInstallAttempt = { },
             installAuthority = install,
             identityStore = identityStore,
-            accountingDay = accountingDay,
+            identityConflict = identityConflict,
         )
         return Triple(p, lifecycle, binds)
     }
@@ -414,12 +414,38 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
-    fun `a NEW accounting day does not reuse yesterday's id - that would be a silent 410`() = runBlocking {
-        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()), accountingDay = { "2026-11-04" })
-            .first.provision()
-        val yesterdayId = sentRequestId()
-        provisioner(200, goBody(), clock = mutableListOf(3_000L, 4_000L), identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()), accountingDay = { "2026-11-05" })
-            .first.provision()
-        assertNotEquals("a persisted id from another day is dead on the server", yesterdayId, sentRequestId())
+    fun `a persisted id is reused across a DAY rollover - the device calendar never decides`() = runBlocking {
+        // cloud bcc9a42a: the accounting day is server state, so it is NOT in the persisted key.
+        // Reusing yesterday's id costs exactly one `410` round trip and charges nothing, whereas a
+        // client-side calendar comparison would silently mint a new allocation on a clock change.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+        val firstId = sentRequestId()
+        provisioner(200, goBody(disposition = "replayed"), clock = mutableListOf(3_000L, 4_000L), identityStore = store).first.provision()
+        assertEquals("a day rollover must not mint a new id", firstId, sentRequestId())
+    }
+
+    @Test
+    fun `409 DISCARDS the id and reports it as a client bug, loudly`() = runBlocking {
+        // cloud bcc9a42a: 409 can only mean the id survived an enrollment change. It is a bug
+        // report, not a transient -- the id is discarded AND the conflict is surfaced.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        var conflicts = 0
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+        val firstId = sentRequestId()
+        provisioner(409, "", clock = mutableListOf(3_000L, 4_000L), identityStore = store, identityConflict = { conflicts++ }).first.provision()
+        assertEquals("a 409 must surface as a client bug report, not a silent retry", 1, conflicts)
+        provisioner(200, goBody(), clock = mutableListOf(5_000L, 6_000L), identityStore = store).first.provision()
+        assertNotEquals("a 409 must discard the presented id", firstId, sentRequestId())
+    }
+
+    @Test
+    fun `a CHANGED enrollment epoch discards the old id instead of provoking a 409`() = runBlocking {
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+        val oldId = sentRequestId()
+        val newEpoch = CaptureAllowanceProvisioner.Credential(bearer = "tok", accountId = "acct-1", enrollmentEpoch = "ep-2")
+        provisioner(200, goBody(echoEpoch = "ep-2"), clock = mutableListOf(3_000L, 4_000L), cred = newEpoch, identityStore = store).first.provision()
+        assertNotEquals("an id minted under a dead epoch must not be presented", oldId, sentRequestId())
     }
 }

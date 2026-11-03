@@ -636,7 +636,10 @@ class VoiceSharingAccountOperationsFencingTest {
         // the OWNER, the sole place that can be harmed, not from a callback list.
         assertEquals("token-b", owner.authoritySnapshot().token!!.value) // owner publication untouched
         assertEquals("Bearer token-b", credentials.current()!!.bearer) // fresh credential untouched
-        assertEquals("rev-1", state.projection.value?.membershipRevision ?: "rev-1")
+        // BOTH halves must hold (reviewer b702cd53): nothing was destroyed AND the live voice
+        // authority is intact -- asserted directly, never via a defaulted/optional value.
+        assertTrue("a pre-transaction 401 must not revoke the live voice authority", state.hasCurrentSessionProjection())
+        assertEquals("rev-1", state.projection.value!!.membershipRevision)
     }
 
     @Test
@@ -1044,7 +1047,10 @@ class VoiceSharingAccountAuthBindingTest {
         // revokes nothing at all, and the credential published meanwhile survives untouched.
         assertEquals("real-token-2", owner.authoritySnapshot().token!!.value)
         assertEquals("Bearer real-token-2", credentials.current()!!.bearer)
-        assertFalse("a STALE 401 must not revoke the live voice authority", state.hasCurrentSessionProjection())
+        // BOTH halves (reviewer b702cd53): the stale 401 committed nothing -- the fresh credential
+        // survives AND the live voice authority established before the rotation is STILL current.
+        assertTrue("a stale 401 must not revoke the live voice authority", state.hasCurrentSessionProjection())
+        assertTrue(state.isCurrentSession(token))
         server.shutdown()
     }
 }

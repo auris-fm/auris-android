@@ -66,6 +66,17 @@ class EnrollmentDisclosureTest {
     }
 
     @Test
+    fun `the disclosure states withdrawal does not delete and deletion is separate`() {
+        val rendered = (
+            stringResource("voice_sharing_disclosure_supporting") + " " +
+                stringResource("voice_sharing_disclosure_detail")
+            ).lowercase()
+        assertTrue(rendered.contains("withdraw"))
+        assertTrue(rendered.contains("one year"))
+        assertTrue(rendered.contains("does not delete"))
+    }
+
+    @Test
     fun `the version is non-blank so enrollment cannot ship an unusable consent record`() {
         assertTrue(EnrollmentDisclosure.VERSION.isNotBlank())
     }

@@ -190,7 +190,14 @@ class UploadCostMeasurementTest {
             }
             // The provider's freshness check requires the SDK bookkeeping to ADVANCE with each
             // fetch (a cached success whose timestamps stand still fails closed) — mirror that.
+            // fetchSuspending() calls the NO-ARG fetch(): an unstubbed overload returned null and
+            // its addOnCompleteListener NPE escaped as an uncaught coroutine exception, poisoning
+            // the next runTest in the shared JVM (UncaughtExceptionsBeforeTest).
             on { fetch() }.thenAnswer {
+                fetchTimeMs += 1_000
+                JvmTask(Result.success(Unit))
+            }
+            on { fetch(0L) }.thenAnswer {
                 fetchTimeMs += 1_000
                 JvmTask(Result.success(Unit))
             }

@@ -129,7 +129,7 @@ class VoiceSharingAccountOperations(
      * `kid` and that route refuses it structurally. The owner snapshot still decides whether we
      * may act at all -- it just stops being the bearer, which is the whole of the defect.
      */
-    private val aurisToken: CloudTokenProviding,
+    private val aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding,
     private val onCredentialInvalid: suspend (AuthoritySnapshot) -> Unit,
     /**
      * The AURIS credential's own invalidation, deliberately NOT the owner's `invalidateAuthToken`.
@@ -422,19 +422,23 @@ class VoiceSharingAccountOperations(
         // The owner no longer clears the upstream credential for this route's 401 (it never sees
         // that credential -- cloud bbb9beff); the voice scope is what a committed rejection revokes.
         val frozenBearer = op.bearer ?: return
-        // Read the CURRENT Auris bearer before the transaction (currentToken() suspends); the
-        // comparison itself is pure so the whole check+commit stays inside the owner lock.
-        val currentBearer = "Bearer " + (aurisToken.currentToken() ?: "")
-        val committed = ownership.transaction {
-            // Staleness FIRST: if the current Auris bearer is not the one that was rejected, the
-            // 401 answers a credential that has already been replaced -- commit NOTHING.
-            currentBearer == frozenBearer &&
-                state.processUnauthorized(op.token, op.ticket)
+        // ATOMIC staleness + commit (reviewer 57246e46): the cache-publication monitor is held
+        // across the whole comparison-and-commit, so a concurrent re-mint cannot land between
+        // them. Staleness FIRST: a 401 answering a bearer that is no longer the cache's current
+        // token (superseded mint, switched account, other origin, cleared cache) answers a
+        // credential that has already been replaced -- commit NOTHING.
+        val committed = aurisToken.withCurrentCachedToken { currentBearer ->
+            ownership.transaction {
+                "Bearer " + (currentBearer ?: "") == frozenBearer &&
+                    state.processUnauthorized(op.token, op.ticket)
+            }
         }
         if (!committed) return // effects fire ONLY for a rejection that actually committed
-        // Delayed-effect fence: if a SUPERSEDING session has already re-established a projection,
-        // this rejection is history -- its mirror clear must not touch the newer scope.
-        if (state.hasCurrentSessionProjection()) return
+        // Delayed-effect fence, RE-CHECKED AFTER THE SUSPENSION (reviewer 57246e46): the refresh
+        // above suspends, and a superseding session can establish its projection while it is in
+        // flight -- this rejection's mirror clear must not touch that newer scope. The check runs
+        // inside the owner transaction so a concurrent publication cannot slip past it.
+        if (ownership.transaction { state.hasCurrentSessionProjection() }) return
         onAurisCredentialRefused() // force a re-mint from the SAME account
         onCredentialInvalid(op.observed) // post-commit notification, NO authority side effects
     }

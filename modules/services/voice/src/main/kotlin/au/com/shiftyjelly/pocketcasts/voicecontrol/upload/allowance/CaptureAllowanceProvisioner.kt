@@ -147,6 +147,10 @@ class CaptureAllowanceProvisioner(
     var lastComposedOwner: CaptureAllowanceOwner? = null
         internal set
 
+    /** The allocation identity [lastComposedOwner] was composed under, for compare-and-swap. */
+    @Volatile
+    private var composedIdentity: CaptureAllowanceAllocationIdentityStore.Identity? = null
+
     data class Grant(val batchId: String, val requestStartElapsedMs: Long, val validForMs: Long) {
         fun isFresh(nowElapsedMs: Long): Boolean {
             if (requestStartElapsedMs < 0 || nowElapsedMs < 0) return false
@@ -154,6 +158,29 @@ class CaptureAllowanceProvisioner(
             if (nowElapsedMs < requestStartElapsedMs) return false
             return nowElapsedMs - requestStartElapsedMs < validForMs
         }
+    }
+
+    /**
+     * The TERMINATION CONDITION for the refill path (cloud 0b659d72).
+     *
+     * A refill spends records already held; it can never create new ones. So "refuse -> refill ->
+     * refuse -> refill" must STOP at a proven-exhaustion state and route to provisioning through
+     * the durable identity, not loop locally: a refill that merely returns false forever is a
+     * silent spin the server sees as inactivity.
+     *
+     * True when the composed owner's own ledger is spent. [prepareComposedToken] returns false in
+     * that state for the same reason a fresh owner would, so callers must distinguish "nothing to
+     * refill yet" from "nothing left to refill" -- this is that distinction, and it is the signal
+     * the engine uses to advance the allocation instead of retrying.
+     */
+    fun composedOwnerExhausted(): Boolean = synchronized(prepareLock) {
+        lastComposedOwner?.isExhausted() == true
+    }
+
+    /** True when the composed grant has passed its own `valid_for_ms`; a refill cannot help. */
+    fun composedOwnerExpired(): Boolean = synchronized(prepareLock) {
+        val grant = currentGrant ?: return false
+        !grant.isFresh(elapsedMs())
     }
 
     /**
@@ -191,13 +218,22 @@ class CaptureAllowanceProvisioner(
         // allocation so this attempt asks for a new one. Note this runs BEFORE acquire(), so the
         // retired id is not presented again.
         store?.let { st ->
-            if (lastComposedOwner?.isExhausted() == true) {
+            val spent = lastComposedOwner
+            val spentIdentity = composedIdentity
+            if (spent != null && spent.isExhausted()) {
+                // COMPARE-AND-SWAP BOUND TO THE OWNER'S OWN ALLOCATION (reviewer 7c220c1d, cloud
+                // b2f0df12): the proof was computed from a SPENT owner, so it may only advance the
+                // identity that owner was composed under -- never whatever is current now, which
+                // could be a newer allocation this stale proof would otherwise delete.
+                if (spentIdentity != null) st.advance(spentIdentity)
                 lastComposedOwner = null
                 currentGrant = null
-                st.current()?.let { st.advance(it) }
+                composedIdentity = null
             }
         }
-        val acquisition = store?.acquire(cred.enrollmentEpoch)
+        // ACCOUNT PER DECISION, not captured at construction (reviewer 7c220c1d #2): the credential
+        // that authorises THIS attempt is the authoritative account for it.
+        val acquisition = store?.acquire(cred.enrollmentEpoch, cred.accountId)
         // AMBIGUOUS PERSISTED STATE REFUSES (reviewer b36642db / cloud ffeaa62d). Re-minting is
         // indistinguishable server-side from a first attempt: it allocates and charges a new
         // batch, with no record that an identity was lost. Refusing costs a capture; re-minting
@@ -347,6 +383,7 @@ class CaptureAllowanceProvisioner(
                     // owner was never prepared, so a successful response could not admit).
                     lastComposedOwner = owner
                     currentGrant = grant
+                    composedIdentity = identity
                 }
                 if (!installAuthority(owner, cred.generation, cred.session, cred.enrollmentEpoch, attemptId, grant, publish)) {
                     return Result.Refused(REASON_IDENTITY_CHANGED)

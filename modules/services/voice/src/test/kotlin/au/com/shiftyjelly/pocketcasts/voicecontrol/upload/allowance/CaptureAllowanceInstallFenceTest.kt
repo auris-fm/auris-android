@@ -489,6 +489,34 @@ class CaptureAllowanceInstallFenceTest {
     }
 
     @Test
+    fun `a SPENT ledger terminates refilling instead of spinning`() {
+        // cloud 0b659d72: refill is a durable ledger charge, never a network call, so it is safe
+        // per attempt -- but it CANNOT create records. Once the local batch is provably spent, a
+        // refill loop stops consuming tokens and starts doing nothing while the caller keeps
+        // asking. Termination has to be observable, not implied.
+        val (f, _, _) = fence()
+        f.beginAttempt("a1")
+        val o = owner()
+        assertTrue(f.install(o, credential.generation, credential.session, credential.enrollmentEpoch, "a1", grant) { })
+        val installed = lifecycleUnderTest!!
+
+        clock = 1_000L + 10_000L
+        var admitted = 0
+        while (o.prepareToken()) {
+            if (installed.takePrepaidToken() != null) admitted++
+            assertTrue("the batch must exhaust long before 16 admissions", admitted <= 16)
+        }
+        assertEquals("every record in the batch must be admitted exactly once", 4, admitted)
+        assertEquals("and charged exactly once each", 4, o.ledgerChargesForTest())
+        assertTrue("a drained ledger must SAY it is spent, so the caller can stop", o.isExhausted())
+        // THE TERMINAL PROPERTY: further refills must refuse rather than hand out phantom work.
+        repeat(3) { round ->
+            assertFalse("round $round: a spent ledger must not report a successful refill", o.prepareToken())
+            assertEquals("round $round: a spent ledger must not keep charging", 4, o.ledgerChargesForTest())
+        }
+    }
+
+    @Test
     fun `preparation AFTER expiry does not charge - the check must precede the charge`() {
         // reviewer 3d1f87be #4: freshness was checked only when TAKING the already-charged token,
         // so a preparation after expiry consumed capacity the server no longer honours. The

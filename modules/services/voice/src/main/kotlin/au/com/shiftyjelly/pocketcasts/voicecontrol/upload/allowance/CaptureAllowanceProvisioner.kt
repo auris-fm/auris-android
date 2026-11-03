@@ -78,10 +78,11 @@ class CaptureAllowanceProvisioner(
      * on `request_id` ALONE, so a fresh UUID per attempt does not retry -- it allocates a new
      * batch. The id is therefore persisted BEFORE the send and reused across restarts, retries
      * and unknown transport outcomes; it is replaced only on a server-confirmed `410`, and
-     * RETAINED on `429`. Null disables durability and is ONLY for controls that assert the
-     * un-persisted behaviour explicitly.
+     * RETAINED on `429`. MANDATORY in production (reviewer b36642db): a nullable default silently
+     * disabled the whole mechanism in `VoiceObservationModule`, which still minted a fresh UUID
+     * per call. Null remains available only to controls that assert un-persisted behaviour.
      */
-    private val identityStore: CaptureAllowanceAllocationIdentityStore? = null,
+    private val identityStore: CaptureAllowanceAllocationIdentityStore?,
     /**
      * Invoked on a `409 request_conflict` (cloud bcc9a42a). This is a CLIENT BUG REPORT, not a
      * transient: it means a persisted id outlived the enrollment epoch it was minted under. The
@@ -155,6 +156,16 @@ class CaptureAllowanceProvisioner(
         }
     }
 
+    /**
+     * PREPARES the durable charge on the currently composed owner, so the next admission on this
+     * authority can hand out a prepaid token.
+     *
+     * This is the production caller `prepareToken()` was missing (reviewer b36642db). It returns
+     * false when nothing is composed, when the owner is closed, or when the ledger cannot charge —
+     * every one of which must leave the capture refused rather than admitting uncharged.
+     */
+    fun prepareComposedToken(): Boolean = synchronized(prepareLock) { lastComposedOwner?.prepareToken() == true }
+
     suspend fun provision(): Result {
         val cred = credential() ?: return Result.Refused(REASON_NO_CREDENTIAL)
         val attemptId = UUID.randomUUID().toString()
@@ -165,8 +176,19 @@ class CaptureAllowanceProvisioner(
         // PERSIST BEFORE SENDING (reviewer 3ba1e605): the id that goes on the wire is the one the
         // next attempt will reuse. A crash between here and the response leaves a persisted id
         // whose re-send is a replay -- never a second allocation.
-        val identity = identityStore?.acquire(cred.enrollmentEpoch)
-        val requestId = identity?.requestId?.let(UUID::fromString) ?: UUID.randomUUID()
+        val store = identityStore
+        val acquisition = store?.acquire(cred.enrollmentEpoch)
+        // AMBIGUOUS PERSISTED STATE REFUSES (reviewer b36642db / cloud ffeaa62d). Re-minting is
+        // indistinguishable server-side from a first attempt: it allocates and charges a new
+        // batch, with no record that an identity was lost. Refusing costs a capture; re-minting
+        // costs capacity that cannot be returned.
+        if (acquisition is CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous) {
+            return Result.Refused(REASON_IDENTITY_AMBIGUOUS)
+        }
+        val identity = (acquisition as? CaptureAllowanceAllocationIdentityStore.Acquisition.Held)?.identity
+        // NO STORE = the caller opted out of durability (controls only). Otherwise the id is the
+        // persisted one; a fresh UUID here would defeat the whole mechanism.
+        val requestId = identity?.let { UUID.fromString(it.requestId) } ?: UUID.randomUUID()
         val body = try {
             CaptureAllowanceBatch.requestJson(requestId, cred.enrollmentEpoch)
         } catch (e: IllegalArgumentException) {
@@ -190,25 +212,24 @@ class CaptureAllowanceProvisioner(
             // A client-side calendar change is never proof of anything: the accounting day is
             // server state and is deliberately not persisted, so a day rollover costs one `410`
             // round trip rather than a comparison against this device's clock.
-            val store = identityStore
             when {
                 // Durability disabled by the caller (controls only).
-                store == null -> Unit
+                store == null || identity == null -> Unit
 
                 // 410: the server's window moved. One round trip, no charge.
-                response.code() == 410 -> store.advance()
+                response.code() == 410 -> store.advance(identity)
 
                 // 409: we presented an id whose stored epoch differs from the one we sent. Since
                 // the epoch travels WITH the id, that can only mean the id survived an enrollment
                 // change -- a client state-machine bug. Discard and mint, and say so loudly: a
                 // silent retry would hide the bug that produced it (cloud bcc9a42a).
                 response.code() == 409 -> {
-                    store.advance()
+                    store.advance(identity)
                     identityConflict()
                 }
 
                 // 429 RETAINS the id: a fresh one refuses identically and stores another row.
-                response.code() == 429 -> if (identity != null) store.retain(identity)
+                response.code() == 429 -> store.retain(identity)
 
                 // 503 retries the SAME id; other 4xx are terminal for that id, no advance.
                 else -> Unit
@@ -298,6 +319,9 @@ class CaptureAllowanceProvisioner(
                 // the provisioner records nothing itself after a suspending callback.
                 val grant = Grant(parsed.batchId, start, parsed.validForMs)
                 val publish = {
+                    // The COMPOSED owner is published so the capture path can PREPARE the durable
+                    // charge on the exact object the fence bound (reviewer b36642db: the composed
+                    // owner was never prepared, so a successful response could not admit).
                     lastComposedOwner = owner
                     currentGrant = grant
                 }
@@ -315,12 +339,17 @@ class CaptureAllowanceProvisioner(
         }
     }
 
+    private val prepareLock = Any()
+
     companion object {
         const val REASON_NO_CREDENTIAL = "allowance_no_credential"
         const val REASON_EPOCH_TOO_LONG = CaptureAllowanceBatch.REASON_EPOCH_TOO_LONG
         const val REASON_TRANSPORT = "allowance_transport_failed"
         const val REASON_MISMATCH = "allowance_response_mismatch"
         const val REASON_IDENTITY_CHANGED = "allowance_identity_changed"
+
+        /** Persisted allocation state exists but cannot be trusted; capture must refuse. */
+        const val REASON_IDENTITY_AMBIGUOUS = "allowance_identity_ambiguous"
 
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
     }

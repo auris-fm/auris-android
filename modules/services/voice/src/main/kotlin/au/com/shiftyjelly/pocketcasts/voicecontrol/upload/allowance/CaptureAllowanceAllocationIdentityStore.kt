@@ -1,90 +1,92 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
 
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 
 /**
- * The DURABLE allocation identity: `(request_id, enrollment_epoch, accounting_day)`.
+ * The DURABLE allocation identity: `(request_id, enrollment_epoch)`.
  *
  * The server is idempotent on `request_id` alone, which makes this the client's most expensive
- * obligation: a *fresh* UUID per attempt does not retry, it allocates a NEW batch (reviewer
- * 3ba1e605, cloud a42eea42). So the identity is persisted BEFORE any transport work and reused
- * for every restart, retry and unknown transport outcome, and it is replaced only in the two
- * cases the server names as advancement:
+ * obligation: a fresh UUID per attempt does not retry, it allocates a NEW batch. So the identity
+ * is made durable BEFORE any transport work and reused for every restart, retry and unknown
+ * transport outcome.
  *
- * | server says                          | client does                                  |
- * |--------------------------------------|----------------------------------------------|
- * | `200 issued` / `200 replayed`        | persist `(id, epoch, day)`, use the batch    |
- * | `503 unavailable`                    | retry the SAME id                            |
- * | `429 exhausted`                      | RETAIN the id, stop allocating for the day   |
- * | `410 window expired`                 | ADVANCE (server-confirmed expiry)            |
- * | `409` / `403` / `422`                | terminal for that id; advance with a new one |
+ * Three properties the reviewer required (b36642db), each of which is a refusal rather than a
+ * guess:
  *
- * The epoch is part of the identity because reusing an id across an enrollment change is a `409`
- * the client should never provoke; the day is part of it because a persisted id silently becomes
- * a `410` at midnight UTC. Advancing on the CLIENT's own calendar is never allowed — device
- * clocks are unvalidated input, and only a server `410` (or proven local batch exhaustion)
- * authorises advancement.
+ * 1. **Durable before the send.** The record is written and `fsync`ed, and the containing
+ *    directory is synced too — `rename` alone orders the directory entry but does not promise
+ *    the bytes survive a power cut, and an identity that evaporates is a silently re-allocated
+ *    batch.
+ * 2. **Ambiguous recovery REFUSES.** Unreadable or corrupt persisted state is not "no identity":
+ *    re-minting is indistinguishable server-side from a first attempt and burns capacity
+ *    permanently (cloud ffeaa62d). [acquire] returns [Acquisition.Ambiguous] and the capture is
+ *    refused until the operator-cleanable file is resolved.
+ * 3. **Advancement is compare-and-swap.** An `advance` or `retain` carries the identity it was
+ *    produced from and applies only if that identity is still the current one. A late response
+ *    for a dead identity must not delete a newer one (cloud ffeaa62d).
  *
- * Storage is a single small file written atomically (temp + rename): a torn write must never
- * leave an id that was never sent, because the id itself is what makes the retry safe.
+ * The accounting day is deliberately NOT part of the key: it is server state, and persisting it
+ * invites comparing it against this device's clock (cloud bcc9a42a). A day rollover reuses the
+ * id, answers `410`, and advances then.
  */
 class CaptureAllowanceAllocationIdentityStore(
     private val file: File,
 ) {
-    /** The persisted identity, or null when none has been minted for the current epoch. */
-    fun current(): Identity? = synchronized(lock) {
-        if (!file.isFile) return null
-        val text = runCatching { file.readText() }.getOrNull() ?: return null
-        IdentityEncoding.decode(text)
+    sealed interface Acquisition {
+        /** The identity to present. It is already durable. */
+        data class Held(val identity: Identity) : Acquisition
+
+        /**
+         * The persisted record exists but cannot be trusted. Refuse the capture: re-minting here
+         * would ask the server for a new batch and charge it, with no trace that anything was lost.
+         */
+        data object Ambiguous : Acquisition
     }
 
+    /** The persisted identity, or null when none was ever minted. */
+    fun current(): Identity? = synchronized(lock) { readOrNull() as? Identity }
+
     /**
-     * Returns the identity to use for an attempt against [enrollmentEpoch]: the persisted one when
-     * its epoch still matches, a fresh one otherwise. Persisted BEFORE the caller sends anything.
-     *
-     * THE DAY IS DELIBERATELY NOT PART OF THE KEY (cloud bcc9a42a). The accounting day is
-     * server-side state; persisting it invites comparing it against this device's clock, and a
-     * device calendar must never decide advancement. What moves the window is the server's `410`,
-     * which [advance] honours. A persisted id from another day is therefore reused, answers
-     * `410`, and is advanced then -- one round trip, no charge, no client-side calendar.
+     * The identity for an attempt under [enrollmentEpoch], made durable before return. Reuses the
+     * persisted id when its epoch still matches (a different epoch can only produce a `409`).
      */
-    fun acquire(enrollmentEpoch: String): Identity = synchronized(lock) {
-        val existing = current()
-        if (existing != null) {
-            if (existing.enrollmentEpoch == enrollmentEpoch) {
+    fun acquire(enrollmentEpoch: String): Acquisition = synchronized(lock) {
+        val existing = readOrNull()
+        if (existing == AMBIGUOUS) return Acquisition.Ambiguous
+        val held = existing as? Identity
+        if (held != null) {
+            if (held.enrollmentEpoch == enrollmentEpoch) {
                 // A RETAINED id is returned too: after a 429 the allocation is gone, and minting a
-                // fresh id would refuse identically while storing another server row (cloud
-                // a42eea42). Only a 410 -- or a new enrollment epoch -- replaces it.
-                return existing
+                // fresh id would refuse identically while storing another server row.
+                return Acquisition.Held(held)
             }
-            // A DIFFERENT EPOCH: the persisted id now belongs to an enrollment that no longer
-            // exists, and reusing it can only produce a 409 (cloud bcc9a42a). Discard and mint.
-            file.delete()
+            // A different epoch: this id belongs to an enrollment that no longer exists.
+            deleteQuietly()
         }
-        IdentityEncoding.encode(file, Identity(UUID.randomUUID().toString(), enrollmentEpoch))
+        val minted = Identity(UUID.randomUUID().toString(), enrollmentEpoch)
+        write(minted)
+        Acquisition.Held(minted)
     }
 
     /**
-     * ADVANCEMENT, and the only place the identity changes on the server's word: `410` (window
-     * expired) or `409` (the persisted id was presented with an epoch it no longer belongs to --
-     * a client state-machine bug worth logging loudly, never a transient to retry).
+     * ADVANCEMENT, compare-and-swap. Applies only if [expected] is still the stored identity, so a
+     * late `409`/`410` for an already-superseded id cannot delete its replacement. `410` is the
+     * server's window moving; `409` is a client state-machine bug (report it, then discard).
      */
-    fun advance() = synchronized(lock) {
-        file.delete()
-        file.delete() // idempotent: absent is the same state as advanced
-        Unit
+    fun advance(expected: Identity): Boolean = synchronized(lock) {
+        if (readOrNull() as? Identity != expected) return false
+        deleteQuietly()
+        true
     }
 
-    /**
-     * `429`: the day's allocation is gone. The id is RETAINED so the client's refusal stays
-     * observable and no new rows are created; only a server `410` or a new day advances it.
-     */
-    fun retain(identity: Identity) = synchronized(lock) {
-        IdentityEncoding.encode(file, identity.copy(retired = true))
+    /** `429`: retain the id so no new allocation is requested for the rest of the window. */
+    fun retain(identity: Identity): Boolean = synchronized(lock) {
+        if (readOrNull() as? Identity != identity) return false
+        write(identity.copy(retired = true))
+        true
     }
-
-    private val lock = Any()
 
     data class Identity(
         val requestId: String,
@@ -92,33 +94,63 @@ class CaptureAllowanceAllocationIdentityStore(
         val retired: Boolean = false,
     ) {
         companion object {
-            /** Strict: an unparseable record is treated as ABSENT, never as a usable identity. */
             fun parse(text: String): Identity? = IdentityEncoding.decode(text)
         }
     }
-}
 
-/** File encoding for a persisted identity. Strict: an unparseable record is ABSENT, not usable. */
-private object IdentityEncoding {
-    const val VERSION = "allowance-identity/1"
+    /** Distinguishes "absent" from "present but unreadable": only the latter refuses. */
+    private fun readOrNull(): Any? {
+        if (!file.exists()) return null
+        val text = runCatching { file.readText() }.getOrNull() ?: return AMBIGUOUS
+        return IdentityEncoding.decode(text) ?: AMBIGUOUS
+    }
 
-    fun encode(file: File, identity: CaptureAllowanceAllocationIdentityStore.Identity): CaptureAllowanceAllocationIdentityStore.Identity {
-        val tmp = File(file.parentFile, file.name + ".tmp")
-        tmp.parentFile?.mkdirs()
-        tmp.writeText(
-            "$VERSION\n" +
-                "${identity.requestId}\n" +
-                "${identity.enrollmentEpoch}\n" +
-                "${identity.retired}\n",
-        )
-        // ATOMIC REPLACE: the rename is the commit point, so a crash never leaves a half-written
-        // identity that would silently become a different request.
+    private fun write(identity: Identity) {
+        val dir = file.parentFile ?: throw IllegalStateException("identity file has no directory")
+        dir.mkdirs()
+        val tmp = File(dir, file.name + ".tmp")
+        // DURABILITY, not just atomicity: fsync the bytes before the rename, then fsync the
+        // directory so the new NAME survives too. Either alone can lose the record on a crash,
+        // and a lost record is a silently re-allocated batch.
+        FileOutputStream(tmp).use { out ->
+            out.write(IdentityEncoding.render(identity).toByteArray())
+            out.flush()
+            out.fd.sync()
+        }
         if (!tmp.renameTo(file)) {
             tmp.delete()
             throw IllegalStateException("allowance identity could not be persisted")
         }
-        return identity
+        syncDirectory(dir)
     }
+
+    private fun deleteQuietly() {
+        val dir = file.parentFile
+        file.delete()
+        if (dir != null) syncDirectory(dir)
+    }
+
+    private fun syncDirectory(dir: File) {
+        // Best effort: some filesystems refuse to open a directory for sync. A failure here is
+        // not a reason to fail an otherwise durable write, but it is never silently assumed.
+        runCatching {
+            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+        }
+    }
+
+    private val lock = Any()
+
+    private companion object {
+        /** Sentinel meaning "present but not trustworthy" -- distinct from absent (null). */
+        val AMBIGUOUS = Any()
+    }
+}
+
+/** Strict file encoding for a persisted identity. Anything unparseable is AMBIGUOUS, not absent. */
+private object IdentityEncoding {
+    const val VERSION = "allowance-identity/2"
+
+    fun render(identity: CaptureAllowanceAllocationIdentityStore.Identity): String = "$VERSION\n${identity.requestId}\n${identity.enrollmentEpoch}\n${identity.retired}\n"
 
     fun decode(text: String): CaptureAllowanceAllocationIdentityStore.Identity? {
         val lines = text.lines()

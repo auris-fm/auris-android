@@ -33,6 +33,13 @@ import java.util.UUID
  */
 class CaptureAllowanceAllocationIdentityStore(
     private val file: File,
+    /**
+     * The authoritative ACCOUNT this identity belongs to (reviewer 3d1f87be #3). One fixed file
+     * scoped only by epoch would let a second account reuse the first account's request id, which
+     * the server would see as one account presenting another's allocation. The account is part of
+     * the persisted record and must match on every read.
+     */
+    private val account: String? = null,
 ) {
     sealed interface Acquisition {
         /** The identity to present. It is already durable. */
@@ -53,10 +60,23 @@ class CaptureAllowanceAllocationIdentityStore(
      * persisted id when its epoch still matches (a different epoch can only produce a `409`).
      */
     fun acquire(enrollmentEpoch: String): Acquisition = synchronized(lock) {
+        // A RECORDED CONFLICT BLOCKS, it does not fall through to a mint.
+        if (conflicted) {
+            val recorded = readOrNull() as? Identity
+            // A genuinely NEW epoch is the one resolution that is not a bypass: the old id cannot
+            // be reused and the server has already told us so.
+            if (recorded != null && recorded.enrollmentEpoch == enrollmentEpoch) return Acquisition.Ambiguous
+            conflicted = false
+            file.delete()
+        }
         val existing = readOrNull()
         if (existing == AMBIGUOUS) return Acquisition.Ambiguous
         val held = existing as? Identity
         if (held != null) {
+            // A record from ANOTHER ACCOUNT can never be reused (reviewer 3d1f87be #3).
+            if (account != null && held.account != null && held.account != account) {
+                return Acquisition.Ambiguous
+            }
             if (held.enrollmentEpoch == enrollmentEpoch) {
                 // A RETAINED id is returned too: after a 429 the allocation is gone, and minting a
                 // fresh id would refuse identically while storing another server row.
@@ -65,15 +85,27 @@ class CaptureAllowanceAllocationIdentityStore(
             // A different epoch: this id belongs to an enrollment that no longer exists.
             deleteQuietly()
         }
-        val minted = Identity(UUID.randomUUID().toString(), enrollmentEpoch)
-        write(minted)
+        val minted = Identity(UUID.randomUUID().toString(), enrollmentEpoch, account = account)
+        if (!write(minted)) {
+            recoveryRequired = true
+            return Acquisition.Ambiguous
+        }
         Acquisition.Held(minted)
     }
 
     /**
+     * Records a `409` against [expected] WITHOUT deleting it (reviewer 3d1f87be #1). The id stays
+     * on disk so the conflict stays observable, and [acquire] refuses until it is resolved.
+     */
+    fun recordConflict(expected: Identity): Boolean = synchronized(lock) {
+        if (readOrNull() as? Identity != expected) return false
+        conflicted = true
+        true
+    }
+
+    /**
      * ADVANCEMENT, compare-and-swap. Applies only if [expected] is still the stored identity, so a
-     * late `409`/`410` for an already-superseded id cannot delete its replacement. `410` is the
-     * server's window moving; `409` is a client state-machine bug (report it, then discard).
+     * late `410` for an already-superseded id cannot delete its replacement.
      */
     fun advance(expected: Identity): Boolean = synchronized(lock) {
         if (readOrNull() as? Identity != expected) return false
@@ -91,6 +123,7 @@ class CaptureAllowanceAllocationIdentityStore(
     data class Identity(
         val requestId: String,
         val enrollmentEpoch: String,
+        val account: String? = null,
         val retired: Boolean = false,
     ) {
         companion object {
@@ -105,7 +138,7 @@ class CaptureAllowanceAllocationIdentityStore(
         return IdentityEncoding.decode(text) ?: AMBIGUOUS
     }
 
-    private fun write(identity: Identity) {
+    private fun write(identity: Identity): Boolean {
         val dir = file.parentFile ?: throw IllegalStateException("identity file has no directory")
         dir.mkdirs()
         val tmp = File(dir, file.name + ".tmp")
@@ -119,9 +152,16 @@ class CaptureAllowanceAllocationIdentityStore(
         }
         if (!tmp.renameTo(file)) {
             tmp.delete()
-            throw IllegalStateException("allowance identity could not be persisted")
+            return false
         }
-        syncDirectory(dir)
+        // Post-rename sync failure is the dangerous case the reviewer called out: the rename
+        // happened, so a naive retry sees "already persisted" -- hence [recoveryRequired].
+        if (!syncDirectory(dir)) {
+            recoveryRequired = true
+            return false
+        }
+        recoveryRequired = false
+        return true
     }
 
     private fun deleteQuietly() {
@@ -130,15 +170,38 @@ class CaptureAllowanceAllocationIdentityStore(
         if (dir != null) syncDirectory(dir)
     }
 
-    private fun syncDirectory(dir: File) {
-        // Best effort: some filesystems refuse to open a directory for sync. A failure here is
-        // not a reason to fail an otherwise durable write, but it is never silently assumed.
-        runCatching {
-            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
-        }
+    /**
+     * Syncs the directory so the new NAME is durable, not just the bytes (reviewer 3d1f87be #2).
+     *
+     * This is NOT best effort. `rename` can be durable in the directory entry and still lose the
+     * record if the entry itself is not flushed, and a lost record is a silently re-allocated
+     * batch. So a failure here is reported and the caller REFUSES to send: the alternative is to
+     * claim an identity is durable when it may vanish on the next power cut.
+     */
+    private fun syncDirectory(dir: File): Boolean = try {
+        java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+        true
+    } catch (e: Exception) {
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        false
     }
 
     private val lock = Any()
+
+    /** Set when a write reached the rename but could not be proven durable; cleared on success. */
+    @Volatile
+    private var recoveryRequired = false
+
+    /**
+     * Set when the server answered `409 request_conflict` (reviewer 3d1f87be #1).
+     *
+     * Deleting the file and letting the next ordinary `acquire` mint a fresh id IS the bypass --
+     * unchanged authority would silently allocate a new batch, which is exactly what the conflict
+     * was warning about. So the conflict is recorded, and `acquire` REFUSES until it is resolved.
+     * Nothing about a 409 may produce a fresh id by itself.
+     */
+    @Volatile
+    private var conflicted = false
 
     private companion object {
         /** Sentinel meaning "present but not trustworthy" -- distinct from absent (null). */
@@ -148,19 +211,31 @@ class CaptureAllowanceAllocationIdentityStore(
 
 /** Strict file encoding for a persisted identity. Anything unparseable is AMBIGUOUS, not absent. */
 private object IdentityEncoding {
-    const val VERSION = "allowance-identity/2"
+    const val VERSION = "allowance-identity/3"
 
-    fun render(identity: CaptureAllowanceAllocationIdentityStore.Identity): String = "$VERSION\n${identity.requestId}\n${identity.enrollmentEpoch}\n${identity.retired}\n"
+    fun render(identity: CaptureAllowanceAllocationIdentityStore.Identity): String = buildString {
+        append(VERSION).append('\n')
+        append(identity.requestId).append('\n')
+        append(identity.enrollmentEpoch).append('\n')
+        append(identity.account ?: "").append('\n')
+        append(identity.retired).append('\n')
+    }
 
     fun decode(text: String): CaptureAllowanceAllocationIdentityStore.Identity? {
         val lines = text.lines()
-        if (lines.size < 4 || lines[0] != VERSION) return null
+        if (lines.size < 5 || lines[0] != VERSION) return null
         val id = lines[1]
         val epoch = lines[2]
-        val retired = lines[3].toBooleanStrictOrNull() ?: return null
+        val accountLine = lines[3]
+        val retired = lines[4].toBooleanStrictOrNull() ?: return null
         // The id must be a UUID: anything else could not have been sent by this client.
         if (runCatching { UUID.fromString(id) }.isFailure) return null
         if (epoch.isEmpty()) return null
-        return CaptureAllowanceAllocationIdentityStore.Identity(id, epoch, retired)
+        return CaptureAllowanceAllocationIdentityStore.Identity(
+            requestId = id,
+            enrollmentEpoch = epoch,
+            account = accountLine.ifEmpty { null },
+            retired = retired,
+        )
     }
 }

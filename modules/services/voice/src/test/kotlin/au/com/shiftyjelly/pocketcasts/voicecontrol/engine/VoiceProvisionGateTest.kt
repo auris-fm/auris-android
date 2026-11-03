@@ -194,6 +194,9 @@ class VoiceProvisionGateTest {
                     null
                 }
             },
+            // Sign-in is a change of the PASSIVE state; a probe that never moves would model a user
+            // who is signed out and stays that way, not the transition under test.
+            readinessProvider = { signedIn },
             clock = { 1_000L },
         )
         val gate = AtomicBoolean(true)
@@ -222,6 +225,7 @@ class VoiceProvisionGateTest {
                     enrollmentEpoch = "ep-1",
                 )
             },
+            readinessProvider = { accountKnown },
             clock = { 1_000L },
         )
         val gate = AtomicBoolean(true)
@@ -345,6 +349,47 @@ class VoiceProvisionGateTest {
     }
 
     @Test
+    fun `a FAILED acquisition under unchanged prerequisites does not re-arm the next utterance`() = runBlocking {
+        // spec 9a9faf8f: prerequisites become ready (empty cache), one acquisition is permitted,
+        // and it FAILS. The prerequisites have not changed, so the passive state is still READY
+        // and the next utterance must NOT re-arm. Recording NOT_READY on acquisition failure
+        // re-armed against a probe that still said READY, so one failure kept re-arming and
+        // re-failing on every utterance -- a retry loop assembled from an outcome.
+        var prerequisitesReady = false
+        var attempts = 0
+        val p = provisioner(
+            CountingApi { id -> batchBody.replace("%s", id) },
+            credential = {
+                attempts++
+                null // the acquisition itself fails
+            },
+            readinessProvider = { prerequisitesReady },
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p) // not ready yet
+        val beforeTransition = attempts
+
+        prerequisitesReady = true
+        VoiceProvisionGate.decide(gate, p) // permitted: one attempt, which fails
+        val afterOneAttempt = attempts
+        assertEquals(
+            "the transition must permit exactly one attempt",
+            beforeTransition + 1,
+            afterOneAttempt,
+        )
+
+        // Prerequisites UNCHANGED. The failure must not be treated as a new reason to ask.
+        repeat(4) { VoiceProvisionGate.decide(gate, p) }
+        assertEquals(
+            "a failed attempt under unchanged prerequisites must not re-arm",
+            afterOneAttempt,
+            attempts,
+        )
+    }
+
+    @Test
     fun `authoritative prerequisites ready while the CACHE is empty permits one attempt`() = runBlocking {
         // spec 57492640's converse: account and epoch are ready but the Auris cache is empty.
         // Readiness must stay PASSIVE -- it may not fetch to populate the cache, and it must not
@@ -385,6 +430,7 @@ class VoiceProvisionGateTest {
             credential = {
                 if (signedIn) CaptureAllowanceProvisioner.Credential("tok", "acct-1", "ep-1") else null
             },
+            readinessProvider = { signedIn },
             clock = { 1_000L },
         )
         val gate = AtomicBoolean(true)

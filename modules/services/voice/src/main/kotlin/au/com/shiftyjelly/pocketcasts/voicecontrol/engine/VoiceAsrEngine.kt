@@ -342,26 +342,28 @@ class VoiceAsrEngine @Inject constructor(
                                 // spent or expired: those are the two states whose whole purpose is
                                 // to route to the server. It stays set after an ordinary refusal,
                                 // so a genuinely unavailable allowance is still asked about once.
-                                if (allowanceProvisionAllowed.compareAndSet(true, false) &&
-                                    ensureCaptureAllowance?.provision() is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned &&
+                                // RE-ARM FROM THE PROVEN STATE, BEFORE DECIDING (reviewer 6a6eec2a).
+                                // Re-arming only in the else after the CAS had already failed meant
+                                // the FIRST exhausted/expired utterance skipped the round trip and
+                                // refused, and only the utterance AFTER it could refresh. The state
+                                // is a precondition of this decision, not a response to its outcome.
+                                val provisionResult = VoiceProvisionGate.decide(allowanceProvisionAllowed, ensureCaptureAllowance)
+                                // UNKNOWN ACCOUNT IS A HOLD, NOT A FAILURE (spec e2cd78d8). The
+                                // attempt is abandoned for this utterance without sending, and the
+                                // gate stays closed: re-arming here would ask again on every
+                                // utterance while the account is still unknowable. The deferral
+                                // resolves by the credential becoming authoritative, not by time.
+                                if (provisionResult == au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Deferred) {
+                                    Timber.i("voice capture deferred: allowance account not yet authoritative")
+                                } else if (provisionResult is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned &&
                                     // CHARGE BEFORE RE-ADMIT (reviewer b36642db): provisioning only
                                     // BINDS an owner; admission takes a PREPAID token, and nothing
                                     // had ever prepared one. Without this the re-admit below asked an
                                     // unprepared owner and refused every time, so a successful
                                     // response could never admit a capture.
-                                    ensureCaptureAllowance.prepareComposedToken()
+                                    ensureCaptureAllowance?.prepareComposedToken() == true
                                 ) {
                                     admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
-                                } else {
-                                    // The server round trip did not produce an admission. Re-arm ONLY
-                                    // when the local state says another round trip could succeed:
-                                    // a spent or expired owner is meant to route back to the
-                                    // server. Anything else (an unavailable allowance) stays gated
-                                    // so we do not ask repeatedly within one session.
-                                    val current = ensureCaptureAllowance
-                                    if (current != null && (current.composedOwnerExhausted() || current.composedOwnerExpired())) {
-                                        allowanceProvisionAllowed.set(true)
-                                    }
                                 }
                             }
                             openContext = admission?.context

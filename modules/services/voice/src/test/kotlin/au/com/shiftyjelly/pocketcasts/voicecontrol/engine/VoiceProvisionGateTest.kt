@@ -1,0 +1,176 @@
+package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
+
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAllocationIdentityStore
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.runBlocking
+import okhttp3.ResponseBody.Companion.toResponseBody
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import retrofit2.Response
+
+/**
+ * reviewer 6a6eec2a gap 3, driven through the REAL gate the engine calls.
+ *
+ * The gate was re-armed only in the else branch, after it had already been consumed. So at the
+ * first exhausted or expired utterance after a successful provision, this attempt skipped the
+ * server round trip and the user's capture was refused; only the FOLLOWING utterance could refresh.
+ * That is exactly the batch boundary the feature exists to cross, and every existing control tested
+ * captures inside one batch, which is why it survived.
+ */
+class VoiceProvisionGateTest {
+
+    @get:org.junit.Rule
+    val tmp = TemporaryFolder()
+
+    private val batchBody = """
+        {"schema_version":1,"request_id":"%s","window_id":"22222222-2222-4222-8222-222222222222",
+         "batch_id":"11111111-1111-4111-8111-111111111111","enrollment_epoch":"ep-1",
+         "disposition":"issued","valid_for_ms":300000,"batch_max_records":4,
+         "batch_max_bytes":7942320,"max_clip_ms":60000,"max_clip_bytes":1920044,
+         "max_metadata_bytes":65536}
+    """.trimIndent()
+
+    /** Counts real round trips through the provisioner's own transport seam. */
+    private class CountingApi(private val body: (String) -> String) : CaptureAllowanceProvisioner.CaptureAllowanceTransport {
+        var calls = 0
+            private set
+
+        override suspend fun postCaptureAllowance(
+            bearer: String?,
+            body: okhttp3.RequestBody,
+        ): Response<okhttp3.ResponseBody> {
+            calls++
+            val sent = okio.Buffer().also { body.writeTo(it) }.readUtf8()
+            val id = sent.substringAfter("\"request_id\":\"").substringBefore("\"")
+            return Response.success(this.body(id).toResponseBody())
+        }
+    }
+
+    private val lifecycleRef = CaptureAllowanceLifecycle()
+
+    private fun provisioner(api: CountingApi, clock: () -> Long): CaptureAllowanceProvisioner = CaptureAllowanceProvisioner(
+        api = api,
+        credential = {
+            CaptureAllowanceProvisioner.Credential(
+                bearer = "tok",
+                accountId = "acct-1",
+                enrollmentEpoch = "ep-1",
+            )
+        },
+        baseArea = tmp.root,
+        lifecycle = lifecycleRef,
+        ceilings = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings(
+            maxDailyRecords = 52,
+            maxDailyBytes = 100L * 1024 * 1024,
+            maxClipBytes = 1_920_044L,
+            maxMetadataBytes = 65_536,
+        ),
+        elapsedMs = clock,
+        beginInstallAttempt = { },
+        // Mirrors the production fence's bind+publish, which is what makes the composed owner
+        // visible to prepareComposedToken().
+        installAuthority = { owner, _, _, _, _, _, publish ->
+            lifecycleRef.bind(owner)
+            publish()
+            true
+        },
+        identityStore = CaptureAllowanceAllocationIdentityStore(File(tmp.root, "identity")),
+    )
+
+    @Test
+    fun `an EXHAUSTED owner may provision on the SAME utterance that finds it spent`() = runBlocking {
+        var now = 1_000L
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(api) { now }
+        // A completed provision: the gate is consumed, the batch is live and spendable.
+        val seed = p.provision()
+        assertEquals("setup: provision must succeed, got $seed", true, seed is CaptureAllowanceProvisioner.Result.Provisioned)
+        p.prepareComposedToken()
+        val firstCalls = api.calls
+
+        // SPEND the batch through the real owner, then close the gate as a refusal would.
+        val owner = p.lastComposedOwner!!
+        // The prepare above already charged one record and left a token PENDING. Consume it first,
+        // or the loop measures "already pending" instead of draining the ledger.
+        var drained = if (owner.takePrepaidToken() != null) 1 else 0
+        while (owner.prepareToken()) {
+            owner.takePrepaidToken()
+            drained++
+        }
+        val gate = AtomicBoolean(false)
+
+        assertEquals(
+            "setup: drained=$drained charges=${owner.ledgerChargesForTest()} ownerExhausted=${owner.isExhausted()}",
+            true,
+            p.composedOwnerExhausted(),
+        )
+        assertEquals("setup: and not expired", false, p.composedOwnerExpired())
+        // THE BOUNDARY: this is the first utterance after the batch is spent. Re-arming must happen
+        // from the proven state BEFORE the decision, or this attempt is silently refused.
+        VoiceProvisionGate.decide(gate, p)
+
+        assertEquals(
+            "the utterance that finds the batch spent must reach the server, not be refused",
+            firstCalls + 1,
+            api.calls,
+        )
+    }
+
+    @Test
+    fun `an ordinary refusal does not re-arm - one ask, not a spin`() = runBlocking {
+        var now = 1_000L
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(api) { now }
+        // A FAILED provision leaves an owner that is neither spent nor expired.
+        p.provision()
+        val gate = AtomicBoolean(false)
+
+        VoiceProvisionGate.decide(gate, p)
+        VoiceProvisionGate.decide(gate, p)
+
+        assertEquals(
+            "a closed gate against a live owner must not re-ask on every utterance",
+            1,
+            api.calls,
+        )
+    }
+
+    @Test
+    fun `an EXPIRED grant re-arms, because expiry is what the server resolves`() = runBlocking {
+        var now = 1_000L
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(api) { now }
+        p.provision()
+        val grant = p.currentGrant!!
+        now = grant.requestStartElapsedMs + grant.validForMs + 1 // provably expired
+        val gate = AtomicBoolean(false)
+
+        VoiceProvisionGate.decide(gate, p)
+
+        assertEquals("expiry must route to the server", 2, api.calls)
+    }
+
+    @Test
+    fun `an armed gate provisions once and stays closed`() = runBlocking {
+        var now = 1_000L
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(api) { now }
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p)
+        VoiceProvisionGate.decide(gate, p)
+
+        assertEquals(1, api.calls)
+        assertEquals(false, gate.get())
+    }
+
+    @Test
+    fun `no provisioner means no decision`() = runBlocking {
+        assertNull(VoiceProvisionGate.decide(AtomicBoolean(true), null))
+    }
+}

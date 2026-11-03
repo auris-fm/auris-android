@@ -69,20 +69,29 @@ interface VoiceSharingAccountApi {
 }
 
 /**
- * Does the rejection still speak about the LIVE authority? Identity is the INSTANCE, never a
- * value: `(account, generation)` does not distinguish two incarnations, and a re-entered owner
- * object would compare "equal" and clear authority that is actually newer (cloud b501633e).
+ * Does a committed rejection still speak about the LIVE authority?
  *
- * NULL IDENTITY: there is no live voice session, which happens for exactly two reasons here --
- * this committed rejection ended it, or the owner is retiring it. The two are indistinguishable
- * at this point, so the choice is deliberate and it is SAFE ONLY BECAUSE THIS GUARDS A MIRROR:
- * a mirror records the credential the boundary believes is published, and with no live voice
- * session there is no authority it could preserve, so clearing it cannot destroy authority (the
- * alternative -- leaving a mirror behind for a session that no longer exists -- records a
- * credential that is not usable). This predicate MUST NOT be reused to guard anything with a
- * durable effect: "no owner" and "owner momentarily unknown" would both read as true there.
+ * The predicate compares the SESSION INCARNATION (`token`, a new `SessionToken` instance per
+ * issued session, reference-compared), never `(account, owner generation)`: two incarnations can
+ * share a generation, and a value comparison would clear authority that is actually newer.
+ *
+ * The case that decides the clear here is NO LIVE SESSION. `processUnauthorized` has just ended
+ * the session this 401 rejected, so after it commits there are only two possibilities: this
+ * rejection ended the session (nothing live -> clear), or a NEWER session is live (different
+ * token -> leave it alone). Note the live wrapper is freshly constructed per call, so the
+ * `=== rejected` branch never fires in production; the null branch does the work, and it is the
+ * branch that must stay correct.
+ *
+ * NULL IS SAFE ONLY BECAUSE THIS GUARDS A MIRROR: a mirror records the credential the boundary
+ * believes is published. With no live voice session there is no authority for it to preserve, so
+ * clearing cannot destroy any (whereas leaving it behind records a credential that is not
+ * usable). This predicate MUST NOT be reused for anything with a durable effect: "no owner" and
+ * "owner momentarily unknown" would both read as true there.
  */
-private fun stillRejected(state: VoiceSharingAccountState, rejected: VoiceSharingAccountState.VoiceIdentity): Boolean = state.voiceIdentity()?.let { it === rejected } ?: true
+private fun stillRejected(state: VoiceSharingAccountState, rejected: VoiceSharingAccountState.VoiceIdentity): Boolean {
+    val live = state.voiceIdentity() ?: return true // no live session: the clear stands (see above)
+    return live.token === rejected.token
+}
 
 /**
  * How long a committed rejection waits for its OWN identity to re-establish authority before
@@ -462,9 +471,8 @@ class VoiceSharingAccountOperations(
         // them. Staleness FIRST: a 401 answering a bearer that is no longer the cache's current
         // token (superseded mint, switched account, other origin, cleared cache) answers a
         // credential that has already been replaced -- commit NOTHING.
-        // The REJECTED identity is the implementation instance, not a value: two sessions never
-        // compare equal by construction, so an older rejection cannot match a newer session that
-        // happens to live under the same owner generation.
+        // The REJECTED identity is the live session incarnation this 401 was committed against;
+        // it is compared by reference against the live one at the fence (see stillRejected).
         val ident = arrayOfNulls<VoiceSharingAccountState.VoiceIdentity?>(1)
         val committed = aurisToken.withCurrentCachedToken { currentBearer ->
             ownership.transaction {
@@ -479,16 +487,14 @@ class VoiceSharingAccountOperations(
         // equality test against "no live session" would read as "superseded" and skip the effect).
         if (ownership.credentialTransaction { !stillRejected(state, rejected) }) return
         onAurisCredentialRefused() // force a re-mint from the SAME account
-        // THE MUTATION-BOUNDARY FENCE (reviewer cf8188f0 + 82a9958d, cloud 561e8d35): a
-        // check-then-act pair reopens a window at EVERY await between the two, and projection
-        // PRESENCE cannot tell newer authority from reinstated authority (a brand-new session
-        // passes it by not having published yet). So the mirror is cleared only when -- under the
-        // CREDENTIAL lock, in one critical section with the comparison -- the live voice identity
-        // is STILL the rejected one: same session incarnation and same owner session generation.
-        // A newer identity, with or without its projection, is left untouched.
+        // THE MUTATION-BOUNDARY FENCE (reviewer cf8188f0 + 82a9958d, ad9c7f03): a check-then-act
+        // pair reopens a window at EVERY await between the two, and projection PRESENCE cannot
+        // tell newer authority from a session that has not published yet. So the comparison and
+        // the mirror clear are ONE critical section under the CREDENTIAL lock; the effective
+        // invariant is the one documented on stillRejected (no live session when the clear runs).
         //
-        // The wait before it covers the one case the re-mint legitimately produces: the SAME
-        // identity re-obtaining authority. It re-checks; it does not defer to a newer identity.
+        // The wait before it covers the one case the re-mint legitimately produces: authority
+        // returning for the SAME session. It re-checks; it never defers to a newer identity.
         // MARKER FIRST: a change that lands between the re-mint and here still counts, so a buffered
         // signal can never make this wait decide on a stale "nothing new" reading.
         val marker = state.identityChangeMarker()

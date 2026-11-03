@@ -73,6 +73,21 @@ class CaptureAllowanceProvisioner(
         grant: Grant,
         publish: () -> Unit,
     ) -> Boolean,
+    /**
+     * DURABLE allocation identity (reviewer 3ba1e605, cloud a42eea42). The server is idempotent
+     * on `request_id` ALONE, so a fresh UUID per attempt does not retry -- it allocates a new
+     * batch. The id is therefore persisted BEFORE the send and reused across restarts, retries
+     * and unknown transport outcomes; it is replaced only on a server-confirmed `410`, and
+     * RETAINED on `429`. Null disables durability and is ONLY for controls that assert the
+     * un-persisted behaviour explicitly.
+     */
+    private val identityStore: CaptureAllowanceAllocationIdentityStore? = null,
+    /**
+     * The server's accounting day for an attempt, as the CLIENT reads it. Used only to notice
+     * that a persisted identity belongs to a different day and must not be reused (that reuse
+     * would be a server `410`); it never advances the identity by itself -- only a `410` does.
+     */
+    private val accountingDay: () -> String = { "unknown" },
 ) {
 
     /**
@@ -141,7 +156,11 @@ class CaptureAllowanceProvisioner(
         // older in-flight one at install time.
         beginInstallAttempt(attemptId)
         val start = elapsedMs()
-        val requestId = UUID.randomUUID()
+        // PERSIST BEFORE SENDING (reviewer 3ba1e605): the id that goes on the wire is the one the
+        // next attempt will reuse. A crash between here and the response leaves a persisted id
+        // whose re-send is a replay -- never a second allocation.
+        val identity = identityStore?.acquire(cred.enrollmentEpoch, accountingDay())
+        val requestId = identity?.requestId?.let(UUID::fromString) ?: UUID.randomUUID()
         val body = try {
             CaptureAllowanceBatch.requestJson(requestId, cred.enrollmentEpoch)
         } catch (e: IllegalArgumentException) {
@@ -161,6 +180,23 @@ class CaptureAllowanceProvisioner(
         if (response.code() != 200) {
             responseBody?.close()
             errorBody?.close()
+            // ADVANCEMENT IS THE SERVER'S CALL (reviewer d6171776, cloud a42eea42): only a
+            // server-confirmed expiry retires the persisted id. 429 RETAINS it -- retrying with
+            // a fresh id achieves the same refusal and stores another row; a client-side
+            // calendar change is never proof of anything.
+            val store = identityStore
+            when {
+                store == null -> Unit
+
+                // durability disabled by the caller (controls only)
+                response.code() == 410 -> store.advance()
+
+                // 429 RETAINS the id: retrying with a fresh one refuses the same and stores a row.
+                response.code() == 429 -> if (identity != null) store.retainForDay(identity)
+
+                // 503 retries the SAME id; 4xx are terminal for that id and advance nothing.
+                else -> Unit
+            }
             return Result.Refused("http_${response.code()}")
         }
         if (responseBody == null) {

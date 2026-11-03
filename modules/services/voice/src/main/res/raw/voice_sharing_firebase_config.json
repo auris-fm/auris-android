@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1083869833786",
+    "project_id": "auris-fm",
+    "storage_bucket": "auris-fm.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1083869833786:android:0fe7917eb76d5e54caa303",
+        "android_client_info": {
+          "package_name": "fm.auris.debug"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCvPs4d6wxR2obRgNXhpqoclH8xwsKzBGA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

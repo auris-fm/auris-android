@@ -22,7 +22,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment
  * the invariant and the presence of both resources rather than trusting the comment.
  */
 object EnrollmentDisclosure {
-    const val VERSION: String = "2026-10-01"
+    const val VERSION: String = "voice-sharing-v1"
 
     /** The facts this disclosure must communicate, in the spec's terms. */
     const val TITLE: String = "Help improve voice control"
@@ -32,7 +32,9 @@ object EnrollmentDisclosure {
     const val DETAIL: String =
         "Recordings may include background speech and speech that did not activate Auris. " +
             "Your audio, the text Auris recognized, and the actions it took leave your device " +
-            "so the models can be improved."
+            "so the models can be improved. Recordings are kept for one year, then deleted. " +
+            "Withdrawing from this program stops new uploads but does not delete stored " +
+            "recordings; deleting them is a separate action."
 
     /** Facts the spec requires to be disclosed; used by the control to catch silent copy drift. */
     val REQUIRED_FACTS: List<String> = listOf(
@@ -41,5 +43,8 @@ object EnrollmentDisclosure {
         "command results",
         "background speech",
         "did not activate",
+        "one year",
+        "withdraw",
+        "deleting them is a separate action",
     )
 }

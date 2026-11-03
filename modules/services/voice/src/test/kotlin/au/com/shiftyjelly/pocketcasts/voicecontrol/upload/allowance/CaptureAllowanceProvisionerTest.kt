@@ -144,6 +144,7 @@ class CaptureAllowanceProvisionerTest {
             lifecycle = lifecycle,
             ceilings = ceilings,
             elapsedMs = { clock.removeFirstOrNull() ?: Long.MAX_VALUE },
+            readinessProvider = { true },
             beginInstallAttempt = { },
             installAuthority = install,
             identityStore = identityStore,
@@ -534,6 +535,7 @@ class CaptureAllowanceProvisionerTest {
             lifecycle = lifecycle,
             ceilings = ceilings,
             elapsedMs = { clock.get() },
+            readinessProvider = { true },
             beginInstallAttempt = { attempts++ },
             // The REAL fence wiring: bind the owner, publish through the provisioner, and wrap in
             // the deadline guard exactly as CaptureAllowanceInstallFence does.
@@ -986,6 +988,7 @@ class CaptureAllowanceProvisionerTest {
             lifecycle = lifecycle,
             ceilings = ceilings,
             elapsedMs = { clock.get() },
+            readinessProvider = { true },
             beginInstallAttempt = { },
             // NO DEADLINE WRAPPER HERE, deliberately: if the wrapper is installed it refuses the
             // take and the provisioner's own check is never the reason the assertion passes -- the

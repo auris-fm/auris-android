@@ -5,6 +5,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountApi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperations
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.ownerToken
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadAssembly
@@ -377,7 +378,7 @@ class LoopbackHostDriverTest {
         )
         val owner = DriverOwner()
         val state = VoiceSharingAccountState()
-        return Triple(VoiceSharingAccountOperations(api, state, owner) { _ -> }, owner, state)
+        return Triple(VoiceSharingAccountOperations(api, state, owner, ownerToken(owner), onCredentialInvalid = { _ -> }), owner, state)
     }
 
     // ---------------------------------------------------------------- controls
@@ -686,7 +687,7 @@ class LoopbackHostDriverTest {
         )
         val owner = DriverOwner()
         val state = VoiceSharingAccountState()
-        val operations = VoiceSharingAccountOperations(api, state, owner) { _ -> }
+        val operations = VoiceSharingAccountOperations(api, state, owner, ownerToken(owner), onCredentialInvalid = { _ -> })
         val token = state.sessionStarted(owner.sessionGeneration())
         val result = runBlocking { operations.withdraw(token) }
 

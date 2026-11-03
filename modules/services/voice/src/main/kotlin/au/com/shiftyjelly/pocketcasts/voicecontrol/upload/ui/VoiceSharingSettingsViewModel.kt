@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import timber.log.Timber
 
 /**
  * The settings shell's UI state. Its truth rules (plan Task 7 UI bullet):
@@ -92,6 +93,13 @@ class VoiceSharingSettingsViewModel(
      * published under the account fence, never inferred from collection time.
      */
     private val taggedProjection: StateFlow<VoiceSharingTaggedProjection>,
+    /**
+     * THE PRODUCTION PROJECTION PREFIX (installed-path fix, spec c244661a): the surface's
+     * projection is only authoritative if something actually REQUESTS it. Before this, the
+     * membership GET ran nowhere in production once the owner had a live session, so the consent
+     * section stayed hidden with no request to point at. Null in controls that seed projections.
+     */
+    private val refreshProjection: (suspend () -> Boolean)? = null,
     private val enrollmentController: EnrollmentController,
     private val withdrawalIntent: LocalWithdrawalIntentStore,
     /**
@@ -158,6 +166,12 @@ class VoiceSharingSettingsViewModel(
                 retireForeignSessionPresentation()
                 mutableState.value = render()
             }
+        }
+        // ONE bounded projection request per surface construction (production): the GET that makes
+        // `projectionObserved` reachable at all. Its outcome is visible in the diagnostic log; a
+        // failure leaves the surface hidden fail-closed exactly as before.
+        refreshProjection?.let { request ->
+            scope.launch { request() }
         }
         scope.launch {
             kotlinx.coroutines.flow.combine(policy, enrollmentController.state) { _, _ -> }
@@ -410,28 +424,41 @@ class VoiceSharingSettingsViewModel(
         mutableState.value = render()
     }
 
-    private fun render(status: SettingsOperationStatus = presentationStatus) = VoiceSharingSettingsUiState(
-        settingAvailable = policy.value.enabled,
-        enrolled = isEnrolled(),
-        // Pending is PRESENTATION state, not the shared controller's: the controller keeps the
-        // last operation's Pending state even after it settles as Superseded (its own lifecycle
-        // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
-        pending = pendingOperation != PendingOperation.NONE,
-        projectionObserved = taggedProjection.value.projection != null &&
-            taggedProjection.value.ownerSession == ownerSession(),
-        deletionRequested = deletionRequested,
-        deletionReceiptPending = deletionReceiptPending,
-        deletionFailed = deletionFailed,
-        deleteAvailable = isDeleteAvailable(),
-        deleteConfirmationOpen = deleteConfirmationOpen,
-        status = status,
-        failedOperation = lastFailedOperation,
-        pendingOperation = pendingOperation,
-        disclosureVersion = EnrollmentDisclosure.VERSION,
-        disclosureTitle = EnrollmentDisclosure.TITLE,
-        disclosureSupporting = EnrollmentDisclosure.SUPPORTING,
-        disclosureDetail = EnrollmentDisclosure.DETAIL,
-    )
+    private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState {
+        // Installed-path diagnostic (staging test, reviewer 1f2d9cbf): distinguish the POLICY
+        // gate from the MEMBERSHIP gate on the device, without changing either gate.
+        val observed = taggedProjection.value.projection != null &&
+            taggedProjection.value.ownerSession == ownerSession()
+        Timber.i(
+            "voice-sharing surface: settingAvailable=%b projectionObserved=%b (session=%d) enrolled=%b",
+            policy.value.enabled,
+            observed,
+            ownerSession(),
+            isEnrolled(),
+        )
+        return VoiceSharingSettingsUiState(
+            settingAvailable = policy.value.enabled,
+            enrolled = isEnrolled(),
+            // Pending is PRESENTATION state, not the shared controller's: the controller keeps the
+            // last operation's Pending state even after it settles as Superseded (its own lifecycle
+            // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
+            pending = pendingOperation != PendingOperation.NONE,
+            projectionObserved = taggedProjection.value.projection != null &&
+                taggedProjection.value.ownerSession == ownerSession(),
+            deletionRequested = deletionRequested,
+            deletionReceiptPending = deletionReceiptPending,
+            deletionFailed = deletionFailed,
+            deleteAvailable = isDeleteAvailable(),
+            deleteConfirmationOpen = deleteConfirmationOpen,
+            status = status,
+            failedOperation = lastFailedOperation,
+            pendingOperation = pendingOperation,
+            disclosureVersion = EnrollmentDisclosure.VERSION,
+            disclosureTitle = EnrollmentDisclosure.TITLE,
+            disclosureSupporting = EnrollmentDisclosure.SUPPORTING,
+            disclosureDetail = EnrollmentDisclosure.DETAIL,
+        )
+    }
 
     /**
      * The current session's projection, or null when none is observed FOR THIS session. Enrolled

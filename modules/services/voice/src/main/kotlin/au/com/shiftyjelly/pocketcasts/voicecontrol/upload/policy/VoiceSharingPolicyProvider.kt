@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import timber.log.Timber
 
 /**
  * Voice-sharing remote policy (Task 1 of docs/plans/android/voice-recording-uploads.md).
@@ -70,6 +71,15 @@ class VoiceSharingPolicyProvider(
     private var activationGeneration = 0L
 
     private var invalidationJob: Job? = null
+
+    /**
+     * The OWNER IDENTITY this provider last acquired policy FOR — account name AND session
+     * generation; see [refreshOnAccountReadable]. Identity-scoped, not a process-wide latch: repeats
+     * for the same identity are deduped, while a real account change, a sign-out and back into the
+     * same account, and a same-account session rotation are all NEW authority that must reacquire
+     * policy (@spec f5575767, reviewer 4ce3ba23).
+     */
+    private val lastRefreshedOwner = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
     /**
      * Serializes generation allocation, conditional publication, and timer install/cancel.
@@ -132,7 +142,31 @@ class VoiceSharingPolicyProvider(
         // The WHOLE refresh is bounded: a fetch or activation that never completes cannot hang
         // the caller; on deadline it fails closed (fenced).
         return withTimeoutOrNull(refreshTimeoutMs) { runRefresh(requestGen) }
-            ?: publishDisabled(requestGen)
+            ?: publishDisabled(requestGen, "refresh deadline exceeded")
+    }
+
+    /**
+     * ACCOUNT-READABILITY TRIGGER (@spec 69630b93): the launch exchange in the init block can run
+     * before the account is readable on a cold start that follows a login, and nothing re-ran it —
+     * so the lease stayed disabled with no capture driver. The first account-readability signal for
+     * an identity therefore runs one refresh, and so does every LATER real change of identity
+     * (@spec f5575767: a process-wide "already refreshed" flag must never suppress refreshing for
+     * a new owner). Repeat signals for the SAME owner are deduped (no spin); a null account name
+     * means "not readable yet" and refreshes nothing. NOTHING about the allowance batch, ledger or
+     * queued records is touched here — this is policy acquisition only.
+     *
+     * Returns true only when this call actually drove a refresh.
+     */
+    suspend fun refreshOnAccountReadable(accountName: String?, session: Long): Boolean {
+        if (accountName == null) return false
+        // The owner identity is BOTH facts: a new session for the same account is new authority.
+        val owner = accountName + "#" + session
+        // Atomic claim BEFORE the await: concurrent duplicate signals for the same owner collapse to
+        // ONE refresh, and a LATER different owner is never suppressed by the claim.
+        val previous = lastRefreshedOwner.getAndSet(owner)
+        if (previous == owner) return false
+        refresh()
+        return true
     }
 
     private suspend fun runRefresh(requestGen: Long): PolicySnapshot {
@@ -142,38 +176,51 @@ class VoiceSharingPolicyProvider(
         // An unreadable baseline is NOT a pass: fail closed.
         val baseline = attemptFinite { remoteConfig.info }
             ?.let { info -> attemptFinite { info.fetchTimeMillis } }
-            ?: return publishDisabled(requestGen)
+            ?: return publishDisabled(requestGen, "fetch baseline unreadable")
 
-        // A genuine new fetch request, awaited before its bookkeeping is judged.
-        val fetched = attemptFinite { taskSuccess(remoteConfig.fetch()) }
+        // A genuine new fetch request, awaited before its bookkeeping is judged. Interval 0 is
+        // REQUIRED by the freshness contract below: the default SDK minimum fetch interval
+        // throttles repeated fetch() calls (status THROTTLED, fetchTimeMillis not advancing),
+        // which would make the SUCCESS-and-advanced gate unsatisfiable — every refresh must be
+        // a real network fetch.
+        val fetched = attemptFinite { taskSuccess(remoteConfig.fetch(0L)) }
         if (fetched != true) {
-            return publishDisabled(requestGen)
+            return publishDisabled(requestGen, "fetch task failed")
         }
 
-        val info = attemptFinite { remoteConfig.info } ?: return publishDisabled(requestGen)
+        val info = attemptFinite { remoteConfig.info } ?: return publishDisabled(requestGen, "post-fetch info unreadable")
         val statusOk = attemptFinite { info.lastFetchStatus == FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS } == true
         val postFetchTimeMs = attemptFinite { info.fetchTimeMillis }
         if (!statusOk || postFetchTimeMs == null || postFetchTimeMs <= baseline) {
             // Failure, or a cached success whose bookkeeping never advanced: not fresh, and the
             // lease must not renew.
-            return publishDisabled(requestGen)
+            return publishDisabled(
+                requestGen,
+                "fetch bookkeeping not fresh: status=$statusOk postFetchTimeMs=$postFetchTimeMs baseline=$baseline (THROTTLED when statusOk=false)",
+            )
         }
 
         val activated = attemptFinite { taskSuccess(remoteConfig.activate()) }
         if (activated != true) {
-            return publishDisabled(requestGen)
+            return publishDisabled(requestGen, "activation failed")
         }
 
         val value = attemptFinite { remoteConfig.getValue(FirebaseConfig.VOICE_SHARING_ENABLED) }
-            ?: return publishDisabled(requestGen)
+            ?: return publishDisabled(requestGen, "remote key unreadable")
         val strictBoolean = attemptFinite {
             when (value.asString()) {
                 "true" -> true
                 "false" -> false
                 else -> null
             }
-        } ?: return publishDisabled(requestGen)
+        } ?: return publishDisabled(requestGen, "remote key not a strict boolean")
         val enabled = strictBoolean && attemptFinite { value.source } == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE
+        if (!enabled) {
+            return publishDisabled(
+                requestGen,
+                "remote value=${value.asString()} (source=${attemptFinite { value.source }}) — key not enabled for this build",
+            )
+        }
 
         val snapshot = PolicySnapshot(
             enabled = enabled,
@@ -189,6 +236,7 @@ class VoiceSharingPolicyProvider(
                 }
                 activationGeneration = requestGen
                 state.value = snapshot
+                Timber.i("voice-sharing policy ENABLED (gen=%d)", requestGen)
                 // Timer ownership is serialized WITH publication under the same fences: a
                 // superseded refresh never reaches this line, so it can never cancel a newer
                 // timer or install a stale one; a renewal cancels the previous timer here first.
@@ -199,7 +247,8 @@ class VoiceSharingPolicyProvider(
     }
 
     /** Publishes disabled unless a newer refresh request has started (generation fence). */
-    private fun publishDisabled(requestGen: Long): PolicySnapshot {
+    private fun publishDisabled(requestGen: Long, reason: String): PolicySnapshot {
+        Timber.i("voice-sharing policy disabled: %s", reason)
         synchronized(sharedCollectionLock) {
             synchronized(fence) {
                 if (requestGen == requestGeneration) {
@@ -221,6 +270,7 @@ class VoiceSharingPolicyProvider(
             return
         }
         val gen = snapshot.activationGeneration
+        val wakeClock = nowMs()
         invalidationJob = scope.launch {
             while (true) {
                 val before = nowMs()
@@ -244,7 +294,18 @@ class VoiceSharingPolicyProvider(
                     // inside the fence at publication; if a late wake still slips through (cancellation
                     // lost the race), the activation-generation check refuses to tear down the renewal.
                     if (activationGeneration == gen) {
+                        Timber.i("voice-sharing policy disabled: lease expired (gen=%d) — attempting renewal", gen)
                         state.value = DISABLED
+                        // Renewal ON EXPIRY: before the first consented capture there is no other
+                        // refresh driver, so without this the consent surface decays LEASE_MS after
+                        // every app start and can never be used. Subscribers see disabled until the
+                        // fresh install (unchanged semantics); a superseded renewal is fenced below.
+                        // NOT for a stalled clock: a sleep that returns without the monotonic clock
+                        // moving can never produce a fresh lease (every install would re-expire
+                        // immediately), so renewing there would spin. Fail closed instead.
+                        if (nowMs() > wakeClock) {
+                            scope.launch { refresh() }
+                        }
                     }
                 }
             }

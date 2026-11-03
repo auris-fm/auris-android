@@ -29,6 +29,10 @@ class VoiceSharingAccountState {
     /** Post-commit notification hook (applied session + projection); mirror bookkeeping only. */
     var onProjectionApplied: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
 
+    /** Opt-in diagnostic sink (staging observability): receives the projection outcome of one
+     *  refresh WITHOUT any authority effect; null in production consumers that do not need it. */
+    var onRefreshObserved: ((VoiceSharingRefreshDiagnostic) -> Unit)? = null
+
     /** Central post-transition observer (reviewer dde0905a + 6b6d62b8): fired for EVERY
      *  authoritative projection change OR LOSS - applied outcomes AND nulling transitions
      *  (scoped 401 processUnauthorized, session-moved revocation, session end). The payload
@@ -80,6 +84,7 @@ class VoiceSharingAccountState {
         // generation, so the tag identifies the authoritative session even while empty
         // (reviewer 278e595f).
         currentSessionGeneration = sessionGeneration
+        signalIdentityChange() // a NEW identity is live from here on
         publish(null)
         notifyProjection(null, sessionGeneration)
         SessionToken().also { currentToken = it }
@@ -90,6 +95,7 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+        signalIdentityChange() // identity gone
         publish(null)
         notifyProjection(null, currentSessionGeneration)
     }
@@ -105,6 +111,7 @@ class VoiceSharingAccountState {
             operationGeneration.incrementAndGet()
             currentToken = null
             state.value = null
+            signalIdentityChange()
             publish(null)
             notifyProjection(null, currentSessionGeneration)
             true
@@ -174,6 +181,7 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+        signalIdentityChange()
         publish(null)
         notifyProjection(null, currentSessionGeneration)
         true
@@ -198,6 +206,7 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+        signalIdentityChange()
         publish(null)
         notifyProjection(null, ticket.session)
         true
@@ -206,8 +215,79 @@ class VoiceSharingAccountState {
     /** Test/diagnostic accessor for the current issued session (null when ended). */
     fun currentSessionTokenForTest(): SessionToken? = synchronized(fence) { currentToken }
 
+    fun currentOwnerSessionForTest(): Long? = synchronized(fence) { currentToken?.let { currentSessionGeneration } }
+
+    /** Re-arms the session under the SAME owner generation: the reinstatement a 401 allows for. */
+    fun sessionStartedForTest(ownerSession: Long): SessionToken = synchronized(fence) { sessionStarted(ownerSession) }
+
+    /** Same-session authority publication, for controls that must SKIP the op that a 401 ended. */
+    fun applyOutcomeForTest(token: SessionToken, json: String, ownerSession: Long): Boolean {
+        synchronized(fence) {
+            if (token !== currentToken) return false
+            val projection = parseProjection(json) ?: return false
+            state.value = projection
+            publish(projection)
+            notifyProjection(projection, ownerSession)
+            return true
+        }
+    }
+
     fun hasCurrentSessionProjection(): Boolean = synchronized(fence) {
         currentToken != null && state.value != null
+    }
+
+    /**
+     * The voice identity a delayed effect compares itself against. Identity is the INSTANCE: a
+     * newer session -- with or without its projection, under any owner generation -- is never
+     * the value an older rejection captured (reviewer 82a9958d, cloud 561e8d35).
+     */
+    class VoiceIdentity internal constructor(
+        internal val token: SessionToken,
+        internal val ownerSession: Long,
+    )
+
+    /**
+     * The voice identity (session token + owner session generation) of the CURRENT live session,
+     * or null when none is live. The identity a delayed effect compares itself against: an effect
+     * for a rejected identity must fire only when the authority under coordination is STILL that
+     * identity (reviewer 561e8d35 -- presence cannot distinguish newer from reinstated).
+     */
+    private val identityChangeSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+
+    /** Bumped on EVERY identity transition, so a waiter can tell "changed since I looked" apart. */
+    private val identityChangeCount = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Wakes a SUSPENDED caller when the live voice identity changes. Nested inside [fence]: leaf. */
+    private fun signalIdentityChange() {
+        identityChangeCount.incrementAndGet()
+        identityChangeSignal.trySend(Unit)
+    }
+
+    /** A token that becomes stale the moment the identity changes: read it BEFORE the effect. */
+    fun identityChangeMarker(): Long = identityChangeCount.get()
+
+    /** Wakes a waiting rejection when ANY live authority is observed (identity unchanged). */
+    fun signalLiveAuthority() {
+        identityChangeSignal.trySend(Unit) // wakes the WAIT, does not advance the change counter
+    }
+
+    /**
+     * Suspends until the live voice identity changes (or the caller times out). NEVER blocks a
+     * thread and never runs under a lock: the caller awaits this, then re-reads [voiceIdentity]
+     * inside its own critical section. Correctness rests on that re-read, not on this signal.
+     */
+    suspend fun awaitIdentityChange(seen: Long, until: () -> Boolean = { true }) {
+        // DRAIN FIRST: a wake buffered before this call proves nothing about the state RIGHT NOW.
+        // The loop reads the counter AFTER every drain, so a stale wake can never decide anything.
+        while (true) {
+            if (identityChangeMarker() != seen) return // a real change landed
+            if (until()) return
+            identityChangeSignal.receive() // block until something happens, then re-read
+        }
+    }
+
+    fun voiceIdentity(): VoiceIdentity? = synchronized(fence) {
+        currentToken?.let { VoiceIdentity(it, currentSessionGeneration) }
     }
 }
 
@@ -360,3 +440,23 @@ data class VoiceSharingTaggedProjection(
     val ownerSession: Long,
     val projection: VoiceSharingAccountProjection?,
 )
+
+/**
+ * Outcome of ONE membership projection refresh, for device observability only (no authority
+ * effect, no credentials, no body): the installed-path diagnostic for "why is the projection
+ * absent?" — an APPLIED projection that still reads not-enrolled, or a REJECTED/409/401 attempt.
+ */
+data class VoiceSharingRefreshDiagnostic(
+    val kind: Kind,
+    val status: Int?,
+    val bodyBytes: Int?,
+    val detail: String,
+    /**
+     * Bounded server correlation ids (`X-Request-Id`) observed on each response, in call order.
+     * One element per HTTP attempt, so a retried 5xx yields two ids. Truncated; never a body or
+     * a credential.
+     */
+    val requestIds: List<String> = emptyList(),
+) {
+    enum class Kind { APPLIED, REJECTED }
+}

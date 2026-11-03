@@ -497,6 +497,9 @@ class VoiceSharingPolicyProviderTest {
             override val collectionSharedLock = ownerLock
             override fun authoritySnapshot() = snap
             override fun sessionGeneration(): Long = 0L
+
+            // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+            override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
             override fun <T> transaction(block: () -> T): T = synchronized(ownerLock) { block() }
             override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
             override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot): au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease? = null
@@ -566,6 +569,7 @@ class VoiceSharingPolicyProviderTest {
             override fun authoritySnapshot() = snap
             override fun sessionGeneration(): Long = 0L
             override fun <T> transaction(block: () -> T): T = synchronized(testSharedLock) { block() }
+            override fun <T> credentialTransaction(block: () -> T): T = synchronized(testSharedLock) { block() }
             override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
             override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot): au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease? = null
             override fun publishRefresh(lease: au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false

@@ -8,6 +8,7 @@ import com.squareup.moshi.JsonWriter
 import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -66,6 +67,21 @@ interface VoiceSharingAccountApi {
         fun create(retrofit: Retrofit): VoiceSharingAccountApi = retrofit.create(VoiceSharingAccountApi::class.java)
     }
 }
+
+/**
+ * Does the rejection still speak about the LIVE authority? True when the voice session is STILL
+ * the rejected incarnation, or when no voice session is live at all (the rejection is what ended
+ * it -- the mirror it left behind must clear). False once a DIFFERENT incarnation is live: that
+ * is newer authority, with or without its projection, and the rejection says nothing about it.
+ */
+private fun stillRejected(state: VoiceSharingAccountState, rejected: VoiceSharingAccountState.VoiceIdentity): Boolean = state.voiceIdentity()?.let { it === rejected } ?: true
+
+/**
+ * How long a committed rejection waits for its OWN identity to re-establish authority before
+ * clearing the mirror (see the mutation-boundary fence). Bounded so a rejected credential can
+ * never leave a live mirror behind: expiry means "re-check and decide", not "wait longer".
+ */
+private const val COORDINATION_WAIT_MS = 10_000L
 
 /**
  * Typed mutation outcomes (reviewer 290e76ea): membership operations never conflate
@@ -130,7 +146,13 @@ class VoiceSharingAccountOperations(
      * may act at all -- it just stops being the bearer, which is the whole of the defect.
      */
     private val aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding,
-    private val onCredentialInvalid: suspend (AuthoritySnapshot) -> Unit,
+    /**
+     * The mirror-clear mutation, deliberately SYNCHRONOUS (reviewer 82a9958d): it is invoked
+     * INSIDE the owner transaction, in the same critical section as the identity comparison, so
+     * no await can reopen a window between the fence and the mutation. Suspending work belongs
+     * in [onAurisCredentialRefused], which runs before the mutation boundary.
+     */
+    private val onCredentialInvalid: (AuthoritySnapshot) -> Unit,
     /**
      * The AURIS credential's own invalidation, deliberately NOT the owner's `invalidateAuthToken`.
      *
@@ -160,6 +182,11 @@ class VoiceSharingAccountOperations(
         return when (val outcome = execute(op) { bearer, _ -> api.getVoiceSharing(bearer) }) {
             is Outcome.Body -> {
                 val applied = ownership.transaction { state.applyOutcome(token, ticket, outcome.json, ownership.authoritySnapshot().session) }
+                if (applied) {
+                    // A get that APPLIED is a live-authority datapoint: a caller waiting for the
+                    // post-rejection clear (see the mutation-boundary fence) re-checks on it.
+                    state.signalLiveAuthority()
+                }
                 state.onRefreshObserved?.invoke(
                     VoiceSharingRefreshDiagnostic(kind = VoiceSharingRefreshDiagnostic.Kind.APPLIED, status = null, bodyBytes = outcome.json.length, requestIds = outcome.requestIds, detail = applied.toString()),
                 )
@@ -427,25 +454,44 @@ class VoiceSharingAccountOperations(
         // them. Staleness FIRST: a 401 answering a bearer that is no longer the cache's current
         // token (superseded mint, switched account, other origin, cleared cache) answers a
         // credential that has already been replaced -- commit NOTHING.
+        // The REJECTED identity is the implementation instance, not a value: two sessions never
+        // compare equal by construction, so an older rejection cannot match a newer session that
+        // happens to live under the same owner generation.
+        val ident = arrayOfNulls<VoiceSharingAccountState.VoiceIdentity?>(1)
         val committed = aurisToken.withCurrentCachedToken { currentBearer ->
             ownership.transaction {
+                ident[0] = state.voiceIdentity() // read WITH the commit, under the owner lock
                 "Bearer " + (currentBearer ?: "") == frozenBearer &&
                     state.processUnauthorized(op.token, op.ticket)
             }
         }
         if (!committed) return // effects fire ONLY for a rejection that actually committed
-        // Cheap pre-check: if a superseding session ALREADY re-established, skip the pointless
-        // re-mint. The LOAD-BEARING fence is re-checked after the suspension below -- that is
-        // where a superseding session can still arrive (reviewer cf8188f0).
-        if (ownership.transaction { state.hasCurrentSessionProjection() }) return
+        val rejected = ident[0] ?: return // nothing identity-less can be fenced; fail closed
+        // Cheap pre-check (cheap, and it needs the SAME identity rule as the fence below -- an
+        // equality test against "no live session" would read as "superseded" and skip the effect).
+        if (ownership.credentialTransaction { !stillRejected(state, rejected) }) return
         onAurisCredentialRefused() // force a re-mint from the SAME account
-        // THE DELAYED-EFFECT FENCE, AFTER THE SUSPENSION (reviewer cf8188f0): the re-mint above
-        // suspends, and a SUPERSEDING session can establish its projection while it is in flight.
-        // The fence is placed where the effect LANDS -- after that suspension, inside the owner
-        // transaction so a concurrent publication cannot slip past it. A superseded rejection's
-        // mirror clear must not touch the newer scope.
-        if (ownership.transaction { state.hasCurrentSessionProjection() }) return
-        onCredentialInvalid(op.observed) // post-commit notification, NO authority side effects
+        // THE MUTATION-BOUNDARY FENCE (reviewer cf8188f0 + 82a9958d, cloud 561e8d35): a
+        // check-then-act pair reopens a window at EVERY await between the two, and projection
+        // PRESENCE cannot tell newer authority from reinstated authority (a brand-new session
+        // passes it by not having published yet). So the mirror is cleared only when -- under the
+        // CREDENTIAL lock, in one critical section with the comparison -- the live voice identity
+        // is STILL the rejected one: same session incarnation and same owner session generation.
+        // A newer identity, with or without its projection, is left untouched.
+        //
+        // The wait before it covers the one case the re-mint legitimately produces: the SAME
+        // identity re-obtaining authority. It re-checks; it does not defer to a newer identity.
+        // MARKER FIRST: a change that lands between the re-mint and here still counts, so a buffered
+        // signal can never make this wait decide on a stale "nothing new" reading.
+        val marker = state.identityChangeMarker()
+        withTimeoutOrNull(COORDINATION_WAIT_MS) {
+            state.awaitIdentityChange(marker) { !stillRejected(state, rejected) }
+        }
+        ownership.credentialTransaction {
+            if (stillRejected(state, rejected)) {
+                onCredentialInvalid(op.observed) // comparison and mutation: ONE critical section
+            }
+        }
     }
 
     /** Endpoint-EXACT bodies from ONLY the ticket-captured values, built once, byte-identical retries. */

@@ -89,6 +89,11 @@ class VoiceAsrEngine @Inject constructor(
     private val collectionAuthority: () -> AuthorityDecision,
     private val retentionSink: ContributionRetentionSink,
     private val segmentObserver: SegmentObserver,
+    // MINIMUM CONNECTED PATH (spec 7dcb3a53): provisioning seam — called when a capture is
+    // refused for lack of a live allowance, at most once per capture session. The composition
+    // binds the reviewed provisioner (real transport, owner snapshot, install fence); capture
+    // stays fail-closed when it returns false.
+    private val ensureCaptureAllowance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner? = null,
     // Upload observation is OFF unless a composition module binds all three collaborators;
     // Dagger never applies Kotlin defaults, so an unbound constructor fails at build time.
     @ApplicationContext private val context: Context,
@@ -96,6 +101,9 @@ class VoiceAsrEngine @Inject constructor(
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
+
+    /** One provisioning attempt per capture session (speechStarted collect run). */
+    private val allowanceProvisionAttempted = java.util.concurrent.atomic.AtomicBoolean(false)
 
     // EVERY processing job stop() cancelled that has not yet finished, exposed so service teardown
     // can await them ALL before releasing the ASR backend. These run on this engine's OWN
@@ -237,6 +245,7 @@ class VoiceAsrEngine @Inject constructor(
 
         val attached = CompletableDeferred<Boolean>()
         lateinit var started: Job
+        allowanceProvisionAttempted.set(false) // fresh session: one fresh provisioning chance
         started = scope.launch {
             Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
@@ -292,7 +301,18 @@ class VoiceAsrEngine @Inject constructor(
                             )
                             // Translation provenance is NOT knowable at capture start (the stage may
                             // or may not run for this utterance); it is recorded when observed.
-                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                            var admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                            if (admission == null) {
+                                // REFUSED → ONE provisioning attempt per session, then re-admit.
+                                // The processor retains the buffered PCM, so the post-RTT
+                                // admission drains the full prefix; a provisioning refusal keeps
+                                // the capture refused fail-closed (allowance_* reason upstream).
+                                if (allowanceProvisionAttempted.compareAndSet(false, true) &&
+                                    ensureCaptureAllowance?.provision() is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned
+                                ) {
+                                    admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                                }
+                            }
                             openContext = admission?.context
                             if (admission != null) {
                                 // Lease-protected initial allocation (reviewers 23cae70e b4 /

@@ -24,6 +24,7 @@ class CollectionStartup @Inject constructor(
     private val allowanceLifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
     private val allowanceRetirement: AllowanceRetirementWatcher,
     private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
+    private val allowanceProvisioner: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner,
 ) {
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {
@@ -44,4 +45,14 @@ class CollectionStartup @Inject constructor(
         observer.outcomeWaitGuard = { outcomeFinalizer.limitsSelected }
         outcomeFinalizer.start()
     }
+
+    /**
+     * MINIMUM CONNECTED PATH (spec 7dcb3a53): the ONE entry the capture path calls before a
+     * consented recording may consume allowance. Provisioning through the reviewed provisioner
+     * — real transport, real owner snapshot, real install fence — binds the batch authority
+     * through [CaptureAllowanceLifecycle]; every refusal keeps capture fail-closed. Returns
+     * true only when a live grant is bound.
+     */
+    suspend fun provisionCaptureAllowance(): Boolean = allowanceProvisioner.provision() is
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned
 }

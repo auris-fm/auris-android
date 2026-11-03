@@ -104,6 +104,10 @@ private class TestOwner(
         true
     }
 
+    // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+
+    override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
     override fun <T> transaction(block: () -> T): T = synchronized(lock) { block() }
 
     override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = synchronized(lock) {
@@ -702,37 +706,132 @@ class VoiceSharingAccountOperationsFencingTest {
     }
 
     @Test
-    fun `the post-commit notification has NO authority effects - deterministic barrier`() = runTest {
-        issueBearer("Bearer token-a")
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
-        // Deterministic barrier: the POST-COMMIT notification suspends; while it is pending we
-        // start a NEW owner session and publish a FRESH owner credential, then release.
-        val enteredCallback = CompletableDeferred<Unit>()
-        val releaseCallback = CompletableDeferred<Unit>()
-        val barrierOps = VoiceSharingAccountOperations(
+    fun `a NEW session with NO projection yet also survives the resumed clear`() = runTest {
+        // Reviewer 82a9958d + cloud 561e8d35: a brand-new session passes any PRESENCE check by
+        // simply not having published yet. The mutation-boundary fence compares identity instead:
+        // a different owner session generation must suppress the clear even with no projection.
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.install()
+        val server = MockWebServer().apply { start() }
+        val refreshEntered = CompletableDeferred<Unit>()
+        val releaseRefresh = CompletableDeferred<Unit>()
+        val clears = java.util.concurrent.atomic.AtomicInteger(0)
+        val fenceableAuris = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+            override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
+            override suspend fun refreshToken() {
+                refreshEntered.complete(Unit)
+                releaseRefresh.await()
+            }
+            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
+        }
+        val operations = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
             ownership = owner,
-            aurisToken = ownerToken(owner),
-            onCredentialInvalid = { _ ->
-                enteredCallback.complete(Unit)
-                releaseCallback.await()
-            },
+            aurisToken = fenceableAuris,
+            onAurisCredentialRefused = { fenceableAuris.refreshToken() },
+            onCredentialInvalid = { clears.incrementAndGet() }, // invoked INSIDE the owner transaction
         )
-        val result = async(Dispatchers.IO) { barrierOps.enroll(token, acceptedDisclosureVersion = "v3") }
-        enteredCallback.await() // transaction COMMITTED (real credential + scoped state cleared)
-        assertFalse(state.hasCurrentSessionProjection()) // the committed revocation is visible
-        owner.simulateAccountSwitch() // fresh owner session incarnation (W1-equivalent)
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        val token = state.currentSessionTokenForTest()!!
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(401))
+        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        refreshEntered.await()
+        // A NEW session arrives mid-flight and has NOT published a projection yet.
+        owner.simulateAccountSwitch()
+        owner.issueToken("token-b")
+        credentials.publish("Bearer token-b")
         val newSession = state.sessionStarted(owner.sessionGeneration())
-        owner.issueToken("token-b") // fresh owner credential BEFORE the notification runs
-        releaseCallback.complete(Unit)
-        // Both survive: the notification is a hook, never a second invalidation.
-        assertTrue(state.isCurrentSession(newSession))
-        assertEquals("Bearer token-b", credentials.current()!!.bearer)
+        releaseRefresh.complete(Unit)
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        assertTrue(invalidations.isEmpty())
+        // No projection, but the identity differs: the clear must NOT fire.
+        assertEquals("Bearer token-b", credentials.current()?.bearer)
+        assertFalse(state.hasCurrentSessionProjection())
+        assertTrue(state.isCurrentSession(newSession))
+        assertEquals(0, clears.get())
+        server.shutdown()
+    }
+
+    @Test
+    fun `authority REINSTATED during the re-mint is newer and survives the fence`() = runTest {
+        // The complementary case to the no-projection control: authority DOES come back before the
+        // fence reads -- but as a new incarnation, so it is newer authority and escapes the clear.
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.install()
+        val server = MockWebServer().apply { start() }
+        val refreshEntered = CompletableDeferred<Unit>()
+        val releaseRefresh = CompletableDeferred<Unit>()
+        val clears = java.util.concurrent.atomic.AtomicInteger(0)
+        val fenceableAuris = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+            override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
+            override suspend fun refreshToken() {
+                refreshEntered.complete(Unit)
+                releaseRefresh.await()
+            }
+            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
+        }
+        val operations = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = owner,
+            aurisToken = fenceableAuris,
+            onAurisCredentialRefused = { fenceableAuris.refreshToken() },
+            onCredentialInvalid = { clears.incrementAndGet() },
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        val token = state.currentSessionTokenForTest()!!
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(401))
+        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        refreshEntered.await()
+        // The SAME session re-establishes authority mid-flight. A 401 ends the session it rejected,
+        // so the reinstatement is a NEW session incarnation under the SAME owner generation -- and
+        // it does not publish through a call (calls are not what a reinstatement is).
+        owner.issueToken("token-1-retry")
+        credentials.publish("Bearer token-1-retry")
+        val reinstated = state.sessionStartedForTest(owner.sessionGeneration())
+        state.applyOutcomeForTest(reinstated, projectionJson("rev-2"), owner.sessionGeneration())
+        kotlinx.coroutines.delay(50) // deterministic: the reinstatement signals BEFORE the fence reads
+        assertTrue(state.hasCurrentSessionProjection())
+        releaseRefresh.complete(Unit)
+        withContext(Dispatchers.IO) { Thread.sleep(100) } // let the resumed re-mint return
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
+        // The fence compares the EXACT rejected incarnation. A 401 ends the session it rejected,
+        // so a reinstatement is necessarily a NEW incarnation -> newer authority, untouched.
+        assertEquals(0, clears.get())
+        assertEquals("Bearer token-1-retry", credentials.current()?.bearer)
+        assertTrue(state.hasCurrentSessionProjection())
+        assertEquals("rev-2", state.projection.value!!.membershipRevision)
+        server.shutdown()
+    }
+
+    @Test
+    fun `the post-commit notification clears ONLY the mirror - mutation-boundary coordinated`() = runTest {
+        // The mirror mutation now runs INSIDE the owner transaction with the identity comparison
+        // (reviewer 82a9958d): no suspension sits between the fence and the effect, so this
+        // control asserts the committed contract instead of racing a barrier.
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(401))
+        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
+        // WHAT THIS ROUTE MAY NOT DO (cloud bbb9beff): its 401 never touches the upstream session
+        // or the real credential the user is signed in with -- read from the OWNER, which is the
+        // only place that can actually be harmed. What it does clear is the voice-scope mirror.
+        assertEquals("fixture-bearer", owner.authoritySnapshot().token!!.value)
+        // The notification fired for THIS rejection and its payload is the identity that produced
+        // it -- not read from a hook's default, but from the callback the api was constructed with.
+        assertEquals(1, invalidations.size)
+        assertEquals("fixture-bearer", invalidations[0].token!!.value)
     }
 
     @Test

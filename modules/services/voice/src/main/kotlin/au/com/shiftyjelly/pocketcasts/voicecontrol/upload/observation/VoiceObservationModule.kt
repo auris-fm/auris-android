@@ -187,9 +187,9 @@ object VoiceObservationModule {
                 // ACCOUNT-SCOPED (reviewer 3d1f87be #3): one fixed file keyed only by epoch would
                 // let a second signed-in account present the first account's request id, which the
                 // server reads as one account carrying another's allocation.
-                // Only bind when an Auris credential is actually present: an absent one means no
-                // allowance request can be made, so an unscoped store cannot present anything.
-                account = aurisToken.peekCurrentToken()?.let { accountStartup.ownerForHandoff().authoritySnapshot().accountName },
+                // NO ACCOUNT HERE (reviewer 7c220c1d #2): the account is supplied per decision
+                // from the credential that authorises that attempt. Capturing it at construction
+                // froze a cold-cache null forever and went stale on an account switch.
             ),
             // A 409 means a persisted id outlived its epoch: a client state-machine bug. Surfaced
             // rather than retried, because a silent retry hides it and burns another batch.

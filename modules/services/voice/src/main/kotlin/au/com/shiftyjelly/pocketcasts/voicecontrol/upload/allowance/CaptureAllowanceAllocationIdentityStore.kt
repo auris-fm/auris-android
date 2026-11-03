@@ -33,13 +33,6 @@ import java.util.UUID
  */
 class CaptureAllowanceAllocationIdentityStore(
     private val file: File,
-    /**
-     * The authoritative ACCOUNT this identity belongs to (reviewer 3d1f87be #3). One fixed file
-     * scoped only by epoch would let a second account reuse the first account's request id, which
-     * the server would see as one account presenting another's allocation. The account is part of
-     * the persisted record and must match on every read.
-     */
-    private val account: String? = null,
 ) {
     sealed interface Acquisition {
         /** The identity to present. It is already durable. */
@@ -56,24 +49,48 @@ class CaptureAllowanceAllocationIdentityStore(
     fun current(): Identity? = synchronized(lock) { readOrNull() as? Identity }
 
     /**
-     * The identity for an attempt under [enrollmentEpoch], made durable before return. Reuses the
-     * persisted id when its epoch still matches (a different epoch can only produce a `409`).
+     * The identity for an attempt under [enrollmentEpoch] by [account], made durable before return.
+     *
+     * [account] is passed PER DECISION, never captured at construction (reviewer 7c220c1d #2): a
+     * cold cache supplies null on the first call and a later account switch changes the answer, so
+     * a captured value is either permanently disabled or permanently stale. The server keys
+     * allocations by `(user_id, request_id)`, which means an id presented under a different user
+     * looks like a first attempt and is issued fresh -- the cross-owner protection would pass
+     * silently while doing nothing.
      */
-    fun acquire(enrollmentEpoch: String): Acquisition = synchronized(lock) {
+    fun acquire(enrollmentEpoch: String, account: String?): Acquisition = synchronized(lock) {
         // A RECORDED CONFLICT BLOCKS, it does not fall through to a mint.
-        if (conflicted) {
-            val recorded = readOrNull() as? Identity
+        val recordedConflict = readOrNull() as? Identity
+        if (recordedConflict != null && recordedConflict.conflicted) {
             // A genuinely NEW epoch is the one resolution that is not a bypass: the old id cannot
-            // be reused and the server has already told us so.
-            if (recorded != null && recorded.enrollmentEpoch == enrollmentEpoch) return Acquisition.Ambiguous
-            conflicted = false
-            file.delete()
+            // be reused and the server has already told us so. Anything else refuses.
+            if (recordedConflict.enrollmentEpoch == enrollmentEpoch) return Acquisition.Ambiguous
+            if (!deleteQuietly()) {
+                recoveryRequired = true
+                return Acquisition.Ambiguous
+            }
+        }
+        // A FAILED POST-RENAME SYNC must actually refuse (reviewer 7c220c1d #1, cloud b2f0df12).
+        // The flag was previously assigned and never read, so the first refusal became an
+        // UNCONFIRMED SEND on retry -- a warning recorded but not consulted is not a refusal.
+        if (recoveryRequired) {
+            // THE BLOCK IS STICKY. A later sync cannot retroactively prove the rename durable:
+            // syncing now flushes whatever the directory holds at this instant, which is not the
+            // same claim as "the entry we renamed is on stable storage". Earlier versions of this
+            // code either ignored the flag or cleared it on the next successful sync, and both let
+            // an unproven id reach the wire. Only a NEW, fully durable write clears it, and that
+            // write happens below by minting -- which requires an empty record first.
+            if (file.exists()) return Acquisition.Ambiguous
+            recoveryRequired = false
         }
         val existing = readOrNull()
         if (existing == AMBIGUOUS) return Acquisition.Ambiguous
         val held = existing as? Identity
         if (held != null) {
-            // A record from ANOTHER ACCOUNT can never be reused (reviewer 3d1f87be #3).
+            // CROSS-OWNER REUSE IS THE DANGER (reviewer 7c220c1d #2). Compare only when BOTH sides
+            // are known: an absent account on either side proves nothing either way, and treating
+            // "unknown" as "foreign" would wedge a legitimate retry whose credential supplier is
+            // still cold. A KNOWN mismatch -- the actual bug -- always refuses.
             if (account != null && held.account != null && held.account != account) {
                 return Acquisition.Ambiguous
             }
@@ -82,8 +99,12 @@ class CaptureAllowanceAllocationIdentityStore(
                 // fresh id would refuse identically while storing another server row.
                 return Acquisition.Held(held)
             }
-            // A different epoch: this id belongs to an enrollment that no longer exists.
-            deleteQuietly()
+            // A different epoch: this id belongs to an enrollment that no longer exists. If the
+            // removal is not durable we cannot claim the old id is gone, so we refuse.
+            if (!deleteQuietly()) {
+                recoveryRequired = true
+                return Acquisition.Ambiguous
+            }
         }
         val minted = Identity(UUID.randomUUID().toString(), enrollmentEpoch, account = account)
         if (!write(minted)) {
@@ -99,8 +120,8 @@ class CaptureAllowanceAllocationIdentityStore(
      */
     fun recordConflict(expected: Identity): Boolean = synchronized(lock) {
         if (readOrNull() as? Identity != expected) return false
-        conflicted = true
-        true
+        // PERSISTED, not in-memory: a restart must not clear the block.
+        write(expected.copy(conflicted = true))
     }
 
     /**
@@ -125,6 +146,7 @@ class CaptureAllowanceAllocationIdentityStore(
         val enrollmentEpoch: String,
         val account: String? = null,
         val retired: Boolean = false,
+        val conflicted: Boolean = false,
     ) {
         companion object {
             fun parse(text: String): Identity? = IdentityEncoding.decode(text)
@@ -164,10 +186,18 @@ class CaptureAllowanceAllocationIdentityStore(
         return true
     }
 
-    private fun deleteQuietly() {
+    /**
+     * Removes the record, and reports whether the REMOVAL is durable.
+     *
+     * A delete that cannot be synced is the same hazard as a rename that cannot be synced: the
+     * next read may still see a record we believe we removed, or lose one we believe we wrote.
+     * Silently ignoring it would leave [acquire] minting on the strength of a state nobody can
+     * vouch for.
+     */
+    private fun deleteQuietly(): Boolean {
         val dir = file.parentFile
         file.delete()
-        if (dir != null) syncDirectory(dir)
+        return dir == null || syncDirectory(dir)
     }
 
     /**
@@ -177,8 +207,18 @@ class CaptureAllowanceAllocationIdentityStore(
      * record if the entry itself is not flushed, and a lost record is a silently re-allocated
      * batch. So a failure here is reported and the caller REFUSES to send: the alternative is to
      * claim an identity is durable when it may vanish on the next power cut.
+     *
+     * The seam below forces the POST-RENAME sync to fail, which is the case the reviewer named and
+     * the one unreachable on a healthy filesystem. It is a one-shot, reachable only from tests.
      */
+    @Volatile
+    var failNextSyncForTest: Boolean = false
+
     private fun syncDirectory(dir: File): Boolean = try {
+        if (failNextSyncForTest) {
+            failNextSyncForTest = false
+            return false
+        }
         java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
         true
     } catch (e: Exception) {
@@ -193,15 +233,16 @@ class CaptureAllowanceAllocationIdentityStore(
     private var recoveryRequired = false
 
     /**
-     * Set when the server answered `409 request_conflict` (reviewer 3d1f87be #1).
+     * A `409 request_conflict` is recorded IN THE PERSISTED RECORD (reviewer 7c220c1d #3, cloud
+     * b2f0df12). Holding it in memory made the recovery a PROCESS RESTART -- the one operation that
+     * loses it -- so the client's response to a conflict would be "send again after a crash", which
+     * the server cannot distinguish from a fresh well-behaved attempt that allocates.
      *
-     * Deleting the file and letting the next ordinary `acquire` mint a fresh id IS the bypass --
-     * unchanged authority would silently allocate a new batch, which is exactly what the conflict
-     * was warning about. So the conflict is recorded, and `acquire` REFUSES until it is resolved.
-     * Nothing about a 409 may produce a fresh id by itself.
+     * The record keeps `conflicted = true` on disk, and [acquire] refuses for as long as it is
+     * there. Nothing about a 409 may produce a fresh id by itself; the only clearings are a
+     * genuinely new enrollment epoch or a proven-exhaustion advance -- never time, attempts or a
+     * restart (cloud 09efcfea).
      */
-    @Volatile
-    private var conflicted = false
 
     private companion object {
         /** Sentinel meaning "present but not trustworthy" -- distinct from absent (null). */
@@ -211,7 +252,7 @@ class CaptureAllowanceAllocationIdentityStore(
 
 /** Strict file encoding for a persisted identity. Anything unparseable is AMBIGUOUS, not absent. */
 private object IdentityEncoding {
-    const val VERSION = "allowance-identity/3"
+    const val VERSION = "allowance-identity/4"
 
     fun render(identity: CaptureAllowanceAllocationIdentityStore.Identity): String = buildString {
         append(VERSION).append('\n')
@@ -219,15 +260,17 @@ private object IdentityEncoding {
         append(identity.enrollmentEpoch).append('\n')
         append(identity.account ?: "").append('\n')
         append(identity.retired).append('\n')
+        append(identity.conflicted).append('\n')
     }
 
     fun decode(text: String): CaptureAllowanceAllocationIdentityStore.Identity? {
         val lines = text.lines()
-        if (lines.size < 5 || lines[0] != VERSION) return null
+        if (lines.size < 6 || lines[0] != VERSION) return null
         val id = lines[1]
         val epoch = lines[2]
         val accountLine = lines[3]
         val retired = lines[4].toBooleanStrictOrNull() ?: return null
+        val conflicted = lines[5].toBooleanStrictOrNull() ?: return null
         // The id must be a UUID: anything else could not have been sent by this client.
         if (runCatching { UUID.fromString(id) }.isFailure) return null
         if (epoch.isEmpty()) return null
@@ -236,6 +279,7 @@ private object IdentityEncoding {
             enrollmentEpoch = epoch,
             account = accountLine.ifEmpty { null },
             retired = retired,
+            conflicted = conflicted,
         )
     }
 }

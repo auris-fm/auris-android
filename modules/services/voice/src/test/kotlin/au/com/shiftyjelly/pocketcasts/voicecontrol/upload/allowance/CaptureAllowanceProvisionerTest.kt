@@ -364,6 +364,16 @@ class CaptureAllowanceProvisionerTest {
 
     private fun identityFile() = java.io.File(tmp.root, "allocation-identity")
 
+    /**
+     * A store the way PRODUCTION builds one: the account comes from the credential that authorises
+     * the attempt, per decision (reviewer 7c220c1d #2). A store with no account in play would make
+     * every read mismatched, which is a test artifact rather than a property.
+     */
+    private fun storeFor(account: String = "acct-1") = object {
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        fun acquire(epoch: String, acct: String? = account) = store.acquire(epoch, acct)
+    }
+
     @Test
     fun `a repeated provision REUSES the persisted request id instead of allocating a new batch`() = runBlocking {
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
@@ -459,7 +469,8 @@ class CaptureAllowanceProvisionerTest {
         // reviewer 3d1f87be #1, second half: without an exhaustion path the ONLY way the client
         // advances is by failing, and every advancement-by-failure is a fresh charge.
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
-        val (p, _, _) = provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store)
+        val clock = mutableListOf(1_000L, 2_000L)
+        val (p, _, _) = provisioner(200, goBody(), clock = clock, identityStore = store)
         p.provision()
         val firstId = sentRequestId()
         val composed = p.lastComposedOwner!!
@@ -474,10 +485,13 @@ class CaptureAllowanceProvisionerTest {
         assertEquals("the batch must exhaust at its bound", 4, charged)
         assertTrue("the composed owner must report exhaustion", composed.isExhausted())
 
-        // The next provision advances FIRST, so it does not present the spent id.
-        val next = provisioner(200, goBody(), clock = mutableListOf(3_000L, 4_000L), identityStore = store)
-        next.first.lastComposedOwner = composed // carry the spent owner across, as production does
-        next.first.provision()
+        // A LATER attempt on the SAME provisioner (production shape: one provisioner, many
+        // attempts). Its composed owner and identity are still set, so the exhaustion advance can
+        // compare-and-swap against them. Assigning a foreign owner onto a fresh provisioner -- my
+        // first version -- leaves composedIdentity null, so nothing could advance and the test
+        // failed for a reason unrelated to the behaviour it claims to pin.
+        clock += listOf(3_000L, 4_000L) // same provisioner's shared clock queue
+        p.provision()
         assertNotEquals("exhaustion must advance the allocation", firstId, sentRequestId())
     }
 
@@ -598,9 +612,9 @@ class CaptureAllowanceProvisionerTest {
     fun `advancement is compare-and-swap - a stale response cannot delete a newer identity`() {
         // cloud ffeaa62d: the server will happily replay a stale id, so the guard has to be local.
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
-        val first = (store.acquire("ep-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
+        val first = (store.acquire("ep-1", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
         // A newer identity replaces it (different epoch, the only legitimate replacement).
-        val second = (store.acquire("ep-2") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
+        val second = (store.acquire("ep-2", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
         assertNotEquals(first.requestId, second.requestId)
 
         // A LATE response for the dead identity must not delete the live one.
@@ -642,17 +656,107 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
+    fun `a failed POST-RENAME sync refuses, and keeps refusing until a sync succeeds`() {
+        // reviewer 7c220c1d #1, cloud b2f0df12: `recoveryRequired` was assigned and never read, so
+        // the refusal it claimed to express did not exist. The next acquire() read the file, found
+        // a plausible id, and returned Held -- turning the FIRST refusal into an UNCONFIRMED SEND
+        // on retry.
+        //
+        // This control crosses exactly ONE seam: the write's own post-rename sync. The file is
+        // MINTED fresh (no earlier record to delete), so the draft-delete sync cannot be what
+        // refuses -- an earlier version of this test passed through that other path and proved
+        // nothing about the rename.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        assertFalse("precondition: no record yet", identityFile().exists())
+        store.failNextSyncForTest = true
+        assertEquals(
+            "a rename whose durability is unconfirmed must refuse, not report Held",
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            store.acquire("ep-1", "acct-1"),
+        )
+        // The mint DID land on disk, so a naive retry would find it and send. The block must hold.
+        assertTrue("the record is on disk but unproven", identityFile().exists())
+        assertEquals(
+            "and it must keep refusing while durability cannot be confirmed",
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            store.acquire("ep-1", "acct-1"),
+        )
+    }
+
+    @Test
+    fun `a failed DELETE sync refuses - an undurable removal is the same hazard`() {
+        // The second half, on its own seam: removing the old record is what makes room for a new
+        // ID. If the removal is not durable we cannot claim the old id is gone, so minting here
+        // would assert a state nobody can vouch for.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        store.acquire("ep-1", "acct-1")
+        store.failNextSyncForTest = true
+        assertEquals(
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            store.acquire("ep-2", "acct-1"),
+        )
+    }
+
+    @Test
+    fun `a RECORDED 409 survives a restart - in-memory state would make a crash the resolution`() {
+        // reviewer 7c220c1d #3, cloud b2f0df12: holding the conflict in a field made a PROCESS
+        // RESTART the thing that cleared it -- the one event the client cannot observe as a
+        // decision, and one the server cannot distinguish from a fresh well-behaved attempt.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val held = (store.acquire("ep-1", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
+        assertTrue(store.recordConflict(held))
+
+        // The block must outlive the process, so a NEW instance reading the same file refuses.
+        val restarted = CaptureAllowanceAllocationIdentityStore(identityFile())
+        assertEquals(
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            restarted.acquire("ep-1", "acct-1"),
+        )
+        // A genuinely new enrollment epoch is the legitimate resolution, and it does clear.
+        assertTrue(
+            restarted.acquire("ep-2", "acct-1") is CaptureAllowanceAllocationIdentityStore.Acquisition.Held,
+        )
+    }
+
+    @Test
+    fun `server-side exhaustion advances only the identity THAT owner was composed under`() = runBlocking {
+        // reviewer 7c220c1d, cloud b2f0df12: the proof was computed from a spent owner, so it may
+        // only advance that owner's allocation. Advancing "whatever is current" lets a stale proof
+        // delete a NEWER pending allocation, and a deleted allocation costs a fresh charge.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val (p, _, _) = provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store)
+        p.provision()
+        val composedUnder = store.current()!!
+        p.lastComposedOwner!!.let { owner ->
+            var n = 0
+            while (owner.prepareToken()) {
+                owner.takePrepaidToken()
+                n++
+            }
+            assertEquals(4, n)
+        }
+
+        // A NEWER allocation is now current (different epoch). The stale proof must not touch it.
+        val newer = (store.acquire("ep-2", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
+        assertNotEquals(composedUnder.requestId, newer.requestId)
+
+        // Force the spent owner's proof through provision(). The newer id must survive INTACT.
+        store.let { p.provision() }
+        assertTrue("the newer allocation must not be deleted by a stale proof", store.current() != null)
+    }
+
+    @Test
     fun `an id bound to ANOTHER account is never reused`() = runBlocking {
         // reviewer 3d1f87be #3: one fixed file scoped only by epoch would let a second account
         // present the first account's request id.
-        val store = CaptureAllowanceAllocationIdentityStore(identityFile(), account = "acct-1")
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
         provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
 
         // A DIFFERENT account opening the same record must refuse rather than send.
-        val foreign = CaptureAllowanceAllocationIdentityStore(identityFile(), account = "acct-2")
+        val foreign = CaptureAllowanceAllocationIdentityStore(identityFile())
         assertEquals(
             CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
-            foreign.acquire("ep-1"),
+            foreign.acquire("ep-1", "acct-2"),
         )
     }
 
@@ -661,12 +765,12 @@ class CaptureAllowanceProvisionerTest {
         // reviewer 3d1f87be #2: a directory sync failure must refuse, not report the id as held.
         // The record is made unreadable-as-valid while still present, which is the same refusal
         // path the post-rename sync failure takes.
-        val store = CaptureAllowanceAllocationIdentityStore(identityFile(), account = "acct-1")
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
         identityFile().parentFile?.mkdirs()
-        identityFile().writeText("allowance-identity/3\nnot-a-uuid\nep-1\nacct-1\nfalse\n")
+        identityFile().writeText("allowance-identity/4\nnot-a-uuid\nep-1\nacct-1\nfalse\nfalse\n")
         assertEquals(
             CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
-            store.acquire("ep-1"),
+            store.acquire("ep-1", "acct-1"),
         )
     }
 

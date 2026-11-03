@@ -69,10 +69,18 @@ interface VoiceSharingAccountApi {
 }
 
 /**
- * Does the rejection still speak about the LIVE authority? True when the voice session is STILL
- * the rejected incarnation, or when no voice session is live at all (the rejection is what ended
- * it -- the mirror it left behind must clear). False once a DIFFERENT incarnation is live: that
- * is newer authority, with or without its projection, and the rejection says nothing about it.
+ * Does the rejection still speak about the LIVE authority? Identity is the INSTANCE, never a
+ * value: `(account, generation)` does not distinguish two incarnations, and a re-entered owner
+ * object would compare "equal" and clear authority that is actually newer (cloud b501633e).
+ *
+ * NULL IDENTITY: there is no live voice session, which happens for exactly two reasons here --
+ * this committed rejection ended it, or the owner is retiring it. The two are indistinguishable
+ * at this point, so the choice is deliberate and it is SAFE ONLY BECAUSE THIS GUARDS A MIRROR:
+ * a mirror records the credential the boundary believes is published, and with no live voice
+ * session there is no authority it could preserve, so clearing it cannot destroy authority (the
+ * alternative -- leaving a mirror behind for a session that no longer exists -- records a
+ * credential that is not usable). This predicate MUST NOT be reused to guard anything with a
+ * durable effect: "no owner" and "owner momentarily unknown" would both read as true there.
  */
 private fun stillRejected(state: VoiceSharingAccountState, rejected: VoiceSharingAccountState.VoiceIdentity): Boolean = state.voiceIdentity()?.let { it === rejected } ?: true
 

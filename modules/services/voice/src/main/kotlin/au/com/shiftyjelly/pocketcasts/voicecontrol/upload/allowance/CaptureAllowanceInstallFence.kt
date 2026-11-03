@@ -93,8 +93,11 @@ class CaptureAllowanceInstallFence(
             !grant.isFresh(nowElapsedMs()) -> false
 
             else -> {
+                // The installed authority carries the ALLOWANCE's own deadline (reviewer
+                // c226fb6f): install-time freshness alone lets a short batch outlive
+                // `valid_for_ms` while the independently live policy lease keeps it installed.
                 lifecycle.bind(
-                    owner,
+                    CaptureAllowanceDeadlineAuthority(owner, grant) { nowElapsedMs() },
                     CaptureAllowanceLifecycle.GrantIdentity(
                         enrollmentEpoch = observedEnrollmentEpoch,
                         ownerSession = live.session,

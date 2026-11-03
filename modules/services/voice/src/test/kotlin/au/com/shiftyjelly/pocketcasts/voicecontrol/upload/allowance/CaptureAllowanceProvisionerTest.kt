@@ -8,6 +8,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -117,6 +118,8 @@ class CaptureAllowanceProvisionerTest {
         echoOverride: String? = null,
         failRead: Boolean = false,
         installAuthority: (suspend (CaptureAllowanceOwner, Long, Long, String, String, CaptureAllowanceProvisioner.Grant, () -> Unit) -> Boolean)? = null,
+        identityStore: CaptureAllowanceAllocationIdentityStore? = null,
+        accountingDay: () -> String = { "2026-11-04" },
     ): Triple<CaptureAllowanceProvisioner, CaptureAllowanceLifecycle, MutableList<Long>> {
         val t = RecordingTransport(code, body, echoOverride, requestId, failRead)
         lastTransport = t
@@ -140,6 +143,8 @@ class CaptureAllowanceProvisionerTest {
             elapsedMs = { clock.removeFirstOrNull() ?: Long.MAX_VALUE },
             beginInstallAttempt = { },
             installAuthority = install,
+            identityStore = identityStore,
+            accountingDay = accountingDay,
         )
         return Triple(p, lifecycle, binds)
     }
@@ -342,5 +347,79 @@ class CaptureAllowanceProvisionerTest {
         assertEquals(CaptureAllowanceBatch.REASON_OVERSIZED, refusedReason(p.provision()))
         assertEquals(0, binds.size)
         assertEquals(1, lastTransport.successBodiesClosed)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // DURABLE ALLOCATION IDENTITY (reviewer 3ba1e605, cloud a42eea42)
+    //
+    // The server is idempotent on `request_id` alone, so these controls assert the property the
+    // server actually depends on: the id on the wire is the SAME id across attempts and restarts.
+    // A test that only checks "a request was sent" passes on the broken behaviour.
+    // ---------------------------------------------------------------------------------------
+
+    private fun sentRequestId(): String = lastTransport.seenBody!!.substringAfter("\"request_id\":\"").substringBefore("\"")
+
+    private fun identityFile() = java.io.File(tmp.root, "allocation-identity")
+
+    @Test
+    fun `a repeated provision REUSES the persisted request id instead of allocating a new batch`() = runBlocking {
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val first = provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store)
+        assertTrue(first.first.provision() is CaptureAllowanceProvisioner.Result.Provisioned)
+        val firstId = sentRequestId()
+        // A SECOND attempt (retry, restart, refused capture) must speak about the same allocation.
+        val second = provisioner(200, goBody(disposition = "replayed"), clock = mutableListOf(3_000L, 4_000L), identityStore = store)
+        assertTrue(second.first.provision() is CaptureAllowanceProvisioner.Result.Provisioned)
+        assertEquals("the retry must replay the same allocation", firstId, sentRequestId())
+    }
+
+    @Test
+    fun `a RESTART reuses the persisted id - a fresh store instance reads the same file`() = runBlocking {
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()))
+            .first.provision()
+        val firstId = sentRequestId()
+        // Restart: a NEW store object over the same file, as the app would build after a process death.
+        val restarted = provisioner(200, goBody(disposition = "replayed"), clock = mutableListOf(5_000L, 6_000L), identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()))
+        restarted.first.provision()
+        assertEquals("process death must not mint a new allocation", firstId, sentRequestId())
+    }
+
+    @Test
+    fun `an UNKNOWN transport outcome keeps the id so the retry is a replay, not a new batch`() = runBlocking {
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        // The first attempt dies in transport: the persisted id survives, which is the whole point.
+        assertTrue(provisioner(503, "", clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision() is CaptureAllowanceProvisioner.Result.Refused)
+        val firstId = sentRequestId()
+        provisioner(200, goBody(disposition = "replayed"), clock = mutableListOf(3_000L, 4_000L), identityStore = store).first.provision()
+        assertEquals("a 503 retries the SAME id", firstId, sentRequestId())
+    }
+
+    @Test
+    fun `429 RETAINS the id - the client stops allocating rather than minting a new one`() = runBlocking {
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        provisioner(429, "", clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+        val exhaustedId = sentRequestId()
+        provisioner(429, "", clock = mutableListOf(3_000L, 4_000L), identityStore = store).first.provision()
+        assertEquals("a 429 must not mint a new id", exhaustedId, sentRequestId())
+        assertTrue("the retained record must not be usable for allocation", store.current()!!.retired)
+    }
+
+    @Test
+    fun `410 ADVANCES the id - server-confirmed window expiry is the one advancement`() = runBlocking {
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        provisioner(410, "", clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+        val expiredId = sentRequestId()
+        provisioner(200, goBody(), clock = mutableListOf(3_000L, 4_000L), identityStore = store).first.provision()
+        assertNotEquals("a server-confirmed 410 must advance the identity", expiredId, sentRequestId())
+    }
+
+    @Test
+    fun `a NEW accounting day does not reuse yesterday's id - that would be a silent 410`() = runBlocking {
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()), accountingDay = { "2026-11-04" })
+            .first.provision()
+        val yesterdayId = sentRequestId()
+        provisioner(200, goBody(), clock = mutableListOf(3_000L, 4_000L), identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()), accountingDay = { "2026-11-05" })
+            .first.provision()
+        assertNotEquals("a persisted id from another day is dead on the server", yesterdayId, sentRequestId())
     }
 }

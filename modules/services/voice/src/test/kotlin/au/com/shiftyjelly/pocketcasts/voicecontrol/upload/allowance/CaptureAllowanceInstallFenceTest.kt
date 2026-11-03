@@ -67,8 +67,12 @@ class CaptureAllowanceInstallFenceTest {
     private var liveBasis: CaptureAllowanceInstallFence.EnrollmentBasis? =
         CaptureAllowanceInstallFence.EnrollmentBasis(enrollmentEpoch = "ep-1", membershipActive = true, policyLive = true)
 
+    /** Set by [fence] so composition controls can read the installed authority it bound. */
+    private var lifecycleUnderTest: CaptureAllowanceLifecycle? = null
+
     private fun fence(ownership: LockingOwnership = LockingOwnership()): Triple<CaptureAllowanceInstallFence, LockingOwnership, AtomicLong> {
         val (lifecycle, binds) = countingLifecycle()
+        lifecycleUnderTest = lifecycle
         val f = CaptureAllowanceInstallFence(ownership, lifecycle, { liveBasis }) { clock }
         return Triple(f, ownership, binds)
     }
@@ -360,5 +364,59 @@ class CaptureAllowanceInstallFenceTest {
         assertEquals(1, binds.get())
         assertEquals(1_000L, p.currentGrant!!.requestStartElapsedMs)
         assertTrue(p.currentGrant!!.isFresh(1_001))
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // ALLOWANCE DEADLINE AT ADMISSION (reviewer c226fb6f, cloud a3293810)
+    //
+    // `valid_for_ms` is min(policy freshness, until-midnight-UTC) and is thus INDEPENDENT of the
+    // policy lease that installed the authority. These controls hold the policy side live and let
+    // only the allowance deadline pass, which is the case an install-time-only check misses.
+    // ---------------------------------------------------------------------------------------
+
+    @Test
+    fun `the INSTALLED authority enforces the allowance deadline - the composition wires it`() {
+        // Composition-level, through the REAL fence: this is the control that fails if
+        // CaptureAllowanceInstallFence stops wrapping the owner in the deadline guard. The two
+        // wrapper-level controls below would keep passing through that regression, which is why
+        // this one asserts the wiring rather than the arithmetic.
+        val (f, _, binds) = fence()
+        f.beginAttempt("a1")
+        val installedOwner = owner()
+        assertTrue(f.install(installedOwner, credential.generation, credential.session, credential.enrollmentEpoch, "a1", grant) { })
+        assertEquals(1, binds.get())
+        // Admission through the PUBLIC path an observer uses -- takePrepaidToken -- so the
+        // assertion cannot accidentally hold a reference the composition never installed.
+        val installed: CaptureAllowanceAuthority = lifecycleUnderTest!!
+
+        // Inside valid_for_ms (anchored at the grant's request start, 1_000 + 300_000).
+        clock = 1_000L + 299_999L
+        // A real prepared handoff: the owner only ever hands out a token it has readied.
+        assertTrue(installedOwner.prepareToken())
+        assertNotNull("inside the allowance window admission must proceed", installed.takePrepaidToken())
+
+        // ONE millisecond past the ALLOWANCE deadline. Policy basis is still live and no timer
+        // has fired, so only the installed guard can refuse here.
+        clock = 1_000L + 300_000L
+        assertTrue("the ledger can still prepare - only the allowance deadline refuses", installedOwner.prepareToken())
+        assertNull("the installed authority must refuse past valid_for_ms", installed.takePrepaidToken())
+    }
+
+    @Test
+    fun `the deadline is anchored at REQUEST start - transit time never extends it`() {
+        val clock = java.util.concurrent.atomic.AtomicLong(0L)
+        // Server computed valid_for_ms = 1_000 at issue; the client anchors at its request start.
+        val grant = CaptureAllowanceProvisioner.Grant(batchId = "b-2", requestStartElapsedMs = 0L, validForMs = 1_000L)
+        var issued = 0
+        val ledger = object : CaptureAllowanceAuthority {
+            override fun takePrepaidToken(): CaptureAllowanceToken {
+                issued++
+                return CaptureAllowanceToken(generation = 1L, limitsBinding = "lb", windowBinding = "wb", selectedMaxClipBytes = 1L, selectedMaxMetadataBytes = 1)
+            }
+        }
+        val guarded = CaptureAllowanceDeadlineAuthority(ledger, grant) { clock.get() }
+        clock.set(1_000L) // the whole interval elapsed DURING the request; nothing is left
+        assertNull("a spent interval refuses immediately, even on a freshly installed authority", guarded.takePrepaidToken())
+        assertEquals(0, issued)
     }
 }

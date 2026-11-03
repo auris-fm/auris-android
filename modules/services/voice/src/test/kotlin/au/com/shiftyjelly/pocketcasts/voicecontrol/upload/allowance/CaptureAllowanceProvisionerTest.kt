@@ -824,6 +824,44 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
+    fun `a marked record is recovered, not handed back, so the marker never reaches Held`() {
+        // WHY THIS CONTROL IS NOT A PROOF THAT CONFIRMATION IS UNCONDITIONAL.
+        //
+        // I tried to write that control and could not make it red, and the reason is worth keeping:
+        // a MARKED record never reaches the durability check at all. Recovery handles it earlier --
+        // it rewrites the same id without the block -- so by the time Held would be returned the
+        // record is clean. The only way in-memory `recoveryRequired` can be set with no readable
+        // record returns Ambiguous outright.
+        //
+        // So confirmation being unconditional is not observable from a marked record; it is a
+        // property of where the check sits, and I justify it by cloud c8c8fdd8 (do not record
+        // uncertainty in something a failure can destroy) rather than by a red receipt. What this
+        // control does establish is the ordering that makes the absence of that receipt true: a
+        // marked record is RECOVERED rather than returned as Held.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val held =
+            (store.acquire("ep-1", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held)
+                .identity
+        identityFile().writeText(
+            "allowance-identity/5\n" + held.requestId + "\nep-1\nacct-1\nfalse\nfalse\ntrue\n",
+        )
+        assertEquals(
+            "setup: the record must read as marked",
+            true,
+            CaptureAllowanceAllocationIdentityStore(identityFile()).current()?.recoveryRequired,
+        )
+
+        // The unconfirmable recovery must refuse rather than return the id.
+        val reconstructed = CaptureAllowanceAllocationIdentityStore(identityFile())
+        reconstructed.failNextSyncForTest = true
+        assertEquals(
+            "a marked record must be recovered, and recovery that cannot confirm must refuse",
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            reconstructed.acquire("ep-1", "acct-1"),
+        )
+    }
+
+    @Test
     fun `a record whose marker NEVER SURVIVED is still confirmed before use`() {
         // reviewer f77aaa69 #2: the marker is written best-effort AFTER an unconfirmed rename, so a
         // process interruption before that rewrite leaves a readable, UNMARKED record whose

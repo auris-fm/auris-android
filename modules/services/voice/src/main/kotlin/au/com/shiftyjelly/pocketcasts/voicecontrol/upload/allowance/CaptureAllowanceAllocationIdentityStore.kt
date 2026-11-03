@@ -93,15 +93,21 @@ class CaptureAllowanceAllocationIdentityStore(
             } else {
                 // RE-PERSIST THE SAME ID WITHOUT THE BLOCK, then STOP.
                 //
-                // Recovery establishes durability, but this attempt still does NOT send: the caller
-                // has not yet seen a confirmed state. Clearing the block and proceeding in the same
-                // call would mean the failure produced exactly one attempt of protection, and the
-                // very next call would present an id the caller was never told was durable.
-                // Refusing now and letting the next attempt proceed makes the confirmation an
-                // observable event rather than an internal side effect of the failed one.
-                if (!durableWrite(record.copy(recoveryRequired = false))) return Acquisition.Ambiguous
+                // ONCE DURABILITY IS CONFIRMED, THIS ATTEMPT MAY PROCEED (spec a91a907e).
+                //
+                // An earlier version refused here so the confirmation would be "an observable
+                // event". That was a testing benefit dressed as a correctness rule: the safety
+                // property is that nothing is SENT until the record is proven durable, and a
+                // successful durableWrite above establishes exactly that, for exactly this id.
+                // Refusing afterwards buys no additional safety and costs the user an utterance.
+                // The confirmation stays observable as a test seam on the write, not as a refusal.
+                // THE RECOVERY WRITE ITSELF CAN FAIL (reviewer d4cff2e5 #1). Using the raw
+                // durableWrite left a hole: if its rename succeeds and its directory sync fails,
+                // the readable record has the block CLEARED and no wrapper restores it, so a new
+                // store instance reads it as Held. Use the policy wrapper instead, which re-blocks
+                // on failure; and treat a failure as a refusal either way.
+                if (!write(record.copy(recoveryRequired = false))) return Acquisition.Ambiguous
                 recoveryRequired = false
-                return Acquisition.Ambiguous
             }
         }
         val existing = readOrNull()

@@ -53,15 +53,19 @@ class VoiceProvisionGateTest {
 
     private val lifecycleRef = CaptureAllowanceLifecycle()
 
-    private fun provisioner(api: CountingApi, clock: () -> Long): CaptureAllowanceProvisioner = CaptureAllowanceProvisioner(
-        api = api,
-        credential = {
+    private fun provisioner(
+        api: CountingApi,
+        credential: () -> CaptureAllowanceProvisioner.Credential? = {
             CaptureAllowanceProvisioner.Credential(
                 bearer = "tok",
                 accountId = "acct-1",
                 enrollmentEpoch = "ep-1",
             )
         },
+        clock: () -> Long,
+    ): CaptureAllowanceProvisioner = CaptureAllowanceProvisioner(
+        api = api,
+        credential = credential,
         baseArea = tmp.root,
         lifecycle = lifecycleRef,
         ceilings = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings(
@@ -167,6 +171,70 @@ class VoiceProvisionGateTest {
 
         assertEquals(1, api.calls)
         assertEquals(false, gate.get())
+    }
+
+    @Test
+    fun `SIGNED OUT at first utterance, SIGNED IN later - the session resumes`() = runBlocking {
+        // reviewer d4cff2e5 #3, spec 1a340261: a signed-out session has NO composed owner, so there
+        // is no spent/expired state to re-arm from. The gate closed on the no-credential refusal
+        // and nothing re-opened it, so signing in during this engine session could never resume
+        // provisioning -- the user would have to restart the app to be helped.
+        var signedIn = false
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(
+            api,
+            credential = {
+                if (signedIn) {
+                    CaptureAllowanceProvisioner.Credential("tok", "acct-1", "ep-1")
+                } else {
+                    null
+                }
+            },
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals("signed out: nothing may be sent", 0, api.calls)
+
+        signedIn = true
+        // THE RESUMPTION: readiness resolved, which must re-arm the gate for THIS session.
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals("signing in must resume provisioning without a restart", 1, api.calls)
+    }
+
+    @Test
+    fun `an ACCOUNT-not-yet-known deferral resumes too, and re-arms only once`() = runBlocking {
+        // The Deferred branch had no resumption wiring at all. Both readiness states share one
+        // mechanism; consuming the transition keeps it event-driven rather than per-utterance.
+        var accountKnown = false
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(
+            api,
+            credential = {
+                CaptureAllowanceProvisioner.Credential(
+                    bearer = "tok",
+                    accountId = if (accountKnown) "acct-1" else "",
+                    enrollmentEpoch = "ep-1",
+                )
+            },
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        assertEquals(
+            "an unknown account must defer without sending",
+            CaptureAllowanceProvisioner.Result.Deferred,
+            VoiceProvisionGate.decide(gate, p),
+        )
+        assertEquals(0, api.calls)
+
+        accountKnown = true
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals("the resolved account must resume provisioning", 1, api.calls)
+        // Third utterance: the transition was consumed, so no further re-arm.
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals("readiness resolves ONCE, it is not a standing licence to ask", 1, api.calls)
     }
 
     @Test

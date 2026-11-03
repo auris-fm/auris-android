@@ -643,6 +643,65 @@ class VoiceSharingAccountOperationsFencingTest {
     }
 
     @Test
+    fun `a newer projection installed DURING the suspended re-mint survives the resumed mirror clear`() = runTest {
+        // The EXACT interleaving reviewer cf8188f0 required: the 401 commits, the re-mint
+        // callback SUSPENDS, a superseding session establishes projection + mirror while it is
+        // in flight, the callback RESUMES -- and the delayed mirror clear must not touch them.
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.install()
+        val server = MockWebServer().apply { start() }
+        val refreshEntered = CompletableDeferred<Unit>()
+        val releaseRefresh = CompletableDeferred<Unit>()
+        val refreshCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val fenceableAuris = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+            override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
+            override suspend fun refreshToken() {
+                refreshCalls.incrementAndGet()
+                refreshEntered.complete(Unit) // the re-mint is now SUSPENDED mid-callback
+                releaseRefresh.await()
+            }
+            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
+        }
+        val operations = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = owner,
+            aurisToken = fenceableAuris,
+            onAurisCredentialRefused = { fenceableAuris.refreshToken() },
+            onCredentialInvalid = { credentials.publish(null) }, // production-like mirror clear
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        val token = state.currentSessionTokenForTest()!!
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(401))
+        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        // enroll only RETURNS after the parked re-mint resumes, so await the PARK, not the result.
+        refreshEntered.await()
+        // THE SUPERSEDING SESSION ARRIVES WHILE THE CALLBACK IS SUSPENDED:
+        owner.simulateAccountSwitch()
+        owner.issueToken("token-b")
+        credentials.publish("Bearer token-b") // newer mirror
+        val newSession = state.sessionStarted(owner.sessionGeneration())
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
+        assertTrue(operations.refreshProjection(newSession))
+        assertTrue(state.hasCurrentSessionProjection()) // newer authority is LIVE before resumption
+        // NOW the old rejection's callback resumes and its delayed mirror clear runs.
+        releaseRefresh.complete(Unit)
+        withContext(Dispatchers.IO) { Thread.sleep(200) }
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
+        // BOTH SURVIVE: the fence sits where the effect lands, not where it is convenient.
+        assertTrue("the newer projection must survive the resumed clear", state.hasCurrentSessionProjection())
+        assertEquals("rev-2", state.projection.value!!.membershipRevision)
+        assertEquals("Bearer token-b", credentials.current()?.bearer)
+        assertEquals(1, refreshCalls.get())
+        server.shutdown()
+    }
+
+    @Test
     fun `the post-commit notification has NO authority effects - deterministic barrier`() = runTest {
         issueBearer("Bearer token-a")
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
@@ -1129,6 +1188,7 @@ class VoiceSharingAccountTransitionAtomicityTest {
  */
 internal fun ownerToken(owner: CredentialOwnershipOwner): au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
     override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
+
     @Suppress("RemoveRedundantCallsOfConversionMethods")
     override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
 }

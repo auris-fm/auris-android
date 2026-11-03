@@ -434,12 +434,17 @@ class VoiceSharingAccountOperations(
             }
         }
         if (!committed) return // effects fire ONLY for a rejection that actually committed
-        // Delayed-effect fence, RE-CHECKED AFTER THE SUSPENSION (reviewer 57246e46): the refresh
-        // above suspends, and a superseding session can establish its projection while it is in
-        // flight -- this rejection's mirror clear must not touch that newer scope. The check runs
-        // inside the owner transaction so a concurrent publication cannot slip past it.
+        // Cheap pre-check: if a superseding session ALREADY re-established, skip the pointless
+        // re-mint. The LOAD-BEARING fence is re-checked after the suspension below -- that is
+        // where a superseding session can still arrive (reviewer cf8188f0).
         if (ownership.transaction { state.hasCurrentSessionProjection() }) return
         onAurisCredentialRefused() // force a re-mint from the SAME account
+        // THE DELAYED-EFFECT FENCE, AFTER THE SUSPENSION (reviewer cf8188f0): the re-mint above
+        // suspends, and a SUPERSEDING session can establish its projection while it is in flight.
+        // The fence is placed where the effect LANDS -- after that suspension, inside the owner
+        // transaction so a concurrent publication cannot slip past it. A superseded rejection's
+        // mirror clear must not touch the newer scope.
+        if (ownership.transaction { state.hasCurrentSessionProjection() }) return
         onCredentialInvalid(op.observed) // post-commit notification, NO authority side effects
     }
 

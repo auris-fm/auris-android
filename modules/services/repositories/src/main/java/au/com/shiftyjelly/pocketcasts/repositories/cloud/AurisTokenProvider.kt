@@ -124,7 +124,7 @@ class AurisTokenProvider(
             // A token past the refresh skew but still inside its real lifetime
             // can keep serving through an inconclusive upstream blip — but only
             // for this same credential.
-            val stillValid = cached?.takeIf { it.matches(lockedIdentity) && it.isWithinLifetime() }
+            val stillValid = snapshot()?.takeIf { it.matches(lockedIdentity) && it.isWithinLifetime() }
             val attempt = acquire(client, lockedIdentity)
             // The identity can change *while* the request is in flight: a logout
             // or a switch during the exchange would otherwise mint a token for
@@ -182,7 +182,7 @@ class AurisTokenProvider(
      * (a 401 means the refresh chain is dead, not that the account is).
      */
     private suspend fun acquire(client: AurisAuthClient, identity: String): Acquisition {
-        val refreshToken = cached?.takeIf { it.matches(identity) }?.tokens?.refreshToken
+        val refreshToken = snapshot()?.takeIf { it.matches(identity) }?.tokens?.refreshToken
         if (refreshToken != null) {
             when (val refreshed = acquire(client.refresh(refreshToken))) {
                 is Acquisition.Tokens -> return refreshed

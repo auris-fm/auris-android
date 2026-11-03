@@ -122,6 +122,18 @@ class CaptureAllowanceAllocationIdentityStore(
             // to the identity it meant. A cold cache is a readiness condition, not permission.
             if (held.account != account) return Acquisition.Ambiguous
             if (held.enrollmentEpoch == enrollmentEpoch) {
+                // A RECORD IS ONLY AS DURABLE AS ITS WRITE (reviewer f77aaa69 #2).
+                //
+                // The marker is not sufficient evidence on its own: it is written best-effort
+                // AFTER an unconfirmed rename, so a process interruption before the rewrite -- or a
+                // failure writing the marker -- leaves a readable, unmarked record whose durability
+                // nobody established. Depending on a second successful write to remember that the
+                // first one failed is exactly the dependency that breaks in the case it exists for.
+                //
+                // So an unmarked record is CONFIRMED before use rather than trusted: re-syncing the
+                // directory establishes current durability for this record. If that cannot be done,
+                // the record is not returned as Held.
+                if (!held.recoveryRequired && !confirmDurable()) return Acquisition.Ambiguous
                 // A RETAINED id is returned too: after a 429 the allocation is gone, and minting a
                 // fresh id would refuse identically while storing another server row.
                 return Acquisition.Held(held)
@@ -174,6 +186,18 @@ class CaptureAllowanceAllocationIdentityStore(
         if (readOrNull() as? Identity != identity) return false
         write(identity.copy(retired = true))
         true
+    }
+
+    /**
+     * Establishes that the CURRENT record on disk is durable, without rewriting it.
+     *
+     * A directory sync is the confirming act: it flushes the entry that already exists. This does
+     * not prove what would have survived an earlier crash (no later sync can), which is why a
+     * record that IS marked unconfirmed still follows the recovery path rather than this one.
+     */
+    private fun confirmDurable(): Boolean {
+        val dir = file.parentFile ?: return false
+        return syncDirectory(dir)
     }
 
     /** Persists the recovery block on the CURRENT record, if one is readable. */

@@ -36,7 +36,16 @@ internal object VoiceUploadCompositionFixtures {
 
     fun startup(app: android.app.Application): VoiceSharingAccountStartup {
         val retrofit = retrofit2.Retrofit.Builder().baseUrl("http://127.0.0.1:1/").build()
-        return VoiceSharingAccountStartup(AppContextOwner(app), app, dagger.Lazy { retrofit })
+        // No Auris environment is configured for these composition controls, so the provider
+        // correctly yields NO token -- and the account path therefore refuses rather than sending
+        // the upstream mirror. That is the asserted behaviour, not a fixture shortcut.
+        val auris = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+            clientProvider = { null },
+            credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+                override suspend fun credential(): String? = null
+            },
+        )
+        return VoiceSharingAccountStartup(AppContextOwner(app), app, dagger.Lazy { retrofit }, auris)
     }
 
     internal class AppContextOwner(private val app: android.content.Context) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {

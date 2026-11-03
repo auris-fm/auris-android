@@ -1,15 +1,19 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot
 import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
+import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
+import org.json.JSONObject
+import org.json.JSONTokener
 import retrofit2.HttpException
 import retrofit2.Response
 import retrofit2.Retrofit
@@ -18,6 +22,7 @@ import retrofit2.http.GET
 import retrofit2.http.HTTP
 import retrofit2.http.Header
 import retrofit2.http.POST
+import timber.log.Timber
 
 /**
  * Auris account routes (Go-owned; docs/specs/voice-recording-uploads.md lines 50-53). The
@@ -31,6 +36,12 @@ interface VoiceSharingAccountApi {
 
     @POST("/api/v1/account/voice-sharing/enrollment")
     suspend fun postEnrollment(
+        @Header("Authorization") bearer: String?,
+        @Body body: okhttp3.RequestBody,
+    ): Response<ResponseBody>
+
+    @POST("/api/v1/account/voice-sharing/capture-allowance")
+    suspend fun postCaptureAllowance(
         @Header("Authorization") bearer: String?,
         @Body body: okhttp3.RequestBody,
     ): Response<ResponseBody>
@@ -102,16 +113,35 @@ data class DeletionReceipt(val deletionRequestId: String, val status: String, va
  *   so quotes/backslashes in opaque values are properly escaped).
  * - Exact endpoint statuses: membership routes 200, deletion 202. Transport failures and 503
  *   retry within bounds; 401/403/409/422 are terminal with no retry.
- * - A 401 captured with the SAME bearer while the ORIGINATING session is still current
- *   invalidates that scoped authority (session end + credential effect). A stale 401 — session
- *   superseded or bearer changed — has no effect on any session or credential. Credential data
- *   never appears in generations or failure evidence.
+ * - A 401 captured while the ORIGINATING session/generation is still current revokes that scoped
+ *   voice authority and forces an Auris token refresh. It does NOT invalidate the upstream account
+ *   session: this route only ever sees the Auris token, so that is the only credential a 401 can
+ *   speak about (cloud `bbb9beff`). A stale 401 -- session superseded or generation moved -- has no
+ *   effect on anything. Credential data never appears in generations or failure evidence.
  */
 class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
     private val state: VoiceSharingAccountState,
     private val ownership: CredentialOwnershipOwner,
+    /**
+     * THE BEARER SOURCE. The account route verifies Auris-issued tokens only (cloud `84a4d25e`,
+     * `bbb9beff`); the upstream Pocket Casts token the owner publishes is `alg=HS256` with no
+     * `kid` and that route refuses it structurally. The owner snapshot still decides whether we
+     * may act at all -- it just stops being the bearer, which is the whole of the defect.
+     */
+    private val aurisToken: CloudTokenProviding,
     private val onCredentialInvalid: suspend (AuthoritySnapshot) -> Unit,
+    /**
+     * The AURIS credential's own invalidation, deliberately NOT the owner's `invalidateAuthToken`.
+     *
+     * A 401 on this route can only mean "the Auris token was refused": the route never sees the
+     * upstream session credential (cloud `bbb9beff`). Handing that 401 to the owner would make a
+     * rejected *derived* token sign the user out of the account that MINTED it -- and
+     * `invalidateIfCurrent` clears `publishedToken` and advances the credential incarnation, so the
+     * session is the one that dies, not the Auris token. The owner snapshot stays the session
+     * fence; the Auris provider is cleared here instead.
+     */
+    private val onAurisCredentialRefused: suspend () -> Unit = { aurisToken.refreshToken() },
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -124,10 +154,42 @@ class VoiceSharingAccountOperations(
             if (ticket == null) null else Triple(live, ticket, Unit)
         } ?: return false
         val (live, ticket, _) = issued
-        val op = frozen(token, ticket, live, Route.GET, null)
+        // ACQUIRE BEFORE THE FREEZE AND REFUSE ON ABSENCE: no Auris credential means no request.
+        val bearer = aurisBearer() ?: return false
+        val op = frozen(token, ticket, live, bearer, Route.GET, null)
         return when (val outcome = execute(op) { bearer, _ -> api.getVoiceSharing(bearer) }) {
-            is Outcome.Body -> ownership.transaction { state.applyOutcome(token, ticket, outcome.json, ownership.authoritySnapshot().session) }
-            else -> false
+            is Outcome.Body -> {
+                val applied = ownership.transaction { state.applyOutcome(token, ticket, outcome.json, ownership.authoritySnapshot().session) }
+                state.onRefreshObserved?.invoke(
+                    VoiceSharingRefreshDiagnostic(kind = VoiceSharingRefreshDiagnostic.Kind.APPLIED, status = null, bodyBytes = outcome.json.length, requestIds = outcome.requestIds, detail = applied.toString()),
+                )
+                applied
+            }
+
+            else -> {
+                state.onRefreshObserved?.invoke(
+                    VoiceSharingRefreshDiagnostic(
+                        kind = VoiceSharingRefreshDiagnostic.Kind.REJECTED,
+                        status = when (outcome) {
+                            is Outcome.Conflict -> 409
+
+                            is Outcome.Rejected -> 401
+
+                            // scoped auth rejection ONLY (a real 401)
+                            is Outcome.Unavailable -> outcome.status
+
+                            is Outcome.Body -> 200
+                        },
+                        bodyBytes = (outcome as? Outcome.Conflict)?.json?.length,
+                        requestIds = outcome.requestIds,
+                        detail = when (outcome) {
+                            is Outcome.Unavailable -> "UNAVAILABLE (not an auth rejection; no credential cleared)"
+                            else -> outcome::class.simpleName ?: "?"
+                        },
+                    ),
+                )
+                false
+            }
         }
     }
 
@@ -138,11 +200,12 @@ class VoiceSharingAccountOperations(
             if (ticket == null) null else live to ticket
         } ?: return VoiceSharingMutationResult.Failure
         val (live, ticket) = issued
-        val op = frozen(token, ticket, live, Route.ENROLLMENT, acceptedDisclosureVersion)
+        val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
+        val op = frozen(token, ticket, live, bearer, Route.ENROLLMENT, acceptedDisclosureVersion)
         return when (val outcome = execute(op) { bearer, payload -> api.postEnrollment(bearer, payload) }) {
             is Outcome.Body -> appliedOrFailure(op, outcome.json)
             is Outcome.Conflict -> conflictOrFailure(op, outcome.json)
-            is Outcome.Rejected -> VoiceSharingMutationResult.Failure
+            is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
@@ -153,11 +216,12 @@ class VoiceSharingAccountOperations(
             if (ticket == null) null else live to ticket
         } ?: return VoiceSharingMutationResult.Failure
         val (live, ticket) = issued
-        val op = frozen(token, ticket, live, Route.WITHDRAWAL, null)
+        val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
+        val op = frozen(token, ticket, live, bearer, Route.WITHDRAWAL, null)
         return when (val outcome = execute(op) { bearer, payload -> api.postWithdrawal(bearer, payload) }) {
             is Outcome.Body -> appliedOrFailure(op, outcome.json)
             is Outcome.Conflict -> conflictOrFailure(op, outcome.json)
-            is Outcome.Rejected -> VoiceSharingMutationResult.Failure
+            is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
@@ -191,7 +255,8 @@ class VoiceSharingAccountOperations(
             if (ticket == null) null else live to ticket
         } ?: return null
         val (live, ticket) = issued
-        val op = frozen(token, ticket, live, Route.DELETION, null)
+        val bearer = aurisBearer() ?: return null
+        val op = frozen(token, ticket, live, bearer, Route.DELETION, null)
         val body = execute(op, expectedStatus = 202) { bearer, payload -> api.deleteData(bearer, payload) }
             .let { (it as? Outcome.Body)?.json } ?: return null
         val receipt = parseDeletionReceipt(body) ?: return null
@@ -199,27 +264,66 @@ class VoiceSharingAccountOperations(
         return if (ownership.transaction { state.isTicketCurrent(token, ticket, ownership.authoritySnapshot().session) }) receipt else null
     }
 
+    /**
+     * Acquires the Auris bearer for an operation that has ALREADY been issued a ticket.
+     *
+     * Refusing here is the whole point: @spec's ruling is that a missing Auris configuration or a
+     * missing token must REFUSE sharing, never fall back to the upstream mirror -- a fallback that
+     * quietly supplies *some* credential is the defect being fixed, and it looks exactly like
+     * success. Returns null when there is nothing to send, and the caller then sends nothing.
+     */
+    private suspend fun aurisBearer(): String? = aurisToken.currentToken()?.takeIf { it.isNotBlank() }
+
     private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
 
     private sealed interface Outcome {
-        data class Body(val json: String) : Outcome
+        /** Server correlation ids harvested from every HTTP attempt of this call, in order. */
+        val requestIds: List<String>
+
+        data class Body(val json: String, override val requestIds: List<String> = emptyList()) : Outcome
 
         /** Explicit 409 membership conflict: carries the current projection body. */
-        data class Conflict(val json: String) : Outcome
+        data class Conflict(val json: String, override val requestIds: List<String> = emptyList()) : Outcome
 
-        data object Rejected : Outcome
+        data class Rejected(override val requestIds: List<String> = emptyList()) : Outcome
+
+        /**
+         * NON-AUTH refusal: transport failure or an exhausted retry on a 5xx/other status. It is
+         * explicitly NOT an authentication rejection — it must never clear credentials or sign the
+         * user out (reviewer fe03ebf7). The last observed HTTP status rides along for diagnosis.
+         */
+        data class Unavailable(val status: Int?, override val requestIds: List<String> = emptyList()) : Outcome
     }
 
-    private fun frozen(token: SessionToken, ticket: OperationTicket, observed: AuthoritySnapshot, route: Route, disclosureVersion: String?): FrozenOperation {
-        // The OWNER-PUBLISHED credential is the ONLY bearer source; the ticket's owner-session
-        // stamp was validated at issuance (owner→voice transaction). No platform-cache reads.
-        val bearer = observed.token?.let { "Bearer " + it.value }
+    private fun frozen(token: SessionToken, ticket: OperationTicket, observed: AuthoritySnapshot, aurisBearer: String, route: Route, disclosureVersion: String?): FrozenOperation {
+        // The bearer was ACQUIRED before the freeze and is passed in, so the token that goes out
+        // is the one taken under the same issuance the ticket belongs to. The owner-published
+        // `observed.token` is deliberately NOT consulted: it is the upstream credential this route
+        // cannot verify.
+        val bearer = "Bearer " + aurisBearer
+        // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else. It answers one
+        // question the server cannot answer for us: whether THIS app's token names a signing key
+        // staging publishes (cloud 84a4d25e). Only the JOSE header is read -- never the payload,
+        // never the signature -- and an unreadable header is reported as absent rather than
+        // guessed at. This is a DIAGNOSTIC: it changes no branch, no retry and no credential path.
+        logTokenKeyId(aurisBearer)
         val body = when (route) {
             Route.GET -> EMPTY_BODY
             else -> writeBody(ticket, route, disclosureVersion)
         }
         return FrozenOperation(token, ticket, observed, bearer, body, route)
     }
+
+    /**
+     * Logs the JOSE header's `kid`/`alg` for the token actually being sent.
+     *
+     * A JWS has three dot-separated segments and the FIRST is the base64url header. Anything else
+     * is opaque and reported as such -- a token that cannot be parsed is not forced through a
+     * parser to manufacture a value. Every failure mode (wrong segment count, bad base64, missing
+     * `kid`, oversized header, malformed JSON) ends in a stated absence, never an exception: this
+     * function must not be able to change how a request behaves.
+     */
+    private fun logTokenKeyId(tokenValue: String) = logTokenKeyIdLine(tokenValue)
 
     /**
      * Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint
@@ -232,32 +336,41 @@ class VoiceSharingAccountOperations(
         call: suspend (String?, okhttp3.RequestBody) -> Response<ResponseBody>,
     ): Outcome {
         var attempt = 0
+        var lastStatus: Int? = null
+        // Bound the correlation-id list: one entry per attempt, capped and truncated.
+        val requestIds = mutableListOf<String>()
         while (attempt < MAX_ATTEMPTS) {
             attempt++
             // Ticket revalidation happens after every await boundary — ONE owner→voice
             // transaction: the LIVE owner snapshot is read and the ticket checked together
             // inside the same lock (b680934d: no two-transaction split).
             val current = ownership.transaction { state.isTicketCurrent(op.token, op.ticket, ownership.authoritySnapshot().session) }
-            if (!current) return Outcome.Rejected
+            if (!current) return Outcome.Rejected(requestIds.toList())
             try {
                 val response = call(op.bearer, op.requestBody)
+                response.headers()[REQUEST_ID_HEADER]?.take(MAX_REQUEST_ID_CHARS)?.let { requestIds += it }
                 when {
                     response.code() == 401 -> {
                         handleUnauthorized(op)
-                        return Outcome.Rejected
+                        return Outcome.Rejected(requestIds.toList())
                     }
 
                     response.code() == 409 && expectedStatus == 200 -> {
                         // Non-2xx content lives in errorBody() for Response<ResponseBody>.
                         val body = response.errorBody()?.string() ?: response.body()?.string()
-                        return if (body.isNullOrBlank()) Outcome.Rejected else Outcome.Conflict(body)
+                        return if (body.isNullOrBlank()) Outcome.Rejected(requestIds.toList()) else Outcome.Conflict(body, requestIds.toList())
                     }
 
-                    response.code() == expectedStatus -> return Outcome.Body(response.body()!!.string())
+                    response.code() == expectedStatus -> return Outcome.Body(response.body()!!.string(), requestIds.toList())
 
-                    response.code() in 500..599 && attempt < MAX_ATTEMPTS -> continue
+                    response.code() in 500..599 && attempt < MAX_ATTEMPTS -> {
+                        lastStatus = response.code()
+                        continue
+                    }
 
-                    else -> return Outcome.Rejected
+                    // Any other non-2xx is UNAVAILABLE, not an auth rejection: a 5xx that
+                    // exhausted its retry, or a status this endpoint never promised.
+                    else -> return Outcome.Unavailable(response.code(), requestIds.toList())
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -265,21 +378,26 @@ class VoiceSharingAccountOperations(
                 when {
                     e.code() == 401 -> {
                         handleUnauthorized(op)
-                        return Outcome.Rejected
+                        return Outcome.Rejected(requestIds.toList())
                     }
 
-                    e.code() == 409 && expectedStatus == 200 -> return Outcome.Rejected
+                    e.code() == 409 && expectedStatus == 200 -> return Outcome.Rejected(requestIds.toList())
 
                     // no body via HttpException
-                    e.code() in 500..599 && attempt < MAX_ATTEMPTS -> continue
+                    e.code() in 500..599 && attempt < MAX_ATTEMPTS -> {
+                        lastStatus = e.code()
+                        continue
+                    }
 
-                    else -> return Outcome.Rejected
+                    // EXHAUSTED 5xx and every other non-401 status are UNAVAILABLE, exactly as on
+                    // the body path: never an authentication rejection (reviewer 5bbccf09/ecfdffe5).
+                    else -> return Outcome.Unavailable(e.code(), requestIds.toList())
                 }
             } catch (_: Exception) {
-                if (attempt == MAX_ATTEMPTS) return Outcome.Rejected
+                if (attempt == MAX_ATTEMPTS) return Outcome.Unavailable(lastStatus, requestIds.toList())
             }
         }
-        return Outcome.Rejected
+        return Outcome.Unavailable(lastStatus, requestIds.toList())
     }
 
     /**
@@ -293,11 +411,21 @@ class VoiceSharingAccountOperations(
      * incarnation — never a raw bearer, never logged.
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
-        val rejected = op.observed
-        val committed = ownership.invalidateIfCurrent(rejected) {
-            state.processUnauthorized(op.token, op.ticket)
+        // ONLY a real 401 reaches here (Outcome.Unavailable never does -- reviewer fe03ebf7).
+        //
+        // This 401 speaks about the AURIS credential, and only about it: the route never sees the
+        // upstream session credential (cloud `bbb9beff`). So the coordinated owner transaction
+        // (`invalidateIfCurrent` -> `invalidateAuthToken` + credential rotation) is DELIBERATELY not
+        // used here -- it would sign the user out of the account that minted the token, turning a
+        // rejected derived credential into a session kill. The owner snapshot is still consulted,
+        // as the fence: a superseded session or generation invalidates nothing.
+        val scoped = ownership.transaction {
+            state.isTicketCurrent(op.token, op.ticket, ownership.authoritySnapshot().session)
         }
-        if (committed) onCredentialInvalid(rejected) // post-commit, NO authority side effects
+        if (!scoped) return
+        state.processUnauthorized(op.token, op.ticket) // voice state only: this session's authority
+        onAurisCredentialRefused() // force a re-mint from the SAME account
+        onCredentialInvalid(op.observed) // post-commit notification, NO authority side effects
     }
 
     /** Endpoint-EXACT bodies from ONLY the ticket-captured values, built once, byte-identical retries. */
@@ -395,7 +523,63 @@ class VoiceSharingAccountOperations(
 
     private companion object {
         const val MAX_ATTEMPTS = 2
+
+        /** Server correlation id echoed on every response (cloud `52fe3319`). */
+        const val REQUEST_ID_HEADER = "X-Request-Id"
+        const val MAX_REQUEST_ID_CHARS = 128
+
         private val jsonMediaTypeStatic = "application/json; charset=utf-8".toMediaType()
         val EMPTY_BODY: okhttp3.RequestBody = ByteArray(0).toRequestBody(jsonMediaTypeStatic)
     }
 }
+
+private fun logTokenKeyIdLine(tokenValue: String) {
+    val header = tokenJoseHeader(tokenValue)
+    if (header == null) {
+        Timber.tag(TAG).i("voice-sharing token kid: kidSource=opaque")
+        return
+    }
+    val kid = header.optString("kid").takeIf { it.isNotEmpty() }
+    val alg = header.optString("alg").takeIf { it.isNotEmpty() }
+    Timber.tag(TAG).i(
+        "voice-sharing token kid: kid=%s alg=%s kidSource=%s",
+        kid?.take(MAX_KID_CHARS) ?: "-",
+        alg?.take(MAX_KID_CHARS) ?: "-",
+        if (kid == null) "absent" else "jwt",
+    )
+}
+
+/**
+ * The token's JOSE header as a JSON object, or null when the token is not a readable JWS.
+ *
+ * Null means "this is not a token we can read a header from" — it is NOT an empty header, so a
+ * caller cannot mistake an opaque token for one whose `kid` happens to be missing.
+ */
+private fun tokenJoseHeader(tokenValue: String): JSONObject? = try {
+    // A JWS is exactly three segments; anything else is not one, and is not parsed to find out.
+    val parts = tokenValue.split('.')
+    if (parts.size != JWS_SEGMENT_COUNT) return null
+    val first = parts[0]
+    if (first.isEmpty() || first.length > MAX_HEADER_B64_CHARS) return null
+    val decoded = Base64.getUrlDecoder().decode(padBase64Url(first))
+    if (decoded.size > MAX_HEADER_BYTES) return null
+    // JSONTokener answers a JSONObject for an object, and throws for anything malformed -- both
+    // are handled here, so a garbage header cannot reach the request path as an exception.
+    JSONTokener(String(decoded, Charsets.UTF_8)).nextValue() as? JSONObject
+} catch (_: Exception) {
+    null
+}
+
+/** base64url without padding is legal in a JWS; the JDK decoder requires it. */
+private fun padBase64Url(value: String): String = when (value.length % 4) {
+    2 -> "$value=="
+    3 -> "$value="
+    else -> value
+}
+
+/** Bounds for the key-id diagnostic: a JOSE header is tiny, so anything larger is not one. */
+private const val TAG = "VoiceSharingAccount"
+private const val JWS_SEGMENT_COUNT = 3
+private const val MAX_HEADER_B64_CHARS = 4096
+private const val MAX_HEADER_BYTES = 2048
+private const val MAX_KID_CHARS = 128

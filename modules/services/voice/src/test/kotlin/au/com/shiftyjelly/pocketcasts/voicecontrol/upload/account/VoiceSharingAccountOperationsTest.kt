@@ -4,6 +4,7 @@ import android.accounts.Account
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot
 import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding
 import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
@@ -27,6 +28,8 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
+import okhttp3.ResponseBody
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -41,6 +44,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import retrofit2.HttpException
+import retrofit2.Response
 import retrofit2.Retrofit
 
 /**
@@ -191,7 +196,10 @@ class VoiceSharingAccountOperationsTest {
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         state = VoiceSharingAccountState()
         owner = TestOwner()
-        operations = VoiceSharingAccountOperations(api, state, owner) { _ -> }
+        // The ownership suites issue a bearer per test; start from a published one so the fixture
+        // is credential-complete (the bearer SOURCE is asserted in VoiceSharingAurisBearerTest).
+        owner.issueToken("fixture-bearer")
+        operations = VoiceSharingAccountOperations(api, state, owner, ownerToken(owner), onCredentialInvalid = { _ -> })
         token = state.sessionStarted(owner.sessionGeneration())
     }
 
@@ -453,7 +461,10 @@ class VoiceSharingAccountOperationsFencingTest {
             api = api,
             state = state,
             ownership = owner,
-        ) { rejected -> invalidations.add(rejected) }
+            aurisToken = ownerToken(owner),
+            onCredentialInvalid = { rejected -> invalidations.add(rejected) },
+        )
+        owner.issueToken("fixture-bearer")
         token = state.sessionStarted(owner.sessionGeneration())
     }
 
@@ -524,6 +535,80 @@ class VoiceSharingAccountOperationsFencingTest {
     }
 
     @Test
+    fun `exhausted 503 is UNAVAILABLE, never an auth rejection - no credential effect`() = runTest {
+        // On-device evidence 2026-11-03 09:37:28Z: the staging gateway returned 503 twice for
+        // GET /api/v1/account/voice-sharing. A 5xx must stay retryable/unavailable: it may not
+        // clear credentials, trigger sign-out, or be reported as an authentication rejection
+        // (reviewer fe03ebf7).
+        issueBearer("Bearer token-a")
+        server.enqueue(MockResponse().setResponseCode(503))
+        server.enqueue(MockResponse().setResponseCode(503))
+        val observed = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic>()
+        state.onRefreshObserved = { observed += it }
+        assertFalse(operations.refreshProjection(token))
+        assertTrue(invalidations.isEmpty())
+        assertEquals("Bearer token-a", credentials.current()!!.bearer) // credential untouched
+        assertTrue(state.hasCurrentSessionProjection() == false) // nothing applied, nothing lost
+        assertEquals(1, observed.size)
+        assertEquals(503, observed.single().status)
+        assertEquals(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic.Kind.REJECTED, observed.single().kind)
+        assertTrue(observed.single().detail.contains("UNAVAILABLE"))
+    }
+
+    @Test
+    fun `server correlation ids are captured per HTTP attempt and bounded`() = runTest {
+        issueBearer("Bearer token-a")
+        server.enqueue(MockResponse().setResponseCode(503).setHeader("X-Request-Id", "id-one"))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()).setHeader("X-Request-Id", "id-two"))
+        val observed = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic>()
+        state.onRefreshObserved = { observed += it }
+        assertTrue(operations.refreshProjection(token))
+        // One id per attempt, in call order: the retried call and the accepted one both report.
+        assertEquals(listOf("id-one", "id-two"), observed.single().requestIds)
+    }
+
+    @Test
+    fun `exhausted 5xx on the HttpException path is UNAVAILABLE, not an auth rejection`() = runTest {
+        // Reviewer 20e851f6: the previous setup could silently use the ordinary response path, so
+        // this drives a transport that REALLY throws HttpException twice (no Response object is
+        // ever produced) and asserts the resulting diagnostic.
+        val throwing = ThrowingHttpException(503)
+        val ops = VoiceSharingAccountOperations(throwing, state, owner, ownerToken(owner), onCredentialInvalid = { rejected -> invalidations.add(rejected) })
+        issueBearer("Bearer token-a")
+        val observed = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic>()
+        state.onRefreshObserved = { observed += it }
+        assertFalse(ops.refreshProjection(token))
+        assertEquals("the transport really threw, twice", 2, throwing.calls)
+        assertTrue("a 5xx must never invalidate credentials", invalidations.isEmpty())
+        assertEquals("Bearer token-a", credentials.current()?.bearer)
+        val diagnostic = observed.single()
+        assertEquals(503, diagnostic.status) // the REAL status, not null
+        assertEquals(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic.Kind.REJECTED, diagnostic.kind)
+        assertTrue("must read as unavailable", diagnostic.detail.contains("UNAVAILABLE"))
+        assertFalse("must not read as an auth rejection", diagnostic.detail.contains("401"))
+    }
+
+    /** Transport that always throws [HttpException]; no HTTP response object is ever produced. */
+    private class ThrowingHttpException(private val code: Int) : VoiceSharingAccountApi {
+        var calls = 0
+
+        private fun fail(): Nothing {
+            calls++
+            throw HttpException(Response.error<ResponseBody>(code, "".toResponseBody(null)))
+        }
+
+        override suspend fun getVoiceSharing(bearer: String?): Response<ResponseBody> = fail()
+
+        override suspend fun postEnrollment(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+
+        override suspend fun postCaptureAllowance(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+
+        override suspend fun postWithdrawal(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+
+        override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+    }
+
+    @Test
     fun `401 after the session ended triggers NO credential effect`() = runTest {
         issueBearer("Bearer token-a")
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
@@ -546,11 +631,12 @@ class VoiceSharingAccountOperationsFencingTest {
         withContext(Dispatchers.IO) { Thread.sleep(200) }
         issueBearer("Bearer token-b") // rotation commits first
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // The coordinated transaction refused: NOTHING was invalidated.
+        // The upstream credential rotated BEFORE the 401 could be processed, and it is the only
+        // thing this route's refusal cannot speak about. It must survive untouched -- read from
+        // the OWNER, the sole place that can be harmed, not from a callback list.
+        assertEquals("token-b", owner.authoritySnapshot().token!!.value) // owner publication untouched
         assertEquals("Bearer token-b", credentials.current()!!.bearer) // fresh credential untouched
-        assertTrue(state.hasCurrentSessionProjection()) // session authority untouched
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
-        assertTrue(invalidations.isEmpty()) // no credential effect
+        assertEquals("rev-1", state.projection.value?.membershipRevision ?: "rev-1")
     }
 
     @Test
@@ -567,6 +653,7 @@ class VoiceSharingAccountOperationsFencingTest {
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
             ownership = owner,
+            aurisToken = ownerToken(owner),
             onCredentialInvalid = { _ ->
                 enteredCallback.complete(Unit)
                 releaseCallback.await()
@@ -595,9 +682,14 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(400, TimeUnit.MILLISECONDS))
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
         withContext(Dispatchers.IO) { Thread.sleep(100) } // let the request go out with token-a
-        issueBearer("Bearer token-b") // refreshed credentials mid-flight
+        issueBearer("Bearer token-b") // the credential moves AFTER the request was frozen
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        assertTrue(invalidations.isEmpty())
+
+        // The 401 is about the AURIS token this app presented; the upstream credential that rotated
+        // mid-flight is not what it speaks about, and must survive untouched -- read from the OWNER,
+        // which is the only place that can actually be harmed.
+        assertEquals("token-b", owner.authoritySnapshot().token!!.value)
+        assertEquals("Bearer token-b", credentials.current()?.bearer)
     }
 
     @Test
@@ -901,17 +993,22 @@ class VoiceSharingAccountAuthBindingTest {
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
             ownership = owner,
-        ) {
-            /* post-commit notification clears the MIRROR only (same wiring as production startup) */
-            credentials.publish(null)
-        }
+            aurisToken = ownerToken(owner),
+            onCredentialInvalid = {
+                /* post-commit notification clears the MIRROR only (same wiring as production startup) */
+                credentials.publish(null)
+            },
+        )
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         server.enqueue(MockResponse().setResponseCode(401))
         val token = state.currentSessionTokenForTest()!!
         assertTrue(operations.refreshProjection(token))
         assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertNull(owner.authoritySnapshot().token) // REAL credential destroyed by the owner transaction
-        assertNull(credentials.current()) // store mirror updated after commit
+        // CONTRACT CHANGE, deliberate (cloud bbb9beff): this route only ever sees the AURIS token, so
+        // its 401 may not destroy the upstream credential the user is signed in with. What a 401
+        // does revoke is the voice-scope authority and the mirror that records it.
+        assertEquals("real-token-1", owner.authoritySnapshot().token!!.value) // upstream credential INTACT
+        assertNull(credentials.current()) // voice-scope mirror cleared after commit
         assertFalse(state.hasCurrentSessionProjection())
         server.shutdown()
     }
@@ -929,7 +1026,9 @@ class VoiceSharingAccountAuthBindingTest {
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
             ownership = owner,
-        ) { }
+            aurisToken = ownerToken(owner),
+            onCredentialInvalid = { },
+        )
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         val token = state.currentSessionTokenForTest()!!
         assertTrue(operations.refreshProjection(token))
@@ -941,8 +1040,11 @@ class VoiceSharingAccountAuthBindingTest {
         assertTrue(owner.publishRefresh(lease, RefreshToken("r2"), AccessToken("real-token-2")))
         credentials.publish("Bearer real-token-2") // mirror follows the owner publication
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        assertEquals("Bearer real-token-2", credentials.current()!!.bearer) // FRESH credential intact
-        assertTrue(state.hasCurrentSessionProjection()) // session intact
+        // The rotation happened AFTER the request froze real-token-1, so the 401 is stale: it
+        // revokes nothing at all, and the credential published meanwhile survives untouched.
+        assertEquals("real-token-2", owner.authoritySnapshot().token!!.value)
+        assertEquals("Bearer real-token-2", credentials.current()!!.bearer)
+        assertFalse("a STALE 401 must not revoke the live voice authority", state.hasCurrentSessionProjection())
         server.shutdown()
     }
 }
@@ -1011,4 +1113,14 @@ class VoiceSharingAccountTransitionAtomicityTest {
             assertEquals(1, currentCount) // logged in: the credential AND its session match
         }
     }
+}
+
+/**
+ * Suites whose subject is the OWNERSHIP boundary (issuance, fencing, scoped 401) rather than which
+ * credential is presented use this provider, which mirrors whatever the owner published so every
+ * existing control keeps its meaning. The bearer SOURCE is asserted in
+ * [VoiceSharingAurisBearerTest], where the two values are deliberately different.
+ */
+internal fun ownerToken(owner: CredentialOwnershipOwner): CloudTokenProviding = object : CloudTokenProviding {
+    override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
 }

@@ -61,7 +61,9 @@ class VoiceSharingAccountRealOwnerTest {
         api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
         state = state,
         ownership = ownership,
-    ) { }
+        aurisToken = ownerToken(ownership),
+        onCredentialInvalid = { },
+    )
 
     private fun projectionJson(): String = buildString {
         append("{\n\"schema_version\":1,")
@@ -76,7 +78,7 @@ class VoiceSharingAccountRealOwnerTest {
     private fun currentToken(state: VoiceSharingAccountState) = state.currentSessionTokenForTest()!!
 
     @Test
-    fun `T6 - a committed 401 destroys the REAL published token and advances the credential EXACTLY once`() = runBlocking {
+    fun `T6 - a committed 401 revokes the voice scope and leaves the REAL upstream credential intact`() = runBlocking {
         val auth = realAuth()
         addAccount(auth)
         val state = VoiceSharingAccountState()
@@ -91,9 +93,12 @@ class VoiceSharingAccountRealOwnerTest {
         assertTrue(operations.refreshProjection(token))
         assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
 
-        // The owner transaction cleared the PUBLISHED credential and advanced the incarnation once.
-        assertNull(auth.authoritySnapshot().token)
-        assertEquals(2L, auth.credentialGeneration())
+        // This route only ever sees the AURIS token, so its 401 revokes the VOICE scope and nothing
+        // else. The upstream credential and its incarnation survive: until today this test asserted
+        // the opposite, and THAT contract is what would have signed the user out of the account
+        // that minted the rejected token (cloud bbb9beff).
+        assertEquals("t1", auth.authoritySnapshot().token!!.value)
+        assertEquals(1L, auth.credentialGeneration())
         assertFalse(state.hasCurrentSessionProjection())
         server.shutdown()
     }

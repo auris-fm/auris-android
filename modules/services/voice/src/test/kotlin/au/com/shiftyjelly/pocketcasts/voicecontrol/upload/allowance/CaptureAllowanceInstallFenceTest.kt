@@ -315,6 +315,7 @@ class CaptureAllowanceInstallFenceTest {
             lifecycle = lifecycle,
             ceilings = ceilings,
             elapsedMs = { 1_000 },
+            readinessProvider = { true },
             beginInstallAttempt = { fence.beginAttempt(it) },
             installAuthority = { owner, gen, session, epoch, attempt, g, publish ->
                 fence.install(owner, gen, session, epoch, attempt, g, publish)

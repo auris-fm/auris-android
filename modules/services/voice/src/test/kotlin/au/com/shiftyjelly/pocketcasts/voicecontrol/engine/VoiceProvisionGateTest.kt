@@ -10,6 +10,7 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import retrofit2.Response
@@ -63,10 +64,12 @@ class VoiceProvisionGateTest {
                 enrollmentEpoch = "ep-1",
             )
         },
+        readinessProvider: () -> Boolean = { true },
         clock: () -> Long,
     ): CaptureAllowanceProvisioner = CaptureAllowanceProvisioner(
         api = api,
         credential = credential,
+        readinessProvider = readinessProvider,
         baseArea = tmp.root,
         lifecycle = lifecycleRef,
         ceilings = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings(
@@ -251,6 +254,7 @@ class VoiceProvisionGateTest {
         val p = provisioner(
             CountingApi { id -> batchBody.replace("%s", id) },
             credential = { null }, // signed out, and stays signed out
+            readinessProvider = { false },
             clock = { 1_000L },
         )
         val gate = AtomicBoolean(true)
@@ -262,6 +266,45 @@ class VoiceProvisionGateTest {
                 p.consumeReadinessTransition(),
             )
         }
+    }
+
+    @Test
+    fun `repeated unresolved decisions do NOT repeat credential ACQUISITION`() = runBlocking {
+        // reviewer 70d0801b: the gate check called readinessNow(), which called the full
+        // credential() supplier -- and in production that starts with
+        // aurisToken.currentToken(), which can exchange or refresh OVER HTTP. So a CLOSED gate
+        // performed credential acquisition on every refused utterance while unresolved. My
+        // previous control asserted only on the returned Boolean and never counted supplier calls,
+        // which is exactly the scope the finding names.
+        var acquisitions = 0
+        var peeks = 0
+        val p = provisioner(
+            CountingApi { id -> batchBody.replace("%s", id) },
+            credential = {
+                acquisitions++
+                null // signed out
+            },
+            readinessProvider = {
+                peeks++
+                false // side-effect-free: answers "no" without acquiring anything
+            },
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p)
+        val acquisitionsAfterFirst = acquisitions
+
+        repeat(4) { VoiceProvisionGate.decide(gate, p) }
+
+        // The peek is what a closed gate may consult; it is cheap and side-effect free, so many
+        // calls are fine. Acquisition is the expensive, network-reaching act and must not repeat.
+        assertTrue("readiness must be consulted through the side-effect-free provider", peeks >= 4)
+        assertEquals(
+            "a closed gate must not perform credential acquisition on every utterance",
+            acquisitionsAfterFirst,
+            acquisitions,
+        )
     }
 
     @Test

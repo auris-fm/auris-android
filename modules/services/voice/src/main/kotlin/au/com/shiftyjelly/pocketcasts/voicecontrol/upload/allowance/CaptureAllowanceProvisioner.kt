@@ -284,17 +284,25 @@ class CaptureAllowanceProvisioner(
     }
 
     suspend fun provision(): Result {
-        // THIS is the permitted attempt, so acquiring the bearer is correct here.
+        // THE ATTEMPT RECORDS WHICH PREREQUISITE STATE IT SAW, NEVER WHETHER IT SUCCEEDED
+        // (spec 9a9faf8f). The gate re-arms on a change of the PASSIVE state. An attempt's outcome
+        // is not a change of that state, but it IS the attempt's business which state it observed:
+        // whichever state the passive probe reported when this attempt began is what has now been
+        // acted on. Recording the outcome instead made a single failed acquisition re-arm forever
+        // (probe still READY, recorded NOT_READY), and recording a blanket READY here swallowed the
+        // transition so a LATER genuine sign-in could no longer re-arm.
+        val observedLocally = if (readinessProvider()) Readiness.READY else Readiness.NOT_READY
         val cred = credential()
         if (cred == null) {
-            readinessActedOn = Readiness.NOT_READY
+            readinessActedOn = observedLocally
             return Result.Refused(REASON_NO_CREDENTIAL)
         }
         // UNKNOWN ACCOUNT DEFERS, IT DOES NOT SEND (spec e2cd78d8, cloud 8d1ffaaf). A cold cache
         // is a readiness condition, not permission to present an unbound request. Note this is
         // checked before ANY durable or transport work, so there is nothing to undo.
         if (cred.accountId.isBlank()) {
-            readinessActedOn = Readiness.NOT_READY
+            // Same rule: record the state observed, not the outcome.
+            readinessActedOn = observedLocally
             return Result.Deferred
         }
         // Past this point the attempt is authorised to exist, so readiness is no longer the

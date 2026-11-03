@@ -308,7 +308,13 @@ class VoiceAsrEngine @Inject constructor(
                                 // admission drains the full prefix; a provisioning refusal keeps
                                 // the capture refused fail-closed (allowance_* reason upstream).
                                 if (allowanceProvisionAttempted.compareAndSet(false, true) &&
-                                    ensureCaptureAllowance?.provision() is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned
+                                    ensureCaptureAllowance?.provision() is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned &&
+                                    // CHARGE BEFORE RE-ADMIT (reviewer b36642db): provisioning only
+                                    // BINDS an owner; admission takes a PREPAID token, and nothing
+                                    // had ever prepared one. Without this the re-admit below asked an
+                                    // unprepared owner and refused every time, so a successful
+                                    // response could never admit a capture.
+                                    ensureCaptureAllowance.prepareComposedToken()
                                 ) {
                                     admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
                                 }

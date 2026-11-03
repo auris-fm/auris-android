@@ -178,6 +178,22 @@ object VoiceObservationModule {
                 maxMetadataBytes = 65_536,
             ),
             elapsedMs = { android.os.SystemClock.elapsedRealtime() },
+            // DURABLE ALLOCATION IDENTITY (reviewer b36642db). The server is idempotent on
+            // `request_id` alone, so this record is what makes a retry a replay instead of a new
+            // charged batch. It lives beside the allowance ledger in no-backup storage and is
+            // keyed by the enrollment epoch, which the credential supplier already scopes.
+            identityStore = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAllocationIdentityStore(
+                java.io.File(context.noBackupFilesDir, "voice_allowance/allocation_identity"),
+            ),
+            // A 409 means a persisted id outlived its epoch: a client state-machine bug. Surfaced
+            // rather than retried, because a silent retry hides it and burns another batch.
+            identityConflict = {
+                // LOUD on purpose: this is the only in-app trace of a state-machine bug whose
+                // silent alternative is a charged batch that was never needed.
+                timber.log.Timber.e(
+                    "VoiceAllowance: 409 request_conflict -- persisted allocation identity outlived its epoch",
+                )
+            },
             beginInstallAttempt = { attempt -> fence.beginAttempt(attempt) },
             installAuthority = { owner, gen, session, epoch, attempt, grant, publish ->
                 fence.install(owner, gen, session, epoch, attempt, grant, publish)

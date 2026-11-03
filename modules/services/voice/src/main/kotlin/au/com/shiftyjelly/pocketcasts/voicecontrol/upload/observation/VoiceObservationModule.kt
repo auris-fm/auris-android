@@ -200,6 +200,11 @@ object VoiceObservationModule {
                     "VoiceAllowance: 409 request_conflict -- persisted allocation identity outlived its epoch",
                 )
             },
+            // SIDE-EFFECT-FREE READINESS (reviewer 70d0801b). peekCurrentToken() serves only a
+            // fresh cached token for the CURRENT identity and never fetches, so a closed gate can
+            // ask "could I send?" without performing credential acquisition on every utterance.
+            // The bearer itself is still acquired inside the permitted attempt, above.
+            readinessProvider = { aurisToken.peekCurrentToken() != null },
             beginInstallAttempt = { attempt -> fence.beginAttempt(attempt) },
             installAuthority = { owner, gen, session, epoch, attempt, grant, publish ->
                 fence.install(owner, gen, session, epoch, attempt, grant, publish)

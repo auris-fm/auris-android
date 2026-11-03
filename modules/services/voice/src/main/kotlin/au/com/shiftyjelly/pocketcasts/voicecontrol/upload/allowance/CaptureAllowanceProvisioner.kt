@@ -39,6 +39,16 @@ import retrofit2.http.POST
 class CaptureAllowanceProvisioner(
     private val api: CaptureAllowanceTransport,
     private val credential: suspend () -> Credential?,
+    /**
+     * SIDE-EFFECT-FREE readiness probe (reviewer 70d0801b): "could I present a credential right
+     * now", answered WITHOUT acquiring one.
+     *
+     * It must not refresh, exchange, or otherwise reach the network. [credential] acquires the
+     * bearer and in production that starts with `aurisToken.currentToken()`, which CAN refresh
+     * over HTTP -- so using it to decide whether to re-arm made a closed gate perform credential
+     * acquisition on every refused utterance. A shutdown check must be free.
+     */
+    private val readinessProvider: () -> Boolean,
     private val baseArea: File,
     private val lifecycle: CaptureAllowanceLifecycle,
     private val ceilings: Ceilings,
@@ -229,24 +239,24 @@ class CaptureAllowanceProvisioner(
         NOT_READY,
     }
 
-    private suspend fun readinessNow(): Readiness {
-        val cred = credential() ?: return Readiness.NOT_READY
-        return if (cred.accountId.isBlank()) Readiness.NOT_READY else Readiness.READY
-    }
-
     /**
      * True only when readiness has CHANGED since the last attempt acted on it (reviewer f77aaa69,
-     * spec 1a340261). A repeated unresolved attempt reports nothing to re-arm from, which is what
-     * separates "resume because the condition resolved" from "retry because it failed again".
+     * spec 1a340261), decided from a SIDE-EFFECT-FREE source (reviewer 70d0801b).
+     *
+     * The credential supplier is NOT a passive read. In production it starts with
+     * `aurisToken.currentToken()`, which can exchange or refresh over HTTP, so calling it from a
+     * gate check meant every refused utterance performed credential acquisition even when the gate
+     * was closed and no attempt was permitted. A closed gate doing network work is precisely the
+     * spin this whole mechanism exists to prevent, so the check must consult a snapshot instead.
+     *
+     * [readinessProvider] answers "could I present a credential right now" without acquiring one;
+     * the bearer is still acquired inside the permitted attempt, where spending it is the point.
      */
-    suspend fun consumeReadinessTransition(): Boolean {
-        // A TRANSITION IS FROM THE STATE THE LAST ATTEMPT ACTED ON. This is a PEEK: it must not
-        // record the observed state, because recording here made the check self-fulfilling --
-        // reading readiness as NOT_READY and storing it looked like a change on the next read as
-        // soon as provision() had also set it, so an unchanged unresolved session kept re-arming
-        // and every utterance made another attempt. Only provision() records what it acted on.
-        val now = readinessNow()
-        return now != readinessActedOn && now == Readiness.READY
+    fun consumeReadinessTransition(): Boolean {
+        val now = if (readinessProvider()) Readiness.READY else Readiness.NOT_READY
+        if (now == readinessActedOn) return false
+        readinessActedOn = now
+        return now == Readiness.READY
     }
 
     /** True when the composed grant has passed its own `valid_for_ms`; a refill cannot help. */
@@ -274,6 +284,7 @@ class CaptureAllowanceProvisioner(
     }
 
     suspend fun provision(): Result {
+        // THIS is the permitted attempt, so acquiring the bearer is correct here.
         val cred = credential()
         if (cred == null) {
             readinessActedOn = Readiness.NOT_READY

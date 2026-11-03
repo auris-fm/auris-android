@@ -672,18 +672,27 @@ class CaptureAllowanceProvisionerTest {
         // The rename DID land, so a naive retry would find the id and send. It must not.
         assertTrue("the record is on disk but unproven", identityFile().exists())
 
-        // THE RESTART CASE (reviewer 6a6eec2a): a fresh store instance must STILL refuse, because
-        // the block is persisted in the record and not in process memory.
+        // THE RESTART CASE (reviewer 6a6eec2a): the block must be PERSISTED, not a field, so a fresh
+        // store cannot read the renamed record as if it were proven durable. The property is that
+        // the restart SEES the unproven state and must re-establish durability -- not that it is
+        // refused forever (spec a91a907e: once confirmed, the attempt may proceed).
         val restarted = CaptureAllowanceAllocationIdentityStore(identityFile())
         val beforeRecovery = store.current()!!.requestId
+        assertTrue(
+            "the block must survive a restart as persisted state",
+            restarted.current()?.recoveryRequired == true,
+        )
         assertEquals(
-            "the block must survive a restart, or the recovery procedure is the bypass",
-            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
-            restarted.acquire("ep-1", "acct-1"),
+            "and a restart must not mint a replacement for it",
+            beforeRecovery,
+            restarted.current()?.requestId,
         )
 
         // Recovery: a successful sync establishes durability for THAT id, which is then reusable.
-        // The persisted id is unchanged -- no replacement is minted.
+        // The persisted id is unchanged -- no replacement is minted. This attempt may PROCEED
+        // (spec a91a907e): the property is that nothing is sent until the record is proven durable,
+        // and recovering in this call proves it for this call. An extra refusal would cost an
+        // utterance and buy no safety.
         val recovered = restarted.acquire("ep-1", "acct-1")
         assertTrue(
             "recovery must confirm the SAME identity, not mint a replacement",
@@ -812,6 +821,33 @@ class CaptureAllowanceProvisionerTest {
         assertNotNull("exactly one request, made only once authorised", lastTransport.seenBody)
         assertEquals("and it is scoped to the account that authorised it", "acct-1", store.current()?.account)
         assertTrue(accountKnown.not()) // documents that the store, not this flag, is what carried over
+    }
+
+    @Test
+    fun `a sync failure DURING RECOVERY re-blocks, so reconstruction cannot read it as clean`() {
+        // reviewer d4cff2e5 #1: recovery used the raw durableWrite. If ITS rename succeeded and its
+        // directory sync failed, the readable record had the block CLEARED with nothing restoring
+        // it, and a fresh store read it as Held -- a proven-durable claim nobody had established.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        store.failNextSyncForTest = true
+        store.acquire("ep-1", "acct-1") // leaves a blocked, unproven record
+        assertTrue("setup: the block must be set", store.current()?.recoveryRequired == true)
+
+        // The recovery attempt's OWN sync now fails.
+        store.failNextSyncForTest = true
+        assertEquals(
+            "a failing recovery must refuse",
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            store.acquire("ep-1", "acct-1"),
+        )
+
+        // And the block must still be there for the NEXT process, not cleared by the attempt.
+        val reconstructed = CaptureAllowanceAllocationIdentityStore(identityFile())
+        assertEquals(
+            "a failed recovery must not leave a record that reads as proven",
+            true,
+            reconstructed.current()?.recoveryRequired,
+        )
     }
 
     @Test

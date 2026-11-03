@@ -151,18 +151,7 @@ object VoiceObservationModule {
         // Both the passive readiness probe and the credential supplier call THIS, so the cheap
         // question and the strict one cannot drift apart (reviewer cfcfab6f). If it returns null an
         // attempt would refuse, so readiness must also be false.
-        fun prerequisiteSnapshot(): OwnerPrerequisite? {
-            val snapshot = accountStartup.ownerForHandoff().authoritySnapshot()
-            val epoch = accountStartup.state.projection.value?.enrollmentEpoch
-            val account = snapshot.accountName
-            if (account == null || epoch == null) return null
-            return OwnerPrerequisite(
-                accountId = account,
-                enrollmentEpoch = epoch,
-                generation = snapshot.credential,
-                session = snapshot.session,
-            )
-        }
+        val prerequisiteSnapshot = { prerequisiteSnapshot(accountStartup) }
 
         return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner(
             api = transport,
@@ -222,9 +211,15 @@ object VoiceObservationModule {
             // [prerequisiteSnapshot] is evaluated with no acquisition, and readiness is
             // "the snapshot is complete". The BEARER is deliberately part of readiness only as
             // CACHE PRESENCE (peek, never fetch); acquiring it is what a permitted attempt does.
-            readinessProvider = {
-                prerequisiteSnapshot() != null && aurisToken.peekCurrentToken() != null
-            },
+            // AN EMPTY CACHE IS NOT NOT-READY (spec 57492640's converse). Readiness is the
+            // AUTHORITATIVE prerequisites only. Requiring a cached token here would mean the gate
+            // never opens on the one occasion acquisition is genuinely needed -- the cache is
+            // empty and the permitted attempt is what fills it -- and would leave correctness
+            // depending on some unrelated caller happening to populate the cache first. Whether a
+            // token is cached is not a prerequisite; obtaining one is what a permitted attempt does.
+            // THE WIRING PREDICATE ITSELF, named and extractable so a control can assert on what
+            // production actually installs rather than on a description of it (reviewer 34af3bd5).
+            readinessProvider = readinessPredicate { prerequisiteSnapshot() },
             beginInstallAttempt = { attempt -> fence.beginAttempt(attempt) },
             installAuthority = { owner, gen, session, epoch, attempt, grant, publish ->
                 fence.install(owner, gen, session, epoch, attempt, grant, publish)
@@ -232,8 +227,57 @@ object VoiceObservationModule {
         )
     }
 
+    /**
+     * Owner-side prerequisites, captured passively so a probe and a supplier cannot disagree.
+     *
+     * TOP-LEVEL AND `internal` so a control can exercise THE ACTUAL SUPPLIED PREDICATE rather than
+     * a fixture that looks like it (reviewer 34af3bd5). As a local function inside the provider it
+     * was untestable, so the fixture and production drifted and a production blocker survived a
+     * green suite.
+     */
+    internal fun prerequisiteSnapshot(accountStartup: VoiceSharingAccountStartup): OwnerPrerequisite? {
+        val snapshot = accountStartup.ownerForHandoff().authoritySnapshot()
+        val epoch = accountStartup.state.projection.value?.enrollmentEpoch
+        return prerequisiteSnapshot(
+            accountName = snapshot.accountName,
+            enrollmentEpoch = epoch,
+            generation = snapshot.credential,
+            session = snapshot.session,
+        )
+    }
+
+    /**
+     * The readiness predicate PRODUCTION INSTALLS.
+     *
+     * Readiness is the AUTHORITATIVE prerequisites only. Requiring a cached token would mean the
+     * gate never opens on the one occasion acquisition is genuinely needed -- empty cache, and the
+     * permitted attempt is what fills it -- and would make correctness depend on an unrelated
+     * caller populating the cache first. This function exists so a control asserts the installed
+     * predicate rather than a lookalike (reviewer 34af3bd5).
+     */
+    internal fun readinessPredicate(prerequisites: () -> OwnerPrerequisite?): () -> Boolean = { prerequisites() != null }
+
+    /**
+     * The predicate ITSELF, over the values it reads. Kept separate so a control can drive the
+     * exact conjunctions production uses without constructing the Hilt-backed startup object.
+     */
+    internal fun prerequisiteSnapshot(
+        accountName: String?,
+        enrollmentEpoch: String?,
+        generation: Long,
+        session: Long,
+    ): OwnerPrerequisite? {
+        if (accountName == null || enrollmentEpoch == null) return null
+        return OwnerPrerequisite(
+            accountId = accountName,
+            enrollmentEpoch = enrollmentEpoch,
+            generation = generation,
+            session = session,
+        )
+    }
+
     /** Owner-side prerequisites, captured passively so a probe and a supplier cannot disagree. */
-    private data class OwnerPrerequisite(
+    internal data class OwnerPrerequisite(
         val accountId: String,
         val enrollmentEpoch: String,
         val generation: Long,

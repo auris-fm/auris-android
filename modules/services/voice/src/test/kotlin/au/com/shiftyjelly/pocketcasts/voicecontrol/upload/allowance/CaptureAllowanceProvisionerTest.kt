@@ -824,6 +824,33 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
+    fun `a record whose marker NEVER SURVIVED is still confirmed before use`() {
+        // reviewer f77aaa69 #2: the marker is written best-effort AFTER an unconfirmed rename, so a
+        // process interruption before that rewrite leaves a readable, UNMARKED record whose
+        // durability nobody established. Depending on a second successful write to remember that
+        // the first failed is the dependency that breaks in exactly the case it exists for.
+        //
+        // Simulated by removing the marker the way an interrupted process would: the record reads
+        // as clean, but its durability was never confirmed.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val held = (store.acquire("ep-1", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
+        // Written verbatim in the record's own on-disk shape, the way an interrupted process would
+        // leave it: a clean-looking record whose durability was never confirmed.
+        identityFile().writeText(
+            "allowance-identity/5\n" + held.requestId + "\nep-1\nacct-1\nfalse\nfalse\nfalse\n",
+        )
+
+        // The confirming sync now cannot be performed, so the record must not be returned as Held.
+        val reconstructed = CaptureAllowanceAllocationIdentityStore(identityFile())
+        reconstructed.failNextSyncForTest = true
+        assertEquals(
+            "an unmarked record must not be trusted when its durability cannot be confirmed",
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            reconstructed.acquire("ep-1", "acct-1"),
+        )
+    }
+
+    @Test
     fun `a sync failure DURING RECOVERY re-blocks, so reconstruction cannot read it as clean`() {
         // reviewer d4cff2e5 #1: recovery used the raw durableWrite. If ITS rename succeeded and its
         // directory sync failed, the readable record had the block CLEARED with nothing restoring

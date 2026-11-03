@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -235,6 +236,57 @@ class VoiceProvisionGateTest {
         // Third utterance: the transition was consumed, so no further re-arm.
         VoiceProvisionGate.decide(gate, p)
         assertEquals("readiness resolves ONCE, it is not a standing licence to ask", 1, api.calls)
+    }
+
+    @Test
+    fun `UNRESOLVED then UNRESOLVED again re-arms NOTHING, so readiness is an event not a retry`() = runBlocking {
+        // reviewer f77aaa69 #1: a flag set by failure and cleared by consumption is a retry
+        // counter wearing the name of an event (cloud 610bec98). The discriminating observable
+        // is the RE-ARM SIGNAL ITSELF, asked directly.
+        //
+        // Two earlier versions of this control were hollow and I only found out by running them
+        // against the regression: decide() consumes the gate via compareAndSet, so gate.get()
+        // afterwards is false whether or not it re-armed; and with no credential, provision()
+        // returns before sending, so send counts cannot see a retry either.
+        val p = provisioner(
+            CountingApi { id -> batchBody.replace("%s", id) },
+            credential = { null }, // signed out, and stays signed out
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+        VoiceProvisionGate.decide(gate, p) // establishes NOT_READY as the acted-on state
+
+        repeat(4) { i ->
+            assertFalse(
+                "readiness UNCHANGED must not signal a re-arm (utterance ${i + 1})",
+                p.consumeReadinessTransition(),
+            )
+        }
+    }
+
+    @Test
+    fun `readiness actually CHANGING is what re-arms`() = runBlocking {
+        var signedIn = false
+        val api = CountingApi { id -> batchBody.replace("%s", id) }
+        val p = provisioner(
+            api,
+            credential = {
+                if (signedIn) CaptureAllowanceProvisioner.Credential("tok", "acct-1", "ep-1") else null
+            },
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals(0, api.calls)
+
+        signedIn = true
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals("the transition is what re-arms", 1, api.calls)
+
+        // And once consumed, a further utterance with readiness UNCHANGED does not ask again.
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals(1, api.calls)
     }
 
     @Test

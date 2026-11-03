@@ -203,27 +203,50 @@ class CaptureAllowanceProvisioner(
     }
 
     /**
-     * True when the last attempt could not send because the client is not yet READY, rather than
-     * because the server refused (reviewer d4cff2e5 #3, spec 1a340261).
+     * The readiness state this provisioner has ALREADY ACTED ON (reviewer f77aaa69).
      *
-     * Two states produce it: no usable credential at all (signed out), and a credential whose
-     * account is not yet authoritative (cold cache). Neither is a verdict on the capture -- both
-     * are conditions that RESOLVE, and when they do the attempt must resume within the SAME engine
-     * session. Without this the gate closed and nothing re-opened it, so signing in during a
-     * session could never resume provisioning, and the Deferred branch had no resumption at all.
+     * The previous version was a flag set by failure and cleared by consumption, which is a retry
+     * counter wearing the name of an event (cloud 610bec98). It never observed readiness; it
+     * observed the last unresolved attempt, so consuming it simply re-fired the same attempt.
+     *
+     * Recording the OBSERVED STATE instead makes resumption a genuine transition: re-arm only when
+     * readiness now differs from the state the last attempt saw. An unresolved -> unresolved
+     * sequence is therefore a no-op however many utterances arrive, and a resolved transition
+     * fires exactly once.
      */
     @Volatile
-    var awaitingReadiness: Boolean = false
-        private set
+    private var readinessActedOn: Readiness = Readiness.UNKNOWN
+
+    /** What was true about the client's ability to send when an attempt started. */
+    private enum class Readiness {
+        /** No attempt has been made yet, so there is no state to differ from. */
+        UNKNOWN,
+
+        /** Credential present and its account authoritative: the attempt may send. */
+        READY,
+
+        /** Credential absent, or its account not yet authoritative: nothing may be sent. */
+        NOT_READY,
+    }
+
+    private suspend fun readinessNow(): Readiness {
+        val cred = credential() ?: return Readiness.NOT_READY
+        return if (cred.accountId.isBlank()) Readiness.NOT_READY else Readiness.READY
+    }
 
     /**
-     * Consumes the readiness transition, so the gate re-arms ONCE per transition rather than on
-     * every utterance. Returns true only if the caller has not yet acted on this one.
+     * True only when readiness has CHANGED since the last attempt acted on it (reviewer f77aaa69,
+     * spec 1a340261). A repeated unresolved attempt reports nothing to re-arm from, which is what
+     * separates "resume because the condition resolved" from "retry because it failed again".
      */
-    fun consumeReadinessTransition(): Boolean {
-        if (!awaitingReadiness) return false
-        awaitingReadiness = false
-        return true
+    suspend fun consumeReadinessTransition(): Boolean {
+        // A TRANSITION IS FROM THE STATE THE LAST ATTEMPT ACTED ON. This is a PEEK: it must not
+        // record the observed state, because recording here made the check self-fulfilling --
+        // reading readiness as NOT_READY and storing it looked like a change on the next read as
+        // soon as provision() had also set it, so an unchanged unresolved session kept re-arming
+        // and every utterance made another attempt. Only provision() records what it acted on.
+        val now = readinessNow()
+        return now != readinessActedOn && now == Readiness.READY
     }
 
     /** True when the composed grant has passed its own `valid_for_ms`; a refill cannot help. */
@@ -253,19 +276,19 @@ class CaptureAllowanceProvisioner(
     suspend fun provision(): Result {
         val cred = credential()
         if (cred == null) {
-            awaitingReadiness = true
+            readinessActedOn = Readiness.NOT_READY
             return Result.Refused(REASON_NO_CREDENTIAL)
         }
         // UNKNOWN ACCOUNT DEFERS, IT DOES NOT SEND (spec e2cd78d8, cloud 8d1ffaaf). A cold cache
         // is a readiness condition, not permission to present an unbound request. Note this is
         // checked before ANY durable or transport work, so there is nothing to undo.
         if (cred.accountId.isBlank()) {
-            awaitingReadiness = true
+            readinessActedOn = Readiness.NOT_READY
             return Result.Deferred
         }
         // Past this point the attempt is authorised to exist, so readiness is no longer the
         // blocker: whatever happens next (issued / refused / transport) is a server-side verdict.
-        awaitingReadiness = false
+        readinessActedOn = Readiness.READY
         val attemptId = UUID.randomUUID().toString()
         // Announce THIS attempt before any transport work: a newer attempt supersedes any
         // older in-flight one at install time.

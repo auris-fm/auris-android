@@ -102,8 +102,14 @@ class VoiceAsrEngine @Inject constructor(
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
 
-    /** One provisioning attempt per capture session (speechStarted collect run). */
-    private val allowanceProvisionAttempted = java.util.concurrent.atomic.AtomicBoolean(false)
+    /**
+     * Gate for the server round trip: true means "a provisioning attempt is permitted".
+     *
+     * Armed at session start and RE-ARMED whenever the composed owner is provably spent or
+     * expired, so the batch boundary and the expiry both reach the advancement/refresh path. It is
+     * cleared before the attempt, so concurrent collect runs do not race two round trips.
+     */
+    private val allowanceProvisionAllowed = java.util.concurrent.atomic.AtomicBoolean(true)
 
     // EVERY processing job stop() cancelled that has not yet finished, exposed so service teardown
     // can await them ALL before releasing the ASR backend. These run on this engine's OWN
@@ -245,7 +251,7 @@ class VoiceAsrEngine @Inject constructor(
 
         val attached = CompletableDeferred<Boolean>()
         lateinit var started: Job
-        allowanceProvisionAttempted.set(false) // fresh session: one fresh provisioning chance
+        allowanceProvisionAllowed.set(true) // fresh session: one fresh provisioning chance
         started = scope.launch {
             Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
@@ -310,7 +316,16 @@ class VoiceAsrEngine @Inject constructor(
                                 // engine start, so without this every later utterance in the same
                                 // session was refused forever. Preparing is a durable ledger charge,
                                 // never a network call, so it is safe on every refusal.
-                                if (ensureCaptureAllowance?.prepareComposedToken() == true) {
+                                // TERMINATION (cloud 0b659d72): a refill only spends records this
+                                // batch already holds. When the ledger is provably spent, stop
+                                // refilling -- looping here would be a silent spin the server sees
+                                // as inactivity. Fall through to provisioning, which asks the server
+                                // ONCE using the persisted identity.
+                                val allowance = ensureCaptureAllowance
+                                if (allowance != null &&
+                                    !allowance.composedOwnerExhausted() &&
+                                    allowance.prepareComposedToken()
+                                ) {
                                     admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
                                 }
                             }
@@ -319,7 +334,15 @@ class VoiceAsrEngine @Inject constructor(
                                 // The processor retains the buffered PCM, so the post-RTT
                                 // admission drains the full prefix; a provisioning refusal keeps
                                 // the capture refused fail-closed (allowance_* reason upstream).
-                                if (allowanceProvisionAttempted.compareAndSet(false, true) &&
+                                // RE-ARMABLE, but not a spin loop (reviewer 7c220c1d #4, cloud
+                                // b2f0df12). A one-shot latch around per-attempt logic is what
+                                // blocked the second utterance last round and the advancement path
+                                // this round. The gate is now "no provisioning attempt is already in
+                                // flight", and it is CLEARED when the composed owner is provably
+                                // spent or expired: those are the two states whose whole purpose is
+                                // to route to the server. It stays set after an ordinary refusal,
+                                // so a genuinely unavailable allowance is still asked about once.
+                                if (allowanceProvisionAllowed.compareAndSet(true, false) &&
                                     ensureCaptureAllowance?.provision() is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned &&
                                     // CHARGE BEFORE RE-ADMIT (reviewer b36642db): provisioning only
                                     // BINDS an owner; admission takes a PREPAID token, and nothing
@@ -329,6 +352,16 @@ class VoiceAsrEngine @Inject constructor(
                                     ensureCaptureAllowance.prepareComposedToken()
                                 ) {
                                     admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                                } else {
+                                    // The server round trip did not produce an admission. Re-arm ONLY
+                                    // when the local state says another round trip could succeed:
+                                    // a spent or expired owner is meant to route back to the
+                                    // server. Anything else (an unavailable allowance) stays gated
+                                    // so we do not ask repeatedly within one session.
+                                    val current = ensureCaptureAllowance
+                                    if (current != null && (current.composedOwnerExhausted() || current.composedOwnerExpired())) {
+                                        allowanceProvisionAllowed.set(true)
+                                    }
                                 }
                             }
                             openContext = admission?.context

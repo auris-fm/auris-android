@@ -429,17 +429,19 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
-    fun `409 DISCARDS the id and reports it as a client bug, loudly`() = runBlocking {
-        // cloud bcc9a42a: 409 can only mean the id survived an enrollment change. It is a bug
-        // report, not a transient -- the id is discarded AND the conflict is surfaced.
+    fun `409 is RECORDED and reported - it does not mint a replacement`() = runBlocking {
+        // CORRECTED (reviewer 3d1f87be #1). This test previously asserted that a 409 discards the
+        // id and the next ordinary call mints a replacement -- which IS the bypass: unchanged
+        // authority would silently allocate a fresh charged batch. The conflict is now recorded
+        // and the id retained, so it stays observable and nothing re-allocates.
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
         var conflicts = 0
         provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
         val firstId = sentRequestId()
-        provisioner(409, "", clock = mutableListOf(3_000L, 4_000L), identityStore = store, identityConflict = { conflicts++ }).first.provision()
+        val result = provisioner(409, "", clock = mutableListOf(3_000L, 4_000L), identityStore = store, identityConflict = { conflicts++ }).first.provision()
+        assertTrue(result is CaptureAllowanceProvisioner.Result.Refused)
         assertEquals("a 409 must surface as a client bug report, not a silent retry", 1, conflicts)
-        provisioner(200, goBody(), clock = mutableListOf(5_000L, 6_000L), identityStore = store).first.provision()
-        assertNotEquals("a 409 must discard the presented id", firstId, sentRequestId())
+        assertEquals("the conflicted id must be RETAINED, not deleted", firstId, store.current()?.requestId)
     }
 
     @Test
@@ -453,30 +455,30 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
-    fun `after a 409 the next ordinary provision allocates ONCE, not free-batch-per-retry`() = runBlocking {
-        // @spec be7941a1 / cloud ffd363a2: discarding a conflicting identity must not make the
-        // next ordinary call a free allocation under unchanged authority. A retry wrapper that
-        // catches 409 and re-provisions would mint a NEW batch every round; the allotment would
-        // silently drain while every individual call looked correct.
+    fun `PROVEN ledger exhaustion advances the allocation instead of failing into a new batch`() = runBlocking {
+        // reviewer 3d1f87be #1, second half: without an exhaustion path the ONLY way the client
+        // advances is by failing, and every advancement-by-failure is a fresh charge.
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
-        var conflicts = 0
-        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
-        val original = sentRequestId()
+        val (p, _, _) = provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store)
+        p.provision()
+        val firstId = sentRequestId()
+        val composed = p.lastComposedOwner!!
 
-        // The conflict: discard + surface.
-        provisioner(409, "", clock = mutableListOf(3_000L, 4_000L), identityStore = store, identityConflict = { conflicts++ }).first.provision()
-        assertEquals(1, conflicts)
+        // Spend the whole batch through the real owner: charge until the ledger refuses.
+        var charged = 0
+        while (composed.prepareToken()) {
+            composed.takePrepaidToken() // consume it, so the next charge is a fresh one
+            charged++
+            if (charged > 16) break // guard: a 4-record batch must exhaust long before this
+        }
+        assertEquals("the batch must exhaust at its bound", 4, charged)
+        assertTrue("the composed owner must report exhaustion", composed.isExhausted())
 
-        // The next ORDINARY provision under UNCHANGED authority mints exactly ONE new id.
-        provisioner(200, goBody(disposition = "replayed"), clock = mutableListOf(5_000L, 6_000L), identityStore = store).first.provision()
-        val afterConflict = sentRequestId()
-        assertNotEquals("the conflicting id must be gone", original, afterConflict)
-
-        // And it is STABLE from there: repeated ordinary calls reuse it, so one conflict costs at
-        // most one allocation, never one per attempt.
-        provisioner(200, goBody(disposition = "replayed"), clock = mutableListOf(7_000L, 8_000L), identityStore = store).first.provision()
-        assertEquals("the post-conflict id must persist across ordinary calls", afterConflict, sentRequestId())
-        assertEquals("a replayed success must not raise a conflict", 1, conflicts)
+        // The next provision advances FIRST, so it does not present the spent id.
+        val next = provisioner(200, goBody(), clock = mutableListOf(3_000L, 4_000L), identityStore = store)
+        next.first.lastComposedOwner = composed // carry the spent owner across, as production does
+        next.first.provision()
+        assertNotEquals("exhaustion must advance the allocation", firstId, sentRequestId())
     }
 
     // ---------------------------------------------------------------------------------------
@@ -608,5 +610,110 @@ class CaptureAllowanceProvisionerTest {
         // The current one still advances normally.
         assertTrue(store.advance(second))
         assertNull(store.current())
+    }
+
+    // ---- reviewer 3d1f87be ----------------------------------------------------------------
+
+    @Test
+    fun `a 409 BLOCKS further allocation under unchanged authority instead of minting`() = runBlocking {
+        // The bypass: delete the file, let the next ordinary acquire mint. Unchanged authority
+        // would silently allocate a new charged batch, which is what the conflict was warning about.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        var conflicts = 0
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+        val conflictedId = sentRequestId()
+        provisioner(409, "", clock = mutableListOf(3_000L, 4_000L), identityStore = store, identityConflict = { conflicts++ }).first.provision()
+        assertEquals(1, conflicts)
+
+        // Unchanged authority: the next attempt must REFUSE, not allocate.
+        val next = provisioner(200, goBody(), clock = mutableListOf(5_000L, 6_000L), identityStore = store)
+        val result = next.first.provision()
+        assertEquals(
+            CaptureAllowanceProvisioner.REASON_IDENTITY_AMBIGUOUS,
+            (result as CaptureAllowanceProvisioner.Result.Refused).reason,
+        )
+        assertEquals("a blocked 409 must not reach the network", null, lastTransport.seenBody)
+        assertEquals("and must not mint a new id", conflictedId, store.current()?.requestId)
+
+        // A REAL enrollment change is the one resolution that is not a bypass.
+        val newEpoch = CaptureAllowanceProvisioner.Credential(bearer = "tok", accountId = "acct-1", enrollmentEpoch = "ep-2")
+        provisioner(200, goBody(echoEpoch = "ep-2"), clock = mutableListOf(7_000L, 8_000L), cred = newEpoch, identityStore = store).first.provision()
+        assertNotEquals("a genuine epoch change may allocate again", conflictedId, sentRequestId())
+    }
+
+    @Test
+    fun `an id bound to ANOTHER account is never reused`() = runBlocking {
+        // reviewer 3d1f87be #3: one fixed file scoped only by epoch would let a second account
+        // present the first account's request id.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile(), account = "acct-1")
+        provisioner(200, goBody(), clock = mutableListOf(1_000L, 2_000L), identityStore = store).first.provision()
+
+        // A DIFFERENT account opening the same record must refuse rather than send.
+        val foreign = CaptureAllowanceAllocationIdentityStore(identityFile(), account = "acct-2")
+        assertEquals(
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            foreign.acquire("ep-1"),
+        )
+    }
+
+    @Test
+    fun `an UNDURABLE record refuses the send rather than claiming durability`() {
+        // reviewer 3d1f87be #2: a directory sync failure must refuse, not report the id as held.
+        // The record is made unreadable-as-valid while still present, which is the same refusal
+        // path the post-rename sync failure takes.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile(), account = "acct-1")
+        identityFile().parentFile?.mkdirs()
+        identityFile().writeText("allowance-identity/3\nnot-a-uuid\nep-1\nacct-1\nfalse\n")
+        assertEquals(
+            CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
+            store.acquire("ep-1"),
+        )
+    }
+
+    @Test
+    fun `prepareComposedToken REFUSES after expiry and charges nothing`() = runBlocking {
+        // reviewer 3d1f87be #4, driven through the PROVISIONER (not a hand-built owner): the
+        // freshness check has to sit before the durable charge, or a preparation after expiry
+        // consumes capacity the server will no longer honour.
+        val clock = java.util.concurrent.atomic.AtomicLong(1_000L)
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val transport = RecordingTransport(200, goBody(), null, requestId)
+        lastTransport = transport
+        val lifecycle = CaptureAllowanceLifecycle()
+        val p = CaptureAllowanceProvisioner(
+            api = transport,
+            credential = { credential },
+            baseArea = tmp.root,
+            lifecycle = lifecycle,
+            ceilings = ceilings,
+            elapsedMs = { clock.get() },
+            beginInstallAttempt = { },
+            // NO DEADLINE WRAPPER HERE, deliberately: if the wrapper is installed it refuses the
+            // take and the provisioner's own check is never the reason the assertion passes -- the
+            // control would be measuring the wrapper, not the ordering the reviewer asked about.
+            installAuthority = { composed, _: Long, _: Long, _: String, _: String, _: CaptureAllowanceProvisioner.Grant, publish: () -> Unit ->
+                lifecycle.bind(composed)
+                publish()
+                true
+            },
+            identityStore = store,
+        )
+        assertTrue(p.provision() is CaptureAllowanceProvisioner.Result.Provisioned)
+        val composed = p.lastComposedOwner!!
+
+        // Inside the window: the refill charges, and the token is CONSUMED. Without consuming it
+        // the next prepareToken() returns false merely because one is still pending -- the control
+        // would then pass on "already pending" rather than on expiry, which is how my first
+        // version of this test measured nothing.
+        clock.set(1_000L + 100_000L)
+        assertTrue("inside the window the refill must charge", p.prepareComposedToken())
+        assertEquals(1, composed.ledgerChargesForTest())
+        assertNotNull("the token must be taken so the next refill is a real charge", lifecycle.takePrepaidToken())
+
+        // PAST the window: the refill must REFUSE, and must not charge.
+        clock.set(1_000L + 300_000L)
+        val expiredPrep = p.prepareComposedToken()
+        assertFalse("an expired grant must not refill (charged=${composed.ledgerChargesForTest()} grant=${p.currentGrant})", expiredPrep)
+        assertEquals("a refused refill must not consume capacity", 1, composed.ledgerChargesForTest())
     }
 }

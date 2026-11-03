@@ -20,7 +20,7 @@ import java.io.File
 class CaptureAllowanceOwner(
     area: File,
     account: String,
-    limits: AllowanceLimits,
+    private val limits: AllowanceLimits,
     window: AllowanceWindow,
     provisioning: AllowanceProvisioning = AllowanceProvisioning.Unavailable,
 ) : CaptureAllowanceAuthority {
@@ -110,6 +110,23 @@ class CaptureAllowanceOwner(
         } finally {
             lock.unlock()
         }
+    }
+
+    /**
+     * EXHAUSTION, proved from the durable ledger (reviewer 3d1f87be #1).
+     *
+     * The limits this batch was bound with admit a charge only while the durable record has room.
+     * A ledger that is Established and no longer admits cannot recover within this batch, so the
+     * only legitimate consequence is to stop presenting this allocation and let the next
+     * provisioning ask the server for a new one. Reading the record is storage I/O, so this is
+     * OFF-PATH only -- never call it from admission.
+     */
+    fun isExhausted(): Boolean = when (val snap = ledger.snapshot()) {
+        is AllowanceSnapshot.Entry -> !limits.admits(snap.chargedRecords, snap.chargedBytes)
+
+        // Closed/Fresh are not exhaustion: they are damage or "not yet used", and neither may be
+        // converted into an advancement by the client.
+        else -> false
     }
 
     /** True when a prepared token exists for the CURRENT generation, limits and window. */

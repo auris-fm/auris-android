@@ -303,6 +303,18 @@ class VoiceAsrEngine @Inject constructor(
                             // or may not run for this utterance); it is recorded when observed.
                             var admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
                             if (admission == null) {
+                                // REFILL FIRST (reviewer 3d1f87be #5): a bound authority hands out
+                                // ONE prepaid token. Once it is consumed, this session has no
+                                // further admission until the charge is replenished -- and the
+                                // `allowanceProvisionAttempted` latch below resets only on a new
+                                // engine start, so without this every later utterance in the same
+                                // session was refused forever. Preparing is a durable ledger charge,
+                                // never a network call, so it is safe on every refusal.
+                                if (ensureCaptureAllowance?.prepareComposedToken() == true) {
+                                    admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                                }
+                            }
+                            if (admission == null) {
                                 // REFUSED → ONE provisioning attempt per session, then re-admit.
                                 // The processor retains the buffered PCM, so the post-RTT
                                 // admission drains the full prefix; a provisioning refusal keeps

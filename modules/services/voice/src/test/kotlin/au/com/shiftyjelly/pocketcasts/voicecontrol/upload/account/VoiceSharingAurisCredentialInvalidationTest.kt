@@ -38,9 +38,10 @@ class VoiceSharingAurisCredentialInvalidationTest {
     private val aurisScopeMirrorClears: MutableList<AuthoritySnapshot> = java.util.Collections.synchronizedList(mutableListOf())
     private val aurisRefusals: MutableList<Unit> = java.util.Collections.synchronizedList(mutableListOf())
 
-    private class RecordingAurisToken(var token: String?) : CloudTokenProviding {
+    private class RecordingAurisToken(var token: String?) : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
         override suspend fun currentToken(): String? = token
 
+        override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(token)
         override suspend fun refreshToken() {
             token = null // the real provider drops the refused token and re-mints on demand
         }

@@ -289,6 +289,7 @@ class VoiceUploadModulePolicyGateTest {
             )
             val trigger = VoiceUploadModule.provideUploadTrigger(
                 assembly = assembly,
+                aurisToken = aurisLive.provider,
                 store = store,
                 accountStartup = startup,
                 policyProvider = policyProvider,

@@ -133,7 +133,14 @@ class CaptureAllowanceAllocationIdentityStore(
                 // So an unmarked record is CONFIRMED before use rather than trusted: re-syncing the
                 // directory establishes current durability for this record. If that cannot be done,
                 // the record is not returned as Held.
-                if (!held.recoveryRequired && !confirmDurable()) return Acquisition.Ambiguous
+                // DERIVED FROM READABLE STATE, NOT FROM A MARKER (cloud c8c8fdd8).
+                // Gating this on `!recoveryRequired` made the marker load-bearing again: an absent
+                // marker would stand for "someone once proved this", which is the same dependence on
+                // a write that may not have survived, one indirection further out. Confirming
+                // unconditionally derives durability from the record we can actually read, so
+                // nothing has to survive a failed write to tell us we are uncertain. The cost is one
+                // directory sync on a read path; the alternative is trusting a proxy for proof.
+                if (!confirmDurable()) return Acquisition.Ambiguous
                 // A RETAINED id is returned too: after a 429 the allocation is gone, and minting a
                 // fresh id would refuse identically while storing another server row.
                 return Acquisition.Held(held)

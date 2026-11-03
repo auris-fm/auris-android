@@ -33,6 +33,14 @@ internal object VoiceProvisionGate {
         if (provisioner != null && (provisioner.composedOwnerExhausted() || provisioner.composedOwnerExpired())) {
             gate.set(true)
         }
+        // READINESS RESOLVED RE-ARMS TOO (reviewer d4cff2e5 #2/#3, spec 1a340261). A signed-out
+        // session, or one whose account was not yet authoritative, produces no composed owner at
+        // all -- so there is no spent/expired state to re-arm from, the gate stays closed, and
+        // signing in DURING this session could never resume provisioning. Consuming the transition
+        // keeps it event-driven: one re-arm per resolution, not one per utterance.
+        if (provisioner != null && provisioner.consumeReadinessTransition()) {
+            gate.set(true)
+        }
         if (!gate.compareAndSet(true, false)) return null
         return provisioner?.provision()
     }

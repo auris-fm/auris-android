@@ -202,6 +202,30 @@ class CaptureAllowanceProvisioner(
         spentSinceLastProvision || lastComposedOwner?.isExhausted() == true
     }
 
+    /**
+     * True when the last attempt could not send because the client is not yet READY, rather than
+     * because the server refused (reviewer d4cff2e5 #3, spec 1a340261).
+     *
+     * Two states produce it: no usable credential at all (signed out), and a credential whose
+     * account is not yet authoritative (cold cache). Neither is a verdict on the capture -- both
+     * are conditions that RESOLVE, and when they do the attempt must resume within the SAME engine
+     * session. Without this the gate closed and nothing re-opened it, so signing in during a
+     * session could never resume provisioning, and the Deferred branch had no resumption at all.
+     */
+    @Volatile
+    var awaitingReadiness: Boolean = false
+        private set
+
+    /**
+     * Consumes the readiness transition, so the gate re-arms ONCE per transition rather than on
+     * every utterance. Returns true only if the caller has not yet acted on this one.
+     */
+    fun consumeReadinessTransition(): Boolean {
+        if (!awaitingReadiness) return false
+        awaitingReadiness = false
+        return true
+    }
+
     /** True when the composed grant has passed its own `valid_for_ms`; a refill cannot help. */
     fun composedOwnerExpired(): Boolean = synchronized(prepareLock) {
         val grant = currentGrant ?: return false
@@ -227,11 +251,21 @@ class CaptureAllowanceProvisioner(
     }
 
     suspend fun provision(): Result {
-        val cred = credential() ?: return Result.Refused(REASON_NO_CREDENTIAL)
+        val cred = credential()
+        if (cred == null) {
+            awaitingReadiness = true
+            return Result.Refused(REASON_NO_CREDENTIAL)
+        }
         // UNKNOWN ACCOUNT DEFERS, IT DOES NOT SEND (spec e2cd78d8, cloud 8d1ffaaf). A cold cache
         // is a readiness condition, not permission to present an unbound request. Note this is
         // checked before ANY durable or transport work, so there is nothing to undo.
-        if (cred.accountId.isBlank()) return Result.Deferred
+        if (cred.accountId.isBlank()) {
+            awaitingReadiness = true
+            return Result.Deferred
+        }
+        // Past this point the attempt is authorised to exist, so readiness is no longer the
+        // blocker: whatever happens next (issued / refused / transport) is a server-side verdict.
+        awaitingReadiness = false
         val attemptId = UUID.randomUUID().toString()
         // Announce THIS attempt before any transport work: a newer attempt supersedes any
         // older in-flight one at install time.

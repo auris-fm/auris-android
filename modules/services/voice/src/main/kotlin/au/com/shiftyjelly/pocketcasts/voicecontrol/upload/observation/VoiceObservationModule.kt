@@ -146,6 +146,24 @@ object VoiceObservationModule {
         val transport = retrofit.get().create(
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.CaptureAllowanceTransport::class.java,
         )
+
+        // The OWNER-side prerequisites a permitted attempt needs, read WITHOUT acquiring anything.
+        // Both the passive readiness probe and the credential supplier call THIS, so the cheap
+        // question and the strict one cannot drift apart (reviewer cfcfab6f). If it returns null an
+        // attempt would refuse, so readiness must also be false.
+        fun prerequisiteSnapshot(): OwnerPrerequisite? {
+            val snapshot = accountStartup.ownerForHandoff().authoritySnapshot()
+            val epoch = accountStartup.state.projection.value?.enrollmentEpoch
+            val account = snapshot.accountName
+            if (account == null || epoch == null) return null
+            return OwnerPrerequisite(
+                accountId = account,
+                enrollmentEpoch = epoch,
+                generation = snapshot.credential,
+                session = snapshot.session,
+            )
+        }
+
         return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner(
             api = transport,
             credential = {
@@ -153,21 +171,14 @@ object VoiceObservationModule {
                 // account route, verifies Auris-issued tokens only. The owner snapshot remains the
                 // session/identity FENCE (account, generation, session) but is NOT the bearer.
                 val aurisBearer = aurisToken.currentToken() ?: return@CaptureAllowanceProvisioner null
-                val snapshot = accountStartup.ownerForHandoff().authoritySnapshot()
-                val projection = accountStartup.state.projection.value
-                val epoch = projection?.enrollmentEpoch
-                val account = snapshot.accountName
-                if (account == null || epoch == null) {
-                    null
-                } else {
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Credential(
-                        bearer = aurisBearer,
-                        accountId = account,
-                        enrollmentEpoch = epoch,
-                        generation = snapshot.credential,
-                        session = snapshot.session,
-                    )
-                }
+                val snap = prerequisiteSnapshot() ?: return@CaptureAllowanceProvisioner null
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Credential(
+                    bearer = aurisBearer,
+                    accountId = snap.accountId,
+                    enrollmentEpoch = snap.enrollmentEpoch,
+                    generation = snap.generation,
+                    session = snap.session,
+                )
             },
             baseArea = java.io.File(context.noBackupFilesDir, "voice_allowance"),
             lifecycle = lifecycle,
@@ -200,17 +211,34 @@ object VoiceObservationModule {
                     "VoiceAllowance: 409 request_conflict -- persisted allocation identity outlived its epoch",
                 )
             },
-            // SIDE-EFFECT-FREE READINESS (reviewer 70d0801b). peekCurrentToken() serves only a
-            // fresh cached token for the CURRENT identity and never fetches, so a closed gate can
-            // ask "could I send?" without performing credential acquisition on every utterance.
-            // The bearer itself is still acquired inside the permitted attempt, above.
-            readinessProvider = { aurisToken.peekCurrentToken() != null },
+            // SAME CONJUNCTS AS THE SUPPLIER, EVALUATED ON A SNAPSHOT (reviewer cfcfab6f,
+            // cloud 650fcc93). A predicate may be made cheaper only by removing COST, never by
+            // removing the conditions it shares with the work it gates: the supplier needs a
+            // bearer AND an authoritative account AND an enrollment epoch, so a probe checking
+            // only the bearer answers READY while every attempt refuses -- re-arm, attempt,
+            // acquire, refuse, repeat, now for free.
+            //
+            // Both sides therefore read the same snapshot function, so they cannot diverge:
+            // [prerequisiteSnapshot] is evaluated with no acquisition, and readiness is
+            // "the snapshot is complete". The BEARER is deliberately part of readiness only as
+            // CACHE PRESENCE (peek, never fetch); acquiring it is what a permitted attempt does.
+            readinessProvider = {
+                prerequisiteSnapshot() != null && aurisToken.peekCurrentToken() != null
+            },
             beginInstallAttempt = { attempt -> fence.beginAttempt(attempt) },
             installAuthority = { owner, gen, session, epoch, attempt, grant, publish ->
                 fence.install(owner, gen, session, epoch, attempt, grant, publish)
             },
         )
     }
+
+    /** Owner-side prerequisites, captured passively so a probe and a supplier cannot disagree. */
+    private data class OwnerPrerequisite(
+        val accountId: String,
+        val enrollmentEpoch: String,
+        val generation: Long,
+        val session: Long,
+    )
 
     @Provides
     @Singleton

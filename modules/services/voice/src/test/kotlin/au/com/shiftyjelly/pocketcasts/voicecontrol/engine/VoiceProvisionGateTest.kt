@@ -308,6 +308,75 @@ class VoiceProvisionGateTest {
     }
 
     @Test
+    fun `cached bearer with NO epoch must not re-arm into a free repeated refusal`() = runBlocking {
+        // reviewer cfcfab6f, cloud 650fcc93: the probe checked only the cached bearer while the
+        // supplier also requires an authoritative account and an enrollment epoch. With a bearer
+        // present and the epoch missing, the supplier returns null every time and records
+        // NOT_READY, while a bearer-only probe keeps answering READY -- re-arm, attempt, acquire,
+        // refuse, repeat. Making the probe cheaper must not make it NARROWER; both predicates must
+        // evaluate the same conjuncts.
+        var epochKnown = false
+        var acquisitions = 0
+        val p = provisioner(
+            CountingApi { id -> batchBody.replace("%s", id) },
+            credential = {
+                acquisitions++
+                null // supplier refuses: no epoch yet
+            },
+            readinessProvider = { epochKnown },
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p)
+        val afterFirst = acquisitions
+        repeat(4) { VoiceProvisionGate.decide(gate, p) }
+
+        assertEquals(
+            "an incomplete prerequisite must not re-arm into repeated acquisition",
+            afterFirst,
+            acquisitions,
+        )
+
+        // The epoch arrives: exactly one attempt is permitted.
+        epochKnown = true
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals("readiness completing must permit one attempt", afterFirst + 1, acquisitions)
+    }
+
+    @Test
+    fun `authoritative prerequisites ready while the CACHE is empty permits one attempt`() = runBlocking {
+        // spec 57492640's converse: account and epoch are ready but the Auris cache is empty.
+        // Readiness must stay PASSIVE -- it may not fetch to populate the cache, and it must not
+        // depend on an unrelated caller to fill it. The permitted attempt is what acquires.
+        var cached = false
+        var acquisitions = 0
+        val p = provisioner(
+            CountingApi { id -> batchBody.replace("%s", id) },
+            credential = {
+                acquisitions++
+                null // no cached token yet; the attempt is where acquisition would happen
+            },
+            readinessProvider = { cached }, // passive snapshot only, never fetches
+            clock = { 1_000L },
+        )
+        val gate = AtomicBoolean(true)
+
+        VoiceProvisionGate.decide(gate, p)
+        val afterFirst = acquisitions
+        repeat(3) { VoiceProvisionGate.decide(gate, p) }
+        assertEquals("an empty cache must not re-arm repeatedly", afterFirst, acquisitions)
+
+        cached = true
+        VoiceProvisionGate.decide(gate, p)
+        assertEquals(
+            "the cache becoming populated must permit exactly one acquisition attempt",
+            afterFirst + 1,
+            acquisitions,
+        )
+    }
+
+    @Test
     fun `readiness actually CHANGING is what re-arms`() = runBlocking {
         var signedIn = false
         val api = CountingApi { id -> batchBody.replace("%s", id) }

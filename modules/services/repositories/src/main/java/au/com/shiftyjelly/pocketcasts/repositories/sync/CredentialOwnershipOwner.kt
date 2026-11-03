@@ -88,6 +88,14 @@ interface CredentialOwnershipOwner {
     fun <T> transaction(block: () -> T): T
 
     /**
+     * The synthesis write lock as its own transaction: composition-level exchanges that read AND
+     * write derived credentials (the 401 mirror clear) run under it without taking the collection
+     * lock they do not touch. Nested inside [transaction] on the same thread is permitted (the
+     * lock is reentrant); the collection lock NEVER nests inside this one.
+     */
+    fun <T> credentialTransaction(block: () -> T): T
+
+    /**
      * The 401 owner transaction: compares the observed snapshot atomically, runs
      * [transaction] (the scoped voice revocation) INSIDE the owner lock, and clears the
      * rejected token value + advances the credential incarnation ONLY when [transaction]

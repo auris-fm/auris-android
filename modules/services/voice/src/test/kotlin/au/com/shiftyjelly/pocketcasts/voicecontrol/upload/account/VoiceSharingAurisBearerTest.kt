@@ -215,6 +215,10 @@ internal class UpstreamOwner(
         accessToken: AccessToken,
     ): Boolean = false
 
+    // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+
+    override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
     override fun <T> transaction(block: () -> T): T = synchronized(lock) { block() }
 
     override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = synchronized(lock) { if (observed.accountName != accountName) false else transaction() }

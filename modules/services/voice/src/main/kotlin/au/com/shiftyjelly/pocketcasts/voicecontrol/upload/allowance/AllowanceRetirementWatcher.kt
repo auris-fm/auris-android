@@ -60,8 +60,53 @@ class AllowanceRetirementWatcher(
 
     @Volatile private var armedFor = -1L
 
+    /**
+     * The last COMMITTED account projection, delivered by the state's post-commit hook (the
+     * state fence serializes commits; this is the authoritative committed value, not a cached
+     * gate decision). Reconcile re-reads this field at every wakeup — reconcile-from-authority.
+     */
+    @Volatile private var lastProjection: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection? = null
+
+    /**
+     * Session-tagged authoritative membership, tri-state (reviewer 0bca26d5):
+     * - Unknown: no committed projection observed (never signed in / fresh fixture state).
+     * - Invalidated: the store COMMITTED a projection LOSS (a NULL payload on
+     *   projectionInvalidatedListener — a same-session 401 via processUnauthorized). This is
+     *   authority loss: the bound allowance retires. A NON-NULL invalidation payload is a
+     *   successful apply (the state fires this listener after onProjectionApplied on every
+     *   applyOutcome, reviewer 414ddbe1) — it commits, it is NOT loss.
+     * - Committed(epoch, ownerSession, membershipActive): a committed projection.
+     *   Retirement is decided against the INSTALLED authority identity (the identity snapshot
+     *   taken when the current bind completed — installs only succeed under the then-current
+     *   membership, so that snapshot IS the installed identity): an inactive membership, or a
+     *   committed identity (epoch or owner session) that differs from the installed one,
+     *   retires the old batch. A repeated decision keeps refusing the same stale grant until
+     *   it is replaced (a bind under the new identity) or retired — no history advance before
+     *   the guarded retirement succeeds.
+     */
+    private sealed interface Membership {
+        data object Unknown : Membership
+        data object Invalidated : Membership
+        data class Committed(
+            val epoch: String?,
+            val ownerSession: Long,
+            /** True only when the committed projection is an ACTIVE enrolled membership. */
+            val membershipActive: Boolean,
+        ) : Membership
+    }
+
+    @Volatile private var membership: Membership = Membership.Unknown
+
+    // The installed authority identity is read COHERENTLY from the lifecycle (generation +
+    // immutable GrantIdentity recorded atomically at bind) — never relabeled from current
+    // membership when a delayed bound callback runs (reviewer c7cdff17).
+
     private var priorSessionEnd: (() -> Unit)? = null
     private var installedListener: (() -> Unit)? = null
+    private var priorEvidence: ((au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection, Long) -> Unit)? = null
+    private var installedEvidence: ((au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection, Long) -> Unit)? = null
+    private var priorInvalidated: ((au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection?, Long) -> Unit)? = null
+    private var installedInvalidated: ((au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection?, Long) -> Unit)? = null
     private var installedBoundHook: ((Long) -> Unit)? = null
     private var scopeCompletion: kotlinx.coroutines.DisposableHandle? = null
 
@@ -84,10 +129,59 @@ class AllowanceRetirementWatcher(
             installedListener = mine
             accountStartup.sessionEndedListener = mine
 
+            // Projection changes (enrollment, withdrawal — INCLUDING a withdrawn projection that
+            // retains the epoch string) are retire-authority wakeups: chain, never overwrite.
+            priorEvidence = accountStartup.enrollmentEvidenceListener
+            val evidence: (au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection, Long) -> Unit = { projection, ownerSession ->
+                val prior = priorEvidence
+                lastProjection = projection
+                membership = committedFrom(projection, ownerSession)
+                prior?.invoke(projection, ownerSession)
+                if (!disposed) reconcile()
+            }
+            installedEvidence = evidence
+            accountStartup.enrollmentEvidenceListener = evidence
+
+            // PROJECTION LOSS (same-session 401): processUnauthorized clears the projection and
+            // fires projectionInvalidatedListener WITHOUT any applied projection and without
+            // necessarily ending the session — the chain on evidence/session alone would keep a
+            // stale ACTIVE allowance alive. Chain, never overwrite.
+            priorInvalidated = accountStartup.state.projectionInvalidatedListener
+            val invalidated: (au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection?, Long) -> Unit = { projection, ownerSession ->
+                val prior = priorInvalidated
+                lastProjection = projection
+                // PAYLOAD-DRIVEN (reviewer 414ddbe1): this listener also receives NON-NULL
+                // projections on every successful apply (it fires after onProjectionApplied).
+                // Only a NULL payload is committed loss; a non-null payload commits.
+                membership = if (projection == null) {
+                    Membership.Invalidated
+                } else {
+                    committedFrom(projection, ownerSession)
+                }
+                prior?.invoke(projection, ownerSession)
+                if (!disposed) reconcile()
+            }
+            installedInvalidated = invalidated
+            accountStartup.state.projectionInvalidatedListener = invalidated
+
+            // SEED AT START (reviewer 0bca26d5): reconcile the membership ALREADY COMMITTED in
+            // the store — a watcher started after an already-committed withdrawal retires at
+            // start, not at some future callback that may never come.
+            // ONE session-tagged read (reviewer c7cdff17): projection and owner session come
+            // from a SINGLE taggedProjection.value snapshot — never paired across reads.
+            val seeded = accountStartup.state.taggedProjection.value
+            membership = seeded.projection?.let { committedFrom(it, seeded.ownerSession) }
+                ?: Membership.Unknown
+
             // NEW BINDS get expiry coverage too (9d29473a #1): the lifecycle invokes this hook
             // AFTER releasing its own lock, so reconcile's watcher→lifecycle order stays
             // one-directional and deadlock-free.
-            val boundHook: (Long) -> Unit = { reconcile() }
+            val boundHook: (Long) -> Unit = { _ ->
+                // The generation argument is NOT used: re-read the coherent installed snapshot
+                // inside the decision, so a delayed/reordered older callback converges on the
+                // CURRENT binding (watcher→lifecycle lock order preserved).
+                reconcile()
+            }
             installedBoundHook = boundHook
             lifecycle.onBound = boundHook
 
@@ -137,13 +231,53 @@ class AllowanceRetirementWatcher(
         }
     }
 
+    private fun committedFrom(
+        projection: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection,
+        ownerSession: Long,
+    ): Membership.Committed = Membership.Committed(
+        epoch = projection.enrollmentEpoch,
+        ownerSession = ownerSession,
+        membershipActive = projection.voiceSharingEnrolled &&
+            projection.withdrawalState == au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.ACTIVE,
+    )
+
     /** Caller holds [watcherLock]. */
     private fun reconcileLocked() {
         while (true) {
-            val genAtDecision = lifecycle.currentGeneration()
+            // ONE coherent installed read per decision (reviewer 255866ea): the same atomic
+            // record supplies BOTH the guarded generation and the installed identity. Null when
+            // nothing is bound — the guarded retire is then a generation-safe no-op.
+            val installed = lifecycle.installedAuthority()
+            val genAtDecision = installed?.generation ?: lifecycle.currentGeneration()
             val evaluated = policyProvider.snapshot()
             onRevalidatedForTest?.invoke()
-            if (!evaluated.enabled || evaluated.activatedAtMonotonicMs <= 0) {
+            // MEMBERSHIP AUTHORITY LOSS / REPLACEMENT (reviewer 0bca26d5 + 414ddbe1), decided
+            // against the INSTALLED authority identity — never against advancing history:
+            // - Invalidated (committed NULL projection — same-session 401 loss) retires;
+            // - a committed projection that is not an ACTIVE enrolled membership (withdrawal
+            //   RETAINING the epoch string) retires;
+            // - a committed ACTIVE identity differing from the INSTALLED identity (epoch or
+            //   owner session replaced) retires the OLD batch; an unchanged identity refresh
+            //   does not. A repeated decision keeps refusing the same stale grant until it is
+            //   replaced by a bind under the new identity (which re-snapshots onBound) or
+            //   retired — the replacement signal survives a lost retirement race.
+            val membershipLoss = when (val m = membership) {
+                is Membership.Invalidated -> true
+
+                // FAIL CLOSED (reviewer c7cdff17): Unknown membership with a bound grant is NOT
+                // a production authorization rule — including startup after a committed 401.
+                Membership.Unknown -> installed != null
+
+                is Membership.Committed ->
+                    installed != null &&
+                        (
+                            installed.identity == null || // bound WITHOUT install identity: fail closed
+                                !m.membershipActive ||
+                                m.epoch != installed.identity.enrollmentEpoch ||
+                                m.ownerSession != installed.identity.ownerSession
+                            )
+            }
+            if (!evaluated.enabled || evaluated.activatedAtMonotonicMs <= 0 || membershipLoss) {
                 // Authoritative policy expired or disabled: the bound authority is governed by
                 // this expired lease. The GUARDED retirement is atomic: it retires ONLY the
                 // binding generation we revalidated; a bind that raced in survives this call and
@@ -202,6 +336,14 @@ class AllowanceRetirementWatcher(
             val mine = installedListener
             if (mine != null && accountStartup.sessionEndedListener === mine) {
                 accountStartup.sessionEndedListener = priorSessionEnd
+            }
+            val myEvidence = installedEvidence
+            if (myEvidence != null && accountStartup.enrollmentEvidenceListener === myEvidence) {
+                accountStartup.enrollmentEvidenceListener = priorEvidence
+            }
+            val myInvalidated = installedInvalidated
+            if (myInvalidated != null && accountStartup.state.projectionInvalidatedListener === myInvalidated) {
+                accountStartup.state.projectionInvalidatedListener = priorInvalidated
             }
             if (lifecycle.onBound === installedBoundHook) {
                 lifecycle.onBound = null

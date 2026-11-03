@@ -71,6 +71,10 @@ class EngineToProducerPublishTest {
 
         override fun authoritySnapshot() = snap
         override fun sessionGeneration(): Long = snap.session
+
+        // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+        override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
         override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
 
         /** ONE coherent live read for the shared binding: account+session from the snapshot,

@@ -45,6 +45,11 @@ object VoiceSharingSettingsModule {
             // THE SAME shared session source the controller fences with: the presentation
             // boundary and the correctness boundary must move together (reviewer a2136dd9).
             ownerSession = { accountStartup.authoritySnapshot().session },
+            // The membership GET the surface depends on: production-only request prefix.
+            refreshProjection = {
+                val token = accountStartup.sessionTokenForRefresh()
+                token != null && accountStartup.operations.refreshProjection(token)
+            },
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
     }

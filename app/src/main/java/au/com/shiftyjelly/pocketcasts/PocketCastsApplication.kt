@@ -252,6 +252,14 @@ class PocketCastsApplication :
             try {
                 defaultPlaylistsInitializer.initialize()
                 voiceSharingPolicyStartup.initializeOnAppStart()
+                // FIRST ACCOUNT-READABILITY wiring (@spec 69630b93): the policy exchange starts at
+                // launch, so a cold start after a login can run it before the account is readable.
+                // The account owner announces readability (immediately when it already holds, and
+                // on every observed transition); the policy owner refreshes itself exactly once.
+                // Wiring only — the allowance batch, ledger and queued records are untouched.
+                voiceSharingAccountStartup.accountReadableListener = { accountName, session ->
+                    voiceSharingPolicyStartup.onAccountReadable(accountName, session)
+                }
                 voiceSharingAccountStartup.initializeOnAppStart()
                 // Loss subscriptions (accounts/enrollment/policy/lease-deadline) + sink wiring.
                 voiceCollectionStartup.initializeOnAppStart()

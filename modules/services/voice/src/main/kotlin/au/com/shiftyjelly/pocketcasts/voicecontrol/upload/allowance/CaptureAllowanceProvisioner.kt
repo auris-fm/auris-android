@@ -145,7 +145,7 @@ class CaptureAllowanceProvisioner(
     /** The last composed (and bound) per-batch owner; observation seam for controls and wiring. */
     @Volatile
     var lastComposedOwner: CaptureAllowanceOwner? = null
-        private set
+        internal set
 
     data class Grant(val batchId: String, val requestStartElapsedMs: Long, val validForMs: Long) {
         fun isFresh(nowElapsedMs: Long): Boolean {
@@ -164,7 +164,15 @@ class CaptureAllowanceProvisioner(
      * false when nothing is composed, when the owner is closed, or when the ledger cannot charge —
      * every one of which must leave the capture refused rather than admitting uncharged.
      */
-    fun prepareComposedToken(): Boolean = synchronized(prepareLock) { lastComposedOwner?.prepareToken() == true }
+    fun prepareComposedToken(): Boolean = synchronized(prepareLock) {
+        // FRESHNESS BEFORE THE CHARGE (reviewer 3d1f87be #4). Checking only in the deadline wrapper
+        // guards the TAKE, by which point the ledger has already been charged: a preparation after
+        // expiry would consume capacity the server will no longer honour. The charge must not
+        // happen at all, so the check belongs here, before prepareToken().
+        val grant = currentGrant ?: return false
+        if (!grant.isFresh(elapsedMs())) return false
+        lastComposedOwner?.prepareToken() == true
+    }
 
     suspend fun provision(): Result {
         val cred = credential() ?: return Result.Refused(REASON_NO_CREDENTIAL)
@@ -177,6 +185,18 @@ class CaptureAllowanceProvisioner(
         // next attempt will reuse. A crash between here and the response leaves a persisted id
         // whose re-send is a replay -- never a second allocation.
         val store = identityStore
+        // PROVEN EXHAUSTION ADVANCES (reviewer 3d1f87be #1). Without this the ONLY way the client
+        // ever advances is by failing, and every advancement-by-failure is a fresh charge. A ledger
+        // that can no longer admit is provable locally and needs no server round trip: retire the
+        // allocation so this attempt asks for a new one. Note this runs BEFORE acquire(), so the
+        // retired id is not presented again.
+        store?.let { st ->
+            if (lastComposedOwner?.isExhausted() == true) {
+                lastComposedOwner = null
+                currentGrant = null
+                st.current()?.let { st.advance(it) }
+            }
+        }
         val acquisition = store?.acquire(cred.enrollmentEpoch)
         // AMBIGUOUS PERSISTED STATE REFUSES (reviewer b36642db / cloud ffeaa62d). Re-minting is
         // indistinguishable server-side from a first attempt: it allocates and charges a new
@@ -223,8 +243,11 @@ class CaptureAllowanceProvisioner(
                 // the epoch travels WITH the id, that can only mean the id survived an enrollment
                 // change -- a client state-machine bug. Discard and mint, and say so loudly: a
                 // silent retry would hide the bug that produced it (cloud bcc9a42a).
+                // 409: record it and REFUSE further allocation under this identity. Deleting the
+                // file here -- as an earlier revision did -- let the next ordinary acquire mint a
+                // fresh id under unchanged authority, which is the bypass, not the fix.
                 response.code() == 409 -> {
-                    store.advance(identity)
+                    store.recordConflict(identity)
                     identityConflict()
                 }
 

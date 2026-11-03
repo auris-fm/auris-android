@@ -462,4 +462,50 @@ class CaptureAllowanceInstallFenceTest {
         // call: total charged equals what was actually admitted.
         assertEquals("total charged must equal total admitted", 1, o.ledgerChargesForTest())
     }
+
+    @Test
+    fun `MULTIPLE captures through one bound authority each need their own refill`() {
+        // reviewer 3d1f87be #5: one bound authority hands out ONE prepaid token. Once it is
+        // consumed, later admissions refuse unless the charge is replenished. This asserts the
+        // property the engine now relies on: consume, refuse, refill, admit -- repeatedly. A
+        // single-capture control cannot see this, which is why the gap survived.
+        val (f, _, binds) = fence()
+        f.beginAttempt("a1")
+        val o = owner()
+        assertTrue(f.install(o, credential.generation, credential.session, credential.enrollmentEpoch, "a1", grant) { })
+        assertEquals(1, binds.get())
+        val installed = lifecycleUnderTest!!
+
+        clock = 1_000L + 10_000L
+        repeat(3) { round ->
+            // REFILL charges one record and makes one admission possible.
+            assertTrue("round $round: the ledger must be able to refill", o.prepareToken())
+            assertNotNull("round $round: the refilled token must admit", installed.takePrepaidToken())
+            // EXHAUSTED AGAIN: without another refill, admission refuses. This is the exact state
+            // the engine used to get stuck in permanently.
+            assertNull("round $round: a consumed authority must refuse until refilled", installed.takePrepaidToken())
+            assertEquals("round $round: charged equals refills, not attempts", round + 1, o.ledgerChargesForTest())
+        }
+    }
+
+    @Test
+    fun `preparation AFTER expiry does not charge - the check must precede the charge`() {
+        // reviewer 3d1f87be #4: freshness was checked only when TAKING the already-charged token,
+        // so a preparation after expiry consumed capacity the server no longer honours. The
+        // provisioner now checks before charging; this pins the owner-level property it relies on.
+        val (f, _, _) = fence()
+        f.beginAttempt("a1")
+        val o = owner()
+        assertTrue(f.install(o, credential.generation, credential.session, credential.enrollmentEpoch, "a1", grant) { })
+        clock = 1_000L + 100_000L
+        assertTrue(o.prepareToken())
+        assertEquals(1, o.ledgerChargesForTest())
+        // Consume it, then move past expiry.
+        assertNotNull(lifecycleUnderTest!!.takePrepaidToken())
+        clock = 1_000L + 300_000L
+        val before = o.ledgerChargesForTest()
+        // The deadline wrapper refuses the take; nothing is admitted from here on.
+        assertNull(lifecycleUnderTest!!.takePrepaidToken())
+        assertEquals("no charge may be created once expired", before, o.ledgerChargesForTest())
+    }
 }

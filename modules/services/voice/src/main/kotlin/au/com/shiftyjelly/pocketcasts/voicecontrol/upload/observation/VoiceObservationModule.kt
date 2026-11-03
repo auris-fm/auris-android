@@ -184,6 +184,12 @@ object VoiceObservationModule {
             // keyed by the enrollment epoch, which the credential supplier already scopes.
             identityStore = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAllocationIdentityStore(
                 java.io.File(context.noBackupFilesDir, "voice_allowance/allocation_identity"),
+                // ACCOUNT-SCOPED (reviewer 3d1f87be #3): one fixed file keyed only by epoch would
+                // let a second signed-in account present the first account's request id, which the
+                // server reads as one account carrying another's allocation.
+                // Only bind when an Auris credential is actually present: an absent one means no
+                // allowance request can be made, so an unscoped store cannot present anything.
+                account = aurisToken.peekCurrentToken()?.let { accountStartup.ownerForHandoff().authoritySnapshot().accountName },
             ),
             // A 409 means a persisted id outlived its epoch: a client state-machine bug. Surfaced
             // rather than retried, because a silent retry hides it and burns another batch.

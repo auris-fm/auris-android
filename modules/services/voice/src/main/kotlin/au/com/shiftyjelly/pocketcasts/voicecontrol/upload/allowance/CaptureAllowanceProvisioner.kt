@@ -130,6 +130,21 @@ class CaptureAllowanceProvisioner(
         ) : Result
 
         data class Refused(val reason: String) : Result
+
+        /**
+         * NOT SENT, and not a refusal of the capture's worth (spec e2cd78d8, cloud 8d1ffaaf).
+         *
+         * The credential's account is not yet authoritative, so there is no identity this request
+         * could be scoped to. Sending anyway does not risk a mismatch -- it GUARANTEES the server
+         * records the id under whatever principal the bearer turns out to be, as a first attempt by
+         * a new user, with no way afterwards to relate it to the identity the client meant.
+         *
+         * This is deliberately a distinct outcome from [Refused] so the caller can DEFER: hold the
+         * attempt and resume when the account becomes knowable, replaying the same persisted id.
+         * It must never be resolved by a timeout that ends in a send -- that is the bypass with a
+         * delay in front of it.
+         */
+        data object Deferred : Result
     }
 
     /**
@@ -146,6 +161,16 @@ class CaptureAllowanceProvisioner(
     @Volatile
     var lastComposedOwner: CaptureAllowanceOwner? = null
         internal set
+
+    /**
+     * True between a proven ledger exhaustion and the next successful provision.
+     *
+     * The owner is cleared as part of advancing, so this is the surviving evidence that the last
+     * batch was spent. [composedOwnerExhausted] reports it, because the gate must be able to ask
+     * "is there anything left to refill?" BEFORE provision() gets a chance to clear the answer.
+     */
+    @Volatile
+    private var spentSinceLastProvision = false
 
     /** The allocation identity [lastComposedOwner] was composed under, for compare-and-swap. */
     @Volatile
@@ -174,7 +199,7 @@ class CaptureAllowanceProvisioner(
      * the engine uses to advance the allocation instead of retrying.
      */
     fun composedOwnerExhausted(): Boolean = synchronized(prepareLock) {
-        lastComposedOwner?.isExhausted() == true
+        spentSinceLastProvision || lastComposedOwner?.isExhausted() == true
     }
 
     /** True when the composed grant has passed its own `valid_for_ms`; a refill cannot help. */
@@ -203,6 +228,10 @@ class CaptureAllowanceProvisioner(
 
     suspend fun provision(): Result {
         val cred = credential() ?: return Result.Refused(REASON_NO_CREDENTIAL)
+        // UNKNOWN ACCOUNT DEFERS, IT DOES NOT SEND (spec e2cd78d8, cloud 8d1ffaaf). A cold cache
+        // is a readiness condition, not permission to present an unbound request. Note this is
+        // checked before ANY durable or transport work, so there is nothing to undo.
+        if (cred.accountId.isBlank()) return Result.Deferred
         val attemptId = UUID.randomUUID().toString()
         // Announce THIS attempt before any transport work: a newer attempt supersedes any
         // older in-flight one at install time.
@@ -225,10 +254,20 @@ class CaptureAllowanceProvisioner(
                 // b2f0df12): the proof was computed from a SPENT owner, so it may only advance the
                 // identity that owner was composed under -- never whatever is current now, which
                 // could be a newer allocation this stale proof would otherwise delete.
-                if (spentIdentity != null) st.advance(spentIdentity)
+                // AN UNCONFIRMED ADVANCE STOPS THE ATTEMPT (reviewer 6a6eec2a, c690ad32). If the
+                // retirement could not be made durable, presenting a replacement would allocate
+                // against a state nobody can vouch for.
+                if (spentIdentity != null && !st.advance(spentIdentity)) {
+                    return Result.Refused(REASON_IDENTITY_AMBIGUOUS)
+                }
                 lastComposedOwner = null
                 currentGrant = null
                 composedIdentity = null
+                // RECORD the spend so the next decision can see it. provision() clears the owner
+                // above, and the gate runs BEFORE provision() -- so without this the very state
+                // that justifies asking the server is erased one step before it is consulted, and
+                // the boundary utterance is refused again (reviewer 6a6eec2a gap 3).
+                spentSinceLastProvision = true
             }
         }
         // ACCOUNT PER DECISION, not captured at construction (reviewer 7c220c1d #2): the credential
@@ -273,7 +312,11 @@ class CaptureAllowanceProvisioner(
                 store == null || identity == null -> Unit
 
                 // 410: the server's window moved. One round trip, no charge.
-                response.code() == 410 -> store.advance(identity)
+                // `410` ADVANCES ONLY IF THE RETIREMENT IS DURABLE (reviewer c690ad32): an
+                // unconfirmed advance must refuse, not report success and mint a replacement.
+                response.code() == 410 -> if (!store.advance(identity)) {
+                    return Result.Refused(REASON_IDENTITY_AMBIGUOUS)
+                }
 
                 // 409: we presented an id whose stored epoch differs from the one we sent. Since
                 // the epoch travels WITH the id, that can only mean the id survived an enrollment
@@ -384,6 +427,7 @@ class CaptureAllowanceProvisioner(
                     lastComposedOwner = owner
                     currentGrant = grant
                     composedIdentity = identity
+                    spentSinceLastProvision = false
                 }
                 if (!installAuthority(owner, cred.generation, cred.session, cred.enrollmentEpoch, attemptId, grant, publish)) {
                     return Result.Refused(REASON_IDENTITY_CHANGED)
@@ -403,6 +447,9 @@ class CaptureAllowanceProvisioner(
 
     companion object {
         const val REASON_NO_CREDENTIAL = "allowance_no_credential"
+
+        /** Reported when a deferral is eventually abandoned; never used to justify a send. */
+        const val REASON_DEFERRED = "allowance_deferred_account_unknown"
         const val REASON_EPOCH_TOO_LONG = CaptureAllowanceBatch.REASON_EPOCH_TOO_LONG
         const val REASON_TRANSPORT = "allowance_transport_failed"
         const val REASON_MISMATCH = "allowance_response_mismatch"

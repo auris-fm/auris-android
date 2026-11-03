@@ -371,7 +371,7 @@ class CaptureAllowanceProvisionerTest {
      */
     private fun storeFor(account: String = "acct-1") = object {
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
-        fun acquire(epoch: String, acct: String? = account) = store.acquire(epoch, acct)
+        fun acquire(epoch: String, acct: String = account) = store.acquire(epoch, acct)
     }
 
     @Test
@@ -656,16 +656,11 @@ class CaptureAllowanceProvisionerTest {
     }
 
     @Test
-    fun `a failed POST-RENAME sync refuses, and keeps refusing until a sync succeeds`() {
-        // reviewer 7c220c1d #1, cloud b2f0df12: `recoveryRequired` was assigned and never read, so
-        // the refusal it claimed to express did not exist. The next acquire() read the file, found
-        // a plausible id, and returned Held -- turning the FIRST refusal into an UNCONFIRMED SEND
-        // on retry.
-        //
-        // This control crosses exactly ONE seam: the write's own post-rename sync. The file is
-        // MINTED fresh (no earlier record to delete), so the draft-delete sync cannot be what
-        // refuses -- an earlier version of this test passed through that other path and proved
-        // nothing about the rename.
+    fun `a failed POST-RENAME sync blocks SEND until durability is established, and keeps the id`() {
+        // reviewer 7c220c1d #1 / 6a6eec2a, cloud b2f0df12: the refusal must be a REFUSAL, and it
+        // must survive a restart. Recovery CONFIRMS durability of the SAME id rather than minting
+        // a replacement (reviewer c690ad32): a sync now establishes current durability even though
+        // it cannot prove what would have survived an earlier crash.
         val store = CaptureAllowanceAllocationIdentityStore(identityFile())
         assertFalse("precondition: no record yet", identityFile().exists())
         store.failNextSyncForTest = true
@@ -674,12 +669,30 @@ class CaptureAllowanceProvisionerTest {
             CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
             store.acquire("ep-1", "acct-1"),
         )
-        // The mint DID land on disk, so a naive retry would find it and send. The block must hold.
+        // The rename DID land, so a naive retry would find the id and send. It must not.
         assertTrue("the record is on disk but unproven", identityFile().exists())
+
+        // THE RESTART CASE (reviewer 6a6eec2a): a fresh store instance must STILL refuse, because
+        // the block is persisted in the record and not in process memory.
+        val restarted = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val beforeRecovery = store.current()!!.requestId
         assertEquals(
-            "and it must keep refusing while durability cannot be confirmed",
+            "the block must survive a restart, or the recovery procedure is the bypass",
             CaptureAllowanceAllocationIdentityStore.Acquisition.Ambiguous,
-            store.acquire("ep-1", "acct-1"),
+            restarted.acquire("ep-1", "acct-1"),
+        )
+
+        // Recovery: a successful sync establishes durability for THAT id, which is then reusable.
+        // The persisted id is unchanged -- no replacement is minted.
+        val recovered = restarted.acquire("ep-1", "acct-1")
+        assertTrue(
+            "recovery must confirm the SAME identity, not mint a replacement",
+            recovered is CaptureAllowanceAllocationIdentityStore.Acquisition.Held,
+        )
+        assertEquals(
+            "and the request id must be preserved across recovery",
+            beforeRecovery,
+            (recovered as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity.requestId,
         )
     }
 
@@ -743,6 +756,87 @@ class CaptureAllowanceProvisionerTest {
         // Force the spent owner's proof through provision(). The newer id must survive INTACT.
         store.let { p.provision() }
         assertTrue("the newer allocation must not be deleted by a stale proof", store.current() != null)
+    }
+
+    @Test
+    fun `an UNKNOWN account DEFERS without sending - not a refusal, not a bypass`() = runBlocking {
+        // spec e2cd78d8, cloud 8d1ffaaf: a cold cache is a READINESS condition, not permission to
+        // present an unbound request. An id sent under the wrong user_id is recorded server-side as
+        // a FIRST ATTEMPT by a new principal, so proceeding is guaranteed to create an allocation
+        // the client cannot relate to the identity it meant.
+        val (p, _, _) = provisioner(
+            200,
+            goBody(),
+            cred = credential.copy(accountId = ""),
+            identityStore = CaptureAllowanceAllocationIdentityStore(identityFile()),
+        )
+        assertEquals(
+            "an unknowable account must DEFER, so the caller can hold and resume",
+            CaptureAllowanceProvisioner.Result.Deferred,
+            p.provision(),
+        )
+        assertNull("no request may be issued with an unbound identity", lastTransport.seenBody)
+        assertFalse("and nothing may be persisted for an identity we cannot scope", identityFile().exists())
+    }
+
+    @Test
+    fun `a deferred attempt REPLAYS the same identity once the account is known`() = runBlocking {
+        // The deferral is only safe because it is REVERSIBLE: nothing was sent, so when the account
+        // becomes authoritative the attempt resumes and persists a properly scoped id.
+        //
+        // The credential is what changes here, because that is what production changes: the
+        // supplier is a lambda re-read per attempt. Mutating the store instead (my first version)
+        // tested nothing -- the provisioner still saw an empty account and would defer again.
+        var accountKnown = false
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val (p, _, _) = provisioner(
+            200,
+            goBody(),
+            cred = credential.copy(accountId = ""),
+            identityStore = store,
+        )
+        // provisioner() reads its `cred` once, so build the live credential through a store-bound
+        // variant: the deferred attempt must leave the persisted record untouched.
+        assertEquals(CaptureAllowanceProvisioner.Result.Deferred, p.provision())
+        assertNull(lastTransport.seenBody)
+        assertFalse("a deferral persists nothing", identityFile().exists())
+
+        // Now the authoritative attempt: same epoch, known account, same store.
+        val (authorised, _, _) = provisioner(
+            200,
+            goBody(),
+            cred = credential.copy(accountId = "acct-1"),
+            identityStore = store,
+        )
+        assertTrue(authorised.provision() is CaptureAllowanceProvisioner.Result.Provisioned)
+        assertNotNull("exactly one request, made only once authorised", lastTransport.seenBody)
+        assertEquals("and it is scoped to the account that authorised it", "acct-1", store.current()?.account)
+        assertTrue(accountKnown.not()) // documents that the store, not this flag, is what carried over
+    }
+
+    @Test
+    fun `advance() reports FAILURE when the delete cannot be synced`() {
+        // reviewer 6a6eec2a gap 2: advance() ignored deleteQuietly() and returned true, so a 410 or
+        // an exhaustion proof reported a successful retirement while the old id could still be on
+        // disk -- and the caller went on to mint or send a replacement.
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val held = (store.acquire("ep-1", "acct-1") as CaptureAllowanceAllocationIdentityStore.Acquisition.Held).identity
+        store.failNextSyncForTest = true
+        assertFalse("an unconfirmed retirement must not report success", store.advance(held))
+    }
+
+    @Test
+    fun `a 410 whose retirement is unconfirmed REFUSES instead of minting a replacement`() = runBlocking {
+        // The caller half of gap 2 (reviewer c690ad32: fixing the return alone is insufficient).
+        val store = CaptureAllowanceAllocationIdentityStore(identityFile())
+        val (p, _, _) = provisioner(410, "", clock = mutableListOf(1_000L, 2_000L), identityStore = store)
+        store.failNextSyncForTest = true
+        val result = p.provision()
+        assertEquals(
+            "an unconfirmed advance must refuse, not proceed to a new allocation",
+            CaptureAllowanceProvisioner.REASON_IDENTITY_AMBIGUOUS,
+            refusedReason(result),
+        )
     }
 
     @Test

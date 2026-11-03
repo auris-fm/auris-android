@@ -152,4 +152,13 @@ sealed interface AllowanceProvisioning {
     data object Unavailable : AllowanceProvisioning
 
     data object TestOnly : AllowanceProvisioning
+
+    /**
+     * PRODUCTION provisioning authority (spec 746cb082 ruling): a VALIDATED server-issued
+     * capture-allowance batch document (CaptureAllowanceBatch). The batch identity keys the
+     * ledger area and the ledger binding; the server day-window id is the SHARED accounting
+     * window written into genesis. Lost ledger burns the batch — no local re-establishment
+     * without a fresh server grant, and refresh never resets usage (no refunds).
+     */
+    data class ServerIssued(val batchId: String, val windowId: String) : AllowanceProvisioning
 }

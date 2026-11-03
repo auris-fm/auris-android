@@ -204,6 +204,8 @@ open class SyncAccountManagerImpl @Inject constructor(
         true
     }
 
+    override fun <T> credentialTransaction(block: () -> T): T = synchronized(credentialWriteLock) { block() }
+
     override fun <T> transaction(block: () -> T): T = underCollectionNesting {
         reconcileLocked()
         block()

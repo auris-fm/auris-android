@@ -32,6 +32,10 @@ class UploadIdentityAuthorityTest {
         @Volatile var snap = AuthoritySnapshot(startAccount, startSession, startSession, AccessToken(startBearer))
         override fun authoritySnapshot(): AuthoritySnapshot = snap
         override fun sessionGeneration(): Long = snap.session
+
+        // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+        override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
         override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
         override fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = snap
         override fun beginRefresh(observed: AuthoritySnapshot): RefreshLease? = null

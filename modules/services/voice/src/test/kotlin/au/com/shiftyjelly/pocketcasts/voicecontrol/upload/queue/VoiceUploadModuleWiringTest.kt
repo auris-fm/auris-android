@@ -51,6 +51,10 @@ class VoiceUploadModuleWiringTest {
 
         override fun authoritySnapshot(): au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot = snap
         override fun sessionGeneration(): Long = snap.session
+
+        // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+        override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
         override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
         override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
         override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot) = null

@@ -358,6 +358,10 @@ class LoopbackHostDriverTest {
         @Volatile var snap = AuthoritySnapshot("driver@test", 1L, 1L, au.com.shiftyjelly.pocketcasts.preferences.AccessToken(fixtureBearerValue()))
         override fun authoritySnapshot() = snap
         override fun sessionGeneration() = snap.session
+
+        // The mirror-clear exchange class (reviewer 82a9958d): credential lock only.
+        override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
         override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
         override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
         override fun beginRefresh(observed: AuthoritySnapshot) = null

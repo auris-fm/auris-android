@@ -38,6 +38,8 @@ class CollectionFenceContractTest {
         @Volatile var snap = AuthoritySnapshot(accountName = "a@b.c", session = 1L, credential = 1L, token = null)
         override fun authoritySnapshot(): AuthoritySnapshot = snap
         override fun sessionGeneration(): Long = snap.session
+        override fun <T> credentialTransaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
         override fun <T> transaction(block: () -> T): T = block()
         override fun beginRefresh(observed: AuthoritySnapshot): RefreshLease? = null
         override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = false

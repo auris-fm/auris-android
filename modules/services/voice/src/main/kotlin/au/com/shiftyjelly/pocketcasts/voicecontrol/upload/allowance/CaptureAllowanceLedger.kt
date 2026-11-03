@@ -193,7 +193,7 @@ class CaptureAllowanceLedger(
                 }
 
                 LedgerState.Fresh -> {
-                    if (provisioning !is AllowanceProvisioning.TestOnly) {
+                    if (provisioning !is AllowanceProvisioning.TestOnly && provisioning !is AllowanceProvisioning.ServerIssued) {
                         // An empty area proves nothing about whether accounting existed.
                         closed = true
                         ChargeOutcome.REFUSED

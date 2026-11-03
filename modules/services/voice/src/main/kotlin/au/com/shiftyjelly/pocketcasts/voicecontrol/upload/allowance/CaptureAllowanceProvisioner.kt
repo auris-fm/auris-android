@@ -83,6 +83,12 @@ class CaptureAllowanceProvisioner(
      */
     private val identityStore: CaptureAllowanceAllocationIdentityStore? = null,
     /**
+     * Invoked on a `409 request_conflict` (cloud bcc9a42a). This is a CLIENT BUG REPORT, not a
+     * transient: it means a persisted id outlived the enrollment epoch it was minted under. The
+     * production wiring logs loudly here; silence would hide the state-machine bug.
+     */
+    private val identityConflict: () -> Unit = {},
+    /**
      * The server's accounting day for an attempt, as the CLIENT reads it. Used only to notice
      * that a persisted identity belongs to a different day and must not be reused (that reuse
      * would be a server `410`); it never advances the identity by itself -- only a `410` does.
@@ -159,7 +165,7 @@ class CaptureAllowanceProvisioner(
         // PERSIST BEFORE SENDING (reviewer 3ba1e605): the id that goes on the wire is the one the
         // next attempt will reuse. A crash between here and the response leaves a persisted id
         // whose re-send is a replay -- never a second allocation.
-        val identity = identityStore?.acquire(cred.enrollmentEpoch, accountingDay())
+        val identity = identityStore?.acquire(cred.enrollmentEpoch)
         val requestId = identity?.requestId?.let(UUID::fromString) ?: UUID.randomUUID()
         val body = try {
             CaptureAllowanceBatch.requestJson(requestId, cred.enrollmentEpoch)
@@ -180,21 +186,31 @@ class CaptureAllowanceProvisioner(
         if (response.code() != 200) {
             responseBody?.close()
             errorBody?.close()
-            // ADVANCEMENT IS THE SERVER'S CALL (reviewer d6171776, cloud a42eea42): only a
-            // server-confirmed expiry retires the persisted id. 429 RETAINS it -- retrying with
-            // a fresh id achieves the same refusal and stores another row; a client-side
-            // calendar change is never proof of anything.
+            // ADVANCEMENT IS THE SERVER'S CALL (reviewer d6171776, cloud a42eea42/bcc9a42a).
+            // A client-side calendar change is never proof of anything: the accounting day is
+            // server state and is deliberately not persisted, so a day rollover costs one `410`
+            // round trip rather than a comparison against this device's clock.
             val store = identityStore
             when {
+                // Durability disabled by the caller (controls only).
                 store == null -> Unit
 
-                // durability disabled by the caller (controls only)
+                // 410: the server's window moved. One round trip, no charge.
                 response.code() == 410 -> store.advance()
 
-                // 429 RETAINS the id: retrying with a fresh one refuses the same and stores a row.
-                response.code() == 429 -> if (identity != null) store.retainForDay(identity)
+                // 409: we presented an id whose stored epoch differs from the one we sent. Since
+                // the epoch travels WITH the id, that can only mean the id survived an enrollment
+                // change -- a client state-machine bug. Discard and mint, and say so loudly: a
+                // silent retry would hide the bug that produced it (cloud bcc9a42a).
+                response.code() == 409 -> {
+                    store.advance()
+                    identityConflict()
+                }
 
-                // 503 retries the SAME id; 4xx are terminal for that id and advance nothing.
+                // 429 RETAINS the id: a fresh one refuses identically and stores another row.
+                response.code() == 429 -> if (identity != null) store.retain(identity)
+
+                // 503 retries the SAME id; other 4xx are terminal for that id, no advance.
                 else -> Unit
             }
             return Result.Refused("http_${response.code()}")

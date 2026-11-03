@@ -40,27 +40,35 @@ class CaptureAllowanceAllocationIdentityStore(
     }
 
     /**
-     * Returns the identity to use for an attempt against [enrollmentEpoch] and [accountingDay]:
-     * the persisted one when it matches, a fresh one otherwise (a changed epoch or a new day
-     * always starts a new identity). Persisted BEFORE the caller sends anything.
+     * Returns the identity to use for an attempt against [enrollmentEpoch]: the persisted one when
+     * its epoch still matches, a fresh one otherwise. Persisted BEFORE the caller sends anything.
+     *
+     * THE DAY IS DELIBERATELY NOT PART OF THE KEY (cloud bcc9a42a). The accounting day is
+     * server-side state; persisting it invites comparing it against this device's clock, and a
+     * device calendar must never decide advancement. What moves the window is the server's `410`,
+     * which [advance] honours. A persisted id from another day is therefore reused, answers
+     * `410`, and is advanced then -- one round trip, no charge, no client-side calendar.
      */
-    fun acquire(enrollmentEpoch: String, accountingDay: String): Identity = synchronized(lock) {
+    fun acquire(enrollmentEpoch: String): Identity = synchronized(lock) {
         val existing = current()
-        if (existing != null &&
-            existing.enrollmentEpoch == enrollmentEpoch &&
-            existing.accountingDay == accountingDay
-        ) {
-            // A RETAINED id is returned too: after a 429 the day's allocation is gone, and
-            // minting a fresh id would refuse identically while storing another server row
-            // (cloud a42eea42). Only a 410 -- or a new epoch/day -- replaces it.
-            return existing
+        if (existing != null) {
+            if (existing.enrollmentEpoch == enrollmentEpoch) {
+                // A RETAINED id is returned too: after a 429 the allocation is gone, and minting a
+                // fresh id would refuse identically while storing another server row (cloud
+                // a42eea42). Only a 410 -- or a new enrollment epoch -- replaces it.
+                return existing
+            }
+            // A DIFFERENT EPOCH: the persisted id now belongs to an enrollment that no longer
+            // exists, and reusing it can only produce a 409 (cloud bcc9a42a). Discard and mint.
+            file.delete()
         }
-        IdentityEncoding.encode(file, Identity(UUID.randomUUID().toString(), enrollmentEpoch, accountingDay))
+        IdentityEncoding.encode(file, Identity(UUID.randomUUID().toString(), enrollmentEpoch))
     }
 
     /**
      * ADVANCEMENT, and the only place the identity changes on the server's word: `410` (window
-     * expired) or proven local batch exhaustion. The next [acquire] mints a new id.
+     * expired) or `409` (the persisted id was presented with an epoch it no longer belongs to --
+     * a client state-machine bug worth logging loudly, never a transient to retry).
      */
     fun advance() = synchronized(lock) {
         file.delete()
@@ -72,7 +80,7 @@ class CaptureAllowanceAllocationIdentityStore(
      * `429`: the day's allocation is gone. The id is RETAINED so the client's refusal stays
      * observable and no new rows are created; only a server `410` or a new day advances it.
      */
-    fun retainForDay(identity: Identity) = synchronized(lock) {
+    fun retain(identity: Identity) = synchronized(lock) {
         IdentityEncoding.encode(file, identity.copy(retired = true))
     }
 
@@ -81,7 +89,6 @@ class CaptureAllowanceAllocationIdentityStore(
     data class Identity(
         val requestId: String,
         val enrollmentEpoch: String,
-        val accountingDay: String,
         val retired: Boolean = false,
     ) {
         companion object {
@@ -102,7 +109,6 @@ private object IdentityEncoding {
             "$VERSION\n" +
                 "${identity.requestId}\n" +
                 "${identity.enrollmentEpoch}\n" +
-                "${identity.accountingDay}\n" +
                 "${identity.retired}\n",
         )
         // ATOMIC REPLACE: the rename is the commit point, so a crash never leaves a half-written
@@ -116,14 +122,13 @@ private object IdentityEncoding {
 
     fun decode(text: String): CaptureAllowanceAllocationIdentityStore.Identity? {
         val lines = text.lines()
-        if (lines.size < 5 || lines[0] != VERSION) return null
+        if (lines.size < 4 || lines[0] != VERSION) return null
         val id = lines[1]
         val epoch = lines[2]
-        val day = lines[3]
-        val retired = lines[4].toBooleanStrictOrNull() ?: return null
+        val retired = lines[3].toBooleanStrictOrNull() ?: return null
         // The id must be a UUID: anything else could not have been sent by this client.
         if (runCatching { UUID.fromString(id) }.isFailure) return null
-        if (epoch.isEmpty() || day.isEmpty()) return null
-        return CaptureAllowanceAllocationIdentityStore.Identity(id, epoch, day, retired)
+        if (epoch.isEmpty()) return null
+        return CaptureAllowanceAllocationIdentityStore.Identity(id, epoch, retired)
     }
 }

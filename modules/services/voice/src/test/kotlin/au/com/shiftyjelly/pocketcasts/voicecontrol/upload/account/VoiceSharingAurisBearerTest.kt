@@ -46,7 +46,7 @@ class VoiceSharingAurisBearerTest {
      * An Auris provider whose current token is set by the test. It records calls so the controls
      * can tell "asked the Auris provider" from "reused some other mirror".
      */
-    private class FakeAurisToken(var token: String?) : CloudTokenProviding {
+    private class FakeAurisToken(var token: String?) : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
         val currentCalls = mutableListOf<Unit>()
         val refreshCalls = mutableListOf<Unit>()
         override suspend fun currentToken(): String? {
@@ -54,6 +54,7 @@ class VoiceSharingAurisBearerTest {
             return token
         }
 
+        override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(token)
         override suspend fun refreshToken() {
             refreshCalls += Unit
         }
@@ -85,7 +86,7 @@ class VoiceSharingAurisBearerTest {
     private val ownerInvalidations: MutableList<AuthoritySnapshot> = java.util.Collections.synchronizedList(mutableListOf())
     private val aurisRefusals: MutableList<Unit> = java.util.Collections.synchronizedList(mutableListOf())
 
-    private fun operations(auris: CloudTokenProviding): VoiceSharingAccountOperations {
+    private fun operations(auris: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding): VoiceSharingAccountOperations {
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         return VoiceSharingAccountOperations(
             api = api,

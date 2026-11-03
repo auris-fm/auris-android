@@ -19,6 +19,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -81,6 +82,9 @@ class VoiceSharingPolicyProviderTest {
     private var throwFirstInfoRead = false
     private var infoReads = 0
 
+    /** Bounded count of real fetches requested, used to prove an extra refresh happened (or not). */
+    private var fetchCount = 0
+
     private fun restubWithFetchGate(gate: JvmTask<Unit>?) {
         fetchGateOverride = gate
         restub()
@@ -117,7 +121,14 @@ class VoiceSharingPolicyProviderTest {
             org.mockito.Mockito.mock(com.google.firebase.remoteconfig.ConfigUpdateListenerRegistration::class.java)
         }
 
-        whenever(config.fetch()).thenAnswer {
+        // fetchSuspending() dials the NO-ARG fetch(): an unstubbed overload returns null and its
+        // addOnCompleteListener NPE escapes as an uncaught coroutine exception that the NEXT
+        // runTest in this JVM reports (the VoiceSharingSettingsViewModelTest flake). Stub BOTH
+        // overloads; per-test fetch(0L) scripts below override the long form only.
+        whenever(config.fetch()).thenAnswer { JvmTask(Result.success(Unit)) }
+
+        whenever(config.fetch(0L)).thenAnswer {
+            fetchCount++
             fetchGateOverride?.let { return@thenAnswer it }
             if (fetchOutcome == null) {
                 JvmTask(Result.failure(IllegalStateException("scripted fetch failure")))
@@ -166,6 +177,97 @@ class VoiceSharingPolicyProviderTest {
         fetchAdvancesBookkeeping = advances
         runBlocking { provider.refresh() }
         fetchAdvancesBookkeeping = true
+    }
+
+    @Test
+    fun `lease expiry disables then renews itself - consent surface survives without a capture driver`() {
+        // On-device evidence (2026-11-03 16:02:46 → 16:17:46): the policy enabled at init decayed
+        // EXACTLY at LEASE_MS and silently disabled, because before the first consented capture
+        // nothing calls refresh() — the consent surface could never survive long enough to be
+        // used. The expiry wake must disable AND drive a renewal; a healthy fetch re-enables.
+        val provider = provider()
+        assertTrue(provider.snapshot().enabled)
+
+        val seen = mutableListOf<String>()
+        runBlocking {
+            provider.policy.test {
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
+                dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 500)
+                dispatcher.scheduler.runCurrent()
+                seen += if (awaitItem().enabled) "enabled" else "disabled" // expiry disable
+                seen += if (awaitItem().enabled) "enabled" else "disabled" // renewal re-enables
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+        org.junit.Assert.assertEquals(listOf("enabled", "disabled", "enabled"), seen)
+        assertTrue(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `account first becoming readable drives ONE extra refresh - cold start after login`() {
+        // @spec 69630b93: on Android the launch exchange runs from onCreate, so a cold start that
+        // follows a login can run it BEFORE the account is readable. Nothing then re-ran it and the
+        // lease stayed disabled with no capture driver. First readability must trigger exactly one
+        // extra refresh; repeated signals must not spin, and a null snapshot is "not readable yet".
+        val provider = provider()
+        assertTrue(provider.snapshot().enabled)
+        val baselineFetches = fetchCount
+        runBlocking {
+            assertFalse("not readable yet must not refresh", provider.refreshOnAccountReadable(null, 0L))
+            assertEquals(baselineFetches, fetchCount)
+
+            assertTrue("first readability refreshes", provider.refreshOnAccountReadable("merlinran", 1L))
+            assertEquals(baselineFetches + 1, fetchCount)
+
+            assertFalse("a repeat signal does NOT refresh again", provider.refreshOnAccountReadable("merlinran", 1L))
+            assertFalse("and neither does a third", provider.refreshOnAccountReadable("merlinran", 1L))
+            assertEquals(baselineFetches + 1, fetchCount)
+        }
+    }
+
+    @Test
+    fun `readability refresh is identity-scoped - new session for the SAME account refreshes too`() {
+        // @spec f5575767 + reviewer 4ce3ba23: dedupe repeats for the SAME owner identity, but never
+        // suppress a refresh after a real account OR session change. A name-only key is wrong:
+        // signing out and back into the same account, and a same-account session rotation, are both
+        // NEW authority for which policy must be reacquired.
+        val provider = provider()
+        val baselineFetches = fetchCount
+        runBlocking {
+            assertTrue(provider.refreshOnAccountReadable("account-a", 1L))
+            assertEquals(baselineFetches + 1, fetchCount)
+
+            assertFalse("same owner identity again: no extra refresh", provider.refreshOnAccountReadable("account-a", 1L))
+            assertEquals(baselineFetches + 1, fetchCount)
+
+            assertTrue("a DIFFERENT account is a new owner", provider.refreshOnAccountReadable("account-b", 1L))
+            assertEquals(baselineFetches + 2, fetchCount)
+
+            assertTrue("SAME account, NEW session: still a new owner", provider.refreshOnAccountReadable("account-b", 2L))
+            assertEquals(baselineFetches + 3, fetchCount)
+
+            assertTrue("sign-out then back into the same account and session: refreshes again", provider.refreshOnAccountReadable("account-a", 1L))
+            assertEquals(baselineFetches + 4, fetchCount)
+
+            assertFalse("dedupe resumes for that identity", provider.refreshOnAccountReadable("account-a", 1L))
+            assertEquals(baselineFetches + 4, fetchCount)
+        }
+    }
+
+    @Test
+    fun `every refresh requests an unthrottled fetch (interval 0) - freshness gate is satisfiable`() {
+        // On-device evidence (2026-11-03): FirebaseRemoteConfig.fetch() (default interval)
+        // THROTTLED on repeated refreshes - lastFetchStatus != SUCCESS and fetchTimeMillis never
+        // advanced - so the provider's freshness gate disabled every time and the consent
+        // surface never appeared. The provider must therefore always request interval 0 (a real
+        // network fetch), never the throttled default.
+        val config = config
+        val provider = provider()
+        refresh(provider)
+        refresh(provider)
+        org.mockito.Mockito.verify(config, org.mockito.Mockito.atLeast(2)).fetch(0L)
+        assertTrue(provider.snapshot().enabled)
     }
 
     @Test
@@ -234,7 +336,7 @@ class VoiceSharingPolicyProviderTest {
         assertTrue(provider.snapshot().enabled) // init: enabled, timer A due at the init lease
 
         val fetchGate = JvmTaskSource<Boolean>()
-        whenever(config.fetch()).thenAnswer { fetchGate.task } // park renewal B inside its fetch
+        whenever(config.fetch(0L)).thenAnswer { fetchGate.task } // park renewal B inside its fetch
 
         val seen = mutableListOf<String>()
         runBlocking {
@@ -264,7 +366,7 @@ class VoiceSharingPolicyProviderTest {
         val provider = provider(refreshTimeoutMs = 500)
         assertTrue(provider.snapshot().enabled)
         val fetchGate = JvmTaskSource<Boolean>()
-        whenever(config.fetch()).thenAnswer { fetchGate.task } // renewal B never completes
+        whenever(config.fetch(0L)).thenAnswer { fetchGate.task } // renewal B never completes
 
         val seen = mutableListOf<String>()
         runBlocking {
@@ -318,7 +420,7 @@ class VoiceSharingPolicyProviderTest {
     @Test
     fun `pending fetch task hits the whole-refresh deadline and fails closed`() {
         val fetchGate = JvmTaskSource<Boolean>()
-        whenever(config.fetch()).thenAnswer { fetchGate.task }
+        whenever(config.fetch(0L)).thenAnswer { fetchGate.task }
         val provider = provider(refreshTimeoutMs = 50)
         val result = runBlocking { provider.refresh() }
         assertFalse(result.enabled)
@@ -344,7 +446,7 @@ class VoiceSharingPolicyProviderTest {
         val fetchGate = JvmTaskSource<Boolean>()
         val firstExplicitFetch = java.util.concurrent.atomic.AtomicBoolean(true)
         val aReachedFetch = java.util.concurrent.CountDownLatch(1)
-        whenever(config.fetch()).thenAnswer {
+        whenever(config.fetch(0L)).thenAnswer {
             if (firstExplicitFetch.compareAndSet(true, false)) {
                 aReachedFetch.countDown()
                 fetchGate.task
@@ -368,7 +470,7 @@ class VoiceSharingPolicyProviderTest {
         org.junit.Assert.assertTrue("A never reached its fetch", aReachedFetch.await(2, java.util.concurrent.TimeUnit.SECONDS))
 
         // Refresh B on THIS thread, same instance: fetch fails → B is the newer disabled.
-        whenever(config.fetch()).thenAnswer { JvmTask(Result.failure(IllegalStateException("scripted fetch failure"))) }
+        whenever(config.fetch(0L)).thenAnswer { JvmTask(Result.failure(IllegalStateException("scripted fetch failure"))) }
         val resultB = runBlocking { provider.refresh() }
         assertFalse(resultB.enabled)
 

@@ -184,6 +184,7 @@ object VoiceUploadModule {
     @Singleton
     fun provideUploadTrigger(
         assembly: ContributionUploadAssembly,
+        aurisToken: AurisTokenProvider,
         store: ContributionStore,
         accountStartup: VoiceSharingAccountStartup,
         policyProvider: VoiceSharingPolicyProvider,
@@ -195,10 +196,11 @@ object VoiceUploadModule {
         // once inside the owner transaction; the watcher subscribes and cancels from the coherent
         // snapshot read at each event. Same-epoch account/session moves enter the mismatch set.
         return UploadTrigger(
-            assembly,
-            scope,
-            POLL_INTERVAL_MS,
-            IdentityRevocationWatchers.production(
+            assembly = assembly,
+            scope = scope,
+            intervalMs = POLL_INTERVAL_MS,
+            acquireCredential = { aurisToken.currentToken() },
+            identityRevocationWatcher = IdentityRevocationWatchers.production(
                 binding = accountStartup.binding,
                 accountState = accountStartup.state,
                 snapshot = { accountStartup.authoritySnapshot() },
@@ -412,6 +414,12 @@ class UploadTrigger(
      * provider nobody calls (reviewer 54635caa).
      */
     private val publishTrigger: RetentionPublishTrigger? = null,
+    /**
+     * CREDENTIAL ACQUISITION PER PASS (reviewer e8ed131245/57246e46): runs in the loop coroutine
+     * BEFORE each poll, so the fail-closed synchronous read the upload path consumes finds a
+     * token acquired for THIS pass. Null = no acquisition (composition controls only).
+     */
+    private val acquireCredential: (suspend () -> Unit)? = null,
 ) {
     @Volatile
     private var started = false
@@ -427,6 +435,7 @@ class UploadTrigger(
         scope.launch {
             while (true) {
                 pollsStarted.incrementAndGet()
+                runCatching { acquireCredential?.invoke() }
                 runCatching { assembly.poll() }
                 delay(intervalMs)
             }

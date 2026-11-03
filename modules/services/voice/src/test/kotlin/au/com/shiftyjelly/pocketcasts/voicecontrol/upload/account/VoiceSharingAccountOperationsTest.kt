@@ -1127,6 +1127,8 @@ class VoiceSharingAccountTransitionAtomicityTest {
  * existing control keeps its meaning. The bearer SOURCE is asserted in
  * [VoiceSharingAurisBearerTest], where the two values are deliberately different.
  */
-internal fun ownerToken(owner: CredentialOwnershipOwner): CloudTokenProviding = object : CloudTokenProviding {
+internal fun ownerToken(owner: CredentialOwnershipOwner): au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
     override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
+    @Suppress("RemoveRedundantCallsOfConversionMethods")
+    override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
 }

@@ -149,6 +149,7 @@ class VoiceUploadCompositionPathTest {
             )
             val trigger = VoiceUploadModule.provideUploadTrigger(
                 assembly = assembly,
+                aurisToken = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.noEnvironmentAuris(),
                 store = store,
                 accountStartup = startup,
                 policyProvider = policy,

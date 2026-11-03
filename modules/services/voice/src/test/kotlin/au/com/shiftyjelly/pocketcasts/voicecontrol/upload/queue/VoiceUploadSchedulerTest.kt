@@ -136,7 +136,7 @@ class VoiceUploadSchedulerTest {
                 if (workerClassName != VoiceUploadDrainWorker::class.java.name) return null
                 // The MODULE seam, not a stand-in: VoiceUploadDrain is what production injects.
                 val drain = object : VoiceUploadDrain {
-                    override fun drainOnce() {
+                    override suspend fun drainOnce() {
                         drains += 1
                     }
                 }

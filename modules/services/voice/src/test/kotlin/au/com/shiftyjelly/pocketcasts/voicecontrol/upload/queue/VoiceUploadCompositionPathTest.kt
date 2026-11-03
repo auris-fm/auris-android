@@ -133,6 +133,7 @@ class VoiceUploadCompositionPathTest {
                 policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                aurisToken = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.noEnvironmentAuris(),
             )
             val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
             val producer = VoiceUploadModule.provideContributionCaptureProducer(
@@ -237,6 +238,8 @@ class VoiceUploadCompositionPathTest {
      */
     @Test
     fun `a valid receipt settles through the module-built assembly and an invalid one does not`() {
+        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
         var status = 500
         var body = ""
         val (server, hits) = loopback { status to body }
@@ -296,6 +299,7 @@ class VoiceUploadCompositionPathTest {
                 policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                aurisToken = aurisLive.provider,
             )
 
             // 1. INVALID receipt: nothing settles, the durable capture stays.
@@ -321,6 +325,7 @@ class VoiceUploadCompositionPathTest {
             )
             org.junit.Assert.assertNull("a VALIDATED receipt settles the entry", store.durableCapture(id))
         } finally {
+            aurisLive.shutdown()
             server.stop(0)
         }
     }
@@ -342,6 +347,8 @@ class VoiceUploadCompositionPathTest {
      */
     @Test
     fun `the joined engine-sink-trigger-producer path lands a durable record and settles it end to end`() {
+        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
         var status = 500
         var body = ""
         val (server, hits) = loopback { status to body }
@@ -366,6 +373,7 @@ class VoiceUploadCompositionPathTest {
                     policyProvider = policy,
                     accountStartup = startup,
                     context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                    aurisToken = aurisLive.provider,
                 )
                 status = 201
                 body = "{\"schema_version\":1,\"capture_id\":\"$captureId\",\"record_sha256\":\"${store.recordedDigest(captureId.toString())}\"," +
@@ -376,6 +384,7 @@ class VoiceUploadCompositionPathTest {
                 // The emitted bytes are the store's own, re-verified by the store before it serves them.
                 assertTrue("the emitted record must be the store's servable capture", emitted.bytes.isNotEmpty())
             } finally {
+                aurisLive.shutdown()
                 scope.cancel()
             }
         } finally {
@@ -392,6 +401,8 @@ class VoiceUploadCompositionPathTest {
      */
     @Test
     fun `drains never overlap an entry and deferred work resumes when the network gate opens`() {
+        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
         var status = 500
         var body = ""
         val release = java.util.concurrent.CountDownLatch(1)
@@ -438,6 +449,7 @@ class VoiceUploadCompositionPathTest {
                 policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                aurisToken = aurisLive.provider,
             )
             status = 201
             body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"deadbeef\",\"status\":\"accepted\"}"
@@ -470,6 +482,7 @@ class VoiceUploadCompositionPathTest {
                     store.stateAttemptsForTest(id),
                 )
             } finally {
+                aurisLive.shutdown()
                 inFlight.shutdownNow()
             }
 
@@ -501,6 +514,8 @@ class VoiceUploadCompositionPathTest {
      */
     @Test
     fun `a tightened upload_network gates the foreground drain per attempt`() {
+        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
         var status = 500
         var body = ""
         val (server, hits) = loopback { status to body }
@@ -550,6 +565,7 @@ class VoiceUploadCompositionPathTest {
                         au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.UNMETERED -> actualUnmetered
                     }
                 },
+                aurisToken = aurisLive.provider,
             )
             // Policy demands UNMETERED; the actual network is metered: DEFER, never send.
             status = 201
@@ -566,6 +582,7 @@ class VoiceUploadCompositionPathTest {
             assertTrue("the per-attempt gate opens with the actual network", hits.get() >= 1)
             org.junit.Assert.assertNull("the durable entry settled", store.durableCapture(id))
         } finally {
+            aurisLive.shutdown()
             server.stop(0)
         }
     }
@@ -581,6 +598,8 @@ class VoiceUploadCompositionPathTest {
      */
     @Test
     fun `the drain worker constructs through the worker factory path and runs the module drain`() {
+        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
         var status = 500
         var body = ""
         val (server, hits) = loopback { status to body }
@@ -622,9 +641,10 @@ class VoiceUploadCompositionPathTest {
                 policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                aurisToken = aurisLive.provider,
             )
             // THE MODULE DRAIN BINDING — the exact provider Hilt consumes.
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(assembly)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(assembly, aurisLive.provider)
             val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
             val worker = androidx.work.testing.TestListenableWorkerBuilder<VoiceUploadDrainWorker>(context)
                 .setWorkerFactory(object : androidx.work.WorkerFactory() {
@@ -645,6 +665,7 @@ class VoiceUploadCompositionPathTest {
             assertTrue("the worker's drain reached the transport", hits.get() >= 1)
             org.junit.Assert.assertNull("the worker's drain settled the durable entry", store.durableCapture(id))
         } finally {
+            aurisLive.shutdown()
             server.stop(0)
         }
     }

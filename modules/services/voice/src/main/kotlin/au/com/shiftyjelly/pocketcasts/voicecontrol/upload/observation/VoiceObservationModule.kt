@@ -93,6 +93,98 @@ object VoiceObservationModule {
     @Singleton
     fun provideCaptureAllowanceLifecycle(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle()
 
+    /**
+     * MINIMUM CONNECTED PATH (spec scope correction 7dcb3a53): the reviewed install fence over
+     * the REAL owner. The enrollment basis is derived from ONE session-tagged projection read
+     * plus the lease-evaluated policy — an enrolled ACTIVE membership with a matching epoch and
+     * a live policy; anything else is a null basis and the fence refuses fail-closed.
+     */
+    @Provides
+    @Singleton
+    fun provideCaptureAllowanceInstallFence(
+        accountStartup: VoiceSharingAccountStartup,
+        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
+        policyProvider: VoiceSharingPolicyProvider,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence(
+        ownership = accountStartup.ownerForHandoff(),
+        lifecycle = lifecycle,
+        enrollmentBasis = {
+            val tagged = accountStartup.state.taggedProjection.value
+            val projection = tagged.projection
+            if (projection == null ||
+                !projection.voiceSharingEnrolled ||
+                projection.withdrawalState != au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.ACTIVE ||
+                projection.enrollmentEpoch == null
+            ) {
+                null
+            } else {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence.EnrollmentBasis(
+                    enrollmentEpoch = projection.enrollmentEpoch,
+                    membershipActive = true,
+                    policyLive = policyProvider.snapshot().enabled,
+                )
+            }
+        },
+    )
+
+    /**
+     * MINIMUM CONNECTED PATH: the reviewed provisioner over the REAL transport (the transport
+     * interface IS the Retrofit contract), REAL owner snapshot (account, generation,
+     * session, epoch) with the AURIS credential as bearer, and the REAL install fence. Capture stays fail-closed until THIS path
+     * provisions a batch.
+     */
+    @Provides
+    @Singleton
+    fun provideCaptureAllowanceProvisioner(
+        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
+        @au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit retrofit: dagger.Lazy<retrofit2.Retrofit>,
+        aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider,
+        accountStartup: VoiceSharingAccountStartup,
+        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
+        fence: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner {
+        val transport = retrofit.get().create(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.CaptureAllowanceTransport::class.java,
+        )
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner(
+            api = transport,
+            credential = {
+                // Bearer from the AURIS credential (reviewer b702cd53): the allowance route, like the
+                // account route, verifies Auris-issued tokens only. The owner snapshot remains the
+                // session/identity FENCE (account, generation, session) but is NOT the bearer.
+                val aurisBearer = aurisToken.currentToken() ?: return@CaptureAllowanceProvisioner null
+                val snapshot = accountStartup.ownerForHandoff().authoritySnapshot()
+                val projection = accountStartup.state.projection.value
+                val epoch = projection?.enrollmentEpoch
+                val account = snapshot.accountName
+                if (account == null || epoch == null) {
+                    null
+                } else {
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Credential(
+                        bearer = aurisBearer,
+                        accountId = account,
+                        enrollmentEpoch = epoch,
+                        generation = snapshot.credential,
+                        session = snapshot.session,
+                    )
+                }
+            },
+            baseArea = java.io.File(context.noBackupFilesDir, "voice_allowance"),
+            lifecycle = lifecycle,
+            ceilings = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings(
+                maxDailyRecords = 52,
+                maxDailyBytes = 100L * 1024 * 1024,
+                maxClipBytes = 1_920_044L,
+                maxMetadataBytes = 65_536,
+            ),
+            elapsedMs = { android.os.SystemClock.elapsedRealtime() },
+            beginInstallAttempt = { attempt -> fence.beginAttempt(attempt) },
+            installAuthority = { owner, gen, session, epoch, attempt, grant, publish ->
+                fence.install(owner, gen, session, epoch, attempt, grant, publish)
+            },
+        )
+    }
+
     @Provides
     @Singleton
     fun provideCaptureAllowanceAuthority(

@@ -39,14 +39,15 @@ class VoiceUploadDrainWorker @AssistedInject constructor(
 
     override fun doWork(): Result {
         // DRAIN is the versioned seam; the worker never mutates the queue itself.
-        drain.drainOnce()
+        // doWork runs on a WorkManager background thread (no coroutine to deadlock).
+        kotlinx.coroutines.runBlocking { drain.drainOnce() }
         return Result.success()
     }
 }
 
 /** The one operation the scheduled worker performs: drain the durable queue once. */
 fun interface VoiceUploadDrain {
-    fun drainOnce()
+    suspend fun drainOnce()
 }
 
 /**

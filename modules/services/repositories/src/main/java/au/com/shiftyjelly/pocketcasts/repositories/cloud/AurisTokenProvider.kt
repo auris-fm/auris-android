@@ -53,6 +53,22 @@ class AurisTokenProvider(
 
     override suspend fun currentToken(): String? = token(force = false)
 
+    /**
+     * The FAIL-CLOSED synchronous read for non-suspending credential sites (the upload
+     * transport's per-attempt authorization): serves ONLY a fresh cached token for the
+     * CURRENT identity — never fetches, never serves a stale or cross-account token.
+     * Null means "acquire first" and callers must refuse, not fall back.
+     */
+    fun peekCurrentToken(): String? {
+        val identity = currentIdentity() ?: return null
+        // Mutex is coroutine-only; the peek never fetches, so monitor exclusion over the
+        // single cached reference is sufficient for a read that cannot block a fetch.
+        synchronized(this) {
+            val entry = cached?.takeIf { it.matches(identity) && it.isFresh() } ?: return null
+            return entry.tokens.accessToken
+        }
+    }
+
     private suspend fun token(force: Boolean): String? {
         // Read the credential first, before any return: a cached token that came
         // from a different credential belongs to a previous account (logout, or
@@ -125,7 +141,7 @@ class AurisTokenProvider(
      * Null when there is no configured environment or no credential, so both
      * failure modes collapse into "fail closed".
      */
-    private suspend fun currentIdentity(): String? {
+    private fun currentIdentity(): String? {
         val origin = clientProvider()?.origin?.takeIf { it.isNotBlank() } ?: return null
         val credential = credentialProvider.credential()?.takeIf { it.isNotBlank() } ?: return null
         return origin + IDENTITY_SEPARATOR + credentialDigest(credential)
@@ -206,7 +222,13 @@ class AurisTokenProvider(
 
 /** The account session credential the app already holds at login. */
 interface AurisAccountCredentialProviding {
-    suspend fun credential(): String?
+    /**
+     * Synchronous by contract: the backing credential is local device state
+     * (the account session's refresh token), not a fetch. A synchronous read is
+     * what lets the token cache answer identity questions without a coroutine,
+     * which is what makes a fail-closed non-suspending cache read possible.
+     */
+    fun credential(): String?
 }
 
 /**

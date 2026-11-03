@@ -131,7 +131,7 @@ class CaptureAllowanceLifecycleTest {
         publish(p, enabled = true, stamp = stamp, generation = 1L)
         val owner = provisionedOwner(tmp.newFolder())
         assertTrue(owner.prepareToken())
-        lifecycle.bind(owner)
+        bindInstalled(lifecycle, startup, owner)
         assertTrue("premise: the freshly bound owner is live BEFORE the account event", owner.hasUsableToken())
         val retired = CountDownLatch(1)
         lifecycle.onRetired = { retired.countDown() }
@@ -143,6 +143,373 @@ class CaptureAllowanceLifecycleTest {
         assertTrue("the retirement must fire the revocation hook", retired.await(2, TimeUnit.SECONDS))
         assertFalse("the prepared token is RETIRED, not usable", owner.hasUsableToken())
         assertNull("the retired slot can no longer hand out a token", lifecycle.takePrepaidToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a WITHDRAWN projection retaining the epoch retires the bound authority through the evidence wakeup`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val priorFired = CountDownLatch(1)
+        // An earlier composition sits on the evidence listener first.
+        startup.enrollmentEvidenceListener = { _, _ -> priorFired.countDown() }
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        watcher(lifecycle, startup, p, scope, clock).start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        bindInstalled(lifecycle, startup, owner)
+        assertTrue("premise: the freshly bound owner is live BEFORE the withdrawal", owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // A WITHDRAWN projection that RETAINS the epoch string (the exact state the fence's
+        // enrollment basis must see): the evidence wakeup must retire, not just the fence refuse.
+        val withdrawn = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection(
+            membershipRevision = "rev-2",
+            plan = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan.PRO,
+            voiceSharingEnrolled = false,
+            enrollmentEpoch = "epoch-retained",
+            acceptedDisclosureVersion = "1",
+            withdrawalState = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.WITHDRAWN,
+        )
+        startup.enrollmentEvidenceListener?.invoke(withdrawn, 1L)
+
+        assertTrue("the prior composition's evidence listener must still fire (chained)", priorFired.await(2, TimeUnit.SECONDS))
+        assertTrue("the withdrawal must fire the revocation hook", retired.await(2, TimeUnit.SECONDS))
+        assertFalse("the prepared token is RETIRED, not usable", owner.hasUsableToken())
+        assertNull(lifecycle.takePrepaidToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `an ACTIVE enrolled projection does not retire the bound authority`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        watcher(lifecycle, startup, p, scope, clock).start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        bindInstalled(lifecycle, startup, owner)
+        assertTrue(owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        val active = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection(
+            membershipRevision = "rev-1",
+            plan = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan.PRO,
+            voiceSharingEnrolled = true,
+            enrollmentEpoch = "epoch-1",
+            acceptedDisclosureVersion = "1",
+            withdrawalState = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.ACTIVE,
+        )
+        startup.enrollmentEvidenceListener?.invoke(active, 1L)
+
+        assertFalse("an active membership must NOT retire", retired.await(1, TimeUnit.SECONDS))
+        assertTrue("the bound authority stays usable", owner.hasUsableToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `an unchanged ACTIVE refresh through the REAL store apply does not retire`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        watcher(lifecycle, startup, p, scope, clock).start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        // Commit ACTIVE epoch-1, bind under it, then refresh the SAME identity twice through the
+        // REAL store path — where applyOutcome fires BOTH the evidence and the invalidation
+        // listener (the invalidation callback carries a NON-NULL payload: a commit, not loss).
+        val state = startup.state
+        val token = state.sessionStarted(0L)
+        val ticket = state.beginOperation(token, requireProjection = false, ownerSession = 0L)
+        assertNotNull(ticket)
+        val activeJson = """
+            {"schema_version":1,"membership_revision":"rev-1","plan":"pro",
+             "voice_sharing_enrolled":true,"enrollment_epoch":"epoch-1",
+             "accepted_disclosure_version":"1","withdrawal_state":"active"}
+        """.trimIndent().replace("\n", "")
+        assertTrue(state.applyOutcome(token, ticket!!, activeJson, ownerSession = 0L))
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        lifecycle.bind(owner, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 0L))
+        assertTrue(owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+        assertTrue(state.applyOutcome(token, ticket, activeJson, ownerSession = 0L))
+        assertFalse("an unchanged ACTIVE refresh must NOT retire", retired.await(1, TimeUnit.SECONDS))
+        assertTrue(owner.hasUsableToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a bind racing an epoch replacement survives with the NEW identity and the old batch retires`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        val w = watcher(lifecycle, startup, p, scope, clock)
+        w.start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
+        val old = provisionedOwner(tmp.newFolder())
+        assertTrue(old.prepareToken())
+        lifecycle.bind(old, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L))
+        assertTrue(old.hasUsableToken())
+        val retiredOld = CountDownLatch(1)
+        lifecycle.onRetired = { retiredOld.countDown() }
+
+        // Interleave INSIDE the watcher decision (onRevalidatedForTest runs after revalidation,
+        // before the retirement decision): commit the replacement identity AND bind a successor.
+        // The decision's guarded retire then loses its race (the generation moved); the
+        // re-decision must SPARE the successor — its onBound snapshot installed epoch-2 — and
+        // must keep refusing the stale epoch-1 grant (already retired by the rebind).
+        val successor = provisionedOwner(tmp.newFolder())
+        assertTrue(successor.prepareToken())
+        w.onRevalidatedForTest = {
+            w.onRevalidatedForTest = null
+            startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-2", revision = "rev-2"), 1L)
+            lifecycle.bind(successor, CaptureAllowanceLifecycle.GrantIdentity("epoch-2", 1L))
+        }
+        // Trigger the decision through an unchanged-identity evidence wakeup.
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
+
+        assertTrue("the stale epoch-1 batch must retire", retiredOld.await(2, TimeUnit.SECONDS))
+        assertFalse("the OLD token is retired", old.hasUsableToken())
+        assertTrue("the successor bound under epoch-2 SURVIVES the lost race", successor.hasUsableToken())
+        // A later decision keeps the successor alive (stable installed-identity invariant).
+        val noSecondRetire = CountDownLatch(1)
+        lifecycle.onRetired = { noSecondRetire.countDown() }
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-2"), 1L)
+        Thread.sleep(200)
+        assertFalse("the epoch-2 authority must not be retired again", noSecondRetire.await(500, TimeUnit.MILLISECONDS))
+        assertTrue(successor.hasUsableToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a DELAYED older bound callback cannot relabel the installed identity of a newer bind`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        val w = watcher(lifecycle, startup, p, scope, clock)
+        w.start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
+        val old = provisionedOwner(tmp.newFolder())
+        assertTrue(old.prepareToken())
+        val oldGen = lifecycle.bind(old, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L))
+        assertTrue(old.hasUsableToken())
+        // Replacement identity + successor bind (the rebind retires the old slot).
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-2", revision = "rev-2"), 1L)
+        val successor = provisionedOwner(tmp.newFolder())
+        assertTrue(successor.prepareToken())
+        lifecycle.bind(successor, CaptureAllowanceLifecycle.GrantIdentity("epoch-2", 1L))
+        assertTrue(successor.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // A DELAYED callback from the OLD bind (as a slow thread would deliver it) must NOT
+        // relabel the installed identity: the hook reads the coherent CURRENT snapshot.
+        lifecycle.onBound?.invoke(oldGen)
+
+        assertFalse("the stale callback must not retire the epoch-2 authority", retired.await(1, TimeUnit.SECONDS))
+        assertTrue("the epoch-2 authority stays usable", successor.hasUsableToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a pre-existing binding WITHOUT install identity fails closed at watcher startup`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        publish(p, enabled = true, stamp = clock.now.get(), generation = 1L)
+        // A binding that predates the watcher and carries NO install identity (legacy or
+        // restart): the watcher must fail closed, not treat Unknown as permitted.
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        lifecycle.bind(owner)
+        assertTrue(owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        watcher(lifecycle, startup, p, scope, clock).start()
+
+        assertTrue("the identity-less binding must retire at start", retired.await(2, TimeUnit.SECONDS))
+        assertFalse(owner.hasUsableToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `startup after a committed same-session 401 (null projection) fails closed for a bound grant`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        publish(p, enabled = true, stamp = clock.now.get(), generation = 1L)
+        // Committed ACTIVE identity, bind under it, then a committed 401 NULL loss — all
+        // through the REAL store path — BEFORE the watcher starts.
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        lifecycle.bind(owner, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L))
+        assertTrue(owner.hasUsableToken())
+        startup.state.projectionInvalidatedListener?.invoke(null, 1L)
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // START: seed sees no committed projection (Unknown) with a bound grant → fail closed.
+        watcher(lifecycle, startup, p, scope, clock).start()
+
+        assertTrue("the post-401 bound grant must retire at start", retired.await(2, TimeUnit.SECONDS))
+        assertFalse(owner.hasUsableToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `retirement clears the installed record - installedAuthority is null afterward`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        watcher(lifecycle, startup, p, scope, clock).start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        val gen = lifecycle.bind(owner, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L))
+        assertEquals(gen, lifecycle.installedAuthority()!!.generation)
+        assertEquals("epoch-1", lifecycle.installedAuthority()!!.identity!!.enrollmentEpoch)
+        assertTrue(lifecycle.retireCurrent(gen))
+        // The retired grant must NOT keep reporting itself as installed.
+        assertNull(lifecycle.installedAuthority())
+        scope.cancel()
+    }
+
+    private fun activeProjection(epoch: String, revision: String = "rev-1") = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection(
+        membershipRevision = revision,
+        plan = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan.PRO,
+        voiceSharingEnrolled = true,
+        enrollmentEpoch = epoch,
+        acceptedDisclosureVersion = "1",
+        withdrawalState = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.ACTIVE,
+    )
+
+    @Test
+    fun `a same-session 401 projection loss retires the bound authority`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        watcher(lifecycle, startup, p, scope, clock).start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        bindInstalled(lifecycle, startup, owner)
+        assertTrue(owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // processUnauthorized commits a NULL projection in the same session — the invalidation
+        // listener (not the evidence listener) carries the loss.
+        startup.state.projectionInvalidatedListener?.invoke(null, 1L)
+
+        assertTrue("the null loss must fire the revocation hook", retired.await(2, TimeUnit.SECONDS))
+        assertFalse(owner.hasUsableToken())
+        assertNull(lifecycle.takePrepaidToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `an ACTIVE epoch replacement retires the batch installed under the previous epoch`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        watcher(lifecycle, startup, p, scope, clock).start()
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        // First committed identity: ACTIVE epoch-1, same session. The subsequent bind installs
+        // UNDER this identity (onBound snapshots it — the fence would refuse a basis mismatch).
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        lifecycle.bind(owner, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L))
+        assertTrue(owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // Re-enrollment: ACTIVE epoch-2, SAME session. The batch installed under epoch-1 retires.
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-2", revision = "rev-2"), 1L)
+
+        assertTrue("the epoch replacement must fire the revocation hook", retired.await(2, TimeUnit.SECONDS))
+        assertFalse(owner.hasUsableToken())
+        assertNull(lifecycle.takePrepaidToken())
+        scope.cancel()
+    }
+
+    @Test
+    fun `a watcher started after an already-committed withdrawal retires at start`() {
+        val lifecycle = CaptureAllowanceLifecycle()
+        val startup = startup()
+        val clock = VirtualClock()
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val p = policyProvider(clock.now)
+        // Commit a WITHDRAWN projection (retaining the epoch string) through the REAL store
+        // path BEFORE the watcher exists.
+        val state = startup.state
+        val token = state.sessionStarted(0L)
+        val ticket = state.beginOperation(token, requireProjection = false, ownerSession = 0L)
+        assertNotNull(ticket)
+        val withdrawnJson = """
+            {"schema_version":1,"membership_revision":"rev-2","plan":"free",
+             "voice_sharing_enrolled":false,"enrollment_epoch":"epoch-retained",
+             "accepted_disclosure_version":null,"withdrawal_state":"withdrawn"}
+        """.trimIndent().replace("\n", "")
+        assertTrue(state.applyOutcome(token, ticket!!, withdrawnJson, ownerSession = 0L))
+        assertEquals(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.WITHDRAWN,
+            state.projection.value!!.withdrawalState,
+        )
+
+        val stamp = clock.now.get()
+        publish(p, enabled = true, stamp = stamp, generation = 1L)
+        val owner = provisionedOwner(tmp.newFolder())
+        assertTrue(owner.prepareToken())
+        lifecycle.bind(owner)
+        assertTrue(owner.hasUsableToken())
+        val retired = CountDownLatch(1)
+        lifecycle.onRetired = { retired.countDown() }
+
+        // START: the seed reads the already-committed withdrawal — retire at start.
+        watcher(lifecycle, startup, p, scope, clock).start()
+
+        assertTrue("the seeded withdrawal must retire at start", retired.await(2, TimeUnit.SECONDS))
+        assertFalse(owner.hasUsableToken())
+        assertNull(lifecycle.takePrepaidToken())
         scope.cancel()
     }
 
@@ -168,7 +535,10 @@ class CaptureAllowanceLifecycleTest {
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val startup = startup()
         val p = policyProvider(clock.now)
+        val grantIdentity = CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L)
         watcher(lifecycle, startup, p, scope, clock).start()
+        // Production-realistic identity: commit once; every bind below carries it (same lease).
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
 
         // (a) PUBLISH-BEFORE-BIND ESCAPE IS CLOSED: a fresh policy published while the slot is
         // unavailable still retires an owner bound LATER under that same lease.
@@ -176,7 +546,7 @@ class CaptureAllowanceLifecycleTest {
         publish(p, enabled = true, stamp = stamp1, generation = 1L)
         val owner1 = provisionedOwner(tmp.newFolder())
         assertTrue(owner1.prepareToken())
-        lifecycle.bind(owner1) // bound AFTER the publication that armed the deadline
+        lifecycle.bind(owner1, grantIdentity) // bound AFTER the publication that armed the deadline
         assertTrue("premise: live immediately before expiry", owner1.hasUsableToken())
         clock.drainOne(deadlineFor(stamp1)) // exact expiry, no publication in between
         assertEquals("a bind after the publication still expires with its lease", false, owner1.hasUsableToken())
@@ -188,10 +558,10 @@ class CaptureAllowanceLifecycleTest {
         publish(p, enabled = true, stamp = stamp2, generation = 2L)
         val owner2 = provisionedOwner(tmp.newFolder())
         assertTrue(owner2.prepareToken())
-        lifecycle.bind(owner2)
+        lifecycle.bind(owner2, grantIdentity)
         val rebind = provisionedOwner(tmp.newFolder())
         assertTrue(rebind.prepareToken())
-        lifecycle.bind(rebind) // same lease; the rebind itself retires owner2 (previous slot)
+        lifecycle.bind(rebind, grantIdentity) // same lease; the rebind itself retires owner2 (previous slot)
         assertTrue("premise: the same-lease rebind is live before expiry", rebind.hasUsableToken())
         clock.drainOne(deadlineFor(stamp2))
         assertEquals("a successor using the SAME expired lease must retire", false, rebind.hasUsableToken())
@@ -203,7 +573,7 @@ class CaptureAllowanceLifecycleTest {
         publish(p, enabled = true, stamp = stamp3, generation = 3L) // arms deadline3
         val spared = provisionedOwner(tmp.newFolder())
         assertTrue(spared.prepareToken())
-        lifecycle.bind(spared)
+        lifecycle.bind(spared, grantIdentity)
         val stamp4 = clock.now.get()
         publish(p, enabled = true, stamp = stamp4, generation = 4L) // supersedes deadline3
         clock.now.set(deadlineFor(stamp3)) // the OLD lease's expiry instant passes
@@ -216,20 +586,20 @@ class CaptureAllowanceLifecycleTest {
         // reconciliation (no armed deadline needed).
         val lapsed = provisionedOwner(tmp.newFolder())
         assertTrue(lapsed.prepareToken())
-        lifecycle.bind(lapsed)
+        lifecycle.bind(lapsed, grantIdentity)
         assertEquals("binding under an expired lease retires via reconciliation", false, lapsed.hasUsableToken())
 
         // (e) DISABLE retires; DISABLE then ENABLE re-arms expiry coverage.
         publish(p, enabled = false, stamp = 0L, generation = 5L)
         val afterDisable = provisionedOwner(tmp.newFolder())
         assertTrue(afterDisable.prepareToken())
-        lifecycle.bind(afterDisable)
+        lifecycle.bind(afterDisable, grantIdentity)
         assertEquals("a binding under a disabled policy retires", false, afterDisable.hasUsableToken())
         val stamp5 = clock.now.get()
         publish(p, enabled = true, stamp = stamp5, generation = 6L)
         val revived = provisionedOwner(tmp.newFolder())
         assertTrue(revived.prepareToken())
-        lifecycle.bind(revived)
+        lifecycle.bind(revived, grantIdentity)
         assertTrue("premise: live under the re-enabled policy", revived.hasUsableToken())
         clock.drainOne(deadlineFor(stamp5))
         assertEquals("expiry coverage is re-armed after disable then enable", false, revived.hasUsableToken())
@@ -251,7 +621,7 @@ class CaptureAllowanceLifecycleTest {
         publish(p, enabled = true, stamp = clock.now.get(), generation = 1L)
         val owner = provisionedOwner(tmp.newFolder())
         assertTrue(owner.prepareToken())
-        lifecycle.bind(owner)
+        bindInstalled(lifecycle, startup, owner)
         assertTrue("premise: live before the owning scope is cancelled", owner.hasUsableToken())
         val retired = CountDownLatch(1)
         lifecycle.onRetired = { retired.countDown() }
@@ -280,6 +650,8 @@ class CaptureAllowanceLifecycleTest {
         val p = policyProvider(clock.now)
         val w = watcher(lifecycle, startup, p, scope, clock)
         w.start()
+        // Production-realistic identity, committed and carried by the racing successor bind.
+        startup.enrollmentEvidenceListener?.invoke(activeProjection("epoch-1"), 1L)
 
         // Deterministic pause BETWEEN authoritative revalidation and the retirement call: the
         // first revalidation to run sees a stale authority and parks in the seam.
@@ -306,7 +678,9 @@ class CaptureAllowanceLifecycleTest {
         publish(p, enabled = true, stamp = stampNew, generation = 2L)
         val successor = provisionedOwner(tmp.newFolder())
         assertTrue(successor.prepareToken())
-        val bindThread = thread(name = "racing-bind") { lifecycle.bind(successor) }
+        val bindThread = thread(name = "racing-bind") {
+            lifecycle.bind(successor, CaptureAllowanceLifecycle.GrantIdentity("epoch-1", 1L))
+        }
         val deadlineForBind = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
         while (lifecycle.currentGeneration() == 0L) {
             check(System.nanoTime() < deadlineForBind) { "racing bind never became visible" }
@@ -327,6 +701,18 @@ class CaptureAllowanceLifecycleTest {
         clock.drainOne(deadlineFor(stampNew))
         assertEquals("its own lease expiry still retires it", false, successor.hasUsableToken())
         scope.cancel()
+    }
+
+    /** Production-realistic install: the committed ACTIVE identity, carried on the binding. */
+    private fun bindInstalled(
+        lifecycle: CaptureAllowanceLifecycle,
+        startup: VoiceSharingAccountStartup,
+        owner: CaptureAllowanceOwner,
+        epoch: String = "epoch-1",
+        session: Long = 1L,
+    ): Long {
+        startup.enrollmentEvidenceListener?.invoke(activeProjection(epoch), session)
+        return lifecycle.bind(owner, CaptureAllowanceLifecycle.GrantIdentity(epoch, session))
     }
 
     private fun watcher(

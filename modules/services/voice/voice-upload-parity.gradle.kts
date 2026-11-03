@@ -12,6 +12,12 @@ val pinValue: String = providers.gradleProperty("aurisCloudWorkerRoot")
     .get()
 tasks.withType<Test>().configureEach {
     environment("AURIS_CLOUD_WORKER_ROOT", pinValue)
+    // PER-CLASS FORK ISOLATION: kotlinx-coroutines-test fails a runTest with
+    // UncaughtExceptionsBeforeTest when an EARLIER class leaked an uncaught coroutine exception
+    // into the shared JVM (observed: a mocked-Firebase fetch NPE from a policy-refresh loop
+    // landing on the next class's runTest). One JVM per test class keeps that pollution local
+    // to the class that caused it, so a flaky leak cannot fail an unrelated class downstream.
+    forkEvery = 1
     // EXPLICIT per-key tracking of the six joined-run loopback inputs (supervisor driverEnv keys).
     // Each providers.environmentVariable read is a named configuration-cache input: when a key's
     // value changes between invocations, Gradle invalidates the stored entry and reconfigures, so

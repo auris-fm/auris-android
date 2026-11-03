@@ -23,7 +23,7 @@ class AurisTokenProviderTest {
 
     private class FakeCredential(var value: String?) : AurisAccountCredentialProviding {
         var calls = 0
-        override suspend fun credential(): String? {
+        override fun credential(): String? {
             calls += 1
             return value
         }

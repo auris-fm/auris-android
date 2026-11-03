@@ -413,17 +413,28 @@ class VoiceSharingAccountOperations(
     private suspend fun handleUnauthorized(op: FrozenOperation) {
         // ONLY a real 401 reaches here (Outcome.Unavailable never does -- reviewer fe03ebf7).
         //
-        // This 401 speaks about the AURIS credential, and only about it: the route never sees the
-        // upstream session credential (cloud `bbb9beff`). So the coordinated owner transaction
-        // (`invalidateIfCurrent` -> `invalidateAuthToken` + credential rotation) is DELIBERATELY not
-        // used here -- it would sign the user out of the account that minted the token, turning a
-        // rejected derived credential into a session kill. The owner snapshot is still consulted,
-        // as the fence: a superseded session or generation invalidates nothing.
-        val scoped = ownership.transaction {
-            state.isTicketCurrent(op.token, op.ticket, ownership.authoritySnapshot().session)
+        // The rejection COMMITS inside one owner transaction: the owner snapshot is compared, the
+        // voice scoped check runs, and the state revokes -- all under the owner lock, so a
+        // superseding operation cannot slip between the check and the commit (reviewer b702cd53).
+        // STALENESS (reviewer b702cd53): the 401 answers the AURIS credential this operation froze.
+        // If that credential has since been re-minted, the rejection is history -- it commits
+        // nothing, so the live voice authority a newer credential established survives.
+        // The owner no longer clears the upstream credential for this route's 401 (it never sees
+        // that credential -- cloud bbb9beff); the voice scope is what a committed rejection revokes.
+        val frozenBearer = op.bearer ?: return
+        // Read the CURRENT Auris bearer before the transaction (currentToken() suspends); the
+        // comparison itself is pure so the whole check+commit stays inside the owner lock.
+        val currentBearer = "Bearer " + (aurisToken.currentToken() ?: "")
+        val committed = ownership.transaction {
+            // Staleness FIRST: if the current Auris bearer is not the one that was rejected, the
+            // 401 answers a credential that has already been replaced -- commit NOTHING.
+            currentBearer == frozenBearer &&
+                state.processUnauthorized(op.token, op.ticket)
         }
-        if (!scoped) return
-        state.processUnauthorized(op.token, op.ticket) // voice state only: this session's authority
+        if (!committed) return // effects fire ONLY for a rejection that actually committed
+        // Delayed-effect fence: if a SUPERSEDING session has already re-established a projection,
+        // this rejection is history -- its mirror clear must not touch the newer scope.
+        if (state.hasCurrentSessionProjection()) return
         onAurisCredentialRefused() // force a re-mint from the SAME account
         onCredentialInvalid(op.observed) // post-commit notification, NO authority side effects
     }

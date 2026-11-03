@@ -319,6 +319,9 @@ class CaptureAllowanceInstallFenceTest {
             installAuthority = { owner, gen, session, epoch, attempt, g, publish ->
                 fence.install(owner, gen, session, epoch, attempt, g, publish)
             },
+            identityStore = CaptureAllowanceAllocationIdentityStore(
+                java.io.File(kotlin.io.path.createTempDirectory("fence-identity").toFile(), "allocation_identity"),
+            ),
         )
     }
 
@@ -418,5 +421,45 @@ class CaptureAllowanceInstallFenceTest {
         clock.set(1_000L) // the whole interval elapsed DURING the request; nothing is left
         assertNull("a spent interval refuses immediately, even on a freshly installed authority", guarded.takePrepaidToken())
         assertEquals(0, issued)
+    }
+
+    @Test
+    fun `across an expiry SEQUENCE every refusal leaves the ledger uncharged`() {
+        // cloud ffd363a2: "charged but not admitted" is invisible to the server -- no request, no
+        // log line -- so the batch would quietly shrink while the server still believes those
+        // records are available. That makes this a LOCAL, EXACT assertion, and it has to hold
+        // across the SEQUENCE (expire, attempt, attempt again, retry) rather than one call.
+        //
+        // Per spec be7941a1, a charge already taken and then abandoned is NOT refunded; what must
+        // hold is that an expired authority never takes one in the first place.
+        val (f, _, binds) = fence()
+        f.beginAttempt("a1")
+        val o = owner()
+        assertTrue(f.install(o, credential.generation, credential.session, credential.enrollmentEpoch, "a1", grant) { })
+        assertEquals(1, binds.get())
+        val installed = lifecycleUnderTest!!
+
+        // A fresh area reports Snapshot.Closed (-1) until the first durable charge establishes it;
+        // that is "not yet charged", not corrupt (isClosedForTest() tells them apart).
+        assertEquals("the area is fresh, not closed", false, o.isClosedForTest())
+        // Step 1: inside the window, a preparation charges exactly once and is admitted.
+        clock = 1_000L + 100_000L
+        assertTrue(o.prepareToken())
+        assertEquals("one preparation charges one record", 1, o.ledgerChargesForTest())
+        assertNotNull(installed.takePrepaidToken())
+        val afterAdmission = o.ledgerChargesForTest()
+
+        // Step 2: PAST the allowance deadline. Repeated attempts, and a retry after each, must
+        // not move the ledger at all -- the batch is not the client's to spend once the server's
+        // interval is over.
+        clock = 1_000L + 300_000L
+        repeat(3) {
+            assertNull("an expired authority must refuse every attempt", installed.takePrepaidToken())
+            assertEquals("a refused attempt must not charge", afterAdmission, o.ledgerChargesForTest())
+        }
+
+        // Step 3: the property that matters, stated at the end of the sequence rather than per
+        // call: total charged equals what was actually admitted.
+        assertEquals("total charged must equal total admitted", 1, o.ledgerChargesForTest())
     }
 }

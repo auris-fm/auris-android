@@ -237,21 +237,15 @@ class VoiceSharingAccountState {
     }
 
     /**
-     * The voice identity a delayed effect compares itself against. Identity is the INSTANCE: a
-     * newer session -- with or without its projection, under any owner generation -- is never
-     * the value an older rejection captured (reviewer 82a9958d, cloud 561e8d35).
+     * The voice identity of a live session: the session incarnation ([token], a NEW instance per
+     * issued session) plus the owner session generation it was started under. A delayed effect
+     * records the one it rejected and asks whether the live one is STILL that same incarnation.
      */
     class VoiceIdentity internal constructor(
         internal val token: SessionToken,
         internal val ownerSession: Long,
     )
 
-    /**
-     * The voice identity (session token + owner session generation) of the CURRENT live session,
-     * or null when none is live. The identity a delayed effect compares itself against: an effect
-     * for a rejected identity must fire only when the authority under coordination is STILL that
-     * identity (reviewer 561e8d35 -- presence cannot distinguish newer from reinstated).
-     */
     private val identityChangeSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
 
     /** Bumped on EVERY identity transition, so a waiter can tell "changed since I looked" apart. */

@@ -77,11 +77,30 @@ class CaptureAllowanceLifecycle : CaptureAllowanceAuthority {
     fun currentGeneration(): Long = generation
 
     /**
-     * Binds [authority] as the current slot, FIRST retiring whatever was bound (kill any
-     * prepared token + fire the revocation hook), under the same lock as take. Returns the NEW
-     * binding generation. Refused after dispose.
+     * THE coherent installed-authority read (reviewer c7cdff17): generation and identity come
+     * from ONE atomic record, so a delayed/reordered bound callback converges on the CURRENT
+     * binding — the callback's generation argument is informational only.
      */
-    fun bind(authority: CaptureAllowanceAuthority): Long {
+    fun installedAuthority(): InstalledAuthority? = installed
+
+    // Binds [authority] as the current slot, FIRST retiring whatever was bound (kill any
+    // prepared token + fire the revocation hook), under the same lock as take. Returns the NEW
+    // binding generation. Refused after dispose.
+
+    /**
+     * The IMMUTABLE identity carried by an installed grant (reviewer c7cdff17): the enrollment
+     * epoch and owner session the install succeeded under, recorded ATOMICALLY with the
+     * binding generation — never relabeled from whatever membership is current when a delayed
+     * bound callback runs.
+     */
+    data class GrantIdentity(val enrollmentEpoch: String, val ownerSession: Long)
+
+    /** Coherent (generation + identity) read of the installed binding; null when nothing is bound. */
+    data class InstalledAuthority(val generation: Long, val identity: GrantIdentity?)
+
+    @Volatile private var installed: InstalledAuthority? = null
+
+    fun bind(authority: CaptureAllowanceAuthority, identity: GrantIdentity? = null): Long {
         val newGeneration: Long
         val boundHook: ((Long) -> Unit)?
         lock.lock()
@@ -92,6 +111,7 @@ class CaptureAllowanceLifecycle : CaptureAllowanceAuthority {
             current = authority
             generation += 1L
             newGeneration = generation
+            installed = InstalledAuthority(newGeneration, identity)
             boundHook = onBound
         } finally {
             lock.unlock()
@@ -150,6 +170,11 @@ class CaptureAllowanceLifecycle : CaptureAllowanceAuthority {
         val previous = current
         current = UnavailableCaptureAllowance
         previous.retireForLifecycle()
+        // The installed record describes the CURRENT binding: a retirement replaces the slot
+        // with the unavailable default, so the record must be cleared under the SAME lock —
+        // otherwise installedAuthority() keeps reporting a retired grant and its stale
+        // generation, contrary to its contract (reviewer b8434788).
+        installed = null
         if (previous === UnavailableCaptureAllowance) return false
         generation += 1L
         onRetired?.invoke()

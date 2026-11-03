@@ -118,7 +118,7 @@ class VoiceUploadModulePolicyGateTest {
         whenever(info.fetchTimeMillis).thenReturn(1_000L)
         whenever(info.lastFetchStatus).thenReturn(FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS)
         whenever(config.info).thenReturn(info)
-        whenever(config.fetch()).thenAnswer { au.com.shiftyjelly.pocketcasts.sharedtest.JvmTask<Unit>() }
+        whenever(config.fetch(0L)).thenAnswer { au.com.shiftyjelly.pocketcasts.sharedtest.JvmTask<Unit>() }
         return VoiceSharingPolicyProvider(
             remoteConfig = config,
             featureProvider = mock(),
@@ -208,6 +208,8 @@ class VoiceUploadModulePolicyGateTest {
         // Hoisted for the finally cleanup (assigned inside the try).
         var root: File? = null
         var store: ContributionStore? = null
+        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
         val slotsBaseline = ContributionStore.processOpenSourceSlotsForTest()
         try {
             // ONE owner fixture shared by the account stack and the provider's collection lock: the
@@ -266,6 +268,7 @@ class VoiceUploadModulePolicyGateTest {
                 policyProvider,
                 startup,
                 actualNetwork = { true },
+                aurisToken = aurisLive.provider,
             )
 
             // THE MODULE'S OWN TRIGGER FACTORY — the real composition including the policy-disable
@@ -337,6 +340,7 @@ class VoiceUploadModulePolicyGateTest {
             assertEquals("nothing further may arrive after the disable", 1, requests.get())
             assertTrue("C stays owned by the queue", store.readyEntries().any { it.captureId == idC })
         } finally {
+            aurisLive.shutdown()
             // Lifecycle completion, in dependency order: unblock the handler, stop the server,
             // CANCEL the trigger/provider work, then REQUIRE bounded successful joins of each
             // scope's children - a missed join fails here instead of passing silently - so nothing

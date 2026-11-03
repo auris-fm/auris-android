@@ -1,6 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import android.content.Context
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
+import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import dagger.Module
@@ -21,12 +23,11 @@ import kotlinx.coroutines.launch
  *
  * NOTHING here can put a request on the network unless ALL of these hold, re-checked on every poll:
  * - the published policy snapshot is `enabled` (remote-config backed; the compiled default is DISABLED);
- * - the transport can produce credentials from the account startup's owner-published state;
+ * - the transport can produce credentials from the AURIS credential provider;
  * - the store's own ownership fence still validates the generation the poll captured.
  *
- * The upload endpoint is deliberately blank until the route contract is confirmed with the cloud lane -
- * the endpoint actually in service is not decidable from this repo, and wiring a guessed URL would be an
- * activation change, which this module explicitly does not do.
+ * The upload endpoint is the specified route (POST /api/v1/voice-recordings) resolved against the
+ * configured staging gateway origin; it is never guessed and never blank-wired in production.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -56,18 +57,22 @@ object VoiceUploadModule {
     @Provides
     @Singleton
     fun provideUploadTransport(
-        accountStartup: VoiceSharingAccountStartup,
+        @SyncServiceRetrofit retrofit: dagger.Lazy<retrofit2.Retrofit>,
+        aurisToken: AurisTokenProvider,
     ): ContributionUploadTransport = ContributionUploadTransport(
-        // Route contract from cloud-voice-uploads 476feadc: POST /api/v1/voice-recordings, server-issued
-// staged key; the HOST stays a deployment-time input (no verified live host), so the endpoint is
-// blank until deployment provides one. A blank endpoint cannot be
-        // requested.
-        endpoint = "",
-        // Bearer comes ONLY from the owner-published credential state, resolved per attempt. The epoch
-        // binding happens in [provideUploadAssembly]: a credential is only CONSULTED for a capture whose
-        // admitted epoch is still the account's current epoch.
+        // Route contract (cloud-voice-uploads 476feadc; core 384952e8): POST /api/v1/voice-recordings
+        // on the CONFIGURED staging gateway origin -- the same origin the account routes ride, taken
+        // from the same @SyncServiceRetrofit the account API is built on. A blank endpoint cannot be
+        // requested, so an unresolved origin fails closed here.
+        endpoint = retrofit.get().baseUrl().resolve("/api/v1/voice-recordings").toString(),
+        // Bearer comes ONLY from the AURIS credential (reviewer b702cd53): this route verifies
+        // Auris-issued tokens; presenting the upstream mirror token is the wrong-credential defect
+        // this wiring exists to remove. Resolved per attempt; the epoch binding happens in
+        // [provideUploadAssembly].
         authorization = {
-            accountStartup.credentials.current()?.bearer?.takeIf { it.isNotBlank() }
+            // FAIL-CLOSED synchronous read: only a fresh token for the CURRENT Auris identity;
+            // null refuses the attempt (retained, retried), never falls back to the mirror.
+            aurisToken.peekCurrentToken()?.takeIf { it.isNotBlank() }
         },
     )
 
@@ -92,12 +97,14 @@ object VoiceUploadModule {
         policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         @ApplicationContext context: Context,
+        aurisToken: AurisTokenProvider,
     ): ContributionUploadAssembly = provideUploadAssembly(
         store,
         transport,
         policyProvider,
         accountStartup,
         actualNetworkFrom(context),
+        aurisToken = aurisToken,
     )
 
     /**
@@ -112,6 +119,7 @@ object VoiceUploadModule {
         policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         actualNetwork: (UploadNetwork) -> Boolean,
+        aurisToken: AurisTokenProvider,
     ): ContributionUploadAssembly {
         // Network availability is "the owner-published credential exists": without it nothing can be sent.
         val accountStartupHasCredentials = { accountStartup.credentials.current() != null }
@@ -144,7 +152,12 @@ object VoiceUploadModule {
             // projection read under the REAL owner lock in a single transaction; the ADMITTED
             // account/session/epoch are compared, not merely read.
             credentialFor = { admitted ->
-                authority().credentialFor(admitted)
+                // The owner transaction vouches for account/session/epoch; the BEARER it freezes is
+                // the AURIS credential (reviewer b702cd53), fail-closed: no fresh Auris token for the
+                // current identity refuses the attempt instead of sending the upstream token.
+                authority().credentialFor(admitted)?.let { live ->
+                    aurisToken.peekCurrentToken()?.let { auris -> live.copy(bearer = auris) }
+                }
             },
             // LAUNCH revalidation: the acquisition lock ends before transmission; this closes the
             // acquisition→Call window on the caller thread (reviewer d2f1bfc8).
@@ -206,7 +219,15 @@ object VoiceUploadModule {
      */
     @Provides
     @Singleton
-    fun provideVoiceUploadDrain(assembly: ContributionUploadAssembly): VoiceUploadDrain = VoiceUploadDrain { assembly.poll() }
+    fun provideVoiceUploadDrain(
+        assembly: ContributionUploadAssembly,
+        aurisToken: AurisTokenProvider,
+    ): VoiceUploadDrain = VoiceUploadDrain {
+        // ACQUIRE before the synchronous poll (reviewer b702cd53): the upload path's fail-closed
+        // cache read must find a token that was acquired for THIS pass, not assumed from earlier.
+        aurisToken.currentToken()
+        assembly.poll()
+    }
 
     /** THE platform scheduler; the cadence is the compiled default (no remote interval). */
     @Provides

@@ -36,16 +36,49 @@ internal object VoiceUploadCompositionFixtures {
 
     fun startup(app: android.app.Application): VoiceSharingAccountStartup {
         val retrofit = retrofit2.Retrofit.Builder().baseUrl("http://127.0.0.1:1/").build()
-        // No Auris environment is configured for these composition controls, so the provider
-        // correctly yields NO token -- and the account path therefore refuses rather than sending
-        // the upstream mirror. That is the asserted behaviour, not a fixture shortcut.
-        val auris = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
-            clientProvider = { null },
+        return VoiceSharingAccountStartup(AppContextOwner(app), app, dagger.Lazy { retrofit }, noEnvironmentAuris())
+    }
+
+    /** No Auris environment configured: the provider yields NO token, so the composition refuses
+     *  rather than sending the upstream mirror. That is the asserted behaviour, not a shortcut. */
+    fun noEnvironmentAuris() = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+        clientProvider = { null },
+        credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+            override fun credential(): String? = null
+        },
+    )
+
+    /**
+     * A REAL Auris provider over a REAL auth exchange (server-first, no test seam in the provider):
+     * a loopback auth server issues one token, [acquire] performs the actual suspend acquisition
+     * the production trigger/drain performs, and the fail-closed synchronous read the upload path
+     * consumes then serves that freshly acquired token. The returned server MUST be shut down.
+     */
+    class LiveAuris(val provider: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider, val server: okhttp3.mockwebserver.MockWebServer) {
+        private val job = kotlinx.coroutines.SupervisorJob()
+        private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + job)
+        fun acquire() = kotlinx.coroutines.runBlocking { provider.currentToken() }
+        fun shutdown() {
+            job.cancel()
+            server.shutdown()
+        }
+    }
+
+    fun liveAuris(access: String = "auris-fixture-token"): LiveAuris {
+        val server = okhttp3.mockwebserver.MockWebServer()
+        server.start()
+        server.enqueue(
+            okhttp3.mockwebserver.MockResponse().setResponseCode(200).setBody(
+                """{"access_token":"$access","token_type":"Bearer","expires_in":900,"refresh_token":"r-fixture"}""",
+            ),
+        )
+        val provider = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+            clientProvider = { au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(server.url("/").toString().trimEnd('/')) },
             credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
-                override suspend fun credential(): String? = null
+                override fun credential(): String? = "fixture-credential"
             },
         )
-        return VoiceSharingAccountStartup(AppContextOwner(app), app, dagger.Lazy { retrofit }, auris)
+        return LiveAuris(provider, server)
     }
 
     internal class AppContextOwner(private val app: android.content.Context) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {

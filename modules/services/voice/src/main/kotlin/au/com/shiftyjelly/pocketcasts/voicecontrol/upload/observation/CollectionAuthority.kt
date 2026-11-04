@@ -79,10 +79,8 @@ class CollectionAuthority @Inject constructor(
         live.credential == issued.credentialIncarnation
 
     private fun enrollmentMatches(issued: IssuedAuthority): Boolean {
-        val tagged = accountStartup.state.taggedProjection.value
-        val projection = tagged.projection ?: return false
-        return tagged.ownerSession == accountStartup.authoritySnapshot().session &&
-            projection.enrollmentEpoch == issued.enrollmentEpoch &&
+        val projection = accountStartup.state.projection.value ?: return false
+        return projection.enrollmentEpoch == issued.enrollmentEpoch &&
             projection.acceptedDisclosureVersion == issued.acceptedDisclosureVersion &&
             projection.voiceSharingEnrolled &&
             projection.withdrawalState == WithdrawalState.ACTIVE
@@ -96,15 +94,14 @@ class CollectionAuthority @Inject constructor(
     private fun decideLocked(): AuthorityDecision {
         val ownership = accountStartup.authoritySnapshot()
         val hasSession = ownership.accountName != null && ownership.session > 0L
-        val tagged = accountStartup.state.taggedProjection.value
-        val projection = tagged.projection
+        val projection = accountStartup.state.projection.value
         // THE LOCAL STOP OVERRIDES THE SERVER'S STALE VIEW. Every other condition here reads
         // server-derived state; this one reads what the user actually asked for, which is why it is
         // checked first and independently. A pending or failed withdrawal leaves the projection
         // saying enrolled, and without this clause collection would silently resume.
         val localIntentPermits = localWithdrawalIntent.collectionPermittedByLocalIntent(projection)
         val enrolledThisSession =
-            hasSession && tagged.ownerSession == ownership.session &&
+            hasSession &&
                 projection != null &&
                 projection.voiceSharingEnrolled &&
                 projection.enrollmentEpoch != null &&

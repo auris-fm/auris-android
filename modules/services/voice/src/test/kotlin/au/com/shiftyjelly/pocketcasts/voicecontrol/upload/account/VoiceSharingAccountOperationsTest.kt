@@ -189,9 +189,9 @@ class VoiceSharingAccountOperationsTest {
     private lateinit var server: MockWebServer
     private lateinit var state: VoiceSharingAccountState
     private lateinit var operations: VoiceSharingAccountOperations
-    private lateinit var token: SessionToken
     private lateinit var owner: TestOwner
     private val credentials get() = owner.mirrorStore
+    private val invalidations = mutableListOf<AuthoritySnapshot>()
 
     @Before
     fun setUp() {
@@ -200,11 +200,10 @@ class VoiceSharingAccountOperationsTest {
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         state = VoiceSharingAccountState()
         owner = TestOwner()
-        // The ownership suites issue a bearer per test; start from a published one so the fixture
-        // is credential-complete (the bearer SOURCE is asserted in VoiceSharingAurisBearerTest).
+        // The suites issue a bearer per test; start from a published one so the fixture is
+        // credential-complete (the bearer SOURCE is asserted in VoiceSharingAurisBearerTest).
         owner.issueToken("fixture-bearer")
-        operations = VoiceSharingAccountOperations(api, state, owner, ownerToken(owner), onCredentialInvalid = { _ -> })
-        token = state.sessionStarted(owner.sessionGeneration())
+        operations = VoiceSharingAccountOperations(api, state, owner, ownerToken(owner), onCredentialInvalid = { rejected -> invalidations.add(rejected) })
     }
 
     @After
@@ -224,13 +223,14 @@ class VoiceSharingAccountOperationsTest {
         withdrawal: String = "not_enrolled",
         enrolled: Boolean = false,
         epoch: String? = null,
+        disclosure: String? = null,
     ): String = buildString {
         append("{\"schema_version\":1,")
         append("\"membership_revision\":\"$revision\",")
         append("\"plan\":\"free\",")
         append("\"voice_sharing_enrolled\":$enrolled,")
         append("\"enrollment_epoch\":${epoch?.let { "\"$it\"" } ?: "null"},")
-        append("\"accepted_disclosure_version\":null,")
+        append("\"accepted_disclosure_version\":${disclosure?.let { "\"$it\"" } ?: "null"},")
         append("\"withdrawal_state\":\"$withdrawal\"}")
     }
 
@@ -238,10 +238,37 @@ class VoiceSharingAccountOperationsTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = revision)))
     }
 
+    private fun sentAuthHeaders(): List<String> {
+        val headers = mutableListOf<String>()
+        while (server.requestCount > headers.size) {
+            val r = server.takeRequest(5, TimeUnit.SECONDS) ?: break
+            r.headers["Authorization"]?.let { headers.add(it) } ?: break
+        }
+        return headers
+    }
+
+    /** Transport that always throws [HttpException]; no HTTP response object is ever produced. */
+    private class ThrowingHttpException(private val code: Int) : VoiceSharingAccountApi {
+        var calls = 0
+
+        private fun fail(): Nothing {
+            calls++
+            throw HttpException(Response.error<ResponseBody>(code, "".toResponseBody(null)))
+        }
+
+        override suspend fun getVoiceSharing(bearer: String?): Response<ResponseBody> = fail()
+
+        override suspend fun postEnrollment(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+
+        override suspend fun postWithdrawal(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+
+        override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+    }
+
     @Test
     fun `current-session GET applies the projection and hits the account route`() = runTest {
         enqueueProjection()
-        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.refreshProjection())
         val recorded = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("GET", recorded.method)
         assertTrue(recorded.path!!.startsWith("/api/v1/account/voice-sharing"))
@@ -249,20 +276,14 @@ class VoiceSharingAccountOperationsTest {
     }
 
     @Test
-    fun `enrollment without a current-session projection issues NO network call`() = runTest {
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertEquals(0, server.requestCount)
-    }
-
-    @Test
     fun `enrollment posts the contract body and applies the response`() = runTest {
         // 1. current-session GET first.
         enqueueProjection()
-        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.refreshProjection())
 
         // 2. Enrollment: request_id UUID, expected_revision = current, disclosure version.
         enqueueProjection(revision = "rev-2")
-        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", posted.method)
@@ -286,18 +307,18 @@ class VoiceSharingAccountOperationsTest {
         )
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
-                projectionJson(revision = "rev-3", withdrawal = "withdrawn", enrolled = false, epoch = "epoch-9"),
+                projectionJson(revision = "rev-1", withdrawal = "withdrawn", enrolled = false, epoch = "epoch-9"),
             ),
         )
-        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.refreshProjection())
 
-        assertApplied(operations.withdraw(token))
+        assertApplied(operations.withdraw())
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", posted.method)
         assertTrue(posted.path!!.startsWith("/api/v1/account/voice-sharing/withdrawal"))
         val body = posted.body.readUtf8()
-        assertTrue(body.contains("\"expected_membership_revision\":\"rev-abc\""))
+        assertTrue(body.contains("\"expected_membership_revision\":\"rev-1\""))
         assertTrue(body.contains("\"enrollment_epoch\":\"epoch-9\""))
         // Withdrawal applies a membership projection; it never deletes data.
         assertEquals(WithdrawalState.WITHDRAWN, state.projection.value!!.withdrawalState)
@@ -311,9 +332,9 @@ class VoiceSharingAccountOperationsTest {
             MockResponse().setResponseCode(202)
                 .setBody("{\"schema_version\":1,\"deletion_request_id\":\"del-123\",\"status\":\"deletion_pending\"}"),
         )
-        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.refreshProjection())
 
-        val receipt = operations.deleteData(token)
+        val receipt = operations.deleteData()
         assertTrue(receipt != null)
         assertEquals("del-123", receipt!!.deletionRequestId)
         assertEquals("deletion_pending", receipt.status)
@@ -331,8 +352,8 @@ class VoiceSharingAccountOperationsTest {
         val receipt202: suspend (String) -> DeletionReceipt? = { body: String ->
             server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
             server.enqueue(MockResponse().setResponseCode(202).setBody(body))
-            assertTrue(operations.refreshProjection(token))
-            val r = operations.deleteData(token)
+            assertTrue(operations.refreshProjection())
+            val r = operations.deleteData()
             server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
             server.takeRequest(5, TimeUnit.SECONDS)!! // drain the DELETE
             r
@@ -394,11 +415,11 @@ class VoiceSharingAccountOperationsTest {
     @Test
     fun `bounded immutable retry reuses the same request_id and captured revision`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.refreshProjection())
 
         server.enqueue(MockResponse().setResponseCode(503)) // retryable
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = "rev-2")))
-        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
 
         server.takeRequest(5, TimeUnit.SECONDS)!! // the GET
         val attempt1 = server.takeRequest(5, TimeUnit.SECONDS)!!
@@ -411,152 +432,20 @@ class VoiceSharingAccountOperationsTest {
     }
 
     @Test
-    fun `session ended while the call is in flight - response never applied`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-
-        // Pause the enrollment response until the session has ended mid-flight.
-        val paused = MockResponse().setResponseCode(200).setBody(projectionJson(revision = "rev-2"))
-            .setHeadersDelay(500, TimeUnit.MILLISECONDS)
-        server.enqueue(paused)
-
-        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        state.sessionEnded()
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // The projection was nulled by logout and stays null.
-        assertNull(state.projection.value)
-    }
-
-    @Test
-    fun `malformed operation response fails closed without applying`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"schema_version\":2}"))
-        assertTrue(operations.withdraw(token) is VoiceSharingMutationResult.Failure)
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
-    }
-}
-
-/**
- * Per-operation generation + 401 bearer-capture contract (spec 27cedf97): a later same-session
- * intent/GET fences an older in-flight operation's response; mutation retries retain the
- * ORIGINAL request_id/body/generation; the bearer actually sent is captured for 401 handling
- * with an originating-session and current-bearer check before any credential effect; credential
- * data never appears in generations or failure evidence.
- */
-class VoiceSharingAccountOperationsFencingTest {
-
-    private lateinit var server: MockWebServer
-    private lateinit var state: VoiceSharingAccountState
-    private lateinit var operations: VoiceSharingAccountOperations
-    private lateinit var token: SessionToken
-    private lateinit var owner: TestOwner
-    private val credentials get() = owner.mirrorStore
-    private val invalidations = mutableListOf<AuthoritySnapshot>()
-
-    @Before
-    fun setUp() {
-        server = MockWebServer()
-        server.start()
-        val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
-        state = VoiceSharingAccountState()
-        owner = TestOwner()
-        operations = VoiceSharingAccountOperations(
-            api = api,
-            state = state,
-            ownership = owner,
-            aurisToken = ownerToken(owner),
-            onCredentialInvalid = { rejected -> invalidations.add(rejected) },
-        )
-        owner.issueToken("fixture-bearer")
-        token = state.sessionStarted(owner.sessionGeneration())
-    }
-
-    @After
-    fun tearDown() {
-        server.shutdown()
-    }
-
-    private fun assertApplied(result: VoiceSharingMutationResult) = assertTrue(result is VoiceSharingMutationResult.Applied)
-
-    /** Owner-published credential (W3-equivalent); the mirror follows. */
-    private fun issueBearer(value: String) {
-        owner.issueToken(value.removePrefix("Bearer "))
-    }
-
-    private fun projectionJson(revision: String = "rev-1"): String = "{\"schema_version\":1,\"membership_revision\":\"$revision\",\"plan\":\"free\"," +
-        "\"voice_sharing_enrolled\":false,\"enrollment_epoch\":null," +
-        "\"accepted_disclosure_version\":null,\"withdrawal_state\":\"not_enrolled\"}"
-
-    @Test
-    fun `a later same-session GET fences an older in-flight operation response`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-
-        // Older enrollment pauses in flight; a later GET completes first with newer data.
-        server.enqueue(
-            MockResponse().setResponseCode(200).setBody(projectionJson("rev-old"))
-                .setHeadersDelay(500, TimeUnit.MILLISECONDS),
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-new")))
-
-        val older = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(100) } // let the older op freeze + go in flight
-        assertTrue(operations.refreshProjection(token)) // newer intent, later generation
-        assertEquals("rev-new", state.projection.value!!.membershipRevision)
-        assertTrue(older.await() is VoiceSharingMutationResult.Failure) // obsolete generation: never applied
-        assertEquals("rev-new", state.projection.value!!.membershipRevision)
-    }
-
-    @Test
-    fun `mutation retries retain the ORIGINAL request_id and byte-identical body`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-
-        server.enqueue(MockResponse().setResponseCode(500))
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
-
-        server.takeRequest(5, TimeUnit.SECONDS)!! // drain GET
-        val a1 = server.takeRequest(5, TimeUnit.SECONDS)!!
-        val a2 = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals(a1.body.readUtf8(), a2.body.readUtf8())
-    }
-
-    @Test
-    fun `401 with the SAME bearer and originating session triggers the credential effect once`() = runTest {
+    fun `exhausted 5xx on the HttpException path is UNAVAILABLE, not an auth rejection`() = runTest {
+        // The transport REALLY throws HttpException twice (no Response object is ever produced).
+        val throwing = ThrowingHttpException(503)
+        val observed = mutableListOf<VoiceSharingRefreshDiagnostic>()
+        val ops = VoiceSharingAccountOperations(throwing, state, owner, ownerToken(owner), onCredentialInvalid = { rejected -> invalidations.add(rejected) })
         issueBearer("Bearer token-a")
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        assertEquals(listOf("Bearer token-a"), sentAuthHeaders())
-
-        server.enqueue(MockResponse().setResponseCode(401))
-        issueBearer("Bearer token-a") // unchanged at 401 time
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertEquals(1, invalidations.size)
-        // The effect carries the ACTUAL rejected owner snapshot (opaque; never logged).
-        assertEquals("token-a", invalidations[0].token!!.value)
-    }
-
-    @Test
-    fun `exhausted 503 is UNAVAILABLE, never an auth rejection - no credential effect`() = runTest {
-        // On-device evidence 2026-11-03 09:37:28Z: the staging gateway returned 503 twice for
-        // GET /api/v1/account/voice-sharing. A 5xx must stay retryable/unavailable: it may not
-        // clear credentials, trigger sign-out, or be reported as an authentication rejection
-        // (reviewer fe03ebf7).
-        issueBearer("Bearer token-a")
-        server.enqueue(MockResponse().setResponseCode(503))
-        server.enqueue(MockResponse().setResponseCode(503))
-        val observed = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic>()
         state.onRefreshObserved = { observed += it }
-        assertFalse(operations.refreshProjection(token))
-        assertTrue(invalidations.isEmpty())
-        assertEquals("Bearer token-a", credentials.current()!!.bearer) // credential untouched
-        assertTrue(state.hasCurrentSessionProjection() == false) // nothing applied, nothing lost
-        assertEquals(1, observed.size)
-        assertEquals(503, observed.single().status)
-        assertEquals(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic.Kind.REJECTED, observed.single().kind)
-        assertTrue(observed.single().detail.contains("UNAVAILABLE"))
+        assertFalse(ops.refreshProjection())
+        assertEquals("the transport really threw, twice", 2, throwing.calls)
+        assertTrue("a 5xx must never invalidate credentials", invalidations.isEmpty())
+        assertEquals("Bearer token-a", credentials.current()?.bearer)
+        assertEquals(503, observed.single().status) // the REAL status, not null
+        assertTrue("must read as unavailable", observed.single().detail.contains("UNAVAILABLE"))
+        assertFalse("must not read as an auth rejection", observed.single().detail.contains("401"))
     }
 
     @Test
@@ -564,534 +453,61 @@ class VoiceSharingAccountOperationsFencingTest {
         issueBearer("Bearer token-a")
         server.enqueue(MockResponse().setResponseCode(503).setHeader("X-Request-Id", "id-one"))
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()).setHeader("X-Request-Id", "id-two"))
-        val observed = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic>()
+        val observed = mutableListOf<VoiceSharingRefreshDiagnostic>()
         state.onRefreshObserved = { observed += it }
-        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.refreshProjection())
         // One id per attempt, in call order: the retried call and the accepted one both report.
         assertEquals(listOf("id-one", "id-two"), observed.single().requestIds)
     }
 
     @Test
-    fun `exhausted 5xx on the HttpException path is UNAVAILABLE, not an auth rejection`() = runTest {
-        // Reviewer 20e851f6: the previous setup could silently use the ordinary response path, so
-        // this drives a transport that REALLY throws HttpException twice (no Response object is
-        // ever produced) and asserts the resulting diagnostic.
-        val throwing = ThrowingHttpException(503)
-        val ops = VoiceSharingAccountOperations(throwing, state, owner, ownerToken(owner), onCredentialInvalid = { rejected -> invalidations.add(rejected) })
-        issueBearer("Bearer token-a")
-        val observed = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic>()
-        state.onRefreshObserved = { observed += it }
-        assertFalse(ops.refreshProjection(token))
-        assertEquals("the transport really threw, twice", 2, throwing.calls)
-        assertTrue("a 5xx must never invalidate credentials", invalidations.isEmpty())
-        assertEquals("Bearer token-a", credentials.current()?.bearer)
-        val diagnostic = observed.single()
-        assertEquals(503, diagnostic.status) // the REAL status, not null
-        assertEquals(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingRefreshDiagnostic.Kind.REJECTED, diagnostic.kind)
-        assertTrue("must read as unavailable", diagnostic.detail.contains("UNAVAILABLE"))
-        assertFalse("must not read as an auth rejection", diagnostic.detail.contains("401"))
-    }
-
-    /** Transport that always throws [HttpException]; no HTTP response object is ever produced. */
-    private class ThrowingHttpException(private val code: Int) : VoiceSharingAccountApi {
-        var calls = 0
-
-        private fun fail(): Nothing {
-            calls++
-            throw HttpException(Response.error<ResponseBody>(code, "".toResponseBody(null)))
-        }
-
-        override suspend fun getVoiceSharing(bearer: String?): Response<ResponseBody> = fail()
-
-        override suspend fun postEnrollment(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
-
-        override suspend fun postWithdrawal(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
-
-        override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
-    }
-
-    @Test
-    fun `401 after the session ended triggers NO credential effect`() = runTest {
-        issueBearer("Bearer token-a")
+    fun `malformed operation response fails closed without applying`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
-        state.sessionEnded()
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertTrue(invalidations.isEmpty())
-    }
-
-    @Test
-    fun `401 after a rotation BEFORE the coordinated transaction invalidates NOTHING`() = runTest {
-        issueBearer("Bearer token-a")
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token)) // froze the owner snapshot at token-a
-        // Deterministic margin: the 401 cannot be PROCESSED until the headers delay elapses
-        // (2s); the rotation is committed at ~200ms — strictly before the transaction starts.
-        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(2, TimeUnit.SECONDS))
-        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(200) }
-        issueBearer("Bearer token-b") // rotation commits first
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // The upstream credential rotated BEFORE the 401 could be processed, and it is the only
-        // thing this route's refusal cannot speak about. It must survive untouched -- read from
-        // the OWNER, the sole place that can be harmed, not from a callback list.
-        assertEquals("token-b", owner.authoritySnapshot().token!!.value) // owner publication untouched
-        assertEquals("Bearer token-b", credentials.current()!!.bearer) // fresh credential untouched
-        // BOTH halves must hold (reviewer b702cd53): nothing was destroyed AND the live voice
-        // authority is intact -- asserted directly, never via a defaulted/optional value.
-        assertTrue("a pre-transaction 401 must not revoke the live voice authority", state.hasCurrentSessionProjection())
+        assertTrue(operations.refreshProjection())
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"schema_version\":2}"))
+        assertTrue(operations.withdraw() is VoiceSharingMutationResult.Failure)
         assertEquals("rev-1", state.projection.value!!.membershipRevision)
-    }
-
-    @Test
-    fun `a newer projection installed DURING the suspended re-mint survives the resumed mirror clear`() = runTest {
-        // The EXACT interleaving reviewer cf8188f0 required: the 401 commits, the re-mint
-        // callback SUSPENDS, a superseding session establishes projection + mirror while it is
-        // in flight, the callback RESUMES -- and the delayed mirror clear must not touch them.
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val owner = TestOwner()
-        owner.issueToken("real-token-1")
-        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.install()
-        val server = MockWebServer().apply { start() }
-        val refreshEntered = CompletableDeferred<Unit>()
-        val releaseRefresh = CompletableDeferred<Unit>()
-        val refreshCalls = java.util.concurrent.atomic.AtomicInteger(0)
-        val fenceableAuris = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
-            override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
-            override suspend fun refreshToken() {
-                refreshCalls.incrementAndGet()
-                refreshEntered.complete(Unit) // the re-mint is now SUSPENDED mid-callback
-                releaseRefresh.await()
-            }
-            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
-        }
-        val operations = VoiceSharingAccountOperations(
-            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
-            state = state,
-            ownership = owner,
-            aurisToken = fenceableAuris,
-            onAurisCredentialRefused = { fenceableAuris.refreshToken() },
-            onCredentialInvalid = { credentials.publish(null) }, // production-like mirror clear
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        val token = state.currentSessionTokenForTest()!!
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
-        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        // enroll only RETURNS after the parked re-mint resumes, so await the PARK, not the result.
-        refreshEntered.await()
-        // THE SUPERSEDING SESSION ARRIVES WHILE THE CALLBACK IS SUSPENDED:
-        owner.simulateAccountSwitch()
-        owner.issueToken("token-b")
-        credentials.publish("Bearer token-b") // newer mirror
-        val newSession = state.sessionStarted(owner.sessionGeneration())
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertTrue(operations.refreshProjection(newSession))
-        assertTrue(state.hasCurrentSessionProjection()) // newer authority is LIVE before resumption
-        // NOW the old rejection's callback resumes and its delayed mirror clear runs.
-        releaseRefresh.complete(Unit)
-        withContext(Dispatchers.IO) { Thread.sleep(200) }
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // BOTH SURVIVE: the fence sits where the effect lands, not where it is convenient.
-        assertTrue("the newer projection must survive the resumed clear", state.hasCurrentSessionProjection())
-        assertEquals("rev-2", state.projection.value!!.membershipRevision)
-        assertEquals("Bearer token-b", credentials.current()?.bearer)
-        assertEquals(1, refreshCalls.get())
-        server.shutdown()
-    }
-
-    @Test
-    fun `a NEW session with NO projection yet also survives the resumed clear`() = runTest {
-        // Reviewer 82a9958d + cloud 561e8d35: a brand-new session passes any PRESENCE check by
-        // simply not having published yet. The mutation-boundary fence compares identity instead:
-        // a different owner session generation must suppress the clear even with no projection.
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val owner = TestOwner()
-        owner.issueToken("real-token-1")
-        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.install()
-        val server = MockWebServer().apply { start() }
-        val refreshEntered = CompletableDeferred<Unit>()
-        val releaseRefresh = CompletableDeferred<Unit>()
-        val clears = java.util.concurrent.atomic.AtomicInteger(0)
-        val fenceableAuris = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
-            override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
-            override suspend fun refreshToken() {
-                refreshEntered.complete(Unit)
-                releaseRefresh.await()
-            }
-            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
-        }
-        val operations = VoiceSharingAccountOperations(
-            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
-            state = state,
-            ownership = owner,
-            aurisToken = fenceableAuris,
-            onAurisCredentialRefused = { fenceableAuris.refreshToken() },
-            onCredentialInvalid = { clears.incrementAndGet() }, // invoked INSIDE the owner transaction
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        val token = state.currentSessionTokenForTest()!!
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
-        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        refreshEntered.await()
-        // A NEW session arrives mid-flight and has NOT published a projection yet.
-        owner.simulateAccountSwitch()
-        owner.issueToken("token-b")
-        credentials.publish("Bearer token-b")
-        val newSession = state.sessionStarted(owner.sessionGeneration())
-        releaseRefresh.complete(Unit)
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // No projection, but the identity differs: the clear must NOT fire.
-        assertEquals("Bearer token-b", credentials.current()?.bearer)
-        assertFalse(state.hasCurrentSessionProjection())
-        assertTrue(state.isCurrentSession(newSession))
-        assertEquals(0, clears.get())
-        server.shutdown()
-    }
-
-    @Test
-    fun `authority REINSTATED during the re-mint is newer and survives the fence`() = runTest {
-        // The complementary case to the no-projection control: authority DOES come back before the
-        // fence reads -- but as a new incarnation, so it is newer authority and escapes the clear.
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val owner = TestOwner()
-        owner.issueToken("real-token-1")
-        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.install()
-        val server = MockWebServer().apply { start() }
-        val refreshEntered = CompletableDeferred<Unit>()
-        val releaseRefresh = CompletableDeferred<Unit>()
-        val clears = java.util.concurrent.atomic.AtomicInteger(0)
-        val fenceableAuris = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
-            override suspend fun currentToken(): String? = owner.authoritySnapshot().token?.value
-            override suspend fun refreshToken() {
-                refreshEntered.complete(Unit)
-                releaseRefresh.await()
-            }
-            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
-        }
-        val operations = VoiceSharingAccountOperations(
-            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
-            state = state,
-            ownership = owner,
-            aurisToken = fenceableAuris,
-            onAurisCredentialRefused = { fenceableAuris.refreshToken() },
-            onCredentialInvalid = { clears.incrementAndGet() },
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        val token = state.currentSessionTokenForTest()!!
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
-        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        refreshEntered.await()
-        // The SAME session re-establishes authority mid-flight. A 401 ends the session it rejected,
-        // so the reinstatement is a NEW session incarnation under the SAME owner generation -- and
-        // it does not publish through a call (calls are not what a reinstatement is).
-        owner.issueToken("token-1-retry")
-        credentials.publish("Bearer token-1-retry")
-        val reinstated = state.sessionStartedForTest(owner.sessionGeneration())
-        state.applyOutcomeForTest(reinstated, projectionJson("rev-2"), owner.sessionGeneration())
-        kotlinx.coroutines.delay(50) // deterministic: the reinstatement signals BEFORE the fence reads
-        assertTrue(state.hasCurrentSessionProjection())
-        releaseRefresh.complete(Unit)
-        withContext(Dispatchers.IO) { Thread.sleep(100) } // let the resumed re-mint return
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // The fence compares the EXACT rejected incarnation. A 401 ends the session it rejected,
-        // so a reinstatement is necessarily a NEW incarnation -> newer authority, untouched.
-        assertEquals(0, clears.get())
-        assertEquals("Bearer token-1-retry", credentials.current()?.bearer)
-        assertTrue(state.hasCurrentSessionProjection())
-        assertEquals("rev-2", state.projection.value!!.membershipRevision)
-        server.shutdown()
-    }
-
-    @Test
-    fun `the post-commit notification clears ONLY the mirror - mutation-boundary coordinated`() = runTest {
-        // The mirror mutation now runs INSIDE the owner transaction with the identity comparison
-        // (reviewer 82a9958d): no suspension sits between the fence and the effect, so this
-        // control asserts the committed contract instead of racing a barrier.
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
-        val result = async(Dispatchers.IO) { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // WHAT THIS ROUTE MAY NOT DO (cloud bbb9beff): its 401 never touches the upstream session
-        // or the real credential the user is signed in with -- read from the OWNER, which is the
-        // only place that can actually be harmed. What it does clear is the voice-scope mirror.
-        assertEquals("fixture-bearer", owner.authoritySnapshot().token!!.value)
-        // The notification fired for THIS rejection and its payload is the identity that produced
-        // it -- not read from a hook's default, but from the callback the api was constructed with.
-        assertEquals(1, invalidations.size)
-        assertEquals("fixture-bearer", invalidations[0].token!!.value)
-    }
-
-    @Test
-    fun `401 when the bearer has since changed triggers NO credential effect`() = runTest {
-        issueBearer("Bearer token-a")
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        // Pause the 401 so the credential changes AFTER the request was sent.
-        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(400, TimeUnit.MILLISECONDS))
-        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(100) } // let the request go out with token-a
-        issueBearer("Bearer token-b") // the credential moves AFTER the request was frozen
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-
-        // The 401 is about the AURIS token this app presented; the upstream credential that rotated
-        // mid-flight is not what it speaks about, and must survive untouched -- read from the OWNER,
-        // which is the only place that can actually be harmed.
-        assertEquals("token-b", owner.authoritySnapshot().token!!.value)
-        assertEquals("Bearer token-b", credentials.current()?.bearer)
-    }
-
-    @Test
-    fun `401 from a superseded same-session operation invalidates NOTHING - generation-fenced`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        // Older enrollment's 401 pauses in flight; a newer same-session op completes first.
-        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(500, TimeUnit.MILLISECONDS))
-        val older = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(100) }
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertApplied(operations.withdraw(token)) // newer intent bumps the operation generation
-        assertTrue(older.await() is VoiceSharingMutationResult.Failure)
-        // The stale 401 must not log out the current session or touch the credential.
-        assertTrue(state.hasCurrentSessionProjection())
-        assertEquals("rev-2", state.projection.value!!.membershipRevision)
-        assertTrue(invalidations.isEmpty())
-    }
-
-    @Test
-    fun `409 revision conflict is terminal - no retry, projection untouched`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(409))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertEquals(2, server.requestCount) // GET + ONE enrollment attempt, no retry
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
-    }
-
-    @Test
-    fun `422 is terminal - no retry`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(422))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertEquals(2, server.requestCount)
-    }
-
-    @Test
-    fun `deleteData fences its terminal outcome - session ended mid-flight discards the receipt`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(
-            MockResponse().setResponseCode(202)
-                .setBody("{\"schema_version\":1,\"deletion_request_id\":\"del-1\",\"status\":\"deletion_pending\"}")
-                .setHeadersDelay(400, TimeUnit.MILLISECONDS),
-        )
-        val result = async { operations.deleteData(token) }
-        state.sessionEnded()
-        assertNull(result.await())
-    }
-
-    @Test
-    fun `disclosure versions with quotes and backslashes are JSON-escaped and retry bodies are byte-identical`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        val tricky = "v\"3\\x"
-        server.enqueue(MockResponse().setResponseCode(500))
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertApplied(operations.enroll(token, acceptedDisclosureVersion = tricky))
-        server.takeRequest(5, TimeUnit.SECONDS)!! // drain GET
-        val a1 = server.takeRequest(5, TimeUnit.SECONDS)!!
-        val a2 = server.takeRequest(5, TimeUnit.SECONDS)!!
-        val raw1 = a1.body.readUtf8()
-        val raw2 = a2.body.readUtf8()
-        assertEquals(raw1, raw2)
-        // The tricky value must survive a strict decode of the posted body, byte-identical.
-        val decoded = state.parseProjection(
-            "{\"schema_version\":1,\"membership_revision\":\"r\",\"plan\":\"free\",\"voice_sharing_enrolled\":true,\"enrollment_epoch\":\"e\",\"accepted_disclosure_version\":null,\"withdrawal_state\":\"withdrawn\"}",
-        ) // sanity: strict parser still works; body itself checked below via org.json-free read
-        assertTrue(raw1.contains("\\\"") || raw1.contains("\\\\"))
-    }
-
-    @Test
-    fun `malformed deletion receipt fails closed - dup keys, trailing junk, wrong schema`() {
-        val ops = operations
-        val access = ops.javaClass.getDeclaredMethod("parseDeletionReceipt", String::class.java)
-        access.isAccessible = true
-        assertNull(access.invoke(ops, "{\"schema_version\":1,\"deletion_request_id\":\"a\",\"deletion_request_id\":\"b\",\"status\":\"deletion_pending\"}"))
-        assertNull(access.invoke(ops, "{\"schema_version\":1,\"deletion_request_id\":\"a\",\"status\":\"deletion_pending\"} junk"))
-        assertNull(access.invoke(ops, "{\"schema_version\":\"1\",\"deletion_request_id\":\"a\",\"status\":\"deletion_pending\"}"))
-        assertNull(access.invoke(ops, "{\"schema_version\":1,\"deletion_request_id\":\"a\",\"status\":\"other\"}"))
-    }
-
-    // --- reviewer 6b1d517f: endpoint-exact bodies ---
-
-    private fun decodedKeys(raw: String): Set<String> = Regex("\\\"([a-z_]+)\\\":").findAll(raw).map { it.groupValues[1] }.toSet()
-
-    @Test
-    fun `enrollment body carries NO epoch - exact decoded key set`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(epoch = "epoch-9")))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
-        server.takeRequest(5, TimeUnit.SECONDS)!!
-        val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
-        assertEquals(setOf("request_id", "expected_membership_revision", "accepted_disclosure_version"), decodedKeys(body))
-        assertFalse(body.contains("epoch"))
-    }
-
-    @Test
-    fun `withdrawal serializes a NULL epoch explicitly - exact decoded key set`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertApplied(operations.withdraw(token))
-        server.takeRequest(5, TimeUnit.SECONDS)!!
-        val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
-        assertEquals(setOf("request_id", "expected_membership_revision", "enrollment_epoch"), decodedKeys(body))
-        assertTrue(body.contains("\"enrollment_epoch\":null"))
-    }
-
-    @Test
-    fun `deletion body carries ONLY the request_id`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(
-            MockResponse().setResponseCode(202)
-                .setBody("{\"schema_version\":1,\"deletion_request_id\":\"del-1\",\"status\":\"deletion_pending\"}"),
-        )
-        assertTrue(operations.deleteData(token) != null)
-        server.takeRequest(5, TimeUnit.SECONDS)!!
-        val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
-        assertEquals(setOf("request_id"), decodedKeys(body))
-    }
-
-    // --- 409 explicit membership-conflict outcome: strictly parsed projection, fenced apply ---
-
-    @Test
-    fun `409 applies the strictly parsed CURRENT projection under the issued token - no replay`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(
-            MockResponse().setResponseCode(409).setBody(
-                projectionJson("rev-current", withdrawal = "withdrawn", enrolled = false, epoch = "e"),
-            ),
-        )
-        val outcome = operations.enroll(token, acceptedDisclosureVersion = "v3")
-        assertTrue(outcome is VoiceSharingMutationResult.MembershipConflict) // NEVER a success
-        assertEquals("rev-current", (outcome as VoiceSharingMutationResult.MembershipConflict).currentProjection.membershipRevision)
-        assertEquals(2, server.requestCount) // terminal: no retry, no auto re-enroll
-        assertEquals("rev-current", state.projection.value!!.membershipRevision)
-    }
-
-    @Test
-    fun `withdraw 409 conflict is a DISTINCT outcome - never reports success`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(
-            MockResponse().setResponseCode(409).setBody(
-                projectionJson("rev-current", withdrawal = "withdrawn", enrolled = false, epoch = "e"),
-            ),
-        )
-        val outcome = operations.withdraw(token)
-        assertTrue(outcome is VoiceSharingMutationResult.MembershipConflict)
-        assertEquals(2, server.requestCount) // terminal: no retry
-        assertEquals("rev-current", state.projection.value!!.membershipRevision)
-    }
-
-    @Test
-    fun `409 arriving after a newer same-session op is Failure - not a conflict outcome`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        // Older enrollment's 409 pauses in flight; a newer same-session withdrawal completes first.
-        server.enqueue(
-            MockResponse().setResponseCode(409).setHeadersDelay(500, TimeUnit.MILLISECONDS).setBody(
-                projectionJson("rev-conflict"),
-            ),
-        )
-        val older = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(100) }
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertApplied(operations.withdraw(token)) // newer intent bumps the operation generation
-        // The stale 409's fenced apply is rejected: Failure, not MembershipConflict.
-        assertTrue(older.await() is VoiceSharingMutationResult.Failure)
-        assertEquals("rev-2", state.projection.value!!.membershipRevision)
-    }
-
-    @Test
-    fun `409 with a malformed projection body applies nothing`() = runTest {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(409).setBody("{\"schema_version\":9}"))
-        // A malformed 409 body is Failure, NEVER a MembershipConflict with a null projection.
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        assertEquals("rev-1", state.projection.value!!.membershipRevision) // malformed body applies nothing
-    }
-
-    private fun sentAuthHeaders(): List<String> {
-        val headers = mutableListOf<String>()
-        while (server.requestCount > headers.size) {
-            val r = server.takeRequest(5, TimeUnit.SECONDS) ?: break
-            r.headers["Authorization"]?.let { headers.add(it) } ?: break
-        }
-        return headers
     }
 }
 
 /**
- * Auth/lifecycle binding for the account boundary (reviewer b566ee43): the coordinator is the
- * ACTUAL credential owner composition — login/refresh/logout drive BOTH the credential
- * incarnation store and the session lifecycle; operations always require a real store.
+ * The account boundary's ordinary lifecycle reaction: mirror the credential, drop the projection
+ * on a session end. No identity, tokens or tickets of its own (spec 06392988).
  */
 class VoiceSharingAccountSessionCoordinatorTest {
 
     @Test
-    fun `login binds the credential write to session issuance`() {
+    fun `session start mirrors the published credential - no identity is created`() {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
-        val token = coordinator.login("Bearer token-a")
+        VoiceSharingAccountSessionCoordinator(state, credentials).onSessionStarted("Bearer token-a")
         assertEquals("Bearer token-a", credentials.current()!!.bearer)
-        assertTrue(state.isCurrentSession(token))
+        assertNull(state.projection.value)
     }
 
     @Test
-    fun `login without a credential issues a session with no incarnation`() {
+    fun `session start without a credential clears the mirror`() {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
         val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
-        val token = coordinator.login(null)
+        coordinator.onSessionStarted("Bearer token-a")
+        coordinator.onSessionStarted(null)
         assertNull(credentials.current())
-        assertTrue(state.isCurrentSession(token))
     }
 
     @Test
-    fun `logout clears the credential AND ends the session together`() {
+    fun `session end clears the credential AND drops the projection`() {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
         val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
-        val token = coordinator.login("Bearer token-a")
-        coordinator.loggedOut()
+        coordinator.onSessionStarted("Bearer token-a")
+        state.publish(state.parseProjection(projectionJson())!!)
+        coordinator.onSessionEnded()
         assertNull(credentials.current())
-        assertNull(state.beginOperation(token, requireProjection = false)) // session ended
+        assertNull("consent evidence dies with the session", state.projection.value)
     }
 }
 
-/**
- * Binding controls (reviewer 504da9ea design): the binding is the owner's NARROW synchronous
- * binding — session arms/ends INSIDE owner lifecycle transactions; install() bootstraps
- * fail-closed under the same owner lock. NO async email collector exists (no second authority
- * writer).
- */
 @RunWith(RobolectricTestRunner::class) // android.accounts.Account needs the Robolectric shadow
 class VoiceSharingAccountAuthBindingTest {
 
@@ -1103,11 +519,9 @@ class VoiceSharingAccountAuthBindingTest {
         owner.issueToken("real-token-1")
         val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
         val snapshot = binding.install()
-        val armedToken = state.currentSessionTokenForTest()
         assertEquals("real-token-1", snapshot!!.token!!.value)
         assertEquals("Bearer real-token-1", credentials.current()!!.bearer)
-        assertNotNull(armedToken)
-        assertTrue(state.isCurrentSession(armedToken!!)) // session armed synchronously at install
+        assertNull(state.projection.value) // install publishes nothing; the GET does
     }
 
     @Test
@@ -1118,162 +532,6 @@ class VoiceSharingAccountAuthBindingTest {
         val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
         assertNull(binding.install())
         assertNull(credentials.current())
-    }
-
-    @Test
-    fun `owner login and logout transactions drive the binding SYNCHRONOUSLY`() {
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val owner = TestOwner()
-        owner.issueToken("real-token-1")
-        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.install()
-        val armedToken = state.currentSessionTokenForTest()!!
-        owner.login("token-2") // W1-equivalent: the owner transaction invokes the binding INSIDE the lock
-        assertEquals("Bearer token-2", credentials.current()!!.bearer)
-        val reloginToken = state.currentSessionTokenForTest()!!
-        assertTrue(state.isCurrentSession(reloginToken)) // the NEW incarnation is armed
-        assertFalse(state.isCurrentSession(armedToken)) // the install-time session was superseded
-        owner.logout() // W2-equivalent: revocation in the SAME transaction
-        assertNull(credentials.current())
-        assertFalse(state.hasCurrentSessionProjection())
-    }
-
-    @Test
-    fun `a committed 401 through the binding path clears the REAL credential and the mirror TOGETHER`() = runTest {
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val owner = TestOwner()
-        owner.issueToken("real-token-1")
-        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.install()
-        val server = MockWebServer().apply { start() }
-        val operations = VoiceSharingAccountOperations(
-            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
-            state = state,
-            ownership = owner,
-            aurisToken = ownerToken(owner),
-            onCredentialInvalid = {
-                /* post-commit notification clears the MIRROR only (same wiring as production startup) */
-                credentials.publish(null)
-            },
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        server.enqueue(MockResponse().setResponseCode(401))
-        val token = state.currentSessionTokenForTest()!!
-        assertTrue(operations.refreshProjection(token))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        // CONTRACT CHANGE, deliberate (cloud bbb9beff): this route only ever sees the AURIS token, so
-        // its 401 may not destroy the upstream credential the user is signed in with. What a 401
-        // does revoke is the voice-scope authority and the mirror that records it.
-        assertEquals("real-token-1", owner.authoritySnapshot().token!!.value) // upstream credential INTACT
-        assertNull(credentials.current()) // voice-scope mirror cleared after commit
-        assertFalse(state.hasCurrentSessionProjection())
-        server.shutdown()
-    }
-
-    @Test
-    fun `a refresh published AFTER the freeze spares the FRESH credential from a stale 401`() = runTest {
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val owner = TestOwner()
-        owner.issueToken("real-token-1")
-        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.install()
-        val server = MockWebServer().apply { start() }
-        val operations = VoiceSharingAccountOperations(
-            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
-            state = state,
-            ownership = owner,
-            aurisToken = ownerToken(owner),
-            onCredentialInvalid = { },
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        val token = state.currentSessionTokenForTest()!!
-        assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(2, TimeUnit.SECONDS))
-        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(200) }
-        // REAL refresh write via the lease path (T4): session survives, credential rotates.
-        val lease = owner.beginRefresh(owner.authoritySnapshot())!!
-        assertTrue(owner.publishRefresh(lease, RefreshToken("r2"), AccessToken("real-token-2")))
-        credentials.publish("Bearer real-token-2") // mirror follows the owner publication
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // The rotation happened AFTER the request froze real-token-1, so the 401 is stale: it
-        // revokes nothing at all, and the credential published meanwhile survives untouched.
-        assertEquals("real-token-2", owner.authoritySnapshot().token!!.value)
-        assertEquals("Bearer real-token-2", credentials.current()!!.bearer)
-        // BOTH halves (reviewer b702cd53): the stale 401 committed nothing -- the fresh credential
-        // survives AND the live voice authority established before the rotation is STILL current.
-        assertTrue("a stale 401 must not revoke the live voice authority", state.hasCurrentSessionProjection())
-        assertTrue(state.isCurrentSession(token))
-        server.shutdown()
-    }
-}
-
-/** Atomicity of the coordinator + serialization of the credential transaction (a65170e7). */
-class VoiceSharingAccountTransitionAtomicityTest {
-
-    @Test
-    fun `rotation CANNOT interleave the coordinated invalidation transaction - deterministic lock barrier`() {
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val token = state.sessionStarted()
-        val ticket = state.beginOperation(token, requireProjection = false)!!
-        val c1 = credentials.publish("Bearer a")!!
-        val insideTransaction = CompletableDeferred<Unit>()
-        val releaseTransaction = CompletableDeferred<Unit>()
-
-        val transaction = thread(start = false) {
-            credentials.invalidateIfCurrent(c1) {
-                insideTransaction.complete(Unit)
-                runBlocking { releaseTransaction.await() }
-                state.processUnauthorized(token, ticket) // runs INSIDE the owner transaction
-            }
-        }
-        transaction.start()
-        runBlocking { withTimeout(5_000) { insideTransaction.await() } } // lock HELD by transaction
-
-        var rotationCompleted = false
-        val rotator = thread {
-            credentials.publish("Bearer b")
-            rotationCompleted = true
-        }
-        Thread.sleep(200) // bounded negative wait: rotation must still be BLOCKED on the lock
-        // The rotation must still be blocked: it cannot interleave the transaction.
-        assertFalse(rotationCompleted)
-
-        releaseTransaction.complete(Unit)
-        rotator.join(5_000)
-        transaction.join(5_000)
-        assertTrue(rotationCompleted) // rotation proceeded only AFTER the transaction committed
-        assertEquals("Bearer b", credentials.current()!!.bearer)
-    }
-
-    @Test
-    fun `interleaved login and logout stay CONSISTENT - credential present iff a session is current`() {
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
-        val tokens = ConcurrentLinkedQueue<SessionToken>()
-        val deadline = System.currentTimeMillis() + 1_000
-        val churn = (0 until 2).map { _ ->
-            thread {
-                while (System.currentTimeMillis() < deadline) {
-                    tokens.add(coordinator.login("Bearer churn-${System.nanoTime()}"))
-                    coordinator.loggedOut()
-                }
-            }
-        }
-        churn.forEach { it.join(10_000) }
-        val currentCount = tokens.count { state.isCurrentSession(it) }
-        val credential = credentials.current()
-        // The invariant the lock ordering guarantees: exactly one side survives, never half.
-        if (credential == null) {
-            assertEquals(0, currentCount) // logged out: no credential AND no current session
-        } else {
-            assertEquals(1, currentCount) // logged in: the credential AND its session match
-        }
     }
 }
 

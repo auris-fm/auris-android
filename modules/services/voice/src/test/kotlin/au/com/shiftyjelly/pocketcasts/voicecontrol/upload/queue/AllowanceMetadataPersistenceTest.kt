@@ -63,9 +63,7 @@ class AllowanceMetadataPersistenceTest {
         val owner = startup.ownerForHandoff()
         (owner as VoiceUploadCompositionFixtures.AppContextOwner).publish("a@x", 7L, "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
-        val token = startup.state.sessionStarted(7L)
-        val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-        assertTrue(startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L))
+        startup.publishEnrolledFixture("epoch-1")
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()
@@ -178,9 +176,7 @@ class AllowanceMetadataPersistenceTest {
         val owner = startup.ownerForHandoff()
         (owner as VoiceUploadCompositionFixtures.AppContextOwner).publish("a@x", 7L, "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
-        val token = startup.state.sessionStarted(7L)
-        val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-        assertTrue(startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L))
+        startup.publishEnrolledFixture("epoch-1")
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()

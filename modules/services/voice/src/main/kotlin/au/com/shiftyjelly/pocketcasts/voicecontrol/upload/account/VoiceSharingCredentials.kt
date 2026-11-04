@@ -41,9 +41,9 @@ class CredentialIncarnation internal constructor(
 )
 
 /**
- * Session+credential coordination for the boundary: lifecycle transitions keep the mirror and
- * the state fence consistent under [lifecycleLock] (voice-internal lock; the OWNER→voice order
- * is established by the caller — the binding callbacks run inside owner transactions).
+ * The account boundary's ONLY lifecycle reaction: mirror the credential the owner published and
+ * react to a session end. It creates no identity of its own — the owner's snapshot IS the identity
+ * (spec 06392988), and every request is authorized by the ordinary signed-in bearer.
  */
 class VoiceSharingAccountSessionCoordinator(
     val state: VoiceSharingAccountState,
@@ -52,15 +52,14 @@ class VoiceSharingAccountSessionCoordinator(
     private val lifecycleLock = Any()
 
     /** Session armed (binding callback from the owner's login/install transaction). */
-    fun login(bearer: String?, authGeneration: Long = Long.MIN_VALUE, tokenValue: String? = null, sessionGeneration: Long = Long.MIN_VALUE): SessionToken = synchronized(lifecycleLock) {
-        if (bearer != null) credentials.publish(bearer) else credentials.publish(null)
-        state.sessionStarted(sessionGeneration)
+    fun onSessionStarted(bearer: String?) = synchronized(lifecycleLock) {
+        credentials.publish(bearer)
     }
 
     /** Session ended (binding callback from the owner's logout/removal transaction). */
-    fun loggedOut(): Unit = synchronized(lifecycleLock) {
+    fun onSessionEnded() = synchronized(lifecycleLock) {
         credentials.publish(null)
-        state.sessionEnded()
+        state.clear()
     }
 }
 
@@ -74,7 +73,7 @@ class VoiceSharingAccountSessionCoordinator(
  */
 class VoiceSharingAccountAuthBinding(
     private val ownership: CredentialOwnershipOwner,
-    val coordinator: VoiceSharingAccountSessionCoordinator,
+    private val coordinator: VoiceSharingAccountSessionCoordinator,
 ) : CredentialOwnershipBinding {
 
     /**
@@ -94,21 +93,16 @@ class VoiceSharingAccountAuthBinding(
     @Volatile
     var authorityMovedListener: (() -> Unit)? = null
 
-    /** Owner login/install transaction tail (INSIDE the owner lock): arm session + mirror + notify. */
+    /** Owner login/install transaction tail (INSIDE the owner lock): mirror the credential + notify. */
     override fun onSessionStarted(session: Long) {
         val snapshot = ownership.authoritySnapshot() // reentrant owner read
-        coordinator.login(
-            snapshot.token?.let { "Bearer " + it.value },
-            snapshot.credential,
-            snapshot.token?.value,
-            session,
-        )
+        coordinator.onSessionStarted(snapshot.token?.let { "Bearer " + it.value })
         authorityMovedListener?.invoke()
     }
 
-    /** Owner logout/removal transaction tail (INSIDE the owner lock): clear mirror + end session + notify. */
+    /** Owner logout/removal transaction tail (INSIDE the owner lock): clear mirror + notify. */
     override fun onSessionEnded(session: Long) {
-        coordinator.loggedOut()
+        coordinator.onSessionEnded()
         authorityMovedListener?.invoke()
     }
 }

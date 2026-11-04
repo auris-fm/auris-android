@@ -97,15 +97,12 @@ class VoiceSharingAurisCredentialInvalidationTest {
         // credential taking the session down with it.
         val ops = operations()
 
-        // One session token for both attempts: refreshProjection fences one operation per session
-        // token, so a second call with a NEW token is the "superseded" case, not the 401 case.
-        val sessionToken = state.sessionStarted(owner.authoritySnapshot().session)
         server.enqueue(projection())
-        assertTrue("the projection must apply before a 401 can speak to a current session", ops.refreshProjection(sessionToken))
+        assertTrue("the projection must apply before a 401 can speak to a current session", ops.refreshProjection())
         server.takeRequest()
 
         server.enqueue(MockResponse().setResponseCode(401))
-        val applied = ops.refreshProjection(sessionToken)
+        val applied = ops.refreshProjection()
 
         assertEquals(false, applied)
         // Asserted through the callback the operations were actually constructed with. Asking the

@@ -412,15 +412,14 @@ class LoopbackHostDriverTest {
         assumeTrue("AURIS_LOOPBACK_ACCOUNT_ID required", fixtureAccountId != null)
         assumeTrue("AURIS_LOOPBACK_DISCLOSURE required (rig's accepted disclosure version)", fixtureDisclosure != null)
         val (operations, owner, state) = newOperations()
-        val token = state.sessionStarted(owner.sessionGeneration())
         // Clear BEFORE the seeding GET so the verdict can only be THIS exchange.
         lastAccountStatus = null
         lastAccountTarget = null
         // Outcome evaluated FIRST (reviewer 77bb1e88 #1): the verdict text must describe the
         // COMPLETED exchange, not be constructed before the GET ran.
-        val seeded = runBlocking { operations.refreshProjection(token) }
+        val seeded = runBlocking { operations.refreshProjection() }
         assertTrue("seeding GET must apply the projection (account verdict: ${accountVerdict()})", seeded)
-        val result = runBlocking { operations.enroll(token, acceptedDisclosureVersion = fixtureDisclosure!!) }
+        val result = runBlocking { operations.enroll(acceptedDisclosureVersion = fixtureDisclosure!!) }
         assertTrue(
             "enroll must be Applied or MembershipConflict, each carrying the current projection (got $result)",
             result is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult.Applied ||
@@ -691,8 +690,7 @@ class LoopbackHostDriverTest {
         val owner = DriverOwner()
         val state = VoiceSharingAccountState()
         val operations = VoiceSharingAccountOperations(api, state, owner, ownerToken(owner), onCredentialInvalid = { _ -> })
-        val token = state.sessionStarted(owner.sessionGeneration())
-        val result = runBlocking { operations.withdraw(token) }
+        val result = runBlocking { operations.withdraw() }
 
         assertTrue("a refused withdrawal is Failure, never Applied", result is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult.Failure)
         intents.onWithdrawalFailed()
@@ -712,24 +710,23 @@ class LoopbackHostDriverTest {
         val marker = File(sharedTmp.root, "withdrawal-intent")
         val intents = LocalWithdrawalIntentStore(FileIntentPersistence(marker))
         assertTrue(intents.recordWithdrawalRequested())
-        val sessionToken = state.sessionStarted(owner.sessionGeneration())
 
         // The contract's own order: current-session GET first, then the mutation.
         lastAccountStatus = null
         lastAccountTarget = null
-        val seeded = runBlocking { operations.refreshProjection(sessionToken) }
+        val seeded = runBlocking { operations.refreshProjection() }
         assertTrue("seeding GET must apply the projection (account verdict: ${accountVerdict()})", seeded)
         // EXPLICIT enrolled precondition: this control establishes its own enrolled state before
         // withdrawing, whatever an earlier method did to the shared server account.
         assumeTrue("AURIS_LOOPBACK_DISCLOSURE required (rig's accepted disclosure version)", fixtureDisclosure != null)
-        val enrolledResult = runBlocking { operations.enroll(sessionToken, acceptedDisclosureVersion = fixtureDisclosure!!) }
+        val enrolledResult = runBlocking { operations.enroll(acceptedDisclosureVersion = fixtureDisclosure!!) }
         assertTrue(
             "enroll precondition must be Applied or MembershipConflict (got $enrolledResult)",
             enrolledResult is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult.Applied ||
                 enrolledResult is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult.MembershipConflict,
         )
         requireEnrolledProjection(state)
-        val result = runBlocking { operations.withdraw(sessionToken) }
+        val result = runBlocking { operations.withdraw() }
 
         val applied = result as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult.Applied
         assertNotNull("withdrawal is Applied (got $result)", applied)
@@ -765,12 +762,11 @@ class LoopbackHostDriverTest {
     fun `control 6 - deletion runs on the POST-WITHDRAWAL state left by control 5`() {
         assumeTrue(accountBase != null)
         val (operations, owner, state) = newOperations()
-        val sessionToken = state.sessionStarted(owner.sessionGeneration())
 
         // The contract's own order: current-session GET first — this is what observes control 5.
         lastAccountStatus = null
         lastAccountTarget = null
-        val seeded = runBlocking { operations.refreshProjection(sessionToken) }
+        val seeded = runBlocking { operations.refreshProjection() }
         assertTrue("seeding GET must apply the post-withdrawal projection (account verdict: ${accountVerdict()})", seeded)
         val projection = state.projection.value
         assertTrue("control 5 must have left an applied projection (got $projection)", projection != null)
@@ -796,7 +792,7 @@ class LoopbackHostDriverTest {
             !control5Stop.collectionPermittedByLocalIntent(projection),
         )
 
-        val receipt = runBlocking { operations.deleteData(sessionToken) }
+        val receipt = runBlocking { operations.deleteData() }
         // This asserts the CLIENT observable only: a 202 deletion_pending receipt. It is NOT proof
         // of completed deletion — completion requires the server-side cleanup/lookup observation,
         // which belongs to the Cloud recipe's joined run.

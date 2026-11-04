@@ -9,120 +9,63 @@ import kotlinx.coroutines.flow.StateFlow
 import okio.Buffer
 
 /**
- * Membership projection state (Task 2 of docs/plans/android/voice-recording-uploads.md,
- * reviewer rounds 2-3). Strict, lifecycle-keyed, fail-closed:
+ * The account's membership projection, and nothing else (spec 06392988).
  *
- * - Parsing uses Moshi's STRICT JsonReader (an established strict parser, not hand-patched
- *   syntax): unquoted or single-quoted names, malformed nested syntax, and trailing junk or a
- *   second top-level value all fail. Legal key escapes are DECODED and duplicate detection
- *   compares decoded keys, so escaped aliases are caught.
- * - Exact values: schema_version must be the exact NUMERIC 1 (1 and 1.0 and 1e0 are the same
- *   number; "1", true, null, and 1.5 fail). Epoch/disclosure must be actual JSON null OR a
- *   nonempty string — no other type coerces. Booleans must be JSON booleans; enums must match
- *   schema literals exactly.
- * - Lifecycle generation is issued SYNCHRONOUSLY: sessionStarted() supersedes the prior token
- *   and clears the prior projection ATOMICALLY (a new authoritative session never inherits the
- *   old one's projection), sessionEnded() ends it, and token refresh is not a boundary.
- * - Every authority apply requires the ORIGINALLY ISSUED token, reference-compared.
+ * This is ORDINARY account state: the server's answer to "is this account enrolled, and under
+ * which epoch / disclosure" — the evidence collection consent and the Settings surface read. It is
+ * NOT an identity lifecycle: there are no session tokens, operation tickets or generations here.
+ * A login/logout is handled by the ordinary account owner, and every request is authorized by the
+ * ordinary signed-in bearer; an operation that loses that bearer simply fails.
+ *
+ * Parsing is STRICT and fails closed:
+ *
+ * - Moshi's STRICT JsonReader (an established strict parser, not hand-patched syntax): unquoted or
+ *   single-quoted names, malformed nested syntax, and trailing junk or a second top-level value
+ *   all fail. Legal key escapes are DECODED, so escaped duplicate aliases are caught.
+ * - Exact values: schema_version must be the exact NUMERIC 1 (1, 1.0 and 1e0 are the same number;
+ *   "1", true, null, and 1.5 fail). Epoch/disclosure must be actual JSON null OR a nonempty string.
+ *   Booleans must be JSON booleans; enums must match schema literals exactly.
+ * - [publish] is the ONE write point: a server answer replaces the projection atomically and
+ *   bumps [publicationCount]. [clear] drops it (session ended, account removed).
  */
 class VoiceSharingAccountState {
-    /** Post-commit notification hook (applied session + projection); mirror bookkeeping only. */
-    var onProjectionApplied: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
+    private val lock = Any()
+    private val projectionFlow = MutableStateFlow<VoiceSharingAccountProjection?>(null)
+    private val publicationCount = AtomicLong(0)
 
-    /** Opt-in diagnostic sink (staging observability): receives the projection outcome of one
-     *  refresh WITHOUT any authority effect; null in production consumers that do not need it. */
+    val projection: StateFlow<VoiceSharingAccountProjection?> = projectionFlow
+
+    /**
+     * How many projections this state has published. A publication count, not an identity: the
+     * operations layer reads it around a request so an answer that a LATER request already
+     * superseded is discarded instead of overwriting newer state.
+     */
+    fun publicationCount(): Long = publicationCount.get()
+
+    /** Publishes a server answer atomically; the newest write wins. */
+    fun publish(projection: VoiceSharingAccountProjection) = synchronized(lock) {
+        projectionFlow.value = projection
+        publicationCount.incrementAndGet()
+        notifyProjection(projection)
+    }
+
+    /** Drops the projection (no live account session): the evidence fails closed until it returns. */
+    fun clear() = synchronized(lock) {
+        projectionFlow.value = null
+        publicationCount.incrementAndGet()
+        notifyProjection(null)
+    }
+
+    /** Post-publication hook used by the collection authority (mirror bookkeeping only). */
+    @Volatile
+    var onProjectionListener: ((VoiceSharingAccountProjection?) -> Unit)? = null
+
+    /** Opt-in diagnostic sink (staging observability): the outcome of one refresh, no authority. */
+    @Volatile
     var onRefreshObserved: ((VoiceSharingRefreshDiagnostic) -> Unit)? = null
 
-    /** Central post-transition observer (reviewer dde0905a + 6b6d62b8): fired for EVERY
-     *  authoritative projection change OR LOSS - applied outcomes AND nulling transitions
-     *  (scoped 401 processUnauthorized, session-moved revocation, session end). The payload
-     *  projection is NULL for a loss: the connector re-reads a coherent optional identity and
-     *  cancels in-flight attempts whose admitted identity no longer matches anything. */
-    @Volatile
-    var projectionInvalidatedListener: ((VoiceSharingAccountProjection?, Long) -> Unit)? = null
-
-    private fun notifyProjection(projection: VoiceSharingAccountProjection?, ownerSession: Long) {
-        projectionInvalidatedListener?.invoke(projection, ownerSession)
-    }
-    private val state = MutableStateFlow<VoiceSharingAccountProjection?>(null)
-
-    /**
-     * The projection WITH its authoritative owner session, published under the same fence as
-     * [state] (reviewer 20b681f0): consumers must not infer a projection's owner from their own
-     * collection time - a singleton constructed under session A, switching to B before its
-     * collector first runs, replays A's value and would stamp it as B's.
-     */
-    private val tagged =
-        MutableStateFlow(VoiceSharingTaggedProjection(ownerSession = Long.MIN_VALUE, projection = null))
-
-    val taggedProjection: StateFlow<VoiceSharingTaggedProjection> = tagged
-
-    private fun publish(projection: VoiceSharingAccountProjection?) {
-        tagged.value = VoiceSharingTaggedProjection(currentSessionGeneration, projection)
-    }
-
-    /** Observed under [fence]; guards the issued session and revision currency. */
-    private var currentToken: SessionToken? = null
-    private var currentSessionGeneration: Long = Long.MIN_VALUE
-
-    private val fence = Any()
-
-    /** Store-owned operation generation: bumped on EVERY session lifecycle transition. */
-    private val operationGeneration = AtomicLong(0)
-
-    val projection: StateFlow<VoiceSharingAccountProjection?> = state
-
-    /**
-     * Issues a fresh session token synchronously, superseding any earlier token AND clearing
-     * the earlier session's projection atomically: a newly authoritative session never starts
-     * with the previous session's projection.
-     */
-    fun sessionStarted(sessionGeneration: Long = Long.MIN_VALUE): SessionToken = synchronized(fence) {
-        operationGeneration.incrementAndGet() // outstanding tickets die with the old session
-        state.value = null
-        // The NULL projection published for the new session must already carry the NEW session's
-        // generation, so the tag identifies the authoritative session even while empty
-        // (reviewer 278e595f).
-        currentSessionGeneration = sessionGeneration
-        signalIdentityChange() // a NEW identity is live from here on
-        publish(null)
-        notifyProjection(null, sessionGeneration)
-        SessionToken().also { currentToken = it }
-    }
-
-    /** Ends the session synchronously: invalidates the projection and the token. */
-    fun sessionEnded() = synchronized(fence) {
-        operationGeneration.incrementAndGet()
-        currentToken = null
-        state.value = null
-        signalIdentityChange() // identity gone
-        publish(null)
-        notifyProjection(null, currentSessionGeneration)
-    }
-
-    /**
-     * SYNCHRONOUS authority validation at the owner/state boundary (reviewer efbe0945): if the
-     * REAL owner's session incarnation has moved since this session was armed (REAL signOut /
-     * account replacement), the projection is revoked HERE — at every authority read — instead
-     * of waiting for the async emailFlow collector. Returns true when it revoked.
-     */
-    fun revokeIfSessionMoved(liveSessionGeneration: Long): Boolean = synchronized(fence) {
-        if (currentToken != null && currentSessionGeneration != liveSessionGeneration) {
-            operationGeneration.incrementAndGet()
-            currentToken = null
-            state.value = null
-            signalIdentityChange()
-            publish(null)
-            notifyProjection(null, currentSessionGeneration)
-            true
-        } else {
-            false
-        }
-    }
-
-    /** Token refresh on the same session: NOT a lifecycle boundary; nothing is invalidated. */
-    fun onTokenRefresh() {
-        // Deliberately no invalidation; projection and authority survive.
+    private fun notifyProjection(projection: VoiceSharingAccountProjection?) {
+        onProjectionListener?.invoke(projection)
     }
 
     /** Strict parse: see [ProjectionJsonParser]. Any defect fails closed. */
@@ -130,158 +73,6 @@ class VoiceSharingAccountState {
         ProjectionJsonParser.parse(json)
     } catch (_: Exception) {
         null
-    }
-
-    /** Opaque revision comparison: equality with the CURRENT revision only, never ordering. */
-    fun isCurrentRevision(revision: String): Boolean = synchronized(fence) {
-        state.value?.membershipRevision == revision
-    }
-
-    /** Fenced check: is this the session currently in authority? */
-    fun isCurrentSession(token: SessionToken): Boolean = synchronized(fence) {
-        token === currentToken
-    }
-
-    /**
-     * STORE-OWNED atomic operation issuance: under one fence, validates the issued session,
-     * captures the projection snapshot, and issues a generation ticket. Mutations require a
-     * current-session GET projection; the GET authority-creation path does not.
-     */
-    fun beginOperation(token: SessionToken, requireProjection: Boolean, ownerSession: Long = Long.MIN_VALUE): OperationTicket? = synchronized(fence) {
-        // OWNER→voice: this runs inside the owner's transaction — the ticket stamps the owner
-        // session incarnation observed under the owner lock, so later checks compare against
-        // the LIVE incarnation, not collector timing.
-        if (token !== currentToken || currentSessionGeneration != ownerSession) return null
-        val projection = state.value
-        if (requireProjection && projection == null) return null
-        // The issued projection snapshot is IMMUTABLE on the ticket: request bodies are
-        // serialized from exactly these captured values, never re-read after awaits.
-        OperationTicket(operationGeneration.incrementAndGet(), projection, ownerSession)
-    }
-
-    /**
-     * STORE-OWNED conditional apply: under one fence, validates the issued session AND the
-     * ticket generation, strictly parses, and only then writes — a new same-session intent
-     * (which bumps the generation) can never slip between check and write.
-     */
-    fun applyOutcome(token: SessionToken, ticket: OperationTicket, json: String, ownerSession: Long = Long.MIN_VALUE): Boolean = synchronized(fence) {
-        // OWNER→voice: ownerSession was read under the owner lock by the caller's transaction.
-        if (token !== currentToken || ticket.generation != operationGeneration.get() || ticket.session != ownerSession) return false
-        val projection = parseProjection(json) ?: return false
-        state.value = projection
-        publish(projection)
-        onProjectionApplied?.invoke(projection, ownerSession)
-        notifyProjection(projection, ownerSession)
-        true
-    }
-
-    /** Atomic issued-session invalidation: ends the session ONLY if it is still current. */
-    fun endSessionIfCurrent(token: SessionToken): Boolean = synchronized(fence) {
-        if (token !== currentToken) return false
-        operationGeneration.incrementAndGet()
-        currentToken = null
-        state.value = null
-        signalIdentityChange()
-        publish(null)
-        notifyProjection(null, currentSessionGeneration)
-        true
-    }
-
-    /** Fenced revalidation used before each send and before terminal outcomes. */
-    fun isTicketCurrent(token: SessionToken, ticket: OperationTicket, ownerSession: Long = Long.MIN_VALUE): Boolean = synchronized(fence) {
-        token === currentToken && ticket.generation == operationGeneration.get() && ticket.session == ownerSession
-    }
-
-    /**
-     * SCOPED state side of the coordinated 401 invalidation transaction: validates the issued
-     * TICKET generation and the session under the state fence, so a newer same-session
-     * operation (which bumped the generation) or a superseded session makes a stale 401 a
-     * no-op. The credential owner ([VoiceSharingCredentialStore.invalidateIfCurrent]) runs
-     * this check INSIDE its transaction lock, making credential compare + state invalidation
-     * one coordinated transaction. No credential data passes through or is stored.
-     */
-    fun processUnauthorized(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
-        if (token !== currentToken) return false
-        if (ticket.generation != operationGeneration.get()) return false
-        operationGeneration.incrementAndGet()
-        currentToken = null
-        state.value = null
-        signalIdentityChange()
-        publish(null)
-        notifyProjection(null, ticket.session)
-        true
-    }
-
-    /** Test/diagnostic accessor for the current issued session (null when ended). */
-    fun currentSessionTokenForTest(): SessionToken? = synchronized(fence) { currentToken }
-
-    fun currentOwnerSessionForTest(): Long? = synchronized(fence) { currentToken?.let { currentSessionGeneration } }
-
-    /** Re-arms the session under the SAME owner generation: the reinstatement a 401 allows for. */
-    fun sessionStartedForTest(ownerSession: Long): SessionToken = synchronized(fence) { sessionStarted(ownerSession) }
-
-    /** Same-session authority publication, for controls that must SKIP the op that a 401 ended. */
-    fun applyOutcomeForTest(token: SessionToken, json: String, ownerSession: Long): Boolean {
-        synchronized(fence) {
-            if (token !== currentToken) return false
-            val projection = parseProjection(json) ?: return false
-            state.value = projection
-            publish(projection)
-            notifyProjection(projection, ownerSession)
-            return true
-        }
-    }
-
-    fun hasCurrentSessionProjection(): Boolean = synchronized(fence) {
-        currentToken != null && state.value != null
-    }
-
-    /**
-     * The voice identity of a live session: the session incarnation ([token], a NEW instance per
-     * issued session) plus the owner session generation it was started under. A delayed effect
-     * records the one it rejected and asks whether the live one is STILL that same incarnation.
-     */
-    class VoiceIdentity internal constructor(
-        internal val token: SessionToken,
-        internal val ownerSession: Long,
-    )
-
-    private val identityChangeSignal = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
-
-    /** Bumped on EVERY identity transition, so a waiter can tell "changed since I looked" apart. */
-    private val identityChangeCount = java.util.concurrent.atomic.AtomicLong(0)
-
-    /** Wakes a SUSPENDED caller when the live voice identity changes. Nested inside [fence]: leaf. */
-    private fun signalIdentityChange() {
-        identityChangeCount.incrementAndGet()
-        identityChangeSignal.trySend(Unit)
-    }
-
-    /** A token that becomes stale the moment the identity changes: read it BEFORE the effect. */
-    fun identityChangeMarker(): Long = identityChangeCount.get()
-
-    /** Wakes a waiting rejection when ANY live authority is observed (identity unchanged). */
-    fun signalLiveAuthority() {
-        identityChangeSignal.trySend(Unit) // wakes the WAIT, does not advance the change counter
-    }
-
-    /**
-     * Suspends until the live voice identity changes (or the caller times out). NEVER blocks a
-     * thread and never runs under a lock: the caller awaits this, then re-reads [voiceIdentity]
-     * inside its own critical section. Correctness rests on that re-read, not on this signal.
-     */
-    suspend fun awaitIdentityChange(seen: Long, until: () -> Boolean = { true }) {
-        // DRAIN FIRST: a wake buffered before this call proves nothing about the state RIGHT NOW.
-        // The loop reads the counter AFTER every drain, so a stale wake can never decide anything.
-        while (true) {
-            if (identityChangeMarker() != seen) return // a real change landed
-            if (until()) return
-            identityChangeSignal.receive() // block until something happens, then re-read
-        }
-    }
-
-    fun voiceIdentity(): VoiceIdentity? = synchronized(fence) {
-        currentToken?.let { VoiceIdentity(it, currentSessionGeneration) }
     }
 }
 
@@ -377,8 +168,7 @@ internal object ProjectionJsonParser {
 
     /**
      * The value must be an actual JSON null (returns null) or a NONEMPTY string (returns it).
-     * Any other type — number, boolean, object, array — fails closed (returns null marker via
-     * exception is avoided here: we return null only for JSON null, and `fail` for others).
+     * Any other type — number, boolean, object, array — fails closed.
      */
     private fun JsonReader.nonEmptyStringOrNull(): String? = when (peek()) {
         JsonReader.Token.NULL -> {
@@ -405,16 +195,6 @@ internal object ProjectionJsonParser {
     )
 }
 
-/** Non-secret lifecycle incarnation: unique per issued session, reference-compared only. */
-class SessionToken internal constructor()
-
-/** Store-issued operation generation: valid only while its session, generation AND owner session incarnation are current. */
-class OperationTicket internal constructor(
-    internal val generation: Long,
-    internal val projection: VoiceSharingAccountProjection?,
-    internal val session: Long,
-)
-
 /** Server-issued opaque membership revision: never sorted, equality/current-only usage. */
 data class VoiceSharingAccountProjection(
     val membershipRevision: String,
@@ -428,12 +208,6 @@ data class VoiceSharingAccountProjection(
 enum class VoiceSharingPlan { FREE, PRO }
 
 enum class WithdrawalState { ACTIVE, WITHDRAWN, NOT_ENROLLED }
-
-/** A membership projection and the authoritative owner session it was published under. */
-data class VoiceSharingTaggedProjection(
-    val ownerSession: Long,
-    val projection: VoiceSharingAccountProjection?,
-)
 
 /**
  * Outcome of ONE membership projection refresh, for device observability only (no authority

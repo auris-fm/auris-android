@@ -144,86 +144,44 @@ class VoiceSharingAccountStateTest {
         assertNull(state().parseProjection(json))
     }
 
-    // --- synchronous lifecycle issuance + token-scoped applies ---
+    // --- ordinary publication: no sessions, no tickets ---
 
     @Test
-    fun `session issuance is synchronous and unique per lifecycle`() {
+    fun `publication replaces the projection and bumps the publication count`() {
         val st = state()
-        val t1 = st.sessionStarted()
-        val t2 = st.sessionStarted()
-        assertTrue(t1 !== t2)
-    }
-
-    @Test
-    fun `apply requires the ORIGINALLY ISSUED token - stale token never applies`() {
-        val st = state()
-        val issued = st.sessionStarted()
-        st.sessionEnded()
-        val relogin = st.sessionStarted() // same account, NEW incarnation
-        // A stale token gets NO ticket at all - there is nothing to apply with.
-        assertNull(st.beginOperation(issued, requireProjection = false))
-        val reloginTicket = st.beginOperation(relogin, requireProjection = false)!!
-        assertTrue(st.applyOutcome(relogin, reloginTicket, projectionJson()))
+        assertNull(st.projection.value)
+        assertTrue(st.publishJson(projectionJson()))
         assertEquals("rev-abc", st.projection.value!!.membershipRevision)
+        assertEquals(1L, st.publicationCount())
+        assertTrue(st.publishJson(projectionJson(revision = "rev-2")))
+        assertEquals("rev-2", st.projection.value!!.membershipRevision)
+        assertEquals(2L, st.publicationCount())
     }
 
     @Test
-    fun `logout invalidates synchronously - no flow conflation dependency`() {
+    fun `clear drops the projection so consent fails closed until the server answers again`() {
         val st = state()
-        val issued = st.sessionStarted()
-        val issuedTicket = st.beginOperation(issued, requireProjection = false)!!
-        assertTrue(st.applyOutcome(issued, issuedTicket, projectionJson()))
-        st.sessionEnded()
+        assertTrue(st.publishJson(projectionJson()))
+        st.clear()
         assertNull(st.projection.value)
-        assertFalse(st.hasCurrentSessionProjection())
-        // The ended token cannot re-arm anything afterwards: no ticket is issued at all.
-        assertNull(st.beginOperation(issued, requireProjection = false))
+        assertEquals(2L, st.publicationCount())
     }
 
     @Test
-    fun `no apply path without an issued session`() {
+    fun `publication listener observes both the projection and its loss`() {
         val st = state()
-        assertNull(st.projection.value)
-        assertFalse(st.hasCurrentSessionProjection())
+        val seen = mutableListOf<String?>()
+        st.onProjectionListener = { seen += it?.membershipRevision }
+        assertTrue(st.publishJson(projectionJson()))
+        st.clear()
+        assertEquals(listOf("rev-abc", null), seen)
     }
 
-    @Test
-    fun `token refresh without a lifecycle boundary keeps the projection`() {
-        val st = state()
-        val issued = st.sessionStarted()
-        val issuedTicket = st.beginOperation(issued, requireProjection = false)!!
-        assertTrue(st.applyOutcome(issued, issuedTicket, projectionJson()))
-        st.onTokenRefresh()
-        assertTrue(st.hasCurrentSessionProjection())
-        val refreshedTicket = st.beginOperation(issued, requireProjection = false)!!
-        assertTrue(st.applyOutcome(issued, refreshedTicket, projectionJson()))
-    }
-
-    @Test
-    fun `opaque revision equality-only - no ordering surface`() {
-        val st = state()
-        val issued = st.sessionStarted()
-        val tk = st.beginOperation(issued, requireProjection = false)!!
-        st.applyOutcome(issued, tk, projectionJson(revision = "zzz-later-looking"))
-        assertTrue(st.isCurrentRevision("zzz-later-looking"))
-        assertFalse(st.isCurrentRevision("aaa-earlier-looking"))
-    }
-
-    // --- reviewer 19dc4b90: lifecycle atomicity + strict-complete parsing ---
-
-    @Test
-    fun `a NEW session token atomically clears the prior projection - no sessionEnded needed`() {
-        val st = state()
-        val a = st.sessionStarted()
-        val aTicket = st.beginOperation(a, requireProjection = false)!!
-        assertTrue(st.applyOutcome(a, aTicket, projectionJson()))
-        assertEquals("rev-abc", st.projection.value!!.membershipRevision)
-
-        st.sessionStarted() // authoritative B starts; A's projection must clear ATOMICALLY
-        assertNull(st.projection.value)
-        assertFalse(st.hasCurrentSessionProjection())
-        // A's token can never re-arm: no ticket is issued for a superseded token.
-        assertNull(st.beginOperation(a, requireProjection = false))
+    /** Publication helper used by the controls: parse, then publish (never a raw string). */
+    private fun VoiceSharingAccountState.publishJson(json: String): Boolean {
+        val projection = parseProjection(json) ?: return false
+        publish(projection)
+        return true
     }
 
     @Test
@@ -286,11 +244,7 @@ class VoiceSharingAccountStateTest {
     // --- malformed baseline ---
 
     @Test
-    fun `unparseable body never arms authority`() {
-        val st = state()
-        val issued = st.sessionStarted()
-        val issuedTicket = st.beginOperation(issued, requireProjection = false)!!
-        assertFalse(st.applyOutcome(issued, issuedTicket, "garbage"))
-        assertNull(st.projection.value)
+    fun `unparseable body never becomes a projection`() {
+        assertNull(state().parseProjection("{\"schema_version\":1,\"membership_revision\":\"a\""))
     }
 }

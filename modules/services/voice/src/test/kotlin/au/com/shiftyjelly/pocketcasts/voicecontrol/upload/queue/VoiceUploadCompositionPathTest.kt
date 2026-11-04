@@ -176,14 +176,9 @@ class VoiceUploadCompositionPathTest {
             // The credential mirror the network gate reads (the production 401 path publishes the
             // SAME way through `credentials.publish`).
             startup.credentials.publish("Bearer-fixture")
-            val token = startup.state.sessionStarted(7L)
-            // The production order (see VoiceSharingAccountSessionCoordinator): arm the session,
-            // OPEN an operation, then apply the fetched projection to THAT ticket.
-            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-            org.junit.Assert.assertTrue(
-                "the real account state accepts the projection",
-                startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L),
-            )
+            // The production publication: the authoritative GET answer becomes the projection.
+            val projection = startup.state.parseProjection(VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"))!!
+            startup.state.publish(projection)
 
             val assembly = VoiceUploadModule.provideUploadAssembly(
                 store = store,
@@ -315,9 +310,7 @@ class VoiceUploadCompositionPathTest {
             val startup = moduleStartup()
             val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
             owner.publish("a@x", 7L, "Bearer-fixture")
-            val token = startup.state.sessionStarted(7L)
-            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
+            startup.publishEnrolledFixture("epoch-1")
             val assembly = VoiceUploadModule.provideUploadAssembly(
                 store = store,
                 transport = ContributionUploadTransport(
@@ -411,9 +404,7 @@ class VoiceUploadCompositionPathTest {
             val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
             owner.publish("a@x", 7L, "Bearer-fixture")
             startup.credentials.publish("Bearer-fixture")
-            val token = startup.state.sessionStarted(7L)
-            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
+            startup.publishEnrolledFixture("epoch-1")
             val assembly = VoiceUploadModule.provideUploadAssembly(
                 store = store,
                 transport = ContributionUploadTransport(

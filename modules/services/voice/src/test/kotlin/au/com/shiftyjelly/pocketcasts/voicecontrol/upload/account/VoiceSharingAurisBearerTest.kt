@@ -122,8 +122,7 @@ class VoiceSharingAurisBearerTest {
         val sent = AtomicReference<String?>()
         val ops = operations(auris)
         server.enqueue(projection())
-        val token = state.sessionStarted(owner.authoritySnapshot().session)
-        ops.refreshProjection(token)
+        ops.refreshProjection()
         sent.set(authorizationOf(server.takeRequest()))
 
         assertEquals("Bearer auris-issued-jws", sent.get())
@@ -141,17 +140,16 @@ class VoiceSharingAurisBearerTest {
 
         // Account A: sends.
         server.enqueue(projection())
-        ops.refreshProjection(state.sessionStarted(owner.authoritySnapshot().session))
+        ops.refreshProjection()
         assertEquals("Bearer token-for-account-A", authorizationOf(server.takeRequest()))
 
         // Switch to account B. The provider (like the real one) drops the previous credential.
         owner.switchAccount(to = "other@example.com", token = "upstream-B")
         auris.token = null
 
-        val after = AtomicReference<Boolean>()
-        after.set(ops.refreshProjection(state.sessionStarted(owner.authoritySnapshot().session)))
+        val after = ops.refreshProjection()
 
-        assertEquals("nothing to serve means the operation is refused", false, after.get())
+        assertEquals("nothing to serve means the operation is refused", false, after)
         assertEquals("no second request may be sent with a stale bearer", 1, server.requestCount)
     }
 
@@ -163,7 +161,7 @@ class VoiceSharingAurisBearerTest {
         owner.logOut()
         auris.token = null
 
-        val applied = ops.refreshProjection(state.sessionStarted(owner.authoritySnapshot().session))
+        val applied = ops.refreshProjection()
 
         assertEquals(false, applied)
         assertEquals("a logged-out session must not reach the network at all", 0, server.requestCount)
@@ -176,7 +174,7 @@ class VoiceSharingAurisBearerTest {
         val auris = FakeAurisToken(null)
         val ops = operations(auris)
 
-        val applied = ops.refreshProjection(state.sessionStarted(owner.authoritySnapshot().session))
+        val applied = ops.refreshProjection()
 
         assertEquals(false, applied)
         assertEquals("no request at all, so no bearer could have been attached", 0, server.requestCount)

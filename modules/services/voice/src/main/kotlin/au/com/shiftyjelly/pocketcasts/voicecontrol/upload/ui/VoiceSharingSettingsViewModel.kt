@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingTaggedProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentDisclosure
@@ -86,11 +85,8 @@ enum class PendingOperation { NONE, ENROLL, WITHDRAW }
  * collection stops while the server has not answered yet (reviewer-verified boundary).
  */
 class VoiceSharingSettingsViewModel(
-    /**
-     * The projection WITH its authoritative owner session (reviewer 20b681f0): the tag is
-     * published under the account fence, never inferred from collection time.
-     */
-    private val taggedProjection: StateFlow<VoiceSharingTaggedProjection>,
+    /** The account's membership projection; null until the server has answered for this session. */
+    private val projection: StateFlow<VoiceSharingAccountProjection?>,
     /**
      * THE PRODUCTION PROJECTION PREFIX (installed-path fix, spec c244661a): the surface's
      * projection is only authoritative if something actually REQUESTS it. Before this, the
@@ -160,7 +156,7 @@ class VoiceSharingSettingsViewModel(
         // an unrelated emission (controller state change) under the new session must not
         // re-label a retained foreign-session projection as current (reviewer 578bb62a).
         scope.launch {
-            taggedProjection.collect {
+            projection.collect {
                 retireForeignSessionPresentation()
                 mutableState.value = render()
             }
@@ -425,8 +421,7 @@ class VoiceSharingSettingsViewModel(
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState {
         // Installed-path diagnostic (staging test, reviewer 1f2d9cbf): distinguish the POLICY
         // gate from the MEMBERSHIP gate on the device, without changing either gate.
-        val observed = taggedProjection.value.projection != null &&
-            taggedProjection.value.ownerSession == ownerSession()
+        val observed = projection.value != null
         Timber.i(
             "voice-sharing surface: settingAvailable=%b projectionObserved=%b (session=%d) enrolled=%b",
             true,
@@ -441,8 +436,7 @@ class VoiceSharingSettingsViewModel(
             // last operation's Pending state even after it settles as Superseded (its own lifecycle
             // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).
             pending = pendingOperation != PendingOperation.NONE,
-            projectionObserved = taggedProjection.value.projection != null &&
-                taggedProjection.value.ownerSession == ownerSession(),
+            projectionObserved = projection.value != null,
             deletionRequested = deletionRequested,
             deletionReceiptPending = deletionReceiptPending,
             deletionFailed = deletionFailed,
@@ -464,11 +458,7 @@ class VoiceSharingSettingsViewModel(
      * store's own collection gate already encodes the fail-closed combination, and the UI reads
      * the same rule so a failed withdrawal cannot render as enrolled.
      */
-    private fun currentProjection(): VoiceSharingAccountProjection? {
-        val tagged = taggedProjection.value
-        if (tagged.ownerSession != ownerSession()) return null
-        return tagged.projection
-    }
+    private fun currentProjection(): VoiceSharingAccountProjection? = projection.value
 
     private fun isEnrolled(): Boolean {
         val p = currentProjection() ?: return false

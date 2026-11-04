@@ -63,64 +63,20 @@ interface VoiceSharingAccountApi {
 }
 
 /**
- * Does a committed rejection still speak about the LIVE authority?
- *
- * The predicate compares the SESSION INCARNATION (`token`, a new `SessionToken` instance per
- * issued session, reference-compared), never `(account, owner generation)`: two incarnations can
- * share a generation, and a value comparison would clear authority that is actually newer.
- *
- * The case that decides the clear here is NO LIVE SESSION. `processUnauthorized` has just ended
- * the session this 401 rejected, so after it commits there are only two possibilities: this
- * rejection ended the session (nothing live -> clear), or a NEWER session is live (different
- * token -> leave it alone). Note the live wrapper is freshly constructed per call, so the
- * `=== rejected` branch never fires in production; the null branch does the work, and it is the
- * branch that must stay correct.
- *
- * NULL IS SAFE ONLY BECAUSE THIS GUARDS A MIRROR: a mirror records the credential the boundary
- * believes is published. With no live voice session there is no authority for it to preserve, so
- * clearing cannot destroy any (whereas leaving it behind records a credential that is not
- * usable). This predicate MUST NOT be reused for anything with a durable effect: "no owner" and
- * "owner momentarily unknown" would both read as true there.
- */
-private fun stillRejected(state: VoiceSharingAccountState, rejected: VoiceSharingAccountState.VoiceIdentity): Boolean {
-    val live = state.voiceIdentity() ?: return true // no live session: the clear stands (see above)
-    return live.token === rejected.token
-}
-
-/**
- * How long a committed rejection waits for its OWN identity to re-establish authority before
- * clearing the mirror (see the mutation-boundary fence). Bounded so a rejected credential can
- * never leave a live mirror behind: expiry means "re-check and decide", not "wait longer".
- */
-private const val COORDINATION_WAIT_MS = 10_000L
-
-/**
  * Typed mutation outcomes (reviewer 290e76ea): membership operations never conflate
  * applied / conflict / failure into a Boolean. A 409 conflict is a DISTINCT public outcome
  * carrying the strictly parsed server-current projection; the operation itself was not
  * accepted (no auto re-enroll / no false success).
  */
 sealed interface VoiceSharingMutationResult {
-    /**
-     * Terminal 200 apply. Carries the IMMUTABLE ORIGINAL issued operation context (ticket +
-     * session token), NOT fresh-sampled state, so a caller resuming after this outcome can
-     * fence its own continuation against exactly the operation that applied.
-     */
+    /** Terminal 200 apply: the projection the server returned and published. */
     data class Applied(
         val projection: VoiceSharingAccountProjection,
-        val token: SessionToken,
-        val ticket: OperationTicket,
     ) : VoiceSharingMutationResult
 
-    /**
-     * 409 membership conflict, returned ONLY when the server-current projection parses
-     * strictly AND the issued ticket was still valid at apply time (the apply was accepted).
-     * Carries the original issued context for caller resume fencing.
-     */
+    /** 409 membership conflict: the server-current projection (published), never a silent retry. */
     data class MembershipConflict(
         val currentProjection: VoiceSharingAccountProjection,
-        val token: SessionToken,
-        val ticket: OperationTicket,
     ) : VoiceSharingMutationResult
 
     data object Failure : VoiceSharingMutationResult
@@ -130,21 +86,20 @@ sealed interface VoiceSharingMutationResult {
 data class DeletionReceipt(val deletionRequestId: String, val status: String, val cutoff: String? = null)
 
 /**
- * Account operations (Task 2; reviewer rounds 3-4). Contract:
+ * Account operations (the consent path, spec 06392988). Contract:
  *
- * - PER-OPERATION GENERATION supplements the session token: every operation entry captures its
- *   generation BEFORE the await; only the currently-issued generation may apply an outcome, so
- *   a later same-session GET/intent fences an older in-flight response (withdrawal included).
- * - The freeze atomically validates the ISSUED session and captures the projection; retries
- *   reuse the ORIGINAL request_id and byte-identical body (built once with Moshi's JsonWriter,
- *   so quotes/backslashes in opaque values are properly escaped).
+ * - Authorization is ORDINARY: every request carries the Auris-issued signed-in bearer, read at
+ *   send time. There is no separate sharing identity, session token or operation ticket; an
+ *   operation that loses its account simply fails.
+ * - A request body is built ONCE from the projection observed at issue, so retries are
+ *   byte-identical (same request_id) and never re-read state after an await.
  * - Exact endpoint statuses: membership routes 200, deletion 202. Transport failures and 503
  *   retry within bounds; 401/403/409/422 are terminal with no retry.
- * - A 401 captured while the ORIGINATING session/generation is still current revokes that scoped
- *   voice authority and forces an Auris token refresh. It does NOT invalidate the upstream account
- *   session: this route only ever sees the Auris token, so that is the only credential a 401 can
- *   speak about (cloud `bbb9beff`). A stale 401 -- session superseded or generation moved -- has no
- *   effect on anything. Credential data never appears in generations or failure evidence.
+ * - A 401 revokes only the AURIS credential (forcing a re-mint from the SAME account) and drops
+ *   the mirror. It never touches the upstream Pocket Casts session: a rejected derived token must
+ *   not sign the user out of the account that minted it.
+ * - A response is discarded when a NEWER projection publication already landed (the store's
+ *   publication count), so a slow answer can never overwrite newer membership state.
  */
 class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
@@ -153,51 +108,26 @@ class VoiceSharingAccountOperations(
     /**
      * THE BEARER SOURCE. The account route verifies Auris-issued tokens only (cloud `84a4d25e`,
      * `bbb9beff`); the upstream Pocket Casts token the owner publishes is `alg=HS256` with no
-     * `kid` and that route refuses it structurally. The owner snapshot still decides whether we
-     * may act at all -- it just stops being the bearer, which is the whole of the defect.
+     * `kid` and that route refuses it structurally.
      */
     private val aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding,
-    /**
-     * The mirror-clear mutation, deliberately SYNCHRONOUS (reviewer 82a9958d): it is invoked
-     * INSIDE the owner transaction, in the same critical section as the identity comparison, so
-     * no await can reopen a window between the fence and the mutation. Suspending work belongs
-     * in [onAurisCredentialRefused], which runs before the mutation boundary.
-     */
+    /** Mirror clear after a committed 401 (synchronous, no authority effect). */
     private val onCredentialInvalid: (AuthoritySnapshot) -> Unit,
     /**
-     * The AURIS credential's own invalidation, deliberately NOT the owner's `invalidateAuthToken`.
-     *
-     * A 401 on this route can only mean "the Auris token was refused": the route never sees the
-     * upstream session credential (cloud `bbb9beff`). Handing that 401 to the owner would make a
-     * rejected *derived* token sign the user out of the account that MINTED it -- and
-     * `invalidateIfCurrent` clears `publishedToken` and advances the credential incarnation, so the
-     * session is the one that dies, not the Auris token. The owner snapshot stays the session
-     * fence; the Auris provider is cleared here instead.
+     * The AURIS credential's own invalidation, deliberately NOT the owner's `invalidateAuthToken`:
+     * a 401 on this route can only speak about the derived Auris token.
      */
     private val onAurisCredentialRefused: suspend () -> Unit = { aurisToken.refreshToken() },
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-    /** Current-session GET: the only way the state gains authority. */
-    suspend fun refreshProjection(token: SessionToken): Boolean {
-        // OWNER→voice issuance: ticket + authority snapshot under the owner lock.
-        val issued = ownership.transaction {
-            val live = ownership.authoritySnapshot()
-            val ticket = state.beginOperation(token, requireProjection = false, ownerSession = live.session)
-            if (ticket == null) null else Triple(live, ticket, Unit)
-        } ?: return false
-        val (live, ticket, _) = issued
-        // ACQUIRE BEFORE THE FREEZE AND REFUSE ON ABSENCE: no Auris credential means no request.
+    /** Current-session GET: the way the state gains authority. */
+    suspend fun refreshProjection(): Boolean {
         val bearer = aurisBearer() ?: return false
-        val op = frozen(token, ticket, live, bearer, Route.GET, null)
-        return when (val outcome = execute(op) { bearer, _ -> api.getVoiceSharing(bearer) }) {
+        val op = frozen(bearer, Route.GET, null)
+        return when (val outcome = execute(op) { b, _ -> api.getVoiceSharing(b) }) {
             is Outcome.Body -> {
-                val applied = ownership.transaction { state.applyOutcome(token, ticket, outcome.json, ownership.authoritySnapshot().session) }
-                if (applied) {
-                    // A get that APPLIED is a live-authority datapoint: a caller waiting for the
-                    // post-rejection clear (see the mutation-boundary fence) re-checks on it.
-                    state.signalLiveAuthority()
-                }
+                val applied = apply(outcome.json)
                 state.onRefreshObserved?.invoke(
                     VoiceSharingRefreshDiagnostic(kind = VoiceSharingRefreshDiagnostic.Kind.APPLIED, status = null, bodyBytes = outcome.json.length, requestIds = outcome.requestIds, detail = applied.toString()),
                 )
@@ -210,12 +140,8 @@ class VoiceSharingAccountOperations(
                         kind = VoiceSharingRefreshDiagnostic.Kind.REJECTED,
                         status = when (outcome) {
                             is Outcome.Conflict -> 409
-
                             is Outcome.Rejected -> 401
-
-                            // scoped auth rejection ONLY (a real 401)
                             is Outcome.Unavailable -> outcome.status
-
                             is Outcome.Body -> 200
                         },
                         bodyBytes = (outcome as? Outcome.Conflict)?.json?.length,
@@ -231,84 +157,63 @@ class VoiceSharingAccountOperations(
         }
     }
 
-    suspend fun enroll(token: SessionToken, acceptedDisclosureVersion: String): VoiceSharingMutationResult {
-        val issued = ownership.transaction {
-            val live = ownership.authoritySnapshot()
-            val ticket = state.beginOperation(token, requireProjection = true, ownerSession = live.session)
-            if (ticket == null) null else live to ticket
-        } ?: return VoiceSharingMutationResult.Failure
-        val (live, ticket) = issued
+    suspend fun enroll(acceptedDisclosureVersion: String): VoiceSharingMutationResult {
         val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
-        val op = frozen(token, ticket, live, bearer, Route.ENROLLMENT, acceptedDisclosureVersion)
-        return when (val outcome = execute(op) { bearer, payload -> api.postEnrollment(bearer, payload) }) {
-            is Outcome.Body -> appliedOrFailure(op, outcome.json)
-            is Outcome.Conflict -> conflictOrFailure(op, outcome.json)
+        val op = frozen(bearer, Route.ENROLLMENT, acceptedDisclosureVersion)
+        return when (val outcome = execute(op) { b, payload -> api.postEnrollment(b, payload) }) {
+            is Outcome.Body -> appliedOrFailure(outcome.json)
+            is Outcome.Conflict -> conflictOrFailure(outcome.json)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
-    suspend fun withdraw(token: SessionToken): VoiceSharingMutationResult {
-        val issued = ownership.transaction {
-            val live = ownership.authoritySnapshot()
-            val ticket = state.beginOperation(token, requireProjection = true, ownerSession = live.session)
-            if (ticket == null) null else live to ticket
-        } ?: return VoiceSharingMutationResult.Failure
-        val (live, ticket) = issued
+    suspend fun withdraw(): VoiceSharingMutationResult {
         val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
-        val op = frozen(token, ticket, live, bearer, Route.WITHDRAWAL, null)
-        return when (val outcome = execute(op) { bearer, payload -> api.postWithdrawal(bearer, payload) }) {
-            is Outcome.Body -> appliedOrFailure(op, outcome.json)
-            is Outcome.Conflict -> conflictOrFailure(op, outcome.json)
+        val op = frozen(bearer, Route.WITHDRAWAL, null)
+        return when (val outcome = execute(op) { b, payload -> api.postWithdrawal(b, payload) }) {
+            is Outcome.Body -> appliedOrFailure(outcome.json)
+            is Outcome.Conflict -> conflictOrFailure(outcome.json)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
-    /** Fenced terminal apply of a 200 body; the outcome carries the ORIGINAL issued context. */
-    private fun appliedOrFailure(op: FrozenOperation, json: String): VoiceSharingMutationResult {
+    /** Terminal apply of a 200 body; the newest publication wins. */
+    private fun appliedOrFailure(json: String): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        val applied = ownership.transaction { state.applyOutcome(op.token, op.ticket, json, ownership.authoritySnapshot().session) }
-        return if (applied) {
-            VoiceSharingMutationResult.Applied(projection, op.token, op.ticket)
-        } else {
-            VoiceSharingMutationResult.Failure
-        }
+        return if (apply(json)) VoiceSharingMutationResult.Applied(projection) else VoiceSharingMutationResult.Failure
+    }
+
+    /** 409: a conflict ONLY when the body parses strictly AND it was applied; never a silent retry. */
+    private fun conflictOrFailure(json: String): VoiceSharingMutationResult {
+        val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
+        if (!apply(json)) return VoiceSharingMutationResult.Failure
+        return VoiceSharingMutationResult.MembershipConflict(projection)
     }
 
     /**
-     * 409 conflict: MembershipConflict ONLY when the body parses strictly AND the issued
-     * ticket is still valid and the fenced apply was ACCEPTED. A malformed body or a
-     * generation-stale 409 is Failure — never a conflict with a null projection.
+     * Publishes an answer UNLESS a newer publication landed while it was in flight. The comparison
+     * and the write are one critical section, so a stale answer can never overwrite newer state.
      */
-    private fun conflictOrFailure(op: FrozenOperation, json: String): VoiceSharingMutationResult {
-        val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        val applied = ownership.transaction { state.applyOutcome(op.token, op.ticket, json, ownership.authoritySnapshot().session) }
-        if (!applied) return VoiceSharingMutationResult.Failure
-        return VoiceSharingMutationResult.MembershipConflict(projection, op.token, op.ticket)
+    private fun apply(json: String): Boolean = ownership.transaction {
+        val observed = state.publicationCount()
+        val projection = state.parseProjection(json) ?: return@transaction false
+        if (state.publicationCount() != observed) return@transaction false
+        state.publish(projection)
+        true
     }
 
-    suspend fun deleteData(token: SessionToken): DeletionReceipt? {
-        val issued = ownership.transaction {
-            val live = ownership.authoritySnapshot()
-            val ticket = state.beginOperation(token, requireProjection = true, ownerSession = live.session)
-            if (ticket == null) null else live to ticket
-        } ?: return null
-        val (live, ticket) = issued
+    suspend fun deleteData(): DeletionReceipt? {
         val bearer = aurisBearer() ?: return null
-        val op = frozen(token, ticket, live, bearer, Route.DELETION, null)
-        val body = execute(op, expectedStatus = 202) { bearer, payload -> api.deleteData(bearer, payload) }
+        val op = frozen(bearer, Route.DELETION, null)
+        val body = execute(op, expectedStatus = 202) { b, payload -> api.deleteData(b, payload) }
             .let { (it as? Outcome.Body)?.json } ?: return null
-        val receipt = parseDeletionReceipt(body) ?: return null
-        // Fence the terminal outcome: a superseded session/generation discards the receipt.
-        return if (ownership.transaction { state.isTicketCurrent(token, ticket, ownership.authoritySnapshot().session) }) receipt else null
+        return parseDeletionReceipt(body)
     }
 
     /**
-     * Acquires the Auris bearer for an operation that has ALREADY been issued a ticket.
-     *
-     * Refusing here is the whole point: @spec's ruling is that a missing Auris configuration or a
-     * missing token must REFUSE sharing, never fall back to the upstream mirror -- a fallback that
-     * quietly supplies *some* credential is the defect being fixed, and it looks exactly like
-     * success. Returns null when there is nothing to send, and the caller then sends nothing.
+     * Acquires the Auris bearer. Refusing here is the whole point: a missing Auris configuration
+     * or a missing token must REFUSE sharing, never fall back to the upstream mirror — a fallback
+     * that quietly supplies *some* credential is the defect being fixed and looks like success.
      */
     private suspend fun aurisBearer(): String? = aurisToken.currentToken()?.takeIf { it.isNotBlank() }
 
@@ -328,46 +233,25 @@ class VoiceSharingAccountOperations(
         /**
          * NON-AUTH refusal: transport failure or an exhausted retry on a 5xx/other status. It is
          * explicitly NOT an authentication rejection — it must never clear credentials or sign the
-         * user out (reviewer fe03ebf7). The last observed HTTP status rides along for diagnosis.
+         * user out. The last observed HTTP status rides along for diagnosis.
          */
         data class Unavailable(val status: Int?, override val requestIds: List<String> = emptyList()) : Outcome
     }
 
-    private fun frozen(token: SessionToken, ticket: OperationTicket, observed: AuthoritySnapshot, aurisBearer: String, route: Route, disclosureVersion: String?): FrozenOperation {
-        // The bearer was ACQUIRED before the freeze and is passed in, so the token that goes out
-        // is the one taken under the same issuance the ticket belongs to. The owner-published
-        // `observed.token` is deliberately NOT consulted: it is the upstream credential this route
-        // cannot verify.
+    private fun frozen(aurisBearer: String, route: Route, disclosureVersion: String?): FrozenOperation {
         val bearer = "Bearer " + aurisBearer
-        // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else. It answers one
-        // question the server cannot answer for us: whether THIS app's token names a signing key
-        // staging publishes (cloud 84a4d25e). Only the JOSE header is read -- never the payload,
-        // never the signature -- and an unreadable header is reported as absent rather than
-        // guessed at. This is a DIAGNOSTIC: it changes no branch, no retry and no credential path.
+        // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else: it answers whether
+        // THIS app's token names a signing key staging publishes (cloud 84a4d25e). Only the JOSE
+        // header is read, and a diagnostic changes no branch, no retry and no credential path.
         logTokenKeyId(aurisBearer)
         val body = when (route) {
             Route.GET -> EMPTY_BODY
-            else -> writeBody(ticket, route, disclosureVersion)
+            else -> writeBody(state.projection.value, route, disclosureVersion)
         }
-        return FrozenOperation(token, ticket, observed, bearer, body, route)
+        return FrozenOperation(bearer, body, route)
     }
 
-    /**
-     * Logs the JOSE header's `kid`/`alg` for the token actually being sent.
-     *
-     * A JWS has three dot-separated segments and the FIRST is the base64url header. Anything else
-     * is opaque and reported as such -- a token that cannot be parsed is not forced through a
-     * parser to manufacture a value. Every failure mode (wrong segment count, bad base64, missing
-     * `kid`, oversized header, malformed JSON) ends in a stated absence, never an exception: this
-     * function must not be able to change how a request behaves.
-     */
-    private fun logTokenKeyId(tokenValue: String) = logTokenKeyIdLine(tokenValue)
-
-    /**
-     * Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint
-     * status and revalidating the ticket before EVERY send. 401 scoped invalidation; 409
-     * surfaces as [Outcome.Conflict]; other statuses terminal.
-     */
+    /** Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint status. */
     private suspend fun execute(
         op: FrozenOperation,
         expectedStatus: Int = 200,
@@ -375,15 +259,9 @@ class VoiceSharingAccountOperations(
     ): Outcome {
         var attempt = 0
         var lastStatus: Int? = null
-        // Bound the correlation-id list: one entry per attempt, capped and truncated.
         val requestIds = mutableListOf<String>()
         while (attempt < MAX_ATTEMPTS) {
             attempt++
-            // Ticket revalidation happens after every await boundary — ONE owner→voice
-            // transaction: the LIVE owner snapshot is read and the ticket checked together
-            // inside the same lock (b680934d: no two-transaction split).
-            val current = ownership.transaction { state.isTicketCurrent(op.token, op.ticket, ownership.authoritySnapshot().session) }
-            if (!current) return Outcome.Rejected(requestIds.toList())
             try {
                 val response = call(op.bearer, op.requestBody)
                 response.headers()[REQUEST_ID_HEADER]?.take(MAX_REQUEST_ID_CHARS)?.let { requestIds += it }
@@ -406,8 +284,6 @@ class VoiceSharingAccountOperations(
                         continue
                     }
 
-                    // Any other non-2xx is UNAVAILABLE, not an auth rejection: a 5xx that
-                    // exhausted its retry, or a status this endpoint never promised.
                     else -> return Outcome.Unavailable(response.code(), requestIds.toList())
                 }
             } catch (e: CancellationException) {
@@ -421,14 +297,11 @@ class VoiceSharingAccountOperations(
 
                     e.code() == 409 && expectedStatus == 200 -> return Outcome.Rejected(requestIds.toList())
 
-                    // no body via HttpException
                     e.code() in 500..599 && attempt < MAX_ATTEMPTS -> {
                         lastStatus = e.code()
                         continue
                     }
 
-                    // EXHAUSTED 5xx and every other non-401 status are UNAVAILABLE, exactly as on
-                    // the body path: never an authentication rejection (reviewer 5bbccf09/ecfdffe5).
                     else -> return Outcome.Unavailable(e.code(), requestIds.toList())
                 }
             } catch (_: Exception) {
@@ -439,72 +312,22 @@ class VoiceSharingAccountOperations(
     }
 
     /**
-     * Scoped 401 invalidation as ONE COORDINATED OWNER TRANSACTION: the credential owner
-     * compares the rejected incarnation, runs the scoped state check (ticket generation +
-     * session), and clears the credential — all serialized under the credential store's
-     * single transaction lock. Rotation can therefore neither split the two invalidations
-     * nor slip between them: a stale rejection invalidates NOTHING (fresh incarnation AND
-     * fresh session authority both survive), and an accepted one invalidates both together.
-     * The effect fires only when the transaction committed, and carries the rejected
-     * incarnation — never a raw bearer, never logged.
+     * A real 401 answers the AURIS credential this operation froze. The staleness check and the
+     * effects run under the credential owner's monitor, so a concurrent re-mint cannot land between
+     * them: if the cache already moved on, the rejection is history and commits NOTHING.
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
-        // ONLY a real 401 reaches here (Outcome.Unavailable never does -- reviewer fe03ebf7).
-        //
-        // The rejection COMMITS inside one owner transaction: the owner snapshot is compared, the
-        // voice scoped check runs, and the state revokes -- all under the owner lock, so a
-        // superseding operation cannot slip between the check and the commit (reviewer b702cd53).
-        // STALENESS (reviewer b702cd53): the 401 answers the AURIS credential this operation froze.
-        // If that credential has since been re-minted, the rejection is history -- it commits
-        // nothing, so the live voice authority a newer credential established survives.
-        // The owner no longer clears the upstream credential for this route's 401 (it never sees
-        // that credential -- cloud bbb9beff); the voice scope is what a committed rejection revokes.
-        val frozenBearer = op.bearer ?: return
-        // ATOMIC staleness + commit (reviewer 57246e46): the cache-publication monitor is held
-        // across the whole comparison-and-commit, so a concurrent re-mint cannot land between
-        // them. Staleness FIRST: a 401 answering a bearer that is no longer the cache's current
-        // token (superseded mint, switched account, other origin, cleared cache) answers a
-        // credential that has already been replaced -- commit NOTHING.
-        // The REJECTED identity is the live session incarnation this 401 was committed against;
-        // it is compared by reference against the live one at the fence (see stillRejected).
-        val ident = arrayOfNulls<VoiceSharingAccountState.VoiceIdentity?>(1)
+        val frozenBearer = op.bearer
         val committed = aurisToken.withCurrentCachedToken { currentBearer ->
-            ownership.transaction {
-                ident[0] = state.voiceIdentity() // read WITH the commit, under the owner lock
-                "Bearer " + (currentBearer ?: "") == frozenBearer &&
-                    state.processUnauthorized(op.token, op.ticket)
-            }
+            ownership.credentialTransaction { "Bearer " + (currentBearer ?: "") == frozenBearer }
         }
         if (!committed) return // effects fire ONLY for a rejection that actually committed
-        val rejected = ident[0] ?: return // nothing identity-less can be fenced; fail closed
-        // Cheap pre-check (cheap, and it needs the SAME identity rule as the fence below -- an
-        // equality test against "no live session" would read as "superseded" and skip the effect).
-        if (ownership.credentialTransaction { !stillRejected(state, rejected) }) return
         onAurisCredentialRefused() // force a re-mint from the SAME account
-        // THE MUTATION-BOUNDARY FENCE (reviewer cf8188f0 + 82a9958d, ad9c7f03): a check-then-act
-        // pair reopens a window at EVERY await between the two, and projection PRESENCE cannot
-        // tell newer authority from a session that has not published yet. So the comparison and
-        // the mirror clear are ONE critical section under the CREDENTIAL lock; the effective
-        // invariant is the one documented on stillRejected (no live session when the clear runs).
-        //
-        // The wait before it covers the one case the re-mint legitimately produces: authority
-        // returning for the SAME session. It re-checks; it never defers to a newer identity.
-        // MARKER FIRST: a change that lands between the re-mint and here still counts, so a buffered
-        // signal can never make this wait decide on a stale "nothing new" reading.
-        val marker = state.identityChangeMarker()
-        withTimeoutOrNull(COORDINATION_WAIT_MS) {
-            state.awaitIdentityChange(marker) { !stillRejected(state, rejected) }
-        }
-        ownership.credentialTransaction {
-            if (stillRejected(state, rejected)) {
-                onCredentialInvalid(op.observed) // comparison and mutation: ONE critical section
-            }
-        }
+        ownership.credentialTransaction { onCredentialInvalid(ownership.authoritySnapshot()) }
     }
 
-    /** Endpoint-EXACT bodies from ONLY the ticket-captured values, built once, byte-identical retries. */
-    private fun writeBody(ticket: OperationTicket, route: Route, disclosureVersion: String?): okhttp3.RequestBody {
-        val projection = ticket.projection
+    /** Endpoint-EXACT bodies from the observed projection, built once, byte-identical retries. */
+    private fun writeBody(projection: VoiceSharingAccountProjection?, route: Route, disclosureVersion: String?): okhttp3.RequestBody {
         val requestId = UUID.randomUUID().toString()
         val buffer = okio.Buffer()
         val writer = JsonWriter.of(buffer)
@@ -587,9 +410,6 @@ class VoiceSharingAccountOperations(
 
     /** Everything an operation needs, frozen at creation time — before the first await. */
     private data class FrozenOperation(
-        val token: SessionToken,
-        val ticket: OperationTicket,
-        val observed: AuthoritySnapshot,
         val bearer: String?,
         val requestBody: okhttp3.RequestBody,
         val route: Route,
@@ -643,6 +463,8 @@ private fun tokenJoseHeader(tokenValue: String): JSONObject? = try {
 } catch (_: Exception) {
     null
 }
+
+private fun logTokenKeyId(tokenValue: String) = logTokenKeyIdLine(tokenValue)
 
 /** base64url without padding is legal in a JWS; the JDK decoder requires it. */
 private fun padBase64Url(value: String): String = when (value.length % 4) {

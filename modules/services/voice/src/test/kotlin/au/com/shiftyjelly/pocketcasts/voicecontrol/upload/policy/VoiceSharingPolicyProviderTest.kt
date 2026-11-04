@@ -65,6 +65,12 @@ class VoiceSharingPolicyProviderTest {
     private var fetchOutcome: Unit? = Unit
     private var fetchAdvancesBookkeeping = true
 
+    /** When set with a failing fetch, the failure is a typed server throttle with this deadline. */
+    private var fetchThrottleDeadlineMs: Long? = null
+
+    /** Wall clock behind the provider; moved explicitly to prove deadline-relative scheduling. */
+    private var wallNowMs = 1_000_000L
+
     @Before
     fun setUp() {
         Dispatchers.setMain(dispatcher)
@@ -131,7 +137,20 @@ class VoiceSharingPolicyProviderTest {
             fetchCount++
             fetchGateOverride?.let { return@thenAnswer it }
             if (fetchOutcome == null) {
-                JvmTask(Result.failure(IllegalStateException("scripted fetch failure")))
+                val deadline = fetchThrottleDeadlineMs
+                // The REAL throttled exception's constructor path touches android.text.TextUtils
+                // (not mocked on the JVM), so the typed failure is a Mockito mock carrying the
+                // same authoritative boundary the real one exposes.
+                JvmTask(
+                    if (deadline == null) {
+                        Result.failure(IllegalStateException("scripted fetch failure"))
+                    } else {
+                        val throttled =
+                            mock(com.google.firebase.remoteconfig.FirebaseRemoteConfigFetchThrottledException::class.java)
+                        whenever(throttled.throttleEndTimeMillis).thenReturn(deadline)
+                        Result.failure(throttled)
+                    },
+                )
             } else {
                 // Advancing bookkeeping is a SIDE EFFECT of the fetch itself: the provider must
                 // capture the pre-request timestamp before this runs and observe it move after.
@@ -159,6 +178,7 @@ class VoiceSharingPolicyProviderTest {
         sleepMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
         refreshTimeoutMs: Long = VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS,
         retryDelayMs: Long = VoiceSharingPolicyProvider.RETRY_DELAY_MS,
+        wallClockMs: () -> Long = { wallNowMs },
     ): VoiceSharingPolicyProvider {
         val provider = VoiceSharingPolicyProvider(
             remoteConfig = config,
@@ -168,6 +188,7 @@ class VoiceSharingPolicyProviderTest {
             sleepMs = sleepMs,
             refreshTimeoutMs = refreshTimeoutMs,
             retryDelayMs = retryDelayMs,
+            wallClockMs = wallClockMs,
             sharedCollectionLock = testSharedLock,
         )
         // Run the lifecycle init's bounded join to completion on the virtual scheduler.
@@ -758,5 +779,89 @@ class VoiceSharingPolicyProviderTest {
         dispatcher.scheduler.advanceTimeBy(10_000)
         dispatcher.scheduler.runCurrent()
         assertTrue("recovered after the throttle cleared", provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `a typed server throttle defers the retry to the server boundary - even beyond the backoff cap`() {
+        // reviewer 49c23211 b1: firebase-config 23.1.0 DOES carry the throttle deadline on the
+        // typed FirebaseRemoteConfigFetchThrottledException. A deadline beyond the 15-minute
+        // backoff cap must still be honored: the cap bounds LOCAL backoff growth, not the
+        // server's own boundary.
+        fetchThrottleDeadlineMs = wallNowMs + 20 * 60_000 // 20 minutes > MAX_RETRY_BACKOFF_MS
+        fetchOutcome = null
+        val provider = provider(retryDelayMs = 10_000)
+        assertFalse(provider.snapshot().enabled)
+        val baseline = fetchCount
+
+        // 15 minutes pass (the whole backoff cap): still inside the server's boundary — no retry.
+        dispatcher.scheduler.advanceTimeBy(15 * 60_000)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("the backoff cap does not override the server boundary", baseline, fetchCount)
+
+        // The wall clock passes the server boundary: the retry fires.
+        wallNowMs += 5 * 60_000
+        dispatcher.scheduler.advanceTimeBy(5 * 60_000 + 1)
+        dispatcher.scheduler.runCurrent()
+        assertTrue("the retry fires once the server boundary passes", fetchCount > baseline)
+    }
+
+    @Test
+    fun `a stale failure cannot schedule retries over a newer authoritative answer`() {
+        // reviewer 49c23211 b2: retry ownership is fenced WITH publication. An older failed
+        // refresh (its retry already scheduled) must not re-schedule or move the backoff once a
+        // newer AUTHORITATIVE answer has published.
+        fetchOutcome = null
+        val provider = provider()
+        assertFalse(provider.snapshot().enabled)
+        val afterStaleFailure = fetchCount
+
+        fetchOutcome = Unit
+        rawValue = "false"
+        refresh(provider) // newer authoritative false cancels the pending retry, resets backoff
+        val afterNewerAnswer = fetchCount
+
+        dispatcher.scheduler.advanceTimeBy(10 * 60_000)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("no retry fires after the newer answer governed the timer", afterNewerAnswer, fetchCount)
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `a pending retry does not fire over a newer in-flight refresh`() {
+        // reviewer 49c23211 b2: a newer refresh does not (and must not) silently leave the old
+        // retry free to run; the retry validates its CAPTURED generation before it refreshes, so
+        // it skips while a newer request is still in flight.
+        fetchOutcome = null
+        // A generous refresh timeout: gen2 must still be IN FLIGHT (not deadline-disabled) when
+        // the stale retry fires.
+        val provider = provider(retryDelayMs = 10_000, refreshTimeoutMs = 10 * 60_000)
+        assertFalse(provider.snapshot().enabled)
+        val afterStaleFailure = fetchCount
+
+        fetchOutcome = Unit
+        fetchTimeMs += 1_000
+        restub()
+        val activationGate = JvmTaskSource<Boolean>()
+        whenever(config.activate()).thenAnswer { activationGate.task }
+        scope.launch { provider.refresh() } // newer request (gen2) hangs in activation
+        dispatcher.scheduler.runCurrent() // gen2 captures its generation and fetches (activation pending)
+        val afterGen2Fetch = fetchCount
+
+        dispatcher.scheduler.advanceTimeBy(10_000)
+        dispatcher.scheduler.runCurrent()
+
+        assertEquals(
+            "the stale retry must not refresh over the in-flight newer request",
+            afterGen2Fetch,
+            fetchCount,
+        )
+        activationGate.trySetResult(true)
+        dispatcher.scheduler.runCurrent() // gen2's activation resumption publishes enabled
+        assertTrue(provider.snapshot().enabled)
+
+        // After the newer request PUBLISHED enabled, the stale retry must never fire either.
+        dispatcher.scheduler.advanceTimeBy(10_000)
+        dispatcher.scheduler.runCurrent()
+        assertTrue(provider.snapshot().enabled)
     }
 }

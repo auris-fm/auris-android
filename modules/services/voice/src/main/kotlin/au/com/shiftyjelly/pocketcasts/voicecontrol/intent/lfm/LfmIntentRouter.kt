@@ -176,6 +176,27 @@ class LfmIntentRouter internal constructor(
                     )
                 }
 
+                if (!LfmRoutingPolicy.isLocallySelectable(tool, action)) {
+                    // Out-of-policy label (cloud-only action, unknown tool, or internal
+                    // dialog_control): NEVER execute locally just because the installed
+                    // artifact emitted it. Defer to the cloud with the preserved SOURCE text —
+                    // routerText may be the English routing translation, so the request prefers
+                    // input.sourceTranscript and never adopts model-generated parameters. The
+                    // engine's CloudRoute path rebinds request/sourceLanguage from the same
+                    // input (VoiceAsrEngine), so no translated or model-authored text survives.
+                    Timber.i("[LfmRouter] label %s outside local policy; deferring to cloud", label)
+                    return@withContext finish(
+                        base.success(
+                            intent = VoiceIntent.CloudRoute(
+                                request = input.sourceTranscript ?: input.routerTranscript,
+                                tier = VoiceIntent.CloudTier.Unknown,
+                                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                            ),
+                            classifierLabel = label,
+                        ),
+                    )
+                }
+
                 val prefill = LfmCallPrefill.render(tool, action)
                 val generated = base.timed(RouterStageDiagnostic.STAGE_GENERATE) {
                     inference.generate(prefill)

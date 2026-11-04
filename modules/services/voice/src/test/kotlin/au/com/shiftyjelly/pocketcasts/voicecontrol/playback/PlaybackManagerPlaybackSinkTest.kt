@@ -142,6 +142,8 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = seekOutcome
         }
         val fields = PlaybackManager::class.java
@@ -220,6 +222,71 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
+    fun `a paused seek's untokened notification publishes state and persists the episode's fallback progress through the real manager path`() = runTest {
+        // THE LEGACY OBSERVATION PATH AT THE MANAGER, AS A FALLBACK CONTROL: an ordinary local/UI
+        // seek with NO token (the engine's acknowledgment is not completion evidence) still publishes
+        // the seek relay state with its landed position, and the persistence path runs end to end.
+        // With no player bound this control intentionally verifies the FALLBACK write -- the
+        // episode's pre-existing playedUpToMs (45.0), NOT the 30-second notification position -- so
+        // it proves the persistence path executes, not that a live player's new seek position is
+        // what gets written. A null token dispatches into the real coordinator and completes
+        // NOTHING: no identified operation is settled.
+        val manager = org.mockito.Mockito.mock(
+            PlaybackManager::class.java,
+            org.mockito.Mockito.CALLS_REAL_METHODS,
+        )
+        val fields = PlaybackManager::class.java
+        val relayLazy = kotlin.lazyOf(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState()))
+        fields.getDeclaredField("playbackStateRelay\$delegate").apply { isAccessible = true }.set(manager, relayLazy)
+        // NO PLAYER IS BOUND (a paused seek): the flow reads null so the manager falls back to the
+        // episode's own playedUpToMs for the persisted-progress write.
+        fields.getDeclaredField("_playerFlow").apply { isAccessible = true }.set(
+            manager,
+            kotlinx.coroutines.flow.MutableStateFlow<au.com.shiftyjelly.pocketcasts.repositories.playback.Player?>(null),
+        )
+        val episode = au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+            uuid = "episode-A",
+            podcastUuid = "podcast-1",
+            publishedDate = java.util.Date(),
+        ).apply { playedUpToMs = 45_000 }
+        val queue = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextQueue>()
+        org.mockito.kotlin.whenever(queue.currentEpisode).thenReturn(episode)
+        fields.getDeclaredField("upNextQueue").apply { isAccessible = true }.set(manager, queue)
+        val episodeManager = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager>()
+        fields.getDeclaredField("episodeManager").apply { isAccessible = true }.set(manager, episodeManager)
+        val statsManager = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.user.StatsManager>()
+        fields.getDeclaredField("statsManager").apply { isAccessible = true }.set(manager, statsManager)
+        // The completion coordinator field is not initialized on a Mockito mock (no constructor), so
+        // the real one is installed: the null-token dispatch must traverse it and settle nothing.
+        fields.getDeclaredField("seekCompletions").apply { isAccessible = true }.set(
+            manager,
+            au.com.shiftyjelly.pocketcasts.repositories.playback.SeekCompletionCoordinator(),
+        )
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            // THE PUBLIC PATH, with the token the engine's ordinary acknowledgment carries: none.
+            manager.onSeekComplete(positionMs = 30_000, completionToken = null)
+
+            val state = relayLazy.value.blockingFirst()
+            assertEquals(30_000, state.positionMs)
+            assertEquals(
+                "the relay publication carries the seek's landed position",
+                au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager.LastChangeFrom.OnSeekComplete.value,
+                state.lastChangeFrom,
+            )
+            // THE PERSISTENCE PATH RUNS, WRITING THE FALLBACK VALUE: no player is bound, so the
+            // manager writes the episode's own playedUpToMs -- the path executes; the notification
+            // position itself is not the asserted write.
+            verify(episodeManager).updatePlayedUpToBlocking(episode, 45.0, false)
+            verify(episodeManager).updatePlaybackInteractionDate(episode)
+            verify(statsManager).persistTimes()
+        } finally {
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun `an unknown owner skip is reported as Unknown, not refused`() = runTest {
         // THE OWNER'S TYPED OUTCOME IS WHAT TRAVELS. The mock answers the owner operation with Unknown, so
         // the case fails if the adapter collapses it into Refused -- which is what a Boolean owner result
@@ -238,6 +305,8 @@ class PlaybackManagerPlaybackSinkTest {
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
+                org.mockito.kotlin.anyOrNull(),
+                org.mockito.kotlin.anyOrNull(),
                 org.mockito.kotlin.anyOrNull(),
             ),
         ).thenReturn(PlaybackManager.SkipOutcome.Unknown)
@@ -265,6 +334,8 @@ class PlaybackManagerPlaybackSinkTest {
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
+                org.mockito.kotlin.anyOrNull(),
+                org.mockito.kotlin.anyOrNull(),
                 org.mockito.kotlin.anyOrNull(),
             ),
         ).thenReturn(PlaybackManager.SkipOutcome.Accepted)
@@ -303,6 +374,8 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 entered.complete(Unit)
                 proceed.await()
@@ -399,6 +472,8 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
                 .accepted(positionMs = null)
         }
@@ -585,6 +660,8 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 // THE PLAYER'S OWN MUTATION POINT: it records the seek only while it still addresses the
                 // episode it was asked about, which is what makes a re-pointing REFUSED rather than

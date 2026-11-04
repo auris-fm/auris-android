@@ -151,13 +151,25 @@ class SimplePlayer(
         player?.playWhenReady = true
     }
 
-    override fun handleSeekToTimeMs(positionMs: Int) {
+    override fun handleSeekToTimeMs(positionMs: Int, completionToken: String?) {
         if (player?.isCurrentMediaItemSeekable == false && player?.isPlaying == true) {
             Toast.makeText(context, "Unable to seek. File headers appear to be invalid.", Toast.LENGTH_SHORT).show()
         } else {
             try {
+                // NO LANDING EVIDENCE EXISTS ON THE PINNED ENGINE. Media3 1.10.1 publishes its seek
+                // discontinuity from the CALLING thread with the REQUESTED position masked in
+                // (ExoPlayerImpl.seekTo) -- an acknowledgment, not a completed-seek observation -- and
+                // no notification on this engine demonstrates completed processing with an
+                // invocation-owned landing clock. So this request is issued WITHOUT claiming trusted
+                // completion evidence.
                 player?.seekTo(positionMs.toLong())
-                super.onSeekComplete(positionMs)
+                // THE LEGACY STATE/PROGRESS NOTIFICATION IS PRESERVED, STRICTLY UNTOKENED: the seek
+                // relay publication and progress persistence still run for ordinary local/UI seeks
+                // (including a paused seek with no playback tick). Passing NO token makes it
+                // impossible for this acknowledgment to settle an identified operation -- the
+                // coordinator drops null-token events, so legacy observability and operation
+                // settlement stay separate paths.
+                super.onSeekComplete(positionMs, null)
             } catch (e: Exception) {
                 LogBuffer.e(LogBuffer.TAG_PLAYBACK, e, "Failed to seek to $positionMs ms.")
             }

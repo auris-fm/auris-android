@@ -533,8 +533,37 @@ interface VoicePlaybackSink {
      * different episode.
      */
     suspend fun resume(expectedEpisodeId: String? = null): EpisodeOperationResult
-    suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
-    suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
+
+    /**
+     * Skip forward, ON [expectedEpisodeId], reporting this invocation's native seek completion
+     * through [seekCompletion] when one is supplied.
+     *
+     * The signal is the OPERATION'S invocation identity: created before the effect, armed by the
+     * owner only when the seek is actually issued, and completed by the first native completion
+     * processed after that arming. A caller that needs completion evidence passes a signal; a caller
+     * that does not passes null, which preserves the fire-and-forget behavior exactly.
+     */
+    suspend fun skipForward(
+        seconds: Int?,
+        expectedEpisodeId: String? = null,
+        seekCompletion: PlaybackManager.SeekCompletionSignal? = null,
+        /** The ORIGINAL admission deadline (monotonic ms), enforced by the owner at the player mutation. */
+        admittedDeadlineMs: Long? = null,
+    ): EpisodeOperationResult
+    suspend fun skipBackward(
+        seconds: Int?,
+        expectedEpisodeId: String? = null,
+        seekCompletion: PlaybackManager.SeekCompletionSignal? = null,
+        /** The ORIGINAL admission deadline (monotonic ms), enforced by the owner at the player mutation. */
+        admittedDeadlineMs: Long? = null,
+    ): EpisodeOperationResult
+
+    /**
+     * Release a seek completion signal after its operation has settled: its token can no longer be
+     * completed from the native path, so a timed-out or settled operation cannot linger addressable.
+     * No-op by default for callers that never pass signals.
+     */
+    fun releaseSeekCompletion(seekCompletion: PlaybackManager.SeekCompletionSignal?) {}
 
     /**
      * Seek to a signed absolute episode position, ON [expectedEpisodeId].
@@ -645,6 +674,9 @@ enum class CloudRouteActionOutcome {
 
     /** The action was CONFIRMED performed. */
     Confirmed,
+
+    /** The action was REFUSED by this client: an unsupported non-playback tool on this legacy path. */
+    Refused,
 }
 
 interface VoiceCloudRouteSink {

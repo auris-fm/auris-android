@@ -110,7 +110,12 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
-    override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+    override suspend fun skipForward(
+        seconds: Int?,
+        expectedEpisodeId: String?,
+        seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        admittedDeadlineMs: Long?,
+    ): EpisodeOperationResult {
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
@@ -128,6 +133,8 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     forward = true,
                     sourceView = SourceView.VOICE_COMMANDS,
                     jumpAmountSeconds = seconds,
+                    seekCompletion = seekCompletion,
+                    admittedDeadlineMs = admittedDeadlineMs,
                 )
             ) {
                 is PlaybackManager.SkipOutcome.Accepted ->
@@ -143,7 +150,12 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
-    override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+    override suspend fun skipBackward(
+        seconds: Int?,
+        expectedEpisodeId: String?,
+        seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        admittedDeadlineMs: Long?,
+    ): EpisodeOperationResult {
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
@@ -161,6 +173,8 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     forward = false,
                     sourceView = SourceView.VOICE_COMMANDS,
                     jumpAmountSeconds = seconds,
+                    seekCompletion = seekCompletion,
+                    admittedDeadlineMs = admittedDeadlineMs,
                 )
             ) {
                 is PlaybackManager.SkipOutcome.Accepted ->
@@ -221,6 +235,14 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         playbackManager.seekToTimeMsSuspend(resolvedSeconds * 1000)
         // UNBOUND: no episode-specific subject, so there is no episode or bound position to report.
         return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
+    }
+
+    /**
+     * THROUGH THE OWNER: only the manager's registry holds the armed token, so only it can release.
+     * A settled or timed-out operation's token must not stay addressable by the native path.
+     */
+    override fun releaseSeekCompletion(seekCompletion: PlaybackManager.SeekCompletionSignal?) {
+        if (seekCompletion != null) playbackManager.removeSeekCompletion(seekCompletion)
     }
 
     override fun nextEpisode(): VoiceResponse {

@@ -11,7 +11,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentC
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentDisclosure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -32,7 +31,7 @@ import org.junit.runner.Description
 
 /**
  * THE SETTINGS SHELL'S HONESTY CONTRACT (plan Task 7 UI bullet). The screen composes the LIVE
- * policy snapshot, the account projection and the local withdrawal intent into one UI state, and
+ * the account projection and the local withdrawal intent into one UI state, and
  * surfaces every operation's outcome honestly: pending is shown while the server has not answered,
  * failure is shown as failure, and the toggle's truth is the SERVER projection through the local
  * intent — never a local queue change dressed up as server completion.
@@ -68,7 +67,6 @@ class VoiceSharingSettingsViewModelTest {
         }
     }
 
-    private val policy = MutableStateFlow(enabledSnapshot())
     private val taggedProjection = MutableStateFlow(
         au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingTaggedProjection(
             ownerSession = Long.MIN_VALUE,
@@ -112,12 +110,6 @@ class VoiceSharingSettingsViewModelTest {
             return true
         }
     }
-
-    private fun enabledSnapshot() = PolicySnapshot(
-        enabled = true,
-        activatedAtMonotonicMs = 1_000L,
-        activationGeneration = 1L,
-    )
 
     private fun enrolledProjection() = VoiceSharingAccountProjection(
         membershipRevision = "rev-1",
@@ -166,23 +158,12 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = ownerSession,
         )
         return VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistence),
             ownerSession = ownerSession,
             scope = effective,
         )
-    }
-
-    @Test
-    fun `a disabled policy hides the setting even for an enrolled account`() = runTest(mainDispatcher) {
-        policy.value = PolicySnapshot(enabled = false, activatedAtMonotonicMs = 1L, activationGeneration = 0L)
-        setProjection(enrolledProjection())
-
-        val state = viewModel().state.value
-
-        assertFalse("a disabled policy must hide the setting", state.settingAvailable)
     }
 
     @Test
@@ -587,7 +568,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { 1L },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -624,7 +604,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -694,7 +673,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { 1L },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -731,7 +709,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -829,7 +806,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -886,7 +862,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -917,7 +892,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -957,7 +931,6 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
@@ -993,7 +966,6 @@ class VoiceSharingSettingsViewModelTest {
         tagSession = 1L
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         vm = VoiceSharingSettingsViewModel(
-            policy = policy,
             taggedProjection = taggedProjection,
             enrollmentController = EnrollmentController(
                 enrollOperation = { enrollGate2.await() },

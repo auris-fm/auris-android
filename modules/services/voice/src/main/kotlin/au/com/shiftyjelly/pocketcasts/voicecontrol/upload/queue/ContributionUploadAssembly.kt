@@ -29,7 +29,6 @@ class ContributionUploadAssembly(
      */
     private val captureFor: (captureId: String) -> Capture?,
     clock: () -> Long,
-    policyAllows: () -> Boolean,
     networkAvailable: () -> Boolean,
     /** Called after a VALIDATED acceptance releases the entry; never on an unvalidated one. */
     private val onAccepted: (generation: Long, captureId: String) -> Unit = { _, _ -> },
@@ -96,7 +95,6 @@ class ContributionUploadAssembly(
     val caller: ContributionRetryCaller = ContributionRetryCaller(
         store = store,
         clock = clock,
-        policyAllows = policyAllows,
         networkAvailable = networkAvailable,
         ackResolver = resolver,
         // One attempt: refuse before any byte leaves, then send the metadata-first envelope and remember

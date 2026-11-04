@@ -3,7 +3,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import dagger.Module
 import dagger.Provides
@@ -27,7 +26,6 @@ object VoiceSharingSettingsModule {
     @Provides
     @Singleton
     fun provideVoiceSharingSettingsViewModel(
-        policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         withdrawalIntent: LocalWithdrawalIntentStore,
         store: ContributionStore,
@@ -38,7 +36,6 @@ object VoiceSharingSettingsModule {
             clearLocalPending = { runCatching { store.revokeAndPurge("withdrawal requested from settings") } },
         )
         return VoiceSharingSettingsViewModel(
-            policy = policyProvider.policy,
             taggedProjection = accountStartup.state.taggedProjection,
             enrollmentController = controller,
             withdrawalIntent = withdrawalIntent,

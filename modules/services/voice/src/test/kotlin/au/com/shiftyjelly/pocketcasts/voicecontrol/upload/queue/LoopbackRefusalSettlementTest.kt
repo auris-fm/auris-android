@@ -506,7 +506,6 @@ class LoopbackRefusalSettlementTest {
             }
         },
         clock = now,
-        policyAllows = { true },
         networkAvailable = { true },
         onAccepted = { _, captureId -> acceptedIds += captureId },
     )

@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
 
 import au.com.shiftyjelly.pocketcasts.sharedtest.JvmTask
 import au.com.shiftyjelly.pocketcasts.utils.config.FirebaseConfig
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.OwnedAudio
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
@@ -159,94 +158,5 @@ class UploadCostMeasurementTest {
         // canonical record and any sidecar — the durable footprint must be audio-dominated.
         val ceiling = (5 * 16_000 * 2 + 44) + 16 * 1024
         assertTrue("per-segment durable footprint must stay under $ceiling (measured $perSegment)", perSegment < ceiling)
-    }
-
-    // --- Policy refresh propagation: measured on the provider's own monotonic bookkeeping. ---
-
-    private val dispatcher = StandardTestDispatcher()
-    private val scope = CoroutineScope(dispatcher)
-    private val featureScope = CoroutineScope(dispatcher)
-    private lateinit var config: FirebaseRemoteConfig
-    private var monotonicNowMs = 1_000L
-    private var fetchTimeMs = 5_000L
-    private var rawValue: String? = "true"
-
-    @Before
-    fun setUp() {
-        Dispatchers.setMain(dispatcher)
-        val infoMock = mock<FirebaseRemoteConfigInfo>()
-        whenever(infoMock.fetchTimeMillis).thenAnswer { fetchTimeMs }
-        whenever(infoMock.lastFetchStatus).thenAnswer { FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS }
-        val valueMock = mock<com.google.firebase.remoteconfig.FirebaseRemoteConfigValue>()
-        whenever(valueMock.asString()).thenAnswer { rawValue ?: "" }
-        whenever(valueMock.source).thenAnswer { FirebaseRemoteConfig.VALUE_SOURCE_REMOTE }
-        config = mock {
-            on { this.info }.thenAnswer { infoMock }
-            on { getValue(FirebaseConfig.VOICE_SHARING_ENABLED) }.thenAnswer { valueMock }
-            // The firebase ktx configUpdates extension registers via this call; an unstubbed mock
-            // returns null and the NPE escapes the feature provider's unguarded init launch.
-            on { addOnConfigUpdateListener(org.mockito.kotlin.any()) }.thenAnswer {
-                Mockito.mock(com.google.firebase.remoteconfig.ConfigUpdateListenerRegistration::class.java)
-            }
-            // The provider's freshness check requires the SDK bookkeeping to ADVANCE with each
-            // fetch (a cached success whose timestamps stand still fails closed) — mirror that.
-            // fetchSuspending() calls the NO-ARG fetch(): an unstubbed overload returned null and
-            // its addOnCompleteListener NPE escaped as an uncaught coroutine exception, poisoning
-            // the next runTest in the shared JVM (UncaughtExceptionsBeforeTest).
-            on { fetch() }.thenAnswer {
-                fetchTimeMs += 1_000
-                JvmTask(Result.success(Unit))
-            }
-            on { fetch(0L) }.thenAnswer {
-                fetchTimeMs += 1_000
-                JvmTask(Result.success(Unit))
-            }
-            on { activate() }.thenAnswer { JvmTask(Result.success(true)) }
-        }
-    }
-
-    @After
-    fun tearDown() {
-        scope.cancel()
-        featureScope.cancel()
-        Dispatchers.resetMain()
-    }
-
-    @Test
-    fun `measured policy refresh propagation - disable is observable within one bounded refresh`() {
-        val provider = VoiceSharingPolicyProvider(
-            remoteConfig = config,
-            featureProvider = au.com.shiftyjelly.pocketcasts.utils.featureflag.providers.FirebaseRemoteFeatureProvider(
-                config,
-                featureScope,
-            ),
-            scope = scope,
-            nowMs = { monotonicNowMs },
-            sleepMs = { kotlinx.coroutines.delay(it) },
-            refreshTimeoutMs = VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS,
-            sharedCollectionLock = Any(),
-        )
-        dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.INIT_AWAIT_MS + 1)
-        dispatcher.scheduler.runCurrent()
-        assertTrue("PREMISE: starts enabled", provider.policy.value.enabled)
-
-        // The disabling publication lands remotely; the next refresh observes it.
-        rawValue = "false"
-        fetchTimeMs += 1_000
-        // INDEPENDENT elapsed observation: real wall time around the refresh that observes the
-        // disable - NOT the synthetic bookkeeping step (reviewer b7ad7c92).
-        val startedAtNano = System.nanoTime()
-        kotlinx.coroutines.runBlocking { provider.refresh() }
-        val elapsedMs = (System.nanoTime() - startedAtNano) / 1_000_000
-        assertFalse("the disabled policy is observable", provider.policy.value.enabled)
-        // REPORT: propagation is EVENT-DRIVEN at fetch completion (no polling); the independently
-        // observed host-elapsed refresh interval is reported alongside the compiled bound. Device
-        // radio latency and server publish->observe are UNVERIFIED on the JVM host.
-        println(
-            "B10-PROPAGATION: event_driven=true observed_refresh_elapsed_ms=$elapsedMs " +
-                "upper_bound_refresh_timeout_ms=${VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS} " +
-                "real_world_radio_latency=UNVERIFIED(JVM host) server_publish_to_observe=UNVERIFIED(server-side)",
-        )
-        assertTrue("the observing refresh must stay within its compiled bound", elapsedMs <= VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS)
     }
 }

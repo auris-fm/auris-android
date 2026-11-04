@@ -9,7 +9,6 @@ import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease
 import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.sync.TokenErrorNotification
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
 import com.automattic.eventhorizon.EventHorizon
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -25,7 +24,7 @@ import org.robolectric.RobolectricTestRunner
 
 /**
  * Contract controls for the single collection-authority transaction (reviewer a38421f6):
- * lock order, held-copy-vs-expiry determinism, refusal termination, and coherent policy reads.
+ * lock order, refusal termination, and coherent authority reads.
  */
 @RunWith(RobolectricTestRunner::class)
 @org.robolectric.annotation.Config(sdk = [35])
@@ -56,7 +55,7 @@ class CollectionFenceContractTest {
     @Test
     fun `admission and handoff share one fence - expiry cannot interleave with copy-out`() {
         val owner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val budget = CollectionBudget(1L shl 20)
         val sink = ContributionRetentionSink(budget)
         val issued = IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1")
@@ -119,7 +118,7 @@ class CollectionFenceContractTest {
     @Test
     fun `a handoff denied by the closed live gate retains nothing and releases its prefix`() {
         val owner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val observer = SegmentObserver(
             gate = CollectionGate { true },
@@ -173,7 +172,7 @@ class CollectionFenceContractTest {
     @Test
     fun `invalid handoff without context still terminates exactly once and releases prefix`() {
         val owner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val observer = SegmentObserver(
             gate = CollectionGate { true },
@@ -224,7 +223,7 @@ class CollectionFenceContractTest {
         val budget = CollectionBudget(1L shl 20)
         val sink = ContributionRetentionSink(budget)
         val leaseOwner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(leaseOwner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = leaseOwner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(leaseOwner, sharedLock = leaseOwner.collectionSharedLock)
         val observer = SegmentObserver(
             gate = CollectionGate { true },
             sink = sink,
@@ -268,7 +267,7 @@ class CollectionFenceContractTest {
         val budget = CollectionBudget(1L shl 20)
         val sink = ContributionRetentionSink(budget)
         val owner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val observer = SegmentObserver(
             gate = CollectionGate { true },
             sink = sink,
@@ -331,7 +330,7 @@ class CollectionFenceContractTest {
         val budget = CollectionBudget(1L shl 20)
         val sink = ContributionRetentionSink(budget)
         val owner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val observer = SegmentObserver(
             gate = CollectionGate { true },
             sink = sink,
@@ -367,7 +366,7 @@ class CollectionFenceContractTest {
         val budget = CollectionBudget(1L shl 20)
         val sink = ContributionRetentionSink(budget)
         val owner = FakeOwner()
-        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val observer = SegmentObserver(
             gate = CollectionGate { true },
             sink = sink,
@@ -408,7 +407,6 @@ class CollectionFenceContractTest {
         )
         val tx = CollectionAuthorityTransaction(
             ownership = owner,
-            policy = FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)),
             sharedLock = owner.collectionSharedLock,
         )
         val entered = java.util.concurrent.CountDownLatch(1)
@@ -434,49 +432,19 @@ class CollectionFenceContractTest {
         racer.join(3000)
     }
 
-    @Test
-    fun `policy disable publishes through nesting and old work cannot be reauthorized`() {
-        val owner = FakeOwner()
-        val provider = FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000))
-        val tx = CollectionAuthorityTransaction(owner, provider, sharedLock = owner.collectionSharedLock)
-        val frozen = tx.coherentAuthority().toIssued()
-        provider.snap = PolicySnapshot(enabled = false, activationGeneration = 0, activatedAtMonotonicMs = 0)
-        assertFalse(AuthorityChecks.validateThroughTx(tx, owner, frozen))
-        // Re-enabling creates a NEW incarnation; the frozen old one stays invalid.
-        provider.snap = PolicySnapshot(enabled = true, activationGeneration = 8, activatedAtMonotonicMs = 5000)
-        assertFalse(AuthorityChecks.validateThroughTx(tx, owner, frozen))
-        assertEquals(8L, provider.snapshot().activationGeneration)
-    }
-
     private fun authorityFrom(tx: CollectionAuthorityTransaction, established: Long, owner: FakeOwner): AuthorityDecision {
         val c = tx.coherentAuthority()
-        val ok = c.policyEnabled && c.accountName != null && c.session == established
+        val ok = c.accountName != null && c.session == established
         return AuthorityDecision(collectionPermitted = ok, fullRevocation = !ok)
     }
 
-    private fun CoherentAuthority.toIssued() = IssuedAuthority(
-        accountName,
-        session,
-        credential,
-        "e1",
-        "d1",
-        policyActivationGeneration = policyActivationGeneration,
-        policyActivatedAtMonotonicMs = policyActivatedAtMonotonicMs,
-        policyEnabledAtIssue = policyEnabled,
-    )
+    private fun CoherentAuthority.toIssued() = IssuedAuthority(accountName, session, credential, "e1", "d1")
 
     private object AuthorityChecks {
         fun validateThroughTx(tx: CollectionAuthorityTransaction, owner: FakeOwner, issued: IssuedAuthority): Boolean = tx.transaction {
             val c = tx.coherentAuthority()
             c.accountName == issued.accountName && c.session == issued.sessionGeneration &&
-                c.credential == issued.credentialIncarnation && c.policyEnabled &&
-                c.policyActivationGeneration == issued.policyActivationGeneration &&
-                c.policyActivatedAtMonotonicMs == issued.policyActivatedAtMonotonicMs
+                c.credential == issued.credentialIncarnation
         }
     }
-}
-
-private class FakePolicyReader(initial: PolicySnapshot) : PolicySnapshotReader {
-    @Volatile var snap = initial
-    override fun snapshot() = snap
 }

@@ -3,16 +3,14 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * LIVE collection authority composed from the ACTUAL production authorities — the lease-evaluated
- * policy snapshot, the owner's account/session snapshot, and the CURRENT-SESSION membership
- * projection obtained by the authenticated GET. Consulted synchronously at every retention
- * decision; a START-time decision never authorizes later retention after withdrawal, expiry,
- * disable or account change.
+ * LIVE collection authority composed from the ACTUAL production authorities — the owner's
+ * account/session snapshot and the CURRENT-SESSION membership projection obtained by the
+ * authenticated GET. Consulted synchronously at every retention decision; a START-time decision
+ * never authorizes later retention after withdrawal or account change.
  *
  * FAIL-CLOSED enrollment rule (reviewer 251afd7d): a permitted policy flag plus a logged-in
  * account is NOT enough to retain PCM. Retention additionally requires a fresh projection for
@@ -23,7 +21,6 @@ import javax.inject.Singleton
  */
 @Singleton
 class CollectionAuthority @Inject constructor(
-    private val policyProvider: VoiceSharingPolicyProvider,
     private val accountStartup: VoiceSharingAccountStartup,
     private val collectionTx: CollectionAuthorityTransaction,
     /**
@@ -60,11 +57,10 @@ class CollectionAuthority @Inject constructor(
 
     /**
      * Freeze the ORIGINAL authority COHERENTLY under the COLLECTION fence in ONE acquisition
-     * (reviewers 1d27bcd6 b4 + a38421f6 b4): account/session/credential, the enrollment
-     * projection and the policy activation incarnation come from a single coherent read through
-     * [CollectionAuthorityTransaction]. A later enable or a new policy generation cannot
-     * authorize old work: validation compares every frozen component against live coherent state
-     * acquired under the same fence at the handoff.
+     * (reviewers 1d27bcd6 b4 + a38421f6 b4): account/session/credential and the enrollment
+     * projection come from a single coherent read through [CollectionAuthorityTransaction]. An
+     * account move cannot authorize old work: validation compares every frozen component against
+     * live coherent state acquired under the same fence at the handoff.
      */
     fun issueAuthorityCoherentLockedIndependent(): IssuedAuthority = collectionTx.transaction {
         val coherent = collectionTx.coherentAuthority()
@@ -75,9 +71,6 @@ class CollectionAuthority @Inject constructor(
             credentialIncarnation = coherent.credential,
             enrollmentEpoch = projection?.enrollmentEpoch,
             acceptedDisclosureVersion = projection?.acceptedDisclosureVersion,
-            policyActivationGeneration = coherent.policyActivationGeneration,
-            policyActivatedAtMonotonicMs = coherent.policyActivatedAtMonotonicMs,
-            policyEnabledAtIssue = coherent.policyEnabled,
         )
     }
 
@@ -100,9 +93,6 @@ class CollectionAuthority @Inject constructor(
         return c.accountName == issued.accountName &&
             c.session == issued.sessionGeneration &&
             c.credential == issued.credentialIncarnation &&
-            c.policyEnabled == issued.policyEnabledAtIssue &&
-            c.policyActivationGeneration == issued.policyActivationGeneration &&
-            c.policyActivatedAtMonotonicMs == issued.policyActivatedAtMonotonicMs &&
             enrollmentEvidenceMatches(issued)
     }
 
@@ -111,14 +101,7 @@ class CollectionAuthority @Inject constructor(
         issued: IssuedAuthority,
     ): Boolean = live.accountName == issued.accountName &&
         live.session == issued.sessionGeneration &&
-        live.credential == issued.credentialIncarnation &&
-        // Policy incarnation frozen at issue must still be the CURRENT activation: a newer
-        // generation/stamp means the old lease died — old work cannot be reauthorized.
-        policyProvider.publishedPolicy.value.let { p ->
-            p.enabled == issued.policyEnabledAtIssue &&
-                p.activationGeneration == issued.policyActivationGeneration &&
-                p.activatedAtMonotonicMs == issued.policyActivatedAtMonotonicMs
-        }
+        live.credential == issued.credentialIncarnation
 
     private fun enrollmentEvidenceMatches(issued: IssuedAuthority): Boolean {
         val projection = accountStartup.state.projection.value ?: return false
@@ -129,23 +112,12 @@ class CollectionAuthority @Inject constructor(
             projection.withdrawalState == WithdrawalState.ACTIVE
     }
 
-    /**
-     * Loss-signal decision from the RAW published policy (no lease re-evaluation): used by
-     * revoked()/fan-out where "policy currently disabled" is the trigger, and the exact-deadline
-     * sweep separately guarantees purge at the lease instant even while the flag stays true.
-     */
-    fun decideLossSignal(): Boolean {
-        val p = policyProvider.publishedPolicy.value
-        return !p.enabled
-    }
-
     /** Fence-wrapped decision for composition callers that must not hold any monitor yet. */
     fun decideLossSignalWrapped(): AuthorityDecision = collectionTx.transaction { decideLocked() }
 
     fun decide(): AuthorityDecision = collectionTx.transaction { decideLocked() }
 
     private fun decideLocked(): AuthorityDecision {
-        val permitted = policyProvider.snapshot().enabled
         val ownership = accountStartup.authoritySnapshot()
         val hasSession = ownership.accountName != null && ownership.session > 0L
         val projection = accountStartup.state.projection.value
@@ -162,11 +134,11 @@ class CollectionAuthority @Inject constructor(
                 projection.acceptedDisclosureVersion != null &&
                 projection.withdrawalState == WithdrawalState.ACTIVE &&
                 localIntentPermits
-        // Full revocation covers: no policy, no session, OR enrollment not established for this
-        // session (missing composition fails closed — flag+login alone cannot authorize retention).
-        val fullRevocation = !permitted || !hasSession || !enrolledThisSession
+        // Full revocation covers: no session, OR enrollment not established for this session
+        // (missing composition fails closed — login alone cannot authorize retention).
+        val fullRevocation = !hasSession || !enrolledThisSession
         return AuthorityDecision(
-            collectionPermitted = permitted && hasSession && enrolledThisSession,
+            collectionPermitted = hasSession && enrolledThisSession,
             fullRevocation = fullRevocation,
         )
     }

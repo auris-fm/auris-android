@@ -176,7 +176,6 @@ class ContributionUploadAssemblyTest {
         ),
         captureFor = { captures[it] },
         clock = now,
-        policyAllows = { true },
         networkAvailable = { true },
         onAccepted = { _, captureId -> accepted += captureId },
         onUnresolvedOwnership = { captureId, reason -> unresolvedOwnership += "$captureId:$reason" },
@@ -290,7 +289,6 @@ class ContributionUploadAssemblyTest {
             ),
             captureFor = { handed[it] },
             clock = { 30_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             onAccepted = { _, _ -> },
         )

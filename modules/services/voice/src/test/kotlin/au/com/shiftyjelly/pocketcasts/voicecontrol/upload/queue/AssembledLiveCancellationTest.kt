@@ -173,7 +173,6 @@ class AssembledLiveCancellationTest {
                 ContributionUploadAssembly.Capture(record(captureId), file, owned = ownedOf(file))
             },
             clock = { now },
-            policyAllows = { true },
             networkAvailable = { true },
         )
 

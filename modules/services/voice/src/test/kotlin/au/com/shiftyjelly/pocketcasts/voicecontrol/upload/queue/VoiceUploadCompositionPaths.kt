@@ -36,7 +36,6 @@ internal object VoiceUploadCompositionPaths {
         val captureId: UUID,
         val startup: VoiceSharingAccountStartup,
         val owner: Any,
-        val policy: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider,
         val scope: CoroutineScope,
         val bytes: String,
         val sha256: String,
@@ -90,20 +89,6 @@ internal object VoiceUploadCompositionPaths {
                 ownerSession = 7L,
             ),
         )
-        val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule
-            .provideVoiceSharingPolicyProvider(
-                remoteConfig = mock(),
-                featureProvider = mock(),
-                ownership = owner,
-                scope = CoroutineScope(Job().apply { cancel() }),
-            )
-        policy.applySnapshotForTest(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                enabled = true,
-                activatedAtMonotonicMs = 1L,
-                activationGeneration = 1L,
-            ),
-        )
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()
@@ -117,7 +102,6 @@ internal object VoiceUploadCompositionPaths {
                 credentialIncarnation = 1L,
                 enrollmentEpoch = "epoch-1",
                 acceptedDisclosureVersion = "1",
-                policyEnabledAtIssue = true,
             ),
             asrModel = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
         )
@@ -197,6 +181,6 @@ internal object VoiceUploadCompositionPaths {
         handoff.parentFile?.mkdirs()
         handoff.writeText(bytes)
         java.io.File(handoff.parentFile, "joined-emitted-record.sha256.txt").writeText(sha + "\n")
-        return EmittedJoin(store, captureId, startup, owner, policy, scope, bytes, sha)
+        return EmittedJoin(store, captureId, startup, owner, scope, bytes, sha)
     }
 }

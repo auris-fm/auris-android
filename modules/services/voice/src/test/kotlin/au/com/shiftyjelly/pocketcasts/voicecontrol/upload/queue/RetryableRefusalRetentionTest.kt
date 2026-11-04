@@ -150,7 +150,6 @@ class RetryableRefusalRetentionTest {
             val caller = ContributionRetryCaller(
                 store,
                 clock = { now },
-                policyAllows = { true },
                 networkAvailable = { true },
                 attemptUpload = { _, captureId, _, _ ->
                     firstAttempts.add(captureId)
@@ -210,7 +209,6 @@ class RetryableRefusalRetentionTest {
             val retryCaller = ContributionRetryCaller(
                 fresh,
                 clock = { now },
-                policyAllows = { true },
                 networkAvailable = { true },
                 attemptUpload = { _, captureId, _, _ ->
                     secondAttempts.add(captureId)

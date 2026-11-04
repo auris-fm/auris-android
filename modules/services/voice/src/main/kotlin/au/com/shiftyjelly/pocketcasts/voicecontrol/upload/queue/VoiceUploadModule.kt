@@ -4,7 +4,6 @@ import android.content.Context
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -94,14 +93,12 @@ object VoiceUploadModule {
     fun provideUploadAssembly(
         store: ContributionStore,
         transport: ContributionUploadTransport,
-        policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         @ApplicationContext context: Context,
         aurisToken: AurisTokenProvider,
     ): ContributionUploadAssembly = provideUploadAssembly(
         store,
         transport,
-        policyProvider,
         accountStartup,
         actualNetworkFrom(context),
         aurisToken = aurisToken,
@@ -116,7 +113,6 @@ object VoiceUploadModule {
     internal fun provideUploadAssembly(
         store: ContributionStore,
         transport: ContributionUploadTransport,
-        policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         actualNetwork: (UploadNetwork) -> Boolean,
         aurisToken: AurisTokenProvider,
@@ -163,14 +159,10 @@ object VoiceUploadModule {
             // acquisition→Call window on the caller thread (reviewer d2f1bfc8).
             launchIdentityCheck = { admitted -> authority().credentialFor(admitted) != null },
             clock = System::currentTimeMillis,
-            // THE compiled-off gate: the remote-config snapshot is disabled by default, so the loop
-            // below wakes, finds the gate closed, and touches nothing.
-            policyAllows = { policyProvider.publishedPolicy.value.enabled },
-            // THE PER-ATTEMPT `upload_network` GATE (reviewer 177645cc): credential presence AND
-            // the CURRENT policy network satisfied by the ACTUAL network, re-read per attempt.
+            // THE PER-ATTEMPT NETWORK GATE: credential presence AND the actual network, re-read
+            // per attempt. ANY network is permitted (no remote upload_network policy remains).
             networkAvailable = {
-                accountStartupHasCredentials() &&
-                    actualNetwork(policyProvider.publishedPolicy.value.uploadNetwork)
+                accountStartupHasCredentials() && actualNetwork(UploadNetwork.ANY)
             },
         )
         return assembly
@@ -187,7 +179,6 @@ object VoiceUploadModule {
         aurisToken: AurisTokenProvider,
         store: ContributionStore,
         accountStartup: VoiceSharingAccountStartup,
-        policyProvider: VoiceSharingPolicyProvider,
         @UploadTriggerScope scope: CoroutineScope,
         publishTrigger: RetentionPublishTrigger,
     ): UploadTrigger {
@@ -206,9 +197,6 @@ object VoiceUploadModule {
                 snapshot = { accountStartup.authoritySnapshot() },
                 epoch = { accountStartup.state.projection.value?.enrollmentEpoch },
                 store = store,
-                // THE policy-disable tail: a published disable must also purge QUEUED audio, not
-                // merely close the upload gate.
-                policyProvider = policyProvider,
             ),
             publishTrigger = publishTrigger,
         )
@@ -236,14 +224,12 @@ object VoiceUploadModule {
     @Singleton
     fun provideVoiceUploadScheduler(@ApplicationContext context: Context): VoiceUploadScheduler = VoiceUploadScheduler(androidx.work.WorkManager.getInstance(context))
 
-    /** THE scheduler↔policy binding (started once at app startup, next to the foreground trigger). */
+    /** THE periodic drain constraint: ANY network (no remote upload_network policy remains). */
     @Provides
     @Singleton
     fun provideUploadSchedulerBinding(
         scheduler: VoiceUploadScheduler,
-        policyProvider: VoiceSharingPolicyProvider,
-        @UploadTriggerScope scope: CoroutineScope,
-    ): UploadSchedulerBinding = UploadSchedulerBinding(scheduler, policyProvider, scope)
+    ): UploadSchedulerBinding = UploadSchedulerBinding(scheduler)
 
     /** THE missing binding (reviewer 13eeec80): the trigger's scope, delegated to the app's scope. */
     @Provides
@@ -349,26 +335,17 @@ object VoiceUploadModule {
 }
 
 /**
- * THE SCHEDULER↔POLICY BINDING (reviewer 177645cc): the periodic drain's constraint is not a
- * one-shot value — the published policy's `upload_network` is observed, and every DISTINCT change
- * re-schedules the unique drain (UPDATE semantics rewrite the constraint in place; a transition
- * NEVER stacks a second drain and NEVER leaves a stale constraint). One binding, started once.
+ * Arms the unique periodic drain once at app startup. The old policy→schedule binding is gone:
+ * there is no remote upload_network input, so the constraint is the compiled ANY default.
  */
 class UploadSchedulerBinding(
     private val scheduler: VoiceUploadScheduler,
-    private val policyProvider: VoiceSharingPolicyProvider,
-    private val scope: CoroutineScope,
 ) {
     private val started = java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
-        scope.launch {
-            policyProvider.publishedPolicy
-                .map { it.uploadNetwork }
-                .distinctUntilChanged()
-                .collect { scheduler.schedule(it) }
-        }
+        scheduler.schedule(UploadNetwork.ANY)
     }
 }
 

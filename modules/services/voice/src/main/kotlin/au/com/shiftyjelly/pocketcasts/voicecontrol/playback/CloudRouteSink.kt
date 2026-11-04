@@ -1364,12 +1364,14 @@ class CloudRouteSink internal constructor(
         // may still have been issued -- never a refusal) and cannot issue after expiry or hang
         // before the wait. On timeout the signal is released by the caller, so the token can no
         // longer be completed from the native path.
+        // THE ORIGINAL ADMISSION DEADLINE TRAVELS WITH THE DISPATCH: the owner enforces it at the
+        // player mutation, under the seek lock, before the seek is issued.
         val outcome = kotlinx.coroutines.withTimeoutOrNull((deadlineMs - monotonicMs()).coerceAtLeast(0L)) {
             when {
-                effectiveDelta != null && effectiveDelta > 0 -> playbackSink.skipForward(effectiveDelta, currentEpisode, signal)
-                effectiveDelta != null -> playbackSink.skipBackward(-effectiveDelta, currentEpisode, signal)
-                direction == "backward" -> playbackSink.skipBackward(null, currentEpisode, signal)
-                else -> playbackSink.skipForward(null, currentEpisode, signal)
+                effectiveDelta != null && effectiveDelta > 0 -> playbackSink.skipForward(effectiveDelta, currentEpisode, signal, deadlineMs)
+                effectiveDelta != null -> playbackSink.skipBackward(-effectiveDelta, currentEpisode, signal, deadlineMs)
+                direction == "backward" -> playbackSink.skipBackward(null, currentEpisode, signal, deadlineMs)
+                else -> playbackSink.skipForward(null, currentEpisode, signal, deadlineMs)
             }
         } ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
         return when (outcome) {
@@ -1392,12 +1394,6 @@ class CloudRouteSink internal constructor(
                 val completion = kotlinx.coroutines.withTimeoutOrNull((deadlineMs - monotonicMs()).coerceAtLeast(0L)) {
                     signal.await()
                 } ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
-                // EXPIRY WINS AT AND BEYOND THE DEADLINE, including over evidence that arrived just
-                // before it: a completion received within the budget cannot settle AFTER it. This
-                // monotonic recheck is the settlement gate, not a formality.
-                if (monotonicMs() >= deadlineMs) {
-                    return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
-                }
                 // A COMPLETION FROM ANOTHER EPISODE IS NOT THIS OPERATION'S EVIDENCE: a replacement
                 // or automatic advancement cannot supply the original episode's result.
                 if (completion.episodeUuid != initiatingEpisode) {
@@ -1413,6 +1409,13 @@ class CloudRouteSink internal constructor(
                 }
                 val playing = observedPlaying(after)
                     ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                // EXPIRY WINS AT AND BEYOND THE DEADLINE -- CHECKED AT FINAL SETTLEMENT, AFTER the
+                // state observation, not only after the await: evidence received within the budget
+                // cannot settle success once the clock reads past the deadline, however the
+                // observation itself was delayed. This is the settlement gate, not a formality.
+                if (monotonicMs() >= deadlineMs) {
+                    return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                }
                 // THE POSITION IS THE COMPLETION'S OWN CAPTURED ITEM CLOCK, not the requested
                 // target and not a post-hoc state read. An end-of-file outcome supplies the
                 // engine-confirmed endpoint; a null endpoint supplies NO position, which cannot

@@ -143,6 +143,7 @@ class PlaybackManagerPlaybackSinkTest {
                 positionMs: Int,
                 expectedEpisodeUuid: String,
                 completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = seekOutcome
         }
         val fields = PlaybackManager::class.java
@@ -241,6 +242,7 @@ class PlaybackManagerPlaybackSinkTest {
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.anyOrNull(),
                 org.mockito.kotlin.anyOrNull(),
+                org.mockito.kotlin.anyOrNull(),
             ),
         ).thenReturn(PlaybackManager.SkipOutcome.Unknown)
 
@@ -267,6 +269,7 @@ class PlaybackManagerPlaybackSinkTest {
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
+                org.mockito.kotlin.anyOrNull(),
                 org.mockito.kotlin.anyOrNull(),
                 org.mockito.kotlin.anyOrNull(),
             ),
@@ -307,6 +310,7 @@ class PlaybackManagerPlaybackSinkTest {
                 positionMs: Int,
                 expectedEpisodeUuid: String,
                 completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 entered.complete(Unit)
                 proceed.await()
@@ -404,6 +408,7 @@ class PlaybackManagerPlaybackSinkTest {
                 positionMs: Int,
                 expectedEpisodeUuid: String,
                 completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
                 .accepted(positionMs = null)
         }
@@ -591,6 +596,7 @@ class PlaybackManagerPlaybackSinkTest {
                 positionMs: Int,
                 expectedEpisodeUuid: String,
                 completionToken: String?,
+                admittedDeadlineMs: Long?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 // THE PLAYER'S OWN MUTATION POINT: it records the seek only while it still addresses the
                 // episode it was asked about, which is what makes a re-pointing REFUSED rather than

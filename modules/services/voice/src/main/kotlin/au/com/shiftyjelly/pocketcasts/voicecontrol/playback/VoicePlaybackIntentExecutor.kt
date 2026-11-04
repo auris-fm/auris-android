@@ -547,11 +547,15 @@ interface VoicePlaybackSink {
         seconds: Int?,
         expectedEpisodeId: String? = null,
         seekCompletion: PlaybackManager.SeekCompletionSignal? = null,
+        /** The ORIGINAL admission deadline (monotonic ms), enforced by the owner at the player mutation. */
+        admittedDeadlineMs: Long? = null,
     ): EpisodeOperationResult
     suspend fun skipBackward(
         seconds: Int?,
         expectedEpisodeId: String? = null,
         seekCompletion: PlaybackManager.SeekCompletionSignal? = null,
+        /** The ORIGINAL admission deadline (monotonic ms), enforced by the owner at the player mutation. */
+        admittedDeadlineMs: Long? = null,
     ): EpisodeOperationResult
 
     /**

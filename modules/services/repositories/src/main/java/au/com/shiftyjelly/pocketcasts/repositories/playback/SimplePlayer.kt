@@ -151,13 +151,14 @@ class SimplePlayer(
         player?.playWhenReady = true
     }
 
-    override fun handleSeekToTimeMs(positionMs: Int) {
+    override fun handleSeekToTimeMs(positionMs: Int, completionToken: String?) {
         if (player?.isCurrentMediaItemSeekable == false && player?.isPlaying == true) {
             Toast.makeText(context, "Unable to seek. File headers appear to be invalid.", Toast.LENGTH_SHORT).show()
         } else {
             try {
                 player?.seekTo(positionMs.toLong())
-                super.onSeekComplete(positionMs)
+                // THE COMPLETION IS ISSUED BY ITS OWN REQUEST SITE, carrying THAT request's token.
+                super.onSeekComplete(positionMs, completionToken)
             } catch (e: Exception) {
                 LogBuffer.e(LogBuffer.TAG_PLAYBACK, e, "Failed to seek to $positionMs ms.")
             }

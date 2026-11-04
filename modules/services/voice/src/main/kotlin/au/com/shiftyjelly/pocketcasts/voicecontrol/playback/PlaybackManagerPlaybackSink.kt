@@ -114,6 +114,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         seconds: Int?,
         expectedEpisodeId: String?,
         seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        admittedDeadlineMs: Long?,
     ): EpisodeOperationResult {
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
@@ -133,6 +134,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     sourceView = SourceView.VOICE_COMMANDS,
                     jumpAmountSeconds = seconds,
                     seekCompletion = seekCompletion,
+                    admittedDeadlineMs = admittedDeadlineMs,
                 )
             ) {
                 is PlaybackManager.SkipOutcome.Accepted ->
@@ -152,6 +154,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         seconds: Int?,
         expectedEpisodeId: String?,
         seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        admittedDeadlineMs: Long?,
     ): EpisodeOperationResult {
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
@@ -171,6 +174,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     sourceView = SourceView.VOICE_COMMANDS,
                     jumpAmountSeconds = seconds,
                     seekCompletion = seekCompletion,
+                    admittedDeadlineMs = admittedDeadlineMs,
                 )
             ) {
                 is PlaybackManager.SkipOutcome.Accepted ->

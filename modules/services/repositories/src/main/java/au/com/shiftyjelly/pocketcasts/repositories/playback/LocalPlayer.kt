@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 /**
  * Manages audio focus with local media player.
@@ -24,9 +25,6 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
     @Volatile private var positionMs: Int = 0
 
     private var seekingToPositionMs: Int = 0
-
-    /** The invocation token of the seek in flight, carried back on its completion event. */
-    private var pendingSeekToken: String? = null
     private var seekRetryAllowed: Boolean = false
 
     protected var episodeLocation: EpisodeLocation? = null
@@ -56,7 +54,9 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
     abstract fun handleStop()
     abstract fun handlePause()
     abstract fun handlePlay()
-    abstract fun handleSeekToTimeMs(positionMs: Int)
+
+    /** [completionToken] is the invocation identity of THIS request; the completion it produces carries it back. */
+    abstract fun handleSeekToTimeMs(positionMs: Int, completionToken: String?)
     abstract fun handleIsBuffering(): Boolean
     abstract fun handleIsPrepared(): Boolean
     abstract fun handleCurrentPositionMs(): Int
@@ -124,7 +124,8 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
             // check if the player is where it's meant to be, allow for a 2 second variance
             if (Math.abs(positionMs - playerPositionMs) > 2000) {
                 onSeekStart(positionMs)
-                handleSeekToTimeMs(positionMs)
+                // AN UNTRACKED UI PLAY-CARRYING SEEK CARRIES NO TOKEN.
+                handleSeekToTimeMs(positionMs, null)
             }
             handlePlay()
             onPlayerEvent(this, PlayerEvent.PlayerPlaying)
@@ -136,21 +137,23 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
         this.seekRetryAllowed = true
     }
 
-    protected fun onSeekComplete(positionMs: Int) {
+    protected fun onSeekComplete(positionMs: Int, completionToken: String?) {
         // Fix for the BLU phone. With a new media player (also after a hibernate) the MediaTek player call switches to an invalid time.
         if (positionMs < seekingToPositionMs - 5000 && seekRetryAllowed) {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Player issue was meant to be %.3f but was %.3f", seekingToPositionMs / 1000f, positionMs / 1000f)
             SystemClock.sleep(100)
             seekRetryAllowed = false
-            handleSeekToTimeMs(seekingToPositionMs)
+            // THE RETRY IS THE SAME INVOCATION: it re-issues under the SAME request token, so the
+            // eventual completion is still addressable to the operation that asked for it.
+            handleSeekToTimeMs(seekingToPositionMs, completionToken)
             return
         }
         this.positionMs = positionMs
-        // THE TOKEN IS THE INVOCATION IDENTITY. It was set by the seek request itself -- an
-        // episode-bound operation's token, or null for an untracked UI seek -- so this event is
-        // addressable to exactly the invocation that caused it, never to whoever collects first.
-        onPlayerEvent(this, PlayerEvent.SeekComplete(positionMs, pendingSeekToken))
-        pendingSeekToken = null
+        // THE COMPLETION CARRIES ITS OWN REQUEST'S TOKEN. [completionToken] was supplied BY the seek
+        // request this callback belongs to -- not read from any shared state -- so even overlapping
+        // native requests cannot misattribute a completion: each callback is born with its own
+        // request's identity.
+        onPlayerEvent(this, PlayerEvent.SeekComplete(positionMs, completionToken))
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer onSeekComplete %.3f", positionMs / 1000f)
     }
 
@@ -189,12 +192,11 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
 
             this@LocalPlayer.positionMs = positionMs
-            // AN UNTRACKED UI SEEK CARRIES NO TOKEN: any in-flight token is not this seek's, and a
-            // stale one must never be emitted as this event's identity.
-            pendingSeekToken = null
+            // AN UNTRACKED UI SEEK CARRIES NO TOKEN: its completion carries null, never another
+            // request's identity.
             if (handleIsPrepared()) {
                 onSeekStart(positionMs)
-                handleSeekToTimeMs(positionMs)
+                handleSeekToTimeMs(positionMs, null)
             }
         }
     }
@@ -212,7 +214,10 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String, completionToken: String?): Player.EpisodeSeekOutcome {
+    /** Milliseconds on the SAME monotonic epoch the admitted deadline was minted on; seam for deterministic controls. */
+    open fun admittedClockMs(): Long = System.nanoTime() / 1_000_000L
+
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String, completionToken: String?, admittedDeadlineMs: Long?): Player.EpisodeSeekOutcome {
         return withContext(Dispatchers.Main) {
             if (positionMs < 0) return@withContext Player.EpisodeSeekOutcome.Refused
             // THE CHECK, THE PRE-ACTION SNAPSHOT AND THE MUTATION ARE ONE STEP, under the lock
@@ -226,13 +231,19 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
                 // The NON-SUSPENDING inner form: the public one wraps in withContext, which a monitor cannot hold.
                 val before = handleCurrentPositionMs().toLong()
                 LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
+                // THE DEADLINE IS ENFORCED AT THE MUTATION, under the same lock and BEFORE the
+                // seek is issued: past-deadline here means no effect, so this is a refusal and no
+                // completion can ever arrive to be misattributed.
+                if (admittedDeadlineMs != null && admittedClockMs() >= admittedDeadlineMs) {
+                    Timber.w("[Playback] episode-bound seek refused: admitted deadline expired at the mutation")
+                    return@withContext Player.EpisodeSeekOutcome.Refused
+                }
                 this@LocalPlayer.positionMs = positionMs
-                // THE TOKEN IS SET WITH THE REQUEST, under the same lock: from here until the
-                // completion fires, the event this seek produces carries THIS invocation's identity.
-                pendingSeekToken = completionToken
+                // THE TOKEN TRAVELS WITH THE REQUEST ITSELF: the completion this seek produces is
+                // invoked with THIS token by this request site, never read back from shared state.
                 if (handleIsPrepared()) {
                     onSeekStart(positionMs)
-                    handleSeekToTimeMs(positionMs)
+                    handleSeekToTimeMs(positionMs, completionToken)
                 }
                 // ACCEPTED WITH ITS POSITION: the seek happened and the pre-action value is known.
                 Player.EpisodeSeekOutcome.accepted(before)

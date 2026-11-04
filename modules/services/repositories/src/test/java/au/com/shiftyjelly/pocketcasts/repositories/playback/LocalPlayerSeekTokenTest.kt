@@ -16,22 +16,26 @@ import org.junit.Test
 
 /**
  * THE PLAYER HALF OF SEEK INVOCATION IDENTITY, on the real [LocalPlayer] path: the token an
- * episode-bound seek carries INTO the request is the token the completion event carries OUT. An
- * untracked UI seek emits a null token, and can never masquerade as an operation's completion.
+ * episode-bound seek carries INTO the request is the token its OWN completion carries OUT, and the
+ * admitted deadline is enforced at the mutation, before the seek is issued.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LocalPlayerSeekTokenTest {
 
     private class TestPlayer(sink: (Player, PlayerEvent) -> Unit) : LocalPlayer(sink) {
-        val issuedSeeks = mutableListOf<Int>()
+        val issuedSeeks = mutableListOf<Pair<Int, String?>>()
+
+        /** Milliseconds on the admitted-deadline epoch; controls set it directly. */
+        var nowMs: Long = 0
+        override fun admittedClockMs(): Long = nowMs
 
         var currentPosition = 0
         override fun handlePrepare() {}
         override fun handleStop() {}
         override fun handlePause() {}
         override fun handlePlay() {}
-        override fun handleSeekToTimeMs(positionMs: Int) {
-            issuedSeeks += positionMs
+        override fun handleSeekToTimeMs(positionMs: Int, completionToken: String?) {
+            issuedSeeks += positionMs to completionToken
         }
         override fun handleIsBuffering(): Boolean = false
         override fun handleIsPrepared(): Boolean = true
@@ -47,9 +51,12 @@ class LocalPlayerSeekTokenTest {
         override fun setPodcast(podcast: au.com.shiftyjelly.pocketcasts.models.entity.Podcast?) {}
         override var isPip: Boolean = false
 
-        /** The player engine's completion, delivered the way SimplePlayer delivers one. */
-        fun engineComplete(positionMs: Int) {
-            onSeekComplete(positionMs)
+        /**
+         * The player engine's completion, delivered the way the real request site delivers one:
+         * WITH the token of the request being completed -- never read from shared state.
+         */
+        fun engineComplete(positionMs: Int, completionToken: String?) {
+            onSeekComplete(positionMs, completionToken)
         }
     }
 
@@ -71,9 +78,9 @@ class LocalPlayerSeekTokenTest {
     fun `an episode-bound seek's completion carries the invocation token`() = runTest {
         val outcome = player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-1")
         assertTrue(outcome.accepted)
-        assertEquals(listOf(1_000), player.issuedSeeks)
+        assertEquals(listOf(1_000 to "token-1"), player.issuedSeeks)
 
-        player.engineComplete(1_000)
+        player.engineComplete(1_000, "token-1")
         val event = seekCompletions().single()
         assertEquals("token-1", event.completionToken)
     }
@@ -81,20 +88,8 @@ class LocalPlayerSeekTokenTest {
     @Test
     fun `an untracked UI seek's completion carries a null token`() = runTest {
         player.seekToTimeMs(500)
-        player.engineComplete(500)
+        player.engineComplete(500, null)
         val event = seekCompletions().single()
-        assertNull(event.completionToken)
-    }
-
-    @Test
-    fun `a UI seek cannot inherit an in-flight operation's token`() = runTest {
-        player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-1")
-        // The engine completed NOTHING for the operation yet, and the user seeks NOW.
-        player.seekToTimeMs(2_000)
-        player.engineComplete(2_000)
-        val event = seekCompletions().single()
-        // The completion the UI seek produced carries NO token: the operation's token was consumed
-        // by the seek that actually completed, not by the UI seek that happened to fire.
         assertNull(event.completionToken)
     }
 
@@ -103,19 +98,63 @@ class LocalPlayerSeekTokenTest {
         val outcome = player.seekToTimeMsIfEpisode(1_000, "episode-B", "token-1")
         assertTrue(!outcome.accepted)
         assertTrue(player.issuedSeeks.isEmpty())
-        val completions = seekCompletions()
-        assertTrue(completions.isEmpty())
+        assertTrue(seekCompletions().isEmpty())
     }
 
     @Test
     fun `distinct operations carry distinct tokens through the same player`() = runTest {
         val first = player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-1")
-        player.engineComplete(1_000)
+        player.engineComplete(1_000, "token-1")
         val second = player.seekToTimeMsIfEpisode(3_000, "episode-A", "token-2")
-        player.engineComplete(3_000)
+        player.engineComplete(3_000, "token-2")
         assertNotNull(first)
         assertNotNull(second)
         val completions = seekCompletions()
         assertEquals(listOf("token-1", "token-2"), completions.map { it.completionToken })
+    }
+
+    @Test
+    fun `an overlapping native request's completion carries ITS OWN request's token`() = runTest {
+        // THE REVIEWER'S EXACT TRACE: issue A(1000, token A), issue B(3000, token B), deliver A's
+        // callback at 1000. A mutable latest-tag would emit A's callback with token B; the request
+        // site emits it with A's OWN token.
+        player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-A")
+        player.seekToTimeMsIfEpisode(3_000, "episode-A", "token-B")
+        assertEquals(
+            listOf(1_000 to "token-A", 3_000 to "token-B"),
+            player.issuedSeeks,
+        )
+        player.engineComplete(1_000, "token-A")
+        val event = seekCompletions().single()
+        assertEquals("token-A", event.completionToken)
+        assertEquals(1_000, event.positionMs)
+    }
+
+    @Test
+    fun `a UI seek issued between tracked requests cannot borrow a token`() = runTest {
+        player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-A")
+        player.seekToTimeMs(2_000) // untracked UI seek in the overlap window
+        player.engineComplete(2_000, null)
+        assertEquals(null, seekCompletions().single().completionToken)
+        player.engineComplete(1_000, "token-A")
+        assertEquals("token-A", seekCompletions().last().completionToken)
+    }
+
+    @Test
+    fun `an expired admitted deadline refuses at the mutation without issuing the seek`() = runTest {
+        player.nowMs = 5_000
+        val outcome = player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-1", admittedDeadlineMs = 5_000)
+        assertTrue(!outcome.accepted)
+        // NO EFFECT: the seek was never issued, so no completion can ever arrive.
+        assertTrue(player.issuedSeeks.isEmpty())
+        assertTrue(seekCompletions().isEmpty())
+    }
+
+    @Test
+    fun `a live admitted deadline still issues the seek with its token`() = runTest {
+        player.nowMs = 5_000
+        val outcome = player.seekToTimeMsIfEpisode(1_000, "episode-A", "token-1", admittedDeadlineMs = 6_000)
+        assertTrue(outcome.accepted)
+        assertEquals(listOf(1_000 to "token-1"), player.issuedSeeks)
     }
 }

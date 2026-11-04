@@ -3763,6 +3763,9 @@ class CloudRouteSinkTest {
         var skipGate: CompletableDeferred<Unit>? = null
         val skipStarted = CompletableDeferred<Unit>()
 
+        /** The deadline the LAST skip dispatch carried: the mutation boundary must receive the ORIGINAL admission deadline. */
+        var lastAdmittedDeadlineMs: Long? = null
+
         /** Releases recorded so a control can assert the settled operation's token is no longer addressable. */
         val releasedSignals = mutableListOf<PlaybackManager.SeekCompletionSignal>()
 
@@ -3796,12 +3799,14 @@ class CloudRouteSinkTest {
             seconds: Int?,
             expectedEpisodeId: String?,
             seekCompletion: PlaybackManager.SeekCompletionSignal?,
+            admittedDeadlineMs: Long?,
         ): EpisodeOperationResult {
             skipOutcomeForTest?.let {
                 calls += "skipForward:$seconds"
                 return it
             }
             calls += "skipForward:$seconds"
+            lastAdmittedDeadlineMs = admittedDeadlineMs
             skipStarted.complete(Unit)
             skipGate?.await()
             completeSeek(seekCompletion, expectedEpisodeId)
@@ -3811,12 +3816,14 @@ class CloudRouteSinkTest {
             seconds: Int?,
             expectedEpisodeId: String?,
             seekCompletion: PlaybackManager.SeekCompletionSignal?,
+            admittedDeadlineMs: Long?,
         ): EpisodeOperationResult {
             skipOutcomeForTest?.let {
                 calls += "skipBackward:$seconds"
                 return it
             }
             calls += "skipBackward:$seconds"
+            lastAdmittedDeadlineMs = admittedDeadlineMs
             skipStarted.complete(Unit)
             skipGate?.await()
             completeSeek(seekCompletion, expectedEpisodeId)
@@ -5674,6 +5681,9 @@ class CloudRouteSinkTest {
         assertEquals("unknown", result.getString("outcome"))
         assertEquals("seek_completion_unavailable", result.getString("reason"))
         assertEquals(1, deps.playback.releasedSignals.size)
+        // THE MUTATION BOUNDARY RECEIVED THE ORIGINAL ADMISSION DEADLINE: the dispatch carries it
+        // down for the owner to enforce under the seek lock.
+        assertEquals(base + 15_000L, deps.playback.lastAdmittedDeadlineMs)
     }
 
     @Test

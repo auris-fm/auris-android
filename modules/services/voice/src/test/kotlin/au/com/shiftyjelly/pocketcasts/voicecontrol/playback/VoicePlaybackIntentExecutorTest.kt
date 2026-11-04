@@ -1196,6 +1196,7 @@ class VoicePlaybackIntentExecutorTest {
             seconds: Int?,
             expectedEpisodeId: String?,
             seekCompletion: PlaybackManager.SeekCompletionSignal?,
+            admittedDeadlineMs: Long?,
         ): EpisodeOperationResult {
             calls += "skipForward:$seconds"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
@@ -1204,6 +1205,7 @@ class VoicePlaybackIntentExecutorTest {
             seconds: Int?,
             expectedEpisodeId: String?,
             seekCompletion: PlaybackManager.SeekCompletionSignal?,
+            admittedDeadlineMs: Long?,
         ): EpisodeOperationResult {
             calls += "skipBackward:$seconds"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)

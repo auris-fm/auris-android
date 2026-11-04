@@ -1304,6 +1304,8 @@ open class PlaybackManager @Inject constructor(
         sourceView: SourceView = SourceView.UNKNOWN,
         jumpAmountSeconds: Int? = null,
         seekCompletion: SeekCompletionSignal? = null,
+        /** Voice operations carry their original admission deadline so the mutation enforces it. */
+        admittedDeadlineMs: Long? = null,
     ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != episodeUuid) {
             return SkipOutcome.Refused
@@ -1317,9 +1319,9 @@ open class PlaybackManager @Inject constructor(
         // a second, weaker observation of the same fact: it reports what the player names NOW rather than
         // whether the skip acted, and a later replacement would flip it back to a false refusal.
         return if (forward) {
-            skipForwardScoped(sourceView, jumpAmountSeconds, episodeUuid, seekCompletion)
+            skipForwardScoped(sourceView, jumpAmountSeconds, episodeUuid, seekCompletion, admittedDeadlineMs)
         } else {
-            skipBackwardScoped(sourceView, jumpAmountSeconds, episodeUuid, seekCompletion)
+            skipBackwardScoped(sourceView, jumpAmountSeconds, episodeUuid, seekCompletion, admittedDeadlineMs)
         }
     }
 
@@ -1500,6 +1502,7 @@ open class PlaybackManager @Inject constructor(
         episodeUuid: String,
         positionMs: Int,
         seekCompletion: SeekCompletionSignal? = null,
+        admittedDeadlineMs: Long? = null,
     ): ScopedMutation? {
         val selected = getCurrentEpisode()
         if (selected?.uuid != episodeUuid) return null
@@ -1533,7 +1536,9 @@ open class PlaybackManager @Inject constructor(
         if (seekCompletion != null) {
             seekCompletions.arm(seekCompletion)
         }
-        val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid, seekCompletion?.token)
+        // THE ORIGINAL DEADLINE TRAVELS TO THE MUTATION: the player enforces it under its own seek
+        // lock, before the seek is issued, so an expired admission can never produce an effect.
+        val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid, seekCompletion?.token, admittedDeadlineMs)
         if (!outcome.accepted) {
             // A KNOWN REFUSAL DISARMS: the seek never reached the player, so its token must not stay
             // addressable. An UNKNOWN outcome keeps the arm: the seek may still complete, and its
@@ -1735,6 +1740,7 @@ open class PlaybackManager @Inject constructor(
         jumpAmountSeconds: Int?,
         expectedEpisodeUuid: String,
         seekCompletion: SeekCompletionSignal? = null,
+        admittedDeadlineMs: Long? = null,
     ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
         val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
@@ -1744,7 +1750,7 @@ open class PlaybackManager @Inject constructor(
         val newPositionMs = currentTimeMs + jumpAmountMs
         val durationMs = player?.durationMs() ?: Int.MAX_VALUE
         if (newPositionMs < durationMs) {
-            val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs, seekCompletion)
+            val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs, seekCompletion, admittedDeadlineMs)
             // THE MUTATION'S OWN PAYLOAD DECIDES, through ONE mapping shared with the backward path so the
             // two cannot drift. `null` is the owner's refusal (a different episode is selected, or the
             // player cannot enforce the binding); an absent outcome is Unknown, NOT a refusal, because
@@ -1776,6 +1782,7 @@ open class PlaybackManager @Inject constructor(
         jumpAmountSeconds: Int?,
         expectedEpisodeUuid: String,
         seekCompletion: SeekCompletionSignal? = null,
+        admittedDeadlineMs: Long? = null,
     ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
         val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
@@ -1783,7 +1790,7 @@ open class PlaybackManager @Inject constructor(
         val currentTimeMs = getCurrentTimeMs(episode = episode)
         if (currentTimeMs < 0) return SkipOutcome.Refused
         val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
-        val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs, seekCompletion)
+        val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs, seekCompletion, admittedDeadlineMs)
         val outcome = skipOutcomeOf(mutation)
         if (outcome != SkipOutcome.Accepted) return outcome
         trackPlaybackEvent(sourceView) { source, contentType ->

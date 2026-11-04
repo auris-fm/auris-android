@@ -190,7 +190,19 @@ class CastPlayer(
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String, completionToken: String?): Player.EpisodeSeekOutcome {
+    override suspend fun seekToTimeMsIfEpisode(
+        positionMs: Int,
+        expectedEpisodeUuid: String,
+        completionToken: String?,
+        admittedDeadlineMs: Long?,
+    ): Player.EpisodeSeekOutcome {
+        // THE DEADLINE IS ENFORCED BEFORE THE RECEIVER REQUEST IS ISSUED: past-deadline here means
+        // no effect was sent, so this is a refusal -- not an unknown outcome that could invite a
+        // retry into an operation the receiver never saw.
+        if (admittedDeadlineMs != null && System.nanoTime() / 1_000_000L >= admittedDeadlineMs) {
+            Timber.i("CastPlayer refused a seek: admitted deadline expired at the mutation")
+            return Player.EpisodeSeekOutcome.Refused
+        }
         // THE SAME CONTRACT AS LocalPlayer, enforced here because a cast player can be RE-POINTED by
         // `setEpisode` while a seek is in flight.
         //

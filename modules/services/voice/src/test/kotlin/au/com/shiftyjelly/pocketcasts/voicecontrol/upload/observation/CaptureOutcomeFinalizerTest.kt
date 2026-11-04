@@ -1,11 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import androidx.test.core.app.ApplicationProvider
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceLimits
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceProvisioning
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceWindow
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceOwner
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineStageProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.QueueLimits
@@ -88,14 +83,6 @@ class CaptureOutcomeFinalizerTest {
         fun nowMs(): Long = now
     }
 
-    private fun limits(maxMetadataBytes: Int = 4_096) = AllowanceLimits(
-        10,
-        1_000_000,
-        maxClipBytes = 100_000 - 1024,
-        maxMetadataBytes = maxMetadataBytes,
-        ceilings = Ceilings(10, 1_000_000, 1_000_000L, 8_192),
-    )
-
     /** The REAL admitted retained-audio harness: provisioned allowance admission → frozen cap
      *  → sink candidate with PCM → REAL module trigger → producer → store, plus the finalizer
      *  wired exactly as production CollectionStartup wires it. */
@@ -145,14 +132,11 @@ class CaptureOutcomeFinalizerTest {
         )
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024), nowMs = clockMs)
-        val allowance = CaptureAllowanceOwner(tmp.newFolder(), "a@example.com", limits(), AllowanceWindow.Established("window-1"), AllowanceProvisioning.TestOnly)
-        assertTrue(allowance.prepareToken())
         val observer = SegmentObserver(
             gate = CollectionGate { it.shouldRetainNewWork },
             sink = sink,
             authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
             issueAuthority = { IssuedAuthority("a@x", 7L, 1L, "epoch-1", "1") },
-            allowance = allowance,
         )
         // EXACTLY the production wiring (CollectionStartup): admission guard = limitsSelected.
         val finalizer = CaptureOutcomeFinalizer(
@@ -287,14 +271,11 @@ class CaptureOutcomeFinalizerTest {
     fun `missing wait limits CLOSE contribution admission`() {
         harness(waitLimits = null, clock = VirtualClock(), expectAdmitted = false)
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val allowance = CaptureAllowanceOwner(tmp.newFolder(), "a@example.com", limits(), AllowanceWindow.Established("window-1"), AllowanceProvisioning.TestOnly)
-        assertTrue(allowance.prepareToken())
         fun observer(guard: (() -> Boolean)?) = SegmentObserver(
             gate = CollectionGate { it.shouldRetainNewWork },
             sink = sink,
             authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
             issueAuthority = { IssuedAuthority("a@x", 7L, 1L, "epoch-1", "1") },
-            allowance = allowance,
         ).apply { outcomeWaitGuard = guard }
 
         assertNull("no limits → admission REFUSES (fail-closed, spec cf1b9809)", observer { false }.speechStartedAdmitting(1L, "Headset", 800))

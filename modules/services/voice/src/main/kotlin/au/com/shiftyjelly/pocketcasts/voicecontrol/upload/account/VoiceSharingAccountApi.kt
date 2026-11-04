@@ -41,12 +41,6 @@ interface VoiceSharingAccountApi {
         @Body body: okhttp3.RequestBody,
     ): Response<ResponseBody>
 
-    @POST("/api/v1/account/voice-sharing/capture-allowance")
-    suspend fun postCaptureAllowance(
-        @Header("Authorization") bearer: String?,
-        @Body body: okhttp3.RequestBody,
-    ): Response<ResponseBody>
-
     @POST("/api/v1/account/voice-sharing/withdrawal")
     suspend fun postWithdrawal(
         @Header("Authorization") bearer: String?,

@@ -89,11 +89,6 @@ class VoiceAsrEngine @Inject constructor(
     private val collectionAuthority: () -> AuthorityDecision,
     private val retentionSink: ContributionRetentionSink,
     private val segmentObserver: SegmentObserver,
-    // MINIMUM CONNECTED PATH (spec 7dcb3a53): provisioning seam — called when a capture is
-    // refused for lack of a live allowance, at most once per capture session. The composition
-    // binds the reviewed provisioner (real transport, owner snapshot, install fence); capture
-    // stays fail-closed when it returns false.
-    private val ensureCaptureAllowance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner? = null,
     // Upload observation is OFF unless a composition module binds all three collaborators;
     // Dagger never applies Kotlin defaults, so an unbound constructor fails at build time.
     @ApplicationContext private val context: Context,
@@ -101,15 +96,6 @@ class VoiceAsrEngine @Inject constructor(
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
-
-    /**
-     * Gate for the server round trip: true means "a provisioning attempt is permitted".
-     *
-     * Armed at session start and RE-ARMED whenever the composed owner is provably spent or
-     * expired, so the batch boundary and the expiry both reach the advancement/refresh path. It is
-     * cleared before the attempt, so concurrent collect runs do not race two round trips.
-     */
-    private val allowanceProvisionAllowed = java.util.concurrent.atomic.AtomicBoolean(true)
 
     // EVERY processing job stop() cancelled that has not yet finished, exposed so service teardown
     // can await them ALL before releasing the ASR backend. These run on this engine's OWN
@@ -251,7 +237,6 @@ class VoiceAsrEngine @Inject constructor(
 
         val attached = CompletableDeferred<Boolean>()
         lateinit var started: Job
-        allowanceProvisionAllowed.set(true) // fresh session: one fresh provisioning chance
         started = scope.launch {
             Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
@@ -307,65 +292,13 @@ class VoiceAsrEngine @Inject constructor(
                             )
                             // Translation provenance is NOT knowable at capture start (the stage may
                             // or may not run for this utterance); it is recorded when observed.
-                            var admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
-                            if (admission == null) {
-                                // REFILL FIRST (reviewer 3d1f87be #5): a bound authority hands out
-                                // ONE prepaid token. Once it is consumed, this session has no
-                                // further admission until the charge is replenished -- and the
-                                // `allowanceProvisionAttempted` latch below resets only on a new
-                                // engine start, so without this every later utterance in the same
-                                // session was refused forever. Preparing is a durable ledger charge,
-                                // never a network call, so it is safe on every refusal.
-                                // TERMINATION (cloud 0b659d72): a refill only spends records this
-                                // batch already holds. When the ledger is provably spent, stop
-                                // refilling -- looping here would be a silent spin the server sees
-                                // as inactivity. Fall through to provisioning, which asks the server
-                                // ONCE using the persisted identity.
-                                val allowance = ensureCaptureAllowance
-                                if (allowance != null &&
-                                    !allowance.composedOwnerExhausted() &&
-                                    allowance.prepareComposedToken()
-                                ) {
-                                    admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
-                                }
-                            }
-                            if (admission == null) {
-                                // REFUSED → ONE provisioning attempt per session, then re-admit.
-                                // The processor retains the buffered PCM, so the post-RTT
-                                // admission drains the full prefix; a provisioning refusal keeps
-                                // the capture refused fail-closed (allowance_* reason upstream).
-                                // RE-ARMABLE, but not a spin loop (reviewer 7c220c1d #4, cloud
-                                // b2f0df12). A one-shot latch around per-attempt logic is what
-                                // blocked the second utterance last round and the advancement path
-                                // this round. The gate is now "no provisioning attempt is already in
-                                // flight", and it is CLEARED when the composed owner is provably
-                                // spent or expired: those are the two states whose whole purpose is
-                                // to route to the server. It stays set after an ordinary refusal,
-                                // so a genuinely unavailable allowance is still asked about once.
-                                // RE-ARM FROM THE PROVEN STATE, BEFORE DECIDING (reviewer 6a6eec2a).
-                                // Re-arming only in the else after the CAS had already failed meant
-                                // the FIRST exhausted/expired utterance skipped the round trip and
-                                // refused, and only the utterance AFTER it could refresh. The state
-                                // is a precondition of this decision, not a response to its outcome.
-                                val provisionResult = VoiceProvisionGate.decide(allowanceProvisionAllowed, ensureCaptureAllowance)
-                                // UNKNOWN ACCOUNT IS A HOLD, NOT A FAILURE (spec e2cd78d8). The
-                                // attempt is abandoned for this utterance without sending, and the
-                                // gate stays closed: re-arming here would ask again on every
-                                // utterance while the account is still unknowable. The deferral
-                                // resolves by the credential becoming authoritative, not by time.
-                                if (provisionResult == au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Deferred) {
-                                    Timber.i("voice capture deferred: allowance account not yet authoritative")
-                                } else if (provisionResult is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned &&
-                                    // CHARGE BEFORE RE-ADMIT (reviewer b36642db): provisioning only
-                                    // BINDS an owner; admission takes a PREPAID token, and nothing
-                                    // had ever prepared one. Without this the re-admit below asked an
-                                    // unprepared owner and refused every time, so a successful
-                                    // response could never admit a capture.
-                                    ensureCaptureAllowance?.prepareComposedToken() == true
-                                ) {
-                                    admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
-                                }
-                            }
+                            // ONE admission attempt, gated by consent/policy and the per-clip
+                            // ceiling only (core c74d7e30). There is no allowance to provision,
+                            // no prepaid token to refill and no server round trip on this path:
+                            // the daily limit is metered server-side at acceptance of actual audio
+                            // bytes. A refusal here is therefore FINAL for this utterance and
+                            // means no eligible collection, never "waiting for a batch".
+                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
                             openContext = admission?.context
                             if (admission != null) {
                                 // Lease-protected initial allocation (reviewers 23cae70e b4 /

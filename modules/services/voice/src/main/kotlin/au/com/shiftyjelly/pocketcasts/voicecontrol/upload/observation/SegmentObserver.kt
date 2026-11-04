@@ -30,14 +30,6 @@ class SegmentObserver(
     private val handoff: CompletionHandoff = RefuseAllCompletionHandoff,
     /** Collection-fence wrapper supplied by composition; identity when uncomposed (tests). */
     private val fenceGate: FenceGate = IdentityFenceGate,
-    /**
-     * Prepaid-admission authority (reviewer 2164aee3). FAIL-CLOSED default: with no authority
-     * composed, EVERY capture is refused before any sink reservation or engine allocation - the
-     * same shape as [RefuseAllCompletionHandoff]. Null from the authority REFUSES; it never
-     * preserves the old admission behavior as a bypass.
-     */
-    private val allowance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority =
-        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance,
 ) : ObserverHandoffScope {
 
     // All fields below are guarded by [lock]; external callers and the pipeline thread contend
@@ -47,7 +39,7 @@ class SegmentObserver(
     private var retainedForOpen = false
     private var admissionToken: ReservationToken? = null
 
-    /** The open capture's prepaid clip bound (encoded-WAV bytes incl. 44-byte header). */
+    /** The open capture's per-clip ceiling (encoded-WAV bytes incl. 44-byte header). */
     private var openPrepaidClipBytes: Long = Long.MAX_VALUE
 
     /**
@@ -90,9 +82,9 @@ class SegmentObserver(
     data class AdmissionHandle(
         val context: CaptureContext,
         val initialToken: ReservationToken?,
-        /** The prepaid token's SELECTED clip bound — binds every allocation/growth of THIS capture. */
+        /** The compiled per-clip ceiling — binds every allocation/growth of THIS capture. */
         val selectedMaxClipBytes: Long,
-        /** The prepaid token's SELECTED metadata bound — frozen for the capture's persistence stage. */
+        /** The compiled metadata ceiling — frozen for the capture's persistence stage. */
         val selectedMaxMetadataBytes: Int,
     )
 
@@ -157,48 +149,44 @@ class SegmentObserver(
         asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
     ): AdmissionHandle? = fenceGate.gate {
-        // BATCH B: fail-closed BEFORE consuming anything (no token burn — the capture never
-        // starts, so no prepaid token is taken below when this refuses).
+        // Fail-closed BEFORE consuming anything: a refused wait guard or a refused gate must not
+        // reserve sink bytes or allocate an engine buffer.
         outcomeWaitGuard?.let { guard -> if (!guard()) return@gate null }
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
-        // GATE-OFF CONSUMES NOTHING. The single prepaid token is taken only after the live gate
-        // accepts, still BEFORE the observer monitor and BEFORE any sink reservation or engine
-        // allocation/drain. Null (unavailable/empty) REFUSES the capture fail-closed.
-        val prepaid = if (permitted) allowance.takePrepaidToken() else null
-        if (prepaid == null) return@gate null
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, prepaid)?.let {
-            AdmissionHandle(it, admissionToken, prepaid.selectedMaxClipBytes, prepaid.selectedMaxMetadataBytes)
+        // NO ALLOWANCE STEP HERE (core c74d7e30). Capture used to consult a prepaid allowance token
+        // and fail closed when it was absent; that reserve-before-capture rule is removed, and the
+        // daily limit is metered server-side at acceptance instead. Admission is now gated only by
+        // consent/policy (above) and the compiled per-clip ceiling (below).
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel)?.let {
+            AdmissionHandle(it, admissionToken, ContributionCeilings.MAX_CLIP_BYTES, ContributionCeilings.MAX_METADATA_BYTES)
         }
     }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, prepaid: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceToken): CaptureContext? {
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): CaptureContext? {
         val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel)
         // INVALID SIZES refuse before any arithmetic or admission (reviewer fde5349e): a negative
         // producer size would create a negative open charge and REDUCE the sink budget reservation.
         // ZERO stays legal: the empty-prefix admission is a real, retained capture (deltas grow it).
         if (producerSize < 0) return null
-        // The PREPAID bound binds BEFORE any allocation (reviewer 174083e0 #1): a capture larger
-        // than what was charged for is refused here even when the sink's own independent cap would
-        // still allow it. 2 bytes/sample, same accounting the sink uses.
-        // 44-byte WAV header INCLUDED: selectedMaxClipBytes is an encoded-WAV bound.
-        if (producerSize.toLong() * 2L + 44L > prepaid.selectedMaxClipBytes) {
-            // BURN: the token was taken for a capture whose allocation exceeds the charged bound.
+        // The PER-CLIP CEILING binds BEFORE any allocation. It is a compiled constant now rather
+        // than a server-selected bound, but it still binds: spec §"Actual upload usage" keeps
+        // "at most 60,000 ms and 1,920,044 WAV bytes" per clip and calls these ceilings "not a
+        // reservation or a daily charge". 2 bytes/sample, same accounting the sink uses.
+        // 44-byte WAV header INCLUDED: MAX_CLIP_BYTES is an encoded-WAV bound.
+        if (producerSize.toLong() * 2L + 44L > ContributionCeilings.MAX_CLIP_BYTES) {
             return null
         }
         return synchronized(lock) {
             if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0
-            openPrepaidClipBytes = prepaid.selectedMaxClipBytes
+            openPrepaidClipBytes = ContributionCeilings.MAX_CLIP_BYTES
             openChargedBytes = producerSize.toLong() * 2L // the sink reserves full capacity at admit
             outstanding.clear()
-            // The SELECTED metadata bound is FROZEN into the admission event itself; the sink
-            // stamps it into the immutable retained candidate. No side map, no lookup race.
-            val token = sink.admit(SegmentObservation.Admission(context, producerSize, prepaid.selectedMaxMetadataBytes))
+            // The metadata ceiling is FROZEN into the admission event itself; the sink stamps it
+            // into the immutable retained candidate. No side map, no lookup race.
+            val token = sink.admit(SegmentObservation.Admission(context, producerSize, ContributionCeilings.MAX_METADATA_BYTES))
             if (token == null) {
-                // SINK REFUSAL BURNS the prepaid token, no refund (reviewer 2164aee3): the durable
-                // charge stays consumed even though no audio was admitted. The token object itself
-                // is not stored - the charge lives in the owner's ledger, not here.
                 return@speechStartedAdmittingLocked null
             }
             admissionToken = token // producer-held initial reservation until adopt/release
@@ -291,7 +279,7 @@ class SegmentObserver(
         if (copied < 0 || copied > drained.size) return false
         val reservedBytes = outstanding[token] ?: return false // unknown/stale token: refuse
         // The sink adopts the WHOLE array capacity; growth beyond the reservation is enforced
-        // against the prepaid bound BEFORE adoption, never discovered after the charge moved.
+        // against the per-clip ceiling BEFORE adoption, never discovered after the charge moved.
         val capacityBytes = drained.size.toLong() * 2L
         if (capacityBytes > reservedBytes) {
             if (openChargedBytes - reservedBytes + capacityBytes + 44L > openPrepaidClipBytes) return false
@@ -517,7 +505,6 @@ class SegmentObserver(
             "policy-disable",
             "lease-deadline",
             "policy-inactive",
-            "allowance-retired", // allowance lifecycle retirement invalidates an outstanding capture
         )
     }
 }

@@ -107,9 +107,6 @@ class VoiceUploadScheduler(
     }
 }
 
-/** Re-exported for callers that only need the scheduler surface. */
-typealias UploadNetwork = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork
-
 /** The ONLY mapping from the policy's allowed network to the platform constraint. */
 fun UploadNetwork.toWorkNetworkType(): NetworkType = when (this) {
     UploadNetwork.ANY -> NetworkType.CONNECTED

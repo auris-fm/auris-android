@@ -24,10 +24,6 @@ data class IssuedAuthority(
     val credentialIncarnation: Long,
     val enrollmentEpoch: String?,
     val acceptedDisclosureVersion: String?,
-    /** Policy lease incarnation frozen at issue (blocker 4): newer policy ≠ authorization. */
-    val policyActivationGeneration: Long = 0L,
-    val policyActivatedAtMonotonicMs: Long = 0L,
-    val policyEnabledAtIssue: Boolean = false,
 )
 
 /**

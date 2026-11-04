@@ -8,7 +8,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentD
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,7 +32,7 @@ import timber.log.Timber
  *    cannot render wording the consent version does not name.
  */
 data class VoiceSharingSettingsUiState(
-    /** False while the policy is disabled: the setting must hide, even for an enrolled account. */
+    /** Always true now: there is no remote enable switch; the user's sharing choice is the control. */
     val settingAvailable: Boolean,
     /** Server projection through the local intent. A tap alone never flips this. */
     val enrolled: Boolean,
@@ -81,13 +80,12 @@ enum class FailedOperation { NONE, ENROLL, WITHDRAW }
 enum class PendingOperation { NONE, ENROLL, WITHDRAW }
 
 /**
- * Composes the LIVE policy snapshot, the account projection and the local withdrawal intent into
+ * Composes the account projection and the local withdrawal intent into
  * the settings shell's state, and drives the [EnrollmentController] the same way the production
  * Settings row does: a withdrawal records the LOCAL intent FIRST — before any request — so
  * collection stops while the server has not answered yet (reviewer-verified boundary).
  */
 class VoiceSharingSettingsViewModel(
-    private val policy: StateFlow<PolicySnapshot>,
     /**
      * The projection WITH its authoritative owner session (reviewer 20b681f0): the tag is
      * published under the account fence, never inferred from collection time.
@@ -112,7 +110,7 @@ class VoiceSharingSettingsViewModel(
 ) {
 
     // DURABLE UI STATE, not transient render inputs (reviewer ae7922f9): the combine collector
-    // re-renders on every policy/projection emission, and a default parameter there silently
+    // re-renders on every projection emission, and a default parameter there silently
     // erased the failure copy between an action and the next outcome. The failure identity lasts
     // until the NEXT action; the pending label lasts until the outcome settles.
     private var lastFailedOperation = FailedOperation.NONE
@@ -159,7 +157,7 @@ class VoiceSharingSettingsViewModel(
 
     init {
         // The projection's observed session updates ONLY when the projection flow itself emits:
-        // an unrelated emission (policy flip, controller state) under the new session must not
+        // an unrelated emission (controller state change) under the new session must not
         // re-label a retained foreign-session projection as current (reviewer 578bb62a).
         scope.launch {
             taggedProjection.collect {
@@ -174,7 +172,7 @@ class VoiceSharingSettingsViewModel(
             scope.launch { request() }
         }
         scope.launch {
-            kotlinx.coroutines.flow.combine(policy, enrollmentController.state) { _, _ -> }
+            kotlinx.coroutines.flow.combine(enrollmentController.state) { _ -> }
                 .collect {
                     retireForeignSessionPresentation()
                     mutableState.value = render()
@@ -431,13 +429,13 @@ class VoiceSharingSettingsViewModel(
             taggedProjection.value.ownerSession == ownerSession()
         Timber.i(
             "voice-sharing surface: settingAvailable=%b projectionObserved=%b (session=%d) enrolled=%b",
-            policy.value.enabled,
+            true,
             observed,
             ownerSession(),
             isEnrolled(),
         )
         return VoiceSharingSettingsUiState(
-            settingAvailable = policy.value.enabled,
+            settingAvailable = true,
             enrolled = isEnrolled(),
             // Pending is PRESENTATION state, not the shared controller's: the controller keeps the
             // last operation's Pending state even after it settles as Superseded (its own lifecycle

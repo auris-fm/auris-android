@@ -114,8 +114,6 @@ class PocketCastsApplication :
 
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
 
-    @Inject lateinit var voiceSharingPolicyStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyStartup
-
     @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 
     @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
@@ -251,25 +249,13 @@ class PocketCastsApplication :
         applicationScope.launch {
             try {
                 defaultPlaylistsInitializer.initialize()
-                voiceSharingPolicyStartup.initializeOnAppStart()
-                // FIRST ACCOUNT-READABILITY wiring (@spec 69630b93): the policy exchange starts at
-                // launch, so a cold start after a login can run it before the account is readable.
-                // The account owner announces readability (immediately when it already holds, and
-                // on every observed transition); the policy owner refreshes itself exactly once.
-                // Wiring only — the allowance batch, ledger and queued records are untouched.
-                voiceSharingAccountStartup.accountReadableListener = { accountName, session ->
-                    voiceSharingPolicyStartup.onAccountReadable(accountName, session)
-                }
                 voiceSharingAccountStartup.initializeOnAppStart()
-                // Loss subscriptions (accounts/enrollment/policy/lease-deadline) + sink wiring.
+                // Loss subscriptions (accounts/enrollment) + sink wiring.
                 voiceCollectionStartup.initializeOnAppStart()
                 // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
                 // starting it puts nothing on the network until every eligibility gate opens.
                 voiceUploadTrigger.start()
-                // Platform deferred-transfer scheduling (spec voice-recording-uploads.md): ONE
-                // unique periodic drain under the validated `upload_network` constraint; the
-                // binding re-schedules on every policy transition (UPDATE rewrites the
-                // constraint, never stacks). No foreground mic service, no background timer.
+                // Platform deferred-transfer scheduling: ONE unique periodic drain, ANY network.
                 voiceUploadSchedulerBinding.start()
             } catch (e: CancellationException) {
                 throw e

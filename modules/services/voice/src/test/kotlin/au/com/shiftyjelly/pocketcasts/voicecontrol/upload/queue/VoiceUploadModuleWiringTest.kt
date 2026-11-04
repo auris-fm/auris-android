@@ -111,7 +111,7 @@ class VoiceUploadModuleWiringTest {
     )
 
     @Test
-    fun `the ACTUAL trigger runs polls on its scope and a disabled gate touches nothing`() {
+    fun `the ACTUAL trigger runs polls on its scope and a closed network gate touches nothing`() {
         val root = tmp.newFolder("wiring-trigger")
         val store = newStore(root)
         val id = UUID.randomUUID().toString()
@@ -126,8 +126,7 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio, owned = it.owned) } },
             clock = { 51_000_000L },
-            policyAllows = { false },
-            networkAvailable = { true },
+            networkAvailable = { false },
         )
         // The REAL UploadTrigger on an OWNED scope: start() launches the poll loop; finally cancels it.
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
@@ -147,8 +146,8 @@ class VoiceUploadModuleWiringTest {
             val jobs = scope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList() ?: emptyList()
             assertEquals("exactly ONE loop job exists after two start() calls", 1, jobs.size)
 
-            // The disabled gate is checked BEFORE the pickup, so the attempt count is untouched.
-            assertEquals("the disabled gate never picked the capture up", 1, store.stateAttemptsForTest(id))
+            // The closed gate is checked BEFORE the pickup, so the attempt count is untouched.
+            assertEquals("the closed gate never picked the capture up", 1, store.stateAttemptsForTest(id))
             assertTrue("the capture is still owned", store.readyEntries().any { it.captureId == id })
         } finally {
             scope.cancel()
@@ -185,7 +184,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             // The account has MOVED to epoch-2: epoch-1 captures are a retired identity.
             identityHolds = { epoch -> epoch == "epoch-2" },
@@ -224,7 +222,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             // A REAL authority refuses (null) when any admitted component disagrees with the live one.
@@ -264,7 +261,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -319,7 +315,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             credentialFor = { admitted ->
                 check(admitted.epoch == "epoch-1")
@@ -367,7 +362,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -432,7 +426,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -513,7 +506,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -599,7 +591,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -674,7 +665,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -758,7 +748,6 @@ class VoiceUploadModuleWiringTest {
                 }
             },
             clock = { 51_000_000L },
-            policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
             credentialFor = { admitted ->
@@ -790,7 +779,7 @@ class VoiceUploadModuleWiringTest {
     }
 
     @Test
-    fun `a DISABLED policy puts nothing on the network and settles nothing`() {
+    fun `a closed network gate puts nothing on the network and consumes no attempt`() {
         val root = tmp.newFolder("wiring-disabled")
         val store = newStore(root)
         val id = UUID.randomUUID().toString()
@@ -806,8 +795,7 @@ class VoiceUploadModuleWiringTest {
             transport = transport,
             captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio, owned = it.owned) } },
             clock = { 51_000_000L },
-            policyAllows = { false }, // the compiled-off published policy
-            networkAvailable = { true },
+            networkAvailable = { false },
         )
         val result = assembly.poll()
 
@@ -817,7 +805,7 @@ class VoiceUploadModuleWiringTest {
     }
 
     @Test
-    fun `an ENABLED fixture reaches the store-backed authority and the assembled settlement path`() {
+    fun `an open gate reaches the store-backed authority and the assembled settlement path`() {
         val root = tmp.newFolder("wiring-enabled")
         val store = newStore(root)
         val id = UUID.randomUUID().toString()
@@ -835,7 +823,6 @@ class VoiceUploadModuleWiringTest {
             ),
             captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio, owned = it.owned) } },
             clock = { 51_000_000L },
-            policyAllows = { true }, // an explicitly enabled fixture
             networkAvailable = { true },
         )
         val result = assembly.poll()

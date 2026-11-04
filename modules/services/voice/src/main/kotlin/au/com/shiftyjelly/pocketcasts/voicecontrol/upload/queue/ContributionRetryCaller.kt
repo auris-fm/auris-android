@@ -15,9 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ContributionRetryCaller(
     private val store: ContributionStore,
     private val clock: () -> Long,
-    /** Account/policy gate (sharing enabled, account valid). Rechecked before EVERY attempt. */
-    private val policyAllows: () -> Boolean,
-    /** Network gate. Rechecked before EVERY attempt, after the policy gate. */
+    /** Network gate. Rechecked before EVERY attempt. */
     private val networkAvailable: () -> Boolean,
     /**
      * The upload attempt seam. Called ONLY after the atomic pickup durably consumed the attempt, with
@@ -57,7 +55,6 @@ class ContributionRetryCaller(
 
     data class PollResult(
         val attempted: Int,
-        val deferredPolicy: Int,
         val deferredNetwork: Int,
         val skippedInFlight: Int,
         val cancelledEpoch: Int,
@@ -72,7 +69,6 @@ class ContributionRetryCaller(
     fun pollOnce(): PollResult {
         check(!closed.get()) { "caller closed" }
         var attempted = 0
-        var deferredPolicy = 0
         var deferredNetwork = 0
         var skippedInFlight = 0
         var cancelledEpoch = 0
@@ -96,11 +92,6 @@ class ContributionRetryCaller(
                 continue
             }
             try {
-                // Gate order is policy -> network: cheapest and most semantic first.
-                if (!policyAllows()) {
-                    deferredPolicy++
-                    continue
-                }
                 if (!networkAvailable()) {
                     deferredNetwork++
                     continue
@@ -182,7 +173,7 @@ class ContributionRetryCaller(
                 synchronized(inFlightLock) { inFlight.remove(captureId) }
             }
         }
-        return PollResult(attempted, deferredPolicy, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
+        return PollResult(attempted, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
     }
 
     /** Durable re-arm, token-scoped: ONE ownership transaction validates the attempt AND mutates.

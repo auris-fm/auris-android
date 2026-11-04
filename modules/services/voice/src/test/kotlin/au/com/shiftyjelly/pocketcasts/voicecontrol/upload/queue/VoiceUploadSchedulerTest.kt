@@ -7,7 +7,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.SynchronousExecutor
 import androidx.work.testing.WorkManagerTestInitHelper
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadNetwork
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

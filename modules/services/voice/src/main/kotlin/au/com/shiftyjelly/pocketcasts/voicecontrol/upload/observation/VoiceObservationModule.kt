@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -35,12 +34,10 @@ object VoiceObservationModule {
     @Provides
     @Singleton
     fun provideCollectionAuthority(
-        policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         collectionTx: CollectionAuthorityTransaction,
         localWithdrawalIntent: LocalWithdrawalIntentStore,
     ): CollectionAuthority = CollectionAuthority(
-        policyProvider,
         accountStartup,
         collectionTx,
         localWithdrawalIntent,
@@ -61,13 +58,8 @@ object VoiceObservationModule {
     @Singleton
     fun provideCollectionTx(
         accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
-        policyProvider: VoiceSharingPolicyProvider,
     ): CollectionAuthorityTransaction = CollectionAuthorityTransaction(
         ownership = accountStartup.ownerForHandoff(),
-        policy = object : PolicySnapshotReader {
-            // ONE atomic immutable-snapshot read per acquisition (no 3-call getter).
-            override fun snapshot() = policyProvider.publishedPolicy.value
-        },
         // THE single shared primitive: same object as the owner's collectionSharedLock, injected
         // through the concrete SyncAccountManagerImpl binding resolved by the startup.
         sharedLock = accountStartup.sharedCollectionLock(),
@@ -152,20 +144,19 @@ object VoiceObservationModule {
     )
 
     /**
-     * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change,
-     * enrollment/withdrawal post-commit hook, policy disable flow, exact lease-deadline purge.
-     * Called from the app surface once at startup; idempotent inside the watcher.
+     * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change and the
+     * enrollment/withdrawal post-commit hook. Called from the app surface once at startup;
+     * idempotent inside the watcher.
      */
     @Provides
     @Singleton
     fun provideLossWatcher(
         observer: SegmentObserver,
         authority: CollectionAuthority,
-        policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         syncAccountManager: au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager,
         @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
-    ): CollectionLossWatcher = CollectionLossWatcher(observer, authority, policyProvider, accountStartup, syncAccountManager, scope)
+    ): CollectionLossWatcher = CollectionLossWatcher(observer, authority, accountStartup, syncAccountManager, scope)
 }
 
 /** 64 MiB aggregate ceiling for upload-owned PCM (queue bounds refine this in Task 5). */

@@ -23,16 +23,6 @@ object IdentityRevocationWatchers {
         snapshot: () -> AuthoritySnapshot?,
         epoch: () -> String?,
         store: ContributionStore,
-        /**
-         * THE POLICY-DISABLE TAIL: the published policy is a THIRD revocation source, alongside the
-         * authority-session and projection tails. A disable changes neither the account nor the
-         * projection epoch, so before this subscription existed a disable closed the upload gate
-         * but left already-queued audio and metadata on disk indefinitely - captured under a policy
-         * that then said no. Observed on the real flow (not sampled), purging through the store's
-         * own [ContributionStore.revokeAndPurge] so cancellation, index clear and file deletion stay
-         * ONE ownership transaction. Supply it only where a real policy exists.
-         */
-        policyProvider: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider? = null,
     ): suspend kotlinx.coroutines.CoroutineScope.() -> Unit = coroutineScope@{
         val cancel: () -> Unit = {
             val snap = snapshot()
@@ -44,23 +34,6 @@ object IdentityRevocationWatchers {
         // changes apply through the state fence and fire here - an epoch-1 call cannot survive an
         // epoch retirement just because no login happened.
         accountState.projectionInvalidatedListener = { _, _ -> cancel() }
-        // POLICY tail: a published disable purges the durable queue. `revokeAndPurge` is the store's
-        // own full-revocation transaction, so this reuses the existing revocation connection instead
-        // of introducing a second, weaker purge path.
-        policyProvider?.let { provider ->
-            this@coroutineScope.launch {
-                // LEVEL, not just an edge (spec voice-recording-uploads.md:75, ruling 51ebeb5f):
-                // "Disabling, withdrawal or policy-lease expiry cancels collection-owned work and
-                // deletes pending local contribution audio/metadata, including partial buffers."
-                // There is NO same-process-edge exemption and NO compiled-off exemption, so the
-                // FIRST disabled observation must purge too — a build that starts disabled may still
-                // find a queue left by an earlier enabled run, and leaving it would retain audio the
-                // current policy says must not exist.
-                provider.publishedPolicy.collect { snap ->
-                    if (!snap.enabled) store.revokeAndPurge("policy-disable")
-                }
-            }
-        }
         awaitCancellation()
     }
 }

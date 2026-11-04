@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.QueueLimits
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures
@@ -22,45 +21,21 @@ import org.robolectric.RobolectricTestRunner
 /**
  * CONNECTED POSITIVE CONTROL (spec 200b932b / 5e33fe28, reviewer 6b32f503 + b24c3dcd): from the
  * MODULE-BUILT production stack — `VoiceObservationModule.provideSegmentObserver` (real
- * `CollectionAuthority` over the real account startup/policy/withdrawal store, real
+ * `CollectionAuthority` over the real account startup/withdrawal store, real
  * `CollectionAuthorityTransaction` fence, real `HandoffCoordinator`), the module's
  * `PRODUCTION_OUTCOME_WAIT` finalizer with `CollectionStartup`'s real admission-guard wiring, the
  * module's retention sink and publish trigger over the real producer/store — ALL THE WAY to a
  * DURABLE, servable contribution record, with NO allowance anywhere on the path. External inputs
- * only: owner identity, a live session with its authenticated enrollment projection, and the
- * enabled policy snapshot through the provider's test seam. The consent-refusal negative runs
- * through the SAME connected stack.
+ * only: owner identity, a live session with its authenticated enrollment projection. The
+ * consent-refusal negative runs through the SAME connected stack.
  */
 @RunWith(RobolectricTestRunner::class)
 @org.robolectric.annotation.Config(sdk = [35])
 class AdmissionToDurableRecordControlTest {
 
-    /** The module's policy provider, given an enabled snapshot through its test seam. */
-    private fun enabledPolicy(startup: VoiceSharingAccountStartup) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule
-        .provideVoiceSharingPolicyProvider(
-            remoteConfig = org.mockito.kotlin.mock(),
-            featureProvider = org.mockito.kotlin.mock(),
-            ownership = startup.ownerForHandoff(),
-            scope = CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-        )
-        .also {
-            // Module wires nowMs to elapsedRealtime(): the activation stamp must be a REAL
-            // recent monotonic instant or the lease reads back disabled.
-            it.applySnapshotForTest(
-                PolicySnapshot(
-                    enabled = true,
-                    activationGeneration = 3,
-                    activatedAtMonotonicMs = android.os.SystemClock.elapsedRealtime(),
-                ),
-            )
-        }
-
-    /** Mirrors VoiceObservationModule.provideCollectionTx over the SAME startup/policy. */
-    private fun collectionTx(startup: VoiceSharingAccountStartup, policy: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider) = CollectionAuthorityTransaction(
+    /** Mirrors VoiceObservationModule.provideCollectionTx over the SAME startup. */
+    private fun collectionTx(startup: VoiceSharingAccountStartup) = CollectionAuthorityTransaction(
         ownership = startup.ownerForHandoff(),
-        policy = object : PolicySnapshotReader {
-            override fun snapshot() = policy.publishedPolicy.value
-        },
         sharedLock = startup.sharedCollectionLock(),
     )
 
@@ -95,11 +70,9 @@ class AdmissionToDurableRecordControlTest {
         val context = ApplicationProvider.getApplicationContext<android.app.Application>()
         val store = newStore("admission-durable")
         val startup = VoiceUploadCompositionFixtures.startup(context)
-        val policy = enabledPolicy(startup)
-        val tx = collectionTx(startup, policy)
+        val tx = collectionTx(startup)
         val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
         val authority = CollectionAuthority(
-            policyProvider = policy,
             accountStartup = startup,
             collectionTx = tx,
             localWithdrawalIntent = intent,
@@ -129,7 +102,7 @@ class AdmissionToDurableRecordControlTest {
                 producerSize = 800,
                 asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
             )
-            assertNotNull("a consented, enrolled, policy-live, isolated-route capture with no allowance must be admitted", admission)
+            assertNotNull("a consented, enrolled, isolated-route capture with no allowance must be admitted", admission)
             assertTrue(observer.adoptFirstChunk(admission!!, frames.first()))
             // The REAL HandoffCoordinator: coherent revalidation under the fence, then completion.
             observer.wakeCompleted(admission.context, 0, 1600, SegmentObservation.WakeState.Detected) {
@@ -157,11 +130,9 @@ class AdmissionToDurableRecordControlTest {
         val context = ApplicationProvider.getApplicationContext<android.app.Application>()
         val store = newStore("admission-durable-negative")
         val startup = VoiceUploadCompositionFixtures.startup(context)
-        val policy = enabledPolicy(startup)
-        val tx = collectionTx(startup, policy)
+        val tx = collectionTx(startup)
         val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
         val authority = CollectionAuthority(
-            policyProvider = policy,
             accountStartup = startup,
             collectionTx = tx,
             localWithdrawalIntent = intent,

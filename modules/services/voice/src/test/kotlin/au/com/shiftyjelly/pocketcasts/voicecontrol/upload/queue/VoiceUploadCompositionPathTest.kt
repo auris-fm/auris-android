@@ -5,8 +5,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Collection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionLossWatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.PolicySnapshotReader
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicInteger
@@ -24,8 +22,7 @@ import org.robolectric.RobolectricTestRunner
 /**
  * THE CONSTRUCTED PRODUCTION PATH (spec 2e4a5472): the pieces come from the MODULE's own provider
  * methods — the same calls Hilt makes — rather than hand-rolled stand-ins, and the path is driven
- * with DISABLED fixtures (published policy off, no credentials). What this pins is the honest
- * compiled-off claim: the module's trigger starts, polls, and puts NOTHING on the network.
+ * fixtures. What this pins: the module-built path polls, sends, and settles honestly.
  */
 @RunWith(RobolectricTestRunner::class)
 @org.robolectric.annotation.Config(sdk = [35])
@@ -100,95 +97,11 @@ class VoiceUploadCompositionPathTest {
     // called on this path).
 
     /**
-     * COMPILED-OFF, through the module's OWN trigger: with the published policy disabled, the real
-     * upload trigger polls on its scope, a queued capture is never picked up, and the loopback
-     * server records zero requests.
-     */
-    @Test
-    fun `the module's own trigger polls, sends nothing, and clears a pre-existing queue when compiled off`() {
-        val (server, hits) = loopback()
-        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
-        try {
-            val root = tmp.newFolder("compiled-off")
-            val store = ContributionStore(root, QueueLimits.defaults(), clock = System::currentTimeMillis).also { stores += it }
-            val id = prepareVerifiedCapture(store)
-            val startup = moduleStartup()
-            // The module's OWN policy provider, composed with the real modules (the published
-            // snapshot is the gate the assembly reads; its refresh loop is never started here).
-            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
-                remoteConfig = org.mockito.kotlin.mock(),
-                featureProvider = org.mockito.kotlin.mock(),
-                ownership = startup.ownerForHandoff(),
-                // A cancelled scope: the provider's init refresh (a remote fetch) must never run in
-                // this control — the enabled snapshot is the explicit fixture, and no background job
-                // may silently overwrite it.
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-            )
-            val assembly = VoiceUploadModule.provideUploadAssembly(
-                store = store,
-                transport = ContributionUploadTransport(
-                    endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
-                    authorization = { "Bearer t" },
-                ),
-                policyProvider = policy,
-                accountStartup = startup,
-                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
-                aurisToken = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.noEnvironmentAuris(),
-            )
-            val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
-            val producer = VoiceUploadModule.provideContributionCaptureProducer(
-                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
-                store = store,
-                accountStartup = startup,
-            )
-            val publishTrigger = VoiceUploadModule.provideRetentionPublishTrigger(
-                sink = sink,
-                producer = producer,
-                accountStartup = startup,
-                scope = scope,
-            )
-            val trigger = VoiceUploadModule.provideUploadTrigger(
-                assembly = assembly,
-                aurisToken = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.noEnvironmentAuris(),
-                store = store,
-                accountStartup = startup,
-                policyProvider = policy,
-                scope = scope,
-                publishTrigger = publishTrigger,
-            )
-            // The module's trigger uses the PRODUCTION cadence (60s); the loop's own counter is the
-            // observable, so one started poll is the evidence that the module's loop runs.
-            trigger.start()
-            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
-            while (trigger.pollsStarted.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
-            assertTrue("the module's trigger must actually poll (got ${trigger.pollsStarted.get()})", trigger.pollsStarted.get() >= 1)
-            // Idempotence: a second start() must not launch a second loop.
-            trigger.start()
-            assertEquals("one loop only", 1, trigger.pollsStarted.get())
-            assertEquals("compiled-off: the gate is closed, so nothing is sent", 0, hits.get())
-            // CORRECTED against the ruled contract (spec voice-recording-uploads.md:75, 51ebeb5f):
-            // startup-disabled has NO compiled-off exemption, so the FIRST disabled observation must
-            // clear a queue left by an earlier enabled run. Retention here would be the violation.
-            assertEquals(
-                "a startup-disabled policy clears the pre-existing queue",
-                0,
-                store.readyEntries().size,
-            )
-        } finally {
-            scope.cancel()
-            server.stop(0)
-        }
-    }
-
-    /**
      * Mirrors VoiceObservationModule.provideCollectionTx over the SAME startup/owner (one shared
-     * lock, one immutable policy snapshot per acquisition).
+     * lock per acquisition).
      */
-    private fun collectionTxFor(startup: VoiceSharingAccountStartup, policy: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider): CollectionAuthorityTransaction = CollectionAuthorityTransaction(
+    private fun collectionTxFor(startup: VoiceSharingAccountStartup): CollectionAuthorityTransaction = CollectionAuthorityTransaction(
         ownership = startup.ownerForHandoff(),
-        policy = object : PolicySnapshotReader {
-            override fun snapshot() = policy.publishedPolicy.value
-        },
         sharedLock = startup.sharedCollectionLock(),
     )
 
@@ -272,32 +185,12 @@ class VoiceUploadCompositionPathTest {
                 startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L),
             )
 
-            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
-                remoteConfig = org.mockito.kotlin.mock(),
-                featureProvider = org.mockito.kotlin.mock(),
-                ownership = owner,
-                // A cancelled scope: the provider's init refresh (a remote fetch) must never run in
-                // this control — the enabled snapshot below is the explicit fixture, and no
-                // background job may silently overwrite it.
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-            )
-            // The gate the module reads is the published snapshot; enabling it is the EXACT explicit
-            // fixture spec authorizes (no remote fetch, no activation).
-            policy.applySnapshotForTest(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                    enabled = true,
-                    activatedAtMonotonicMs = 0L,
-                    activationGeneration = 1L,
-                ),
-            )
-
             val assembly = VoiceUploadModule.provideUploadAssembly(
                 store = store,
                 transport = ContributionUploadTransport(
                     endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
                     authorization = { "Bearer-fixture" },
                 ),
-                policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
                 aurisToken = aurisLive.provider,
@@ -312,7 +205,6 @@ class VoiceUploadCompositionPathTest {
                 hits.get() >= 1,
             )
             org.junit.Assert.assertNotNull("an invalid receipt never settles", store.durableCapture(id)?.owned?.also { it.settle(1_000L) })
-            org.junit.Assert.assertTrue("policy stays open after an invalid receipt: ${policy.publishedPolicy.value}", policy.publishedPolicy.value.enabled)
 
             // 2. VALID receipt echoing the store's own digest: the entry settles and is removed.
             val digest = store.recordedDigest(id)!!
@@ -321,7 +213,7 @@ class VoiceUploadCompositionPathTest {
             // The attempt counter must allow a second attempt in this fixture's clock.
             val secondPoll = assembly.poll()
             org.junit.Assert.assertTrue(
-                "a second attempt reached the transport (before=$hitsBefore, after=${hits.get()}, poll=$secondPoll, policy=${policy.publishedPolicy.value})",
+                "a second attempt reached the transport (before=$hitsBefore, after=${hits.get()}, poll=$secondPoll)",
                 hits.get() > hitsBefore,
             )
             org.junit.Assert.assertNull("a VALIDATED receipt settles the entry", store.durableCapture(id))
@@ -361,7 +253,6 @@ class VoiceUploadCompositionPathTest {
             val captureId = emitted.captureId
             val startup = emitted.startup
             val owner = emitted.owner
-            val policy = emitted.policy
             val scope = emitted.scope
             try {
                 // 3. DRAIN side: the module-built assembly uploads and the VALIDATED receipt settles.
@@ -371,7 +262,6 @@ class VoiceUploadCompositionPathTest {
                         endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
                         authorization = { "Bearer-fixture" },
                     ),
-                    policyProvider = policy,
                     accountStartup = startup,
                     context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
                     aurisToken = aurisLive.provider,
@@ -428,26 +318,12 @@ class VoiceUploadCompositionPathTest {
             val token = startup.state.sessionStarted(7L)
             val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
             assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
-            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
-                remoteConfig = org.mockito.kotlin.mock(),
-                featureProvider = org.mockito.kotlin.mock(),
-                ownership = owner,
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-            )
-            policy.applySnapshotForTest(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                    enabled = true,
-                    activatedAtMonotonicMs = 1L,
-                    activationGeneration = 1L,
-                ),
-            )
             val assembly = VoiceUploadModule.provideUploadAssembly(
                 store = store,
                 transport = ContributionUploadTransport(
                     endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
                     authorization = { "Bearer-fixture" },
                 ),
-                policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
                 aurisToken = aurisLive.provider,
@@ -507,88 +383,6 @@ class VoiceUploadCompositionPathTest {
     }
 
     /**
-     * FOREGROUND BYPASS (reviewer 177645cc): the platform scheduler constraint alone cannot stop a
-     * drain started outside WorkManager — the policy's `upload_network` must gate EACH attempt.
-     * With the published policy requiring UNMETERED and the actual network metered, the module
-     * assembly defers and touches nothing; when the actual network satisfies the policy, the same
-     * entry goes out and a VALIDATED receipt settles it.
-     */
-    @Test
-    fun `a tightened upload_network gates the foreground drain per attempt`() {
-        val aurisLive = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.liveAuris()
-        aurisLive.acquire()
-        var status = 500
-        var body = ""
-        val (server, hits) = loopback { status to body }
-        // The ACTUAL network, controlled by the control (production: ConnectivityManager).
-        var actualUnmetered = false
-        try {
-            val root = tmp.newFolder("foreground-bypass")
-            val store = ContributionStore(
-                root,
-                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
-                clock = System::currentTimeMillis,
-                jitter = { 0L },
-            ).also { stores += it }
-            val id = prepareVerifiedCapture(store)
-            val startup = moduleStartup()
-            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
-            owner.publish("a@x", 7L, "Bearer-fixture")
-            startup.credentials.publish("Bearer-fixture")
-            val token = startup.state.sessionStarted(7L)
-            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
-            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
-                remoteConfig = org.mockito.kotlin.mock(),
-                featureProvider = org.mockito.kotlin.mock(),
-                ownership = owner,
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-            )
-            policy.applySnapshotForTest(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                    enabled = true,
-                    activatedAtMonotonicMs = 1L,
-                    activationGeneration = 1L,
-                    uploadNetwork = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.UNMETERED,
-                ),
-            )
-            val assembly = VoiceUploadModule.provideUploadAssembly(
-                store = store,
-                transport = ContributionUploadTransport(
-                    endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
-                    authorization = { "Bearer-fixture" },
-                ),
-                policyProvider = policy,
-                accountStartup = startup,
-                actualNetwork = { requested ->
-                    when (requested) {
-                        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.ANY -> true
-                        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.UNMETERED -> actualUnmetered
-                    }
-                },
-                aurisToken = aurisLive.provider,
-            )
-            // Policy demands UNMETERED; the actual network is metered: DEFER, never send.
-            status = 201
-            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"deadbeef\",\"status\":\"accepted\"}"
-            val deferred = assembly.poll()
-            assertEquals("policy network unsatisfied: the foreground drain defers", 1, deferred.deferredNetwork)
-            assertEquals("nothing is sent against the policy network", 0, hits.get())
-
-            // The actual network now satisfies the policy: the SAME entry goes out per attempt.
-            actualUnmetered = true
-            val digest = store.recordedDigest(id)!!
-            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"$digest\",\"status\":\"accepted\",\"receipt_id\":\"rcpt-n\",\"accepted_at\":\"2026-10-23T00:00:00Z\",\"retention_expires_at\":\"2026-11-22T00:00:00Z\"}"
-            assembly.poll()
-            assertTrue("the per-attempt gate opens with the actual network", hits.get() >= 1)
-            org.junit.Assert.assertNull("the durable entry settled", store.durableCapture(id))
-        } finally {
-            aurisLive.shutdown()
-            server.stop(0)
-        }
-    }
-
-    /**
      * WORKER EXECUTION CONSTRUCTION (reviewer 177645cc): the persisted worker is instantiated
      * through the real WorkManager worker-construction path (TestListenableWorkerBuilder +
      * a WorkerFactory producing the @HiltWorker's constructor shape) and its doWork() runs the
@@ -620,26 +414,12 @@ class VoiceUploadCompositionPathTest {
             val token = startup.state.sessionStarted(7L)
             val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
             assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
-            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
-                remoteConfig = org.mockito.kotlin.mock(),
-                featureProvider = org.mockito.kotlin.mock(),
-                ownership = owner,
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-            )
-            policy.applySnapshotForTest(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                    enabled = true,
-                    activatedAtMonotonicMs = 1L,
-                    activationGeneration = 1L,
-                ),
-            )
             val assembly = VoiceUploadModule.provideUploadAssembly(
                 store = store,
                 transport = ContributionUploadTransport(
                     endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
                     authorization = { "Bearer-fixture" },
                 ),
-                policyProvider = policy,
                 accountStartup = startup,
                 context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
                 aurisToken = aurisLive.provider,

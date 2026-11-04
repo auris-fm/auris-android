@@ -7,7 +7,7 @@ import javax.inject.Singleton
 /**
  * Production composition owner for the collection boundary (reviewer 01877984 blocker 1: no
  * caller graph existed). Injected singletons with no consumer are NOT composition — this class
- * is instantiated from the application's onCreate exactly like [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyStartup]
+ * is instantiated from the application's onCreate exactly like VoiceSharingAccountStartup
  * and [VoiceSharingAccountStartup], and it starts every loss subscription for real:
  *
  *   observer ← sink.onRetentionEnded wiring            (provider, VoiceObservationModule)

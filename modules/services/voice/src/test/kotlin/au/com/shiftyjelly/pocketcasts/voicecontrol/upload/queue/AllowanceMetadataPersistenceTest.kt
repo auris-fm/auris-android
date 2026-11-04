@@ -66,20 +66,6 @@ class AllowanceMetadataPersistenceTest {
         val token = startup.state.sessionStarted(7L)
         val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
         assertTrue(startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L))
-        val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule
-            .provideVoiceSharingPolicyProvider(
-                remoteConfig = mock(),
-                featureProvider = mock(),
-                ownership = owner,
-                scope = CoroutineScope(Job().apply { cancel() }),
-            )
-        policy.applySnapshotForTest(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                enabled = true,
-                activatedAtMonotonicMs = 1L,
-                activationGeneration = 1L,
-            ),
-        )
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()
@@ -195,20 +181,6 @@ class AllowanceMetadataPersistenceTest {
         val token = startup.state.sessionStarted(7L)
         val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
         assertTrue(startup.state.applyOutcome(token, ticket, VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"), ownerSession = 7L))
-        val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule
-            .provideVoiceSharingPolicyProvider(
-                remoteConfig = mock(),
-                featureProvider = mock(),
-                ownership = owner,
-                scope = CoroutineScope(Job().apply { cancel() }),
-            )
-        policy.applySnapshotForTest(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                enabled = true,
-                activatedAtMonotonicMs = 1L,
-                activationGeneration = 1L,
-            ),
-        )
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()

@@ -323,7 +323,6 @@ class LoopbackHostDriverTest {
                 }
             },
             clock = { now },
-            policyAllows = { true },
             networkAvailable = { true },
             onAccepted = { _, _ -> accepted.incrementAndGet() },
         )

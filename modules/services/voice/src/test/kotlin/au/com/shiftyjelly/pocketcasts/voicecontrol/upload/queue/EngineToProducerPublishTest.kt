@@ -144,7 +144,6 @@ class EngineToProducerPublishTest {
         credentialIncarnation = 1L,
         enrollmentEpoch = "epoch-1",
         acceptedDisclosureVersion = "1",
-        policyEnabledAtIssue = true,
     )
 
     private val asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin")

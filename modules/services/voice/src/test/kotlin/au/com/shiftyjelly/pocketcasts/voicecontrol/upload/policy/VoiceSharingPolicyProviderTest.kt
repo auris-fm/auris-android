@@ -864,4 +864,66 @@ class VoiceSharingPolicyProviderTest {
         dispatcher.scheduler.runCurrent()
         assertTrue(provider.snapshot().enabled)
     }
+
+    @Test
+    fun `a retry that claims first cannot supersede a newer manual refresh that starts after it`() {
+        // reviewer 7bdc0d3b: the OLD code checked the captured generation and claimed the next
+        // one in two separate fence acquisitions — a manual refresh starting in that gap made the
+        // stale retry newest, and it superseded the manual request. The claim is now atomic with
+        // the check; this control gates the ordering where the retry WINS the claim: the later
+        // manual refresh becomes newest, supersedes the retry, and its enabled answer is final.
+        fetchOutcome = null
+        val provider = provider(retryDelayMs = 10_000) // stale failure schedules retry (gen1)
+        assertFalse(provider.snapshot().enabled)
+        val afterStaleFailure = fetchCount
+
+        // The retry fires and claims the next generation while failing transiently.
+        dispatcher.scheduler.advanceTimeBy(10_000)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("the retry claimed and executed", afterStaleFailure + 1, fetchCount)
+        assertFalse(provider.snapshot().enabled)
+
+        // A manual refresh starts AFTER the retry's claim: it becomes newest and wins.
+        fetchOutcome = Unit
+        refresh(provider)
+        assertTrue(provider.snapshot().enabled)
+        val afterManual = fetchCount
+
+        // The retry's own next schedule (from its transient failure) is now stale: it must not
+        // fire over the manual request's publication. The lease expiry in this window disables
+        // and renews (monotonic clock advanced, so the no-progress guard permits the renewal);
+        // the final state is the renewed ENABLED policy — no stale retry ever superseded it.
+        monotonicNowMs += 15 * 60_000
+        dispatcher.scheduler.advanceTimeBy(15 * 60_000)
+        dispatcher.scheduler.runCurrent()
+        assertTrue(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `an old in-flight failure publishing after a newer authoritative answer schedules no retry`() {
+        // reviewer 7bdc0d3b: the named stale-failure control completed the failure BEFORE the
+        // newer answer; this one holds an older refresh IN FLIGHT across the newer authoritative
+        // false, then lets its failure publish afterward — the fenced-out failure must not
+        // schedule any retry.
+        val fetchGate = JvmTaskSource<Unit>()
+        restubWithFetchGate(fetchGate.task)
+        val provider = provider()
+        scope.launch { provider.refresh() } // gen1 hangs in fetch
+        dispatcher.scheduler.runCurrent()
+        val afterStaleStart = fetchCount
+
+        // A newer authoritative false publishes while gen1 is still in flight.
+        fetchOutcome = Unit
+        rawValue = "false"
+        refresh(provider)
+        assertFalse(provider.snapshot().enabled)
+        val afterNewerAnswer = fetchCount
+
+        // The stale failure now completes: fenced out, and no retry may be scheduled.
+        fetchGate.trySetException(IllegalStateException("stale fetch failure"))
+        dispatcher.scheduler.runCurrent()
+        dispatcher.scheduler.advanceTimeBy(15 * 60_000)
+        dispatcher.scheduler.runCurrent()
+        assertFalse(provider.snapshot().enabled)
+    }
 }

@@ -53,6 +53,8 @@ class VoiceSharingPolicyProvider(
     private val nowMs: () -> Long,
     private val sleepMs: suspend (Long) -> Unit = { delay(it) },
     private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
+    /** Base retry delay for transient acquisition failures; tests drive this and [sleepMs]. */
+    private val retryDelayMs: Long = RETRY_DELAY_MS,
     /** SHARED serialization primitive: MUST be the SAME object as the account tier's
      * collectionSharedLock (reviewer 23cae70e b1). NO default — an independent fallback lock
      * would silently deserialize policy publication from account transitions. Composition passes
@@ -71,6 +73,18 @@ class VoiceSharingPolicyProvider(
     private var activationGeneration = 0L
 
     private var invalidationJob: Job? = null
+
+    /**
+     * ACQUISITION RETRY DRIVER: a process that starts against a failing fetch previously had NO
+     * retry driver — the lease-expiry renewal only arms when a snapshot is ENABLED, so such a
+     * process stayed disabled until an app restart (observed in the field 2026-11-04). While the
+     * snapshot is disabled by TRANSIENT acquisition failures, each failure schedules the next
+     * ordinary refresh after an exponentially growing, capped backoff — bounded rate, no
+     * permanent abandonment. Authoritative policy answers cancel the loop. Managed under [fence]
+     * like every other timer.
+     */
+    private var retryJob: Job? = null
+    private var retryBackoffMs = retryDelayMs
 
     /**
      * The OWNER IDENTITY this provider last acquired policy FOR — account name AND session
@@ -142,7 +156,7 @@ class VoiceSharingPolicyProvider(
         // The WHOLE refresh is bounded: a fetch or activation that never completes cannot hang
         // the caller; on deadline it fails closed (fenced).
         return withTimeoutOrNull(refreshTimeoutMs) { runRefresh(requestGen) }
-            ?: publishDisabled(requestGen, "refresh deadline exceeded")
+            ?: publishDisabled(requestGen, "refresh deadline exceeded", transient = true)
     }
 
     /**
@@ -176,7 +190,7 @@ class VoiceSharingPolicyProvider(
         // An unreadable baseline is NOT a pass: fail closed.
         val baseline = attemptFinite { remoteConfig.info }
             ?.let { info -> attemptFinite { info.fetchTimeMillis } }
-            ?: return publishDisabled(requestGen, "fetch baseline unreadable")
+            ?: return publishDisabled(requestGen, "fetch baseline unreadable", transient = true)
 
         // A genuine new fetch request, awaited before its bookkeeping is judged. Interval 0 is
         // REQUIRED by the freshness contract below: the default SDK minimum fetch interval
@@ -185,28 +199,35 @@ class VoiceSharingPolicyProvider(
         // a real network fetch.
         val fetched = attemptFinite { taskSuccess(remoteConfig.fetch(0L)) }
         if (fetched != true) {
-            return publishDisabled(requestGen, "fetch task failed")
+            return publishDisabled(requestGen, "fetch task failed", transient = true)
         }
 
-        val info = attemptFinite { remoteConfig.info } ?: return publishDisabled(requestGen, "post-fetch info unreadable")
+        val info = attemptFinite { remoteConfig.info }
+            ?: return publishDisabled(requestGen, "post-fetch info unreadable", transient = true)
         val statusOk = attemptFinite { info.lastFetchStatus == FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS } == true
         val postFetchTimeMs = attemptFinite { info.fetchTimeMillis }
         if (!statusOk || postFetchTimeMs == null || postFetchTimeMs <= baseline) {
             // Failure, or a cached success whose bookkeeping never advanced: not fresh, and the
             // lease must not renew.
+            // NOTE: firebase-config 23.1.0 exposes NO throttle deadline (no
+            // FirebaseRemoteConfigInfo.throttleEndTimeMillis, no typed THROTTLED code), so a
+            // server-side throttle is respected through the growing backoff below, not a
+            // machine-readable end time.
             return publishDisabled(
                 requestGen,
-                "fetch bookkeeping not fresh: status=$statusOk postFetchTimeMs=$postFetchTimeMs baseline=$baseline (THROTTLED when statusOk=false)",
+                "fetch bookkeeping not fresh: status=$statusOk postFetchTimeMs=$postFetchTimeMs baseline=$baseline " +
+                    "(THROTTLED when statusOk=false)",
+                transient = true,
             )
         }
 
         val activated = attemptFinite { taskSuccess(remoteConfig.activate()) }
         if (activated != true) {
-            return publishDisabled(requestGen, "activation failed")
+            return publishDisabled(requestGen, "activation failed", transient = true)
         }
 
         val value = attemptFinite { remoteConfig.getValue(FirebaseConfig.VOICE_SHARING_ENABLED) }
-            ?: return publishDisabled(requestGen, "remote key unreadable")
+            ?: return publishDisabled(requestGen, "remote key unreadable", transient = true)
         val strictBoolean = attemptFinite {
             when (value.asString()) {
                 "true" -> true
@@ -236,6 +257,9 @@ class VoiceSharingPolicyProvider(
                 }
                 activationGeneration = requestGen
                 state.value = snapshot
+                retryBackoffMs = RETRY_DELAY_MS
+                retryJob?.cancel()
+                retryJob = null
                 Timber.i("voice-sharing policy ENABLED (gen=%d)", requestGen)
                 // Timer ownership is serialized WITH publication under the same fences: a
                 // superseded refresh never reaches this line, so it can never cancel a newer
@@ -246,11 +270,34 @@ class VoiceSharingPolicyProvider(
         return snapshot
     }
 
-    /** Publishes disabled unless a newer refresh request has started (generation fence). */
+    /**
+     * Publishes disabled unless a newer refresh request has started (generation fence). A TRANSIENT
+     * failure (the fetch path itself failed — network, deadline, unreadable bookkeeping, server
+     * throttling) schedules the next ordinary refresh after the current backoff (never earlier
+     * than a Firebase throttle deadline) and widens the backoff, so a dark process recovers at a
+     * bounded rate without an app restart and NEVER abandons recovery. An AUTHORITATIVE answer
+     * (the remote key decoded false / not enabled) is the policy's own verdict: it cancels the
+     * retry loop and resets the backoff, and the lane stays closed until the next normal driver.
+     */
     private fun publishDisabled(requestGen: Long, reason: String): PolicySnapshot {
+        return publishDisabled(requestGen, reason, transient = false)
+    }
+
+    private fun publishDisabled(
+        requestGen: Long,
+        reason: String,
+        transient: Boolean,
+    ): PolicySnapshot {
         Timber.i("voice-sharing policy disabled: %s", reason)
         synchronized(sharedCollectionLock) {
             synchronized(fence) {
+                retryJob?.cancel()
+                retryJob = null
+                if (transient) {
+                    scheduleAcquisitionRetryLocked()
+                } else {
+                    retryBackoffMs = RETRY_DELAY_MS
+                }
                 if (requestGen == requestGeneration) {
                     activationGeneration = 0L
                     state.value = DISABLED
@@ -260,6 +307,27 @@ class VoiceSharingPolicyProvider(
             }
         }
         return DISABLED
+    }
+
+    /**
+     * MUST be called while holding [fence] and only for a transient failure. Schedules ONE
+     * ordinary [refresh] after the current backoff, then widens the backoff for the next round
+     * (doubling, capped at [MAX_RETRY_BACKOFF_MS]). The retry runs the full freshness contract
+     * unchanged — fetch(0L), advancing bookkeeping, activation, strict decode — so a retry can
+     * never publish a stale true; a newer real refresh fences it via request generation; the
+     * snapshot stays DISABLED until a fresh successful fetch. Server-side throttling carries no
+     * machine-readable deadline on this SDK (see the note at the THROTTLED call site), so it is
+     * respected through this growing backoff.
+     */
+    private fun scheduleAcquisitionRetryLocked() {
+        val delay = retryBackoffMs
+        retryBackoffMs = (retryBackoffMs * 2).coerceAtMost(MAX_RETRY_BACKOFF_MS)
+        Timber.i("voice-sharing policy: acquisition retry scheduled in %dms", delay)
+        retryJob = scope.launch {
+            sleepMs(delay)
+            Timber.i("voice-sharing policy: acquisition retry attempting refresh")
+            refresh()
+        }
     }
 
     /** MUST be called while holding [fence]: timer install/cancel is part of publication. */
@@ -340,6 +408,8 @@ class VoiceSharingPolicyProvider(
     companion object {
         /** How long a successfully activated snapshot stays valid in monotonic time. */
         const val DEFAULT_LEASE_MS: Long = 15 * 60 * 1000L
+        const val RETRY_DELAY_MS = 30_000L
+        const val MAX_RETRY_BACKOFF_MS: Long = 15 * 60 * 1000L
 
         /** Bound on joining the underlying provider's initial fetch/activation sequence. */
         const val INIT_AWAIT_MS: Long = 2_000L

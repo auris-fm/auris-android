@@ -153,9 +153,12 @@ class VoiceSharingPolicyProviderTest {
     /** Explicit shared primitive for tests — mirrors production composition's owner lock. */
     private val testSharedLock = Any()
 
+    private var throttleEndTimeMs: Long? = null
+
     private fun provider(
         sleepMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
         refreshTimeoutMs: Long = VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS,
+        retryDelayMs: Long = VoiceSharingPolicyProvider.RETRY_DELAY_MS,
     ): VoiceSharingPolicyProvider {
         val provider = VoiceSharingPolicyProvider(
             remoteConfig = config,
@@ -164,6 +167,7 @@ class VoiceSharingPolicyProviderTest {
             nowMs = { monotonicNowMs },
             sleepMs = sleepMs,
             refreshTimeoutMs = refreshTimeoutMs,
+            retryDelayMs = retryDelayMs,
             sharedCollectionLock = testSharedLock,
         )
         // Run the lifecycle init's bounded join to completion on the virtual scheduler.
@@ -682,5 +686,77 @@ class VoiceSharingPolicyProviderTest {
         fetchOutcome = null
         refresh(provider, advances = false)
         assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `a failed initial fetch retries with backoff and recovers without an app restart`() {
+        // Field evidence (2026-11-04 10:09-14:32 local): a process whose FIRST refresh fails had
+        // no retry driver — the lease renewal only arms when enabled — so the lane stayed dark for
+        // hours until an app restart. Transient acquisition failures must self-recover: bounded
+        // retries with growing backoff, still governed by the ordinary freshness contract.
+        fetchOutcome = null
+        val provider = provider() // init refresh fails -> transient retry scheduled
+        assertFalse(provider.snapshot().enabled)
+        val baseline = fetchCount
+
+        dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.RETRY_DELAY_MS)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("the first retry fired after the base delay", baseline + 1, fetchCount)
+        assertFalse("still disabled while the fetch keeps failing", provider.snapshot().enabled)
+
+        // Backoff doubled: the next retry must NOT fire at the base interval again.
+        dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.RETRY_DELAY_MS - 1)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("no second retry before the doubled delay", baseline + 1, fetchCount)
+
+        // The outage ends mid-backoff: the scheduled retry recovers the policy.
+        fetchOutcome = Unit
+        dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.RETRY_DELAY_MS)
+        dispatcher.scheduler.runCurrent()
+        assertEquals(baseline + 2, fetchCount)
+        assertTrue("recovered WITHOUT an app restart", provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `an authoritative false answer cancels the retry loop and stays disabled`() {
+        // The remote key decoded false / not-enabled is the POLICY's own verdict for this round:
+        // retrying it would fight the deployed configuration. No retries may be scheduled.
+        rawValue = "false"
+        val provider = provider()
+        assertFalse(provider.snapshot().enabled)
+        val baseline = fetchCount
+        dispatcher.scheduler.advanceTimeBy(10 * 60_000)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("an authoritative answer never retries", baseline, fetchCount)
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `a throttled fetch still recovers through the growing backoff`() {
+        // firebase-config 23.1.0 exposes NO machine-readable throttle deadline, so a server-side
+        // throttle is respected through the growing backoff: a THROTTLED status keeps the snapshot
+        // disabled and the retries keep widening, never spinning.
+        fetchStatus = FirebaseRemoteConfig.LAST_FETCH_STATUS_THROTTLED
+        fetchAdvancesBookkeeping = false
+        val provider = provider(retryDelayMs = 10_000)
+        assertFalse(provider.snapshot().enabled)
+        val baseline = fetchCount
+
+        dispatcher.scheduler.advanceTimeBy(10_000)
+        dispatcher.scheduler.runCurrent()
+        assertEquals("the throttled retry fired once at the base delay", baseline + 1, fetchCount)
+        assertFalse(provider.snapshot().enabled)
+
+        // Doubled backoff: no retry at the base interval again.
+        dispatcher.scheduler.advanceTimeBy(10_000 - 1)
+        dispatcher.scheduler.runCurrent()
+        assertEquals(baseline + 1, fetchCount)
+
+        // The throttle clears: the next scheduled retry recovers.
+        fetchStatus = FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS
+        fetchAdvancesBookkeeping = true
+        dispatcher.scheduler.advanceTimeBy(10_000)
+        dispatcher.scheduler.runCurrent()
+        assertTrue("recovered after the throttle cleared", provider.snapshot().enabled)
     }
 }

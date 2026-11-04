@@ -5708,6 +5708,45 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a masked-position shaped late notification cannot settle success`() = runTest {
+        // THE PINNED ENGINE'S MASKED NOTIFICATION SHAPE: the REQUESTED target position carrying an
+        // operation's token, arriving after the operation already settled. The production engine
+        // delivers no trusted landing evidence (seekTo masks the requested position into its seek
+        // discontinuity), so the operation settles unknown by the budget; a late token-tagged
+        // requested-target event must find the released token and land NOWHERE -- it cannot settle
+        // success and cannot fabricate a position.
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(seekFrame(), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.playback.completionEpisodeForTest = null // the engine supplies no landing evidence
+        deps.playback.skipGate = CompletableDeferred() // never released: the masked shape arrives LATE
+        val base = System.nanoTime() / 1_000_000L
+        deps.monotonicReads = ArrayDeque(listOf(base, base, base)) // dispatch timeout at entry: unknown settles first
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+        testScheduler.advanceUntilIdle()
+
+        // Simulate the masked notification arriving AFTER settlement: requested target position,
+        // token-tagged, through the real coordinator dispatch.
+        val settled = deps.playback.releasedSignals.single()
+        assertTrue(!deps.playback.seekCoordinator.isArmed(settled))
+        deps.playback.seekCoordinator.dispatch(
+            PlaybackManager.SeekCompletionEvent(
+                episodeUuid = "episode-A",
+                positionMs = 30_000, // exactly the requested target (+30s from 0)
+                endOfFile = false,
+                completionToken = settled.token,
+            ),
+        )
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+        assertTrue(!result.has("state"))
+    }
+
+    @Test
     fun `a settled operation's token is no longer completable from the native path`() = runTest {
         val root = tempJournal()
         val transport = AppOpsTransport(

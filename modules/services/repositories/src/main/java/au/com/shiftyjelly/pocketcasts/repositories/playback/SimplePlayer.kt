@@ -79,12 +79,6 @@ class SimplePlayer(
 
     private var hasVideoSurface = false
 
-    /**
-     * SEEK LANDING CORRELATION. The engine's applied-seek discontinuity carries the landed item
-     * clock; this recorder names the request that landed. No landing is ever self-acknowledged.
-     */
-    private val seekCompletionEvidence = SeekCompletionEvidence()
-
     @Volatile
     private var prepared = false
 
@@ -162,11 +156,15 @@ class SimplePlayer(
             Toast.makeText(context, "Unable to seek. File headers appear to be invalid.", Toast.LENGTH_SHORT).show()
         } else {
             try {
-                // THE REQUEST IS RECORDED; THE COMPLETION COMES FROM THE ENGINE. Calling seekTo and
-                // immediately self-acknowledging would report the REQUESTED target as landing
-                // evidence -- an acknowledgment, not a completed-seek observation. The engine's own
-                // seek discontinuity supplies the landed position and this request's token.
-                seekCompletionEvidence.onRequestIssued(completionToken)
+                // NO LANDING EVIDENCE EXISTS ON THE PINNED ENGINE. Media3 1.10.1 publishes its seek
+                // discontinuity from the CALLING thread with the REQUESTED position masked in
+                // (ExoPlayerImpl.seekTo) -- an acknowledgment, not a completed-seek observation -- and
+                // no notification on this engine demonstrates completed processing with an
+                // invocation-owned landing clock. So this request is issued WITHOUT claiming a
+                // completion: it neither self-acknowledges nor trusts the masked notification. An
+                // operation awaiting landing evidence settles UNKNOWN by its budget, which is the
+                // contract's honest outcome; the owner's EOF path supplies the only local completion
+                // evidence (an engine-confirmed endpoint).
                 player?.seekTo(positionMs.toLong())
             } catch (e: Exception) {
                 LogBuffer.e(LogBuffer.TAG_PLAYBACK, e, "Failed to seek to $positionMs ms.")
@@ -250,12 +248,6 @@ class SimplePlayer(
             .build()
         player.addListener(WearUnsuitableOutputPlaybackSuppressionResolverListener(context))
         player.addListener(PlayPauseListener(playbackStatsCollector))
-        // THE SEEK-APPLIED WATCHER IS THE NATIVE COMPLETION PATH: see its class doc.
-        player.addListener(
-            SeekAppliedWatcher(seekCompletionEvidence) { positionMs, completionToken ->
-                onSeekComplete(positionMs, completionToken)
-            },
-        )
         player.addAnalyticsListener(renderer)
 
         handleStop()

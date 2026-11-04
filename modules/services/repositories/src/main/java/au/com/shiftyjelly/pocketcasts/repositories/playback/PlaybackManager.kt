@@ -1303,6 +1303,7 @@ open class PlaybackManager @Inject constructor(
         forward: Boolean,
         sourceView: SourceView = SourceView.UNKNOWN,
         jumpAmountSeconds: Int? = null,
+        seekCompletion: SeekCompletionSignal? = null,
     ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != episodeUuid) {
             return SkipOutcome.Refused
@@ -1316,9 +1317,9 @@ open class PlaybackManager @Inject constructor(
         // a second, weaker observation of the same fact: it reports what the player names NOW rather than
         // whether the skip acted, and a later replacement would flip it back to a false refusal.
         return if (forward) {
-            skipForwardScoped(sourceView, jumpAmountSeconds, episodeUuid)
+            skipForwardScoped(sourceView, jumpAmountSeconds, episodeUuid, seekCompletion)
         } else {
-            skipBackwardScoped(sourceView, jumpAmountSeconds, episodeUuid)
+            skipBackwardScoped(sourceView, jumpAmountSeconds, episodeUuid, seekCompletion)
         }
     }
 
@@ -1339,6 +1340,52 @@ open class PlaybackManager @Inject constructor(
         /** The skip was ISSUED and its outcome could not be established. */
         data object Unknown : SkipOutcome
     }
+
+    /**
+     * One seek invocation's native completion evidence, as the OWNER observed it.
+     *
+     * A completion MUST identify the invocation and the initiating item. Android's player reports
+     * seek completions globally (`PlayerEvent.SeekComplete` carries only a position), so invocation
+     * identity is carried by the [SeekCompletionSignal] object itself: it is created for ONE seek
+     * invocation, armed at the seek-issuing boundary where the initiating episode is validated, and
+     * completed by the FIRST native completion processed after that arming. Matching a shared state
+     * emission on episode id alone would let two overlapping same-episode seeks settle each other's
+     * result, and a late collector would replay the previous seek's relay value.
+     *
+     * [positionMs] is the item-clock position the engine captured AT completion (or the engine's
+     * confirmed endpoint for an end-of-file outcome); it is the evidence a seek success may rest on.
+     * A target stored in mutable playback state is not.
+     */
+    data class SeekCompletionEvent(
+        val episodeUuid: String,
+        val positionMs: Int?,
+        val endOfFile: Boolean,
+    )
+
+    /**
+     * The per-invocation half of the pair above: created by the operation BEFORE it releases its
+     * effect, passed down the seek path, and completed by the manager when this invocation's native
+     * completion arrives. [await] suspends until then; a caller applies its own monotonic budget and
+     * must treat a missing callback, a superseding episode or expiry as UNKNOWN, never as proof the
+     * seek did not happen.
+     */
+    class SeekCompletionSignal {
+        private val completed = kotlinx.coroutines.CompletableDeferred<SeekCompletionEvent>()
+
+        /** Blocks until THIS invocation's completion arrives. Budgeting is the caller's job. */
+        suspend fun await(): SeekCompletionEvent = completed.await()
+
+        /** Whether this invocation's completion has arrived. */
+        fun isCompleted(): Boolean = completed.isCompleted
+
+        /** Invoked by the owner boundary (and by controls) when this invocation's completion arrives. */
+        fun completeWith(event: SeekCompletionEvent) {
+            completed.complete(event)
+        }
+    }
+
+    /** Armed seek invocations, oldest first: the next native completion belongs to the head. */
+    private val pendingSeekCompletions = java.util.concurrent.ConcurrentLinkedQueue<SeekCompletionSignal>()
 
     /**
      * The DECISION a skip's scoped mutation implies, in ONE place for both directions.
@@ -1442,6 +1489,7 @@ open class PlaybackManager @Inject constructor(
     private suspend fun seekToTimeMsInternalIfEpisodeCapturing(
         episodeUuid: String,
         positionMs: Int,
+        seekCompletion: SeekCompletionSignal? = null,
     ): ScopedMutation? {
         val selected = getCurrentEpisode()
         if (selected?.uuid != episodeUuid) return null
@@ -1469,8 +1517,20 @@ open class PlaybackManager @Inject constructor(
             Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
             return null
         }
+        // THE SIGNAL IS ARMED AT THE ISSUE POINT, under the same boundary that validated the
+        // initiating episode: only a seek that was actually issued to THIS player arms its waiter, so
+        // the waiter can only ever be completed by a completion of a seek this invocation caused.
+        if (seekCompletion != null) {
+            pendingSeekCompletions.add(seekCompletion)
+        }
         val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid)
         if (!outcome.accepted) {
+            // A KNOWN REFUSAL DISARMS: the seek never reached the player, so its waiter must not sit
+            // in the queue absorbing a LATER operation's completion. An UNKNOWN outcome keeps the
+            // arm: the seek may still complete, and its evidence belongs to this invocation.
+            if (!outcome.unknown && seekCompletion != null) {
+                pendingSeekCompletions.remove(seekCompletion)
+            }
             // UNKNOWN IS NOT REFUSAL, and it is not "no result" either: the caller must be able to tell
             // that the operation may have run. Refusing here would look like a retryable failure and
             // could repeat an operation the receiver already performed.
@@ -1664,6 +1724,7 @@ open class PlaybackManager @Inject constructor(
         sourceView: SourceView,
         jumpAmountSeconds: Int?,
         expectedEpisodeUuid: String,
+        seekCompletion: SeekCompletionSignal? = null,
     ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
         val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
@@ -1673,7 +1734,7 @@ open class PlaybackManager @Inject constructor(
         val newPositionMs = currentTimeMs + jumpAmountMs
         val durationMs = player?.durationMs() ?: Int.MAX_VALUE
         if (newPositionMs < durationMs) {
-            val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
+            val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs, seekCompletion)
             // THE MUTATION'S OWN PAYLOAD DECIDES, through ONE mapping shared with the backward path so the
             // two cannot drift. `null` is the owner's refusal (a different episode is selected, or the
             // player cannot enforce the binding); an absent outcome is Unknown, NOT a refusal, because
@@ -1683,6 +1744,14 @@ open class PlaybackManager @Inject constructor(
             statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
+            // AN EXPLICIT END-OF-FILE OUTCOME IS COMPLETION EVIDENCE. This branch never reaches the
+            // player seek, so an armed signal would wait for a callback that never comes; the owner
+            // completes it HERE with the engine-confirmed endpoint instead. A null endpoint supplies
+            // no position, which a caller must treat as unobservable rather than fabricate a landing
+            // frame for.
+            seekCompletion?.completeWith(
+                SeekCompletionEvent(episodeUuid = episode.uuid, positionMs = durationMs.takeIf { it != Int.MAX_VALUE }, endOfFile = true),
+            )
             onCompletion(episode.uuid)
         }
         trackPlaybackEvent(sourceView) { source, contentType ->
@@ -1696,6 +1765,7 @@ open class PlaybackManager @Inject constructor(
         sourceView: SourceView,
         jumpAmountSeconds: Int?,
         expectedEpisodeUuid: String,
+        seekCompletion: SeekCompletionSignal? = null,
     ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
         val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
@@ -1703,7 +1773,7 @@ open class PlaybackManager @Inject constructor(
         val currentTimeMs = getCurrentTimeMs(episode = episode)
         if (currentTimeMs < 0) return SkipOutcome.Refused
         val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
-        val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
+        val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs, seekCompletion)
         val outcome = skipOutcomeOf(mutation)
         if (outcome != SkipOutcome.Accepted) return outcome
         trackPlaybackEvent(sourceView) { source, contentType ->
@@ -2455,14 +2525,22 @@ open class PlaybackManager @Inject constructor(
     }
 
     suspend fun onSeekComplete(positionMs: Int) {
-        playbackStateRelay.blockingFirst().let {
-            playbackStateRelay.accept(
-                it.copy(
-                    positionMs = positionMs,
-                    lastChangeFrom = LastChangeFrom.OnSeekComplete.value,
-                ),
-            )
-        }
+        val state = playbackStateRelay.blockingFirst()
+        playbackStateRelay.accept(
+            state.copy(
+                positionMs = positionMs,
+                lastChangeFrom = LastChangeFrom.OnSeekComplete.value,
+            ),
+        )
+        // ONE EVENT TO ONE WAITING INVOCATION, in engine processing order. Each seek that was issued
+        // while carrying a caller's signal armed that signal here; the oldest armed invocation owns
+        // THIS completion, so two overlapping same-episode seeks cannot settle each other's result.
+        // A completion read out of the shared state relay instead would let the FIRST collector see
+        // the PREVIOUS seek's relay value -- a replay of an old completion -- which is exactly the
+        // false settling the per-invocation signal exists to prevent.
+        pendingSeekCompletions.poll()?.completeWith(
+            SeekCompletionEvent(episodeUuid = state.episodeUuid, positionMs = positionMs, endOfFile = false),
+        )
         updateCurrentPositionInDatabase()
     }
 

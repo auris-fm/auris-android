@@ -239,6 +239,7 @@ class PlaybackManagerPlaybackSinkTest {
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.anyOrNull(),
+                org.mockito.kotlin.anyOrNull(),
             ),
         ).thenReturn(PlaybackManager.SkipOutcome.Unknown)
 
@@ -265,6 +266,7 @@ class PlaybackManagerPlaybackSinkTest {
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
                 org.mockito.kotlin.any(),
+                org.mockito.kotlin.anyOrNull(),
                 org.mockito.kotlin.anyOrNull(),
             ),
         ).thenReturn(PlaybackManager.SkipOutcome.Accepted)

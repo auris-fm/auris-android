@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.sharedtest.MainCoroutineRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
@@ -1191,11 +1192,19 @@ class VoicePlaybackIntentExecutorTest {
             calls += "resume"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
-        override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+        override suspend fun skipForward(
+            seconds: Int?,
+            expectedEpisodeId: String?,
+            seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        ): EpisodeOperationResult {
             calls += "skipForward:$seconds"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
-        override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+        override suspend fun skipBackward(
+            seconds: Int?,
+            expectedEpisodeId: String?,
+            seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        ): EpisodeOperationResult {
             calls += "skipBackward:$seconds"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }

@@ -14,6 +14,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
+import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
@@ -3521,6 +3522,28 @@ class CloudRouteSinkTest {
         var postEffectObservationReads = 0
             private set
         val analytics = FakeCloudRouteAnalytics()
+
+        /**
+         * The monotonic clock the sink's seek budget reads. Seeded from the real monotonic clock so
+         * controls that do not care about the budget behave like production, and moved EXPLICITLY
+         * by controls that assert expiry and the exact deadline boundary.
+         */
+        var monotonicNow: Long = System.nanoTime() / 1_000_000L
+
+        /**
+         * When set, the clock returns these values IN ORDER, one per read, the last one sticky.
+         * This is how a control drives the two reads inside the seek arm -- the deadline read and
+         * the immediate pre-effect re-check -- independently and deterministically.
+         */
+        var monotonicReads: ArrayDeque<Long>? = null
+
+        fun monotonic(): Long {
+            val q = monotonicReads ?: return monotonicNow
+            if (q.isEmpty()) return monotonicNow
+            val v = q.removeFirst()
+            monotonicNow = v
+            return v
+        }
         val routeCalls = mutableListOf<String>()
         val routeContexts = mutableListOf<CloudRouteContext>()
         val routeTurns = mutableListOf<CloudRouteTurn>()
@@ -3640,6 +3663,7 @@ class CloudRouteSinkTest {
             audioPlayer = audioPlayer,
             transportFactory = explicitTransportFactory,
             gracePeriodSignal = gracePeriodSignal,
+            monotonicMs = { monotonic() },
             appOperationSupport = if (appOpsRoot == null) {
                 au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationSupport.Unwired
             } else {
@@ -3722,14 +3746,65 @@ class CloudRouteSinkTest {
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
 
-        override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
-            skipOutcomeForTest?.let { return it }
+        /** Whether the skip takes, refuses, or stays unknowable -- mirroring the owner's outcomes. */
+        var skipOutcomeForTest: EpisodeOperationResult? = null
+
+        /**
+         * The completion evidence the fake's native callback supplies, shaped the way the real
+         * player reports it: the initiating episode, the engine-captured item clock, or an EOF
+         * endpoint. Null models a callback that never arrives.
+         */
+        var completionEpisodeForTest: String? = "episode-id"
+        var completionPositionMsForTest: Int? = 80_500
+        var completionEndOfFileForTest: Boolean = false
+
+        /** When set, skipForward/skipBackward take effect then suspend until released. */
+        var skipGate: CompletableDeferred<Unit>? = null
+        val skipStarted = CompletableDeferred<Unit>()
+
+        private fun completeSeek(seekCompletion: PlaybackManager.SeekCompletionSignal?, @Suppress("UNUSED_PARAMETER") episodeId: String?) {
+            // THROUGH THE OWNER'S COMPLETION EVENT, the way PlaybackManager.onSeekComplete delivers
+            // one. A null [completionEpisodeForTest] IS the missing-callback case: no completion is
+            // supplied at all -- never fallen back to the sink's expectation, which would make the
+            // missing-callback control succeed by construction.
+            val episode = completionEpisodeForTest ?: return
+            seekCompletion?.completeWith(
+                PlaybackManager.SeekCompletionEvent(
+                    episodeUuid = episode,
+                    positionMs = completionPositionMsForTest,
+                    endOfFile = completionEndOfFileForTest,
+                ),
+            )
+        }
+
+        override suspend fun skipForward(
+            seconds: Int?,
+            expectedEpisodeId: String?,
+            seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        ): EpisodeOperationResult {
+            skipOutcomeForTest?.let {
+                calls += "skipForward:$seconds"
+                return it
+            }
             calls += "skipForward:$seconds"
+            skipStarted.complete(Unit)
+            skipGate?.await()
+            completeSeek(seekCompletion, expectedEpisodeId)
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
-        override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
-            skipOutcomeForTest?.let { return it }
+        override suspend fun skipBackward(
+            seconds: Int?,
+            expectedEpisodeId: String?,
+            seekCompletion: PlaybackManager.SeekCompletionSignal?,
+        ): EpisodeOperationResult {
+            skipOutcomeForTest?.let {
+                calls += "skipBackward:$seconds"
+                return it
+            }
             calls += "skipBackward:$seconds"
+            skipStarted.complete(Unit)
+            skipGate?.await()
+            completeSeek(seekCompletion, expectedEpisodeId)
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
 
@@ -3768,9 +3843,6 @@ class CloudRouteSinkTest {
 
         /** Overrides the outcome a seek reports, so a case can drive accepted/refused/unknown. */
         var seekOutcomeForTest: EpisodeOperationResult? = null
-
-        /** Overrides the outcome a SKIP reports, on the same three-way contract. */
-        var skipOutcomeForTest: EpisodeOperationResult? = null
 
         // The PRE-ACTION POSITION the owner would report. The production manager snapshots this at its
         // mutation, so the fake supplies it here: a case that asserts history must not rely on the
@@ -5356,6 +5428,215 @@ class CloudRouteSinkTest {
         assertEquals(1, deps.playback.calls.count { it == "pause" })
         assertEquals(2, transport.sender.sent.size)
         assertEquals(transport.sender.sent[0], transport.sender.sent[1])
+    }
+
+    // --- playback.seek_relative: bounded client completion and durable settlement -------------------
+    //
+    // Success rests ONLY on this invocation's correlated native completion, within the monotonic
+    // budget, verified against a fresh observation. The fake's completion models what the real
+    // player reports: the episode the seek landed in and the engine-captured item clock.
+
+    private fun seekFrame(
+        operationId: String = "11111111-2222-3333-4444-555555555555",
+        params: String = """{"delta_seconds":30}""",
+        precondition: String = """{"episode_id":"episode-id"}""",
+    ) = opFrame(operationId = operationId, action = "seek_relative", params = params, precondition = precondition)
+
+    @Test
+    fun `a correlated native seek completion settles success with the observed item clock`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertEquals(1, deps.playback.calls.count { it == "skipForward:30" })
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        // THE POSITION IS THE COMPLETION'S CAPTURED ITEM CLOCK (80_500 ms), not the requested target
+        // and not a post-hoc state read, in whole elapsed seconds; playing is the FRESH observation.
+        assertEquals(80, result.getJSONObject("state").getInt("position_seconds"))
+        assertEquals(true, result.getJSONObject("state").getBoolean("playing"))
+    }
+
+    @Test
+    fun `a missing native callback settles unknown without hanging`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The callback never arrives. The wait must return a settled unknown at the budget, not
+        // hang: the clock reads drive the deadline and then the budget's expiry, so the wait's
+        // remaining time is ZERO and it returns without any dependency on real time.
+        deps.playback.completionEpisodeForTest = null
+        // Second read JUST inside the deadline: the effect IS released; the wait's remaining time
+        // is then already consumed, so it settles unknown immediately (expiry at-or-beyond the
+        // boundary is the separate `seek_deadline_expired` control).
+        val base = System.nanoTime() / 1_000_000L
+        deps.monotonicReads = ArrayDeque(listOf(base, base + 15_000L - 1))
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+        // No state on an unknown: there is no observation to publish.
+        assertTrue(!result.has("state"))
+    }
+
+    @Test
+    fun `a completion from a replacement episode cannot settle the original operation`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The engine completed a seek, but on ANOTHER episode: automatic advancement cannot supply
+        // the original episode's result.
+        deps.playback.completionEpisodeForTest = "replacement-episode"
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `budget expiry before the effect releases refuses seek_deadline_expired and releases nothing`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The arm reads the clock twice: once for the deadline, once immediately before the effect.
+        // Driving the second read 20 s past the first models an admission whose budget expired while
+        // it waited for execution: deadline = first read, check = second read -> expired, NO effect.
+        val base = System.nanoTime() / 1_000_000L
+        deps.monotonicReads = ArrayDeque(listOf(base, base + 20_000L))
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.none { it.startsWith("skip") })
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("seek_deadline_expired", result.getString("reason"))
+    }
+
+    @Test
+    fun `at the exact deadline expiry wins over a completion`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The effect IS released (the skip runs), and the fake even supplies a completion -- but the
+        // monotonic clock reaches the deadline BEFORE the evidence can settle it. Expiry wins.
+        deps.playback.skipGate = CompletableDeferred()
+        val route = launch { deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1") }
+        deps.playback.skipStarted.await()
+        deps.monotonicNow += 15_000L
+        deps.playback.skipGate?.complete(Unit)
+        route.join()
+
+        assertEquals(1, deps.playback.calls.count { it.startsWith("skip") })
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `the same seek operation redelivered replays the settled result and does not seek again`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        // THE BUDGET IS NEVER RESTARTED by a duplicate: replay precedes execution by construction.
+        assertEquals(1, deps.playback.calls.count { it.startsWith("skip") })
+        assertEquals(2, transport.sender.sent.size)
+        assertEquals(transport.sender.sent[0], transport.sender.sent[1])
+        assertEquals("succeeded", resultOf(transport.sender.sent[1]).getString("outcome"))
+    }
+
+    @Test
+    fun `zero delta is absent and applies the sink interval like any unstated amount`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(seekFrame(params = """{"delta_seconds":0}"""), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        // ZERO IS NOT A NO-OP (voice-intents.md): it is an unstated amount, so the sink's configured
+        // interval applies and completion evidence is still required for success.
+        assertEquals(1, deps.playback.calls.count { it == "skipForward:null" })
+        assertEquals("succeeded", resultOf(transport.sender.sent.single()).getString("outcome"))
+    }
+
+    @Test
+    fun `an unstated amount with an unrecognised direction refuses invalid_request without an effect`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(seekFrame(params = """{"direction":"sideways"}"""), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.none { it.startsWith("skip") })
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("invalid_request", result.getString("reason"))
+    }
+
+    @Test
+    fun `a seek targeting a stale episode refuses before any effect`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(seekFrame(precondition = """{"episode_id":"another-episode"}"""), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        assertTrue(deps.playback.calls.none { it.startsWith("skip") })
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("target_mismatch", result.getString("reason"))
+    }
+
+    @Test
+    fun `an owner-refused seek is a typed refusal with no completion wait`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The OWNER refused (the episode binding failed): no seek was issued, so no completion can
+        // ever arrive, and the answer is the refusal -- not a budget-length unknown wait.
+        deps.playback.skipOutcomeForTest = EpisodeOperationResult.Refused
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("refused", result.getString("outcome"))
+        assertEquals("player_refused", result.getString("reason"))
+    }
+
+    @Test
+    fun `a confirmed end-of-file outcome settles success with the engine endpoint`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // Forward past the end: the owner completes with the engine-confirmed endpoint (600_000 ms).
+        deps.playback.completionEndOfFileForTest = true
+        deps.playback.completionPositionMsForTest = 600_000
+        deps.sink().routeToCloud("skip to the end", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("succeeded", result.getString("outcome"))
+        assertEquals(600, result.getJSONObject("state").getInt("position_seconds"))
+    }
+
+    @Test
+    fun `an end-of-file outcome without a supplied endpoint cannot settle success`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // EOF without an endpoint position supplies NO position: a landing frame must not be
+        // fabricated, so this is unknown.
+        deps.playback.completionEndOfFileForTest = true
+        deps.playback.completionPositionMsForTest = null
+        deps.sink().routeToCloud("skip to the end", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
     }
 
     @Test

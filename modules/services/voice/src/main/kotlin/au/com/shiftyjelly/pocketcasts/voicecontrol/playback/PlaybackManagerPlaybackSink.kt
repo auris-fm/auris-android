@@ -110,7 +110,11 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
-    override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+    override suspend fun skipForward(
+        seconds: Int?,
+        expectedEpisodeId: String?,
+        seekCompletion: PlaybackManager.SeekCompletionSignal?,
+    ): EpisodeOperationResult {
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
@@ -128,6 +132,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     forward = true,
                     sourceView = SourceView.VOICE_COMMANDS,
                     jumpAmountSeconds = seconds,
+                    seekCompletion = seekCompletion,
                 )
             ) {
                 is PlaybackManager.SkipOutcome.Accepted ->
@@ -143,7 +148,11 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
-    override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+    override suspend fun skipBackward(
+        seconds: Int?,
+        expectedEpisodeId: String?,
+        seekCompletion: PlaybackManager.SeekCompletionSignal?,
+    ): EpisodeOperationResult {
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
@@ -161,6 +170,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     forward = false,
                     sourceView = SourceView.VOICE_COMMANDS,
                     jumpAmountSeconds = seconds,
+                    seekCompletion = seekCompletion,
                 )
             ) {
                 is PlaybackManager.SkipOutcome.Accepted ->

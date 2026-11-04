@@ -14,6 +14,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
+import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
@@ -109,6 +110,13 @@ class CloudRouteSink internal constructor(
     private val gracePeriodSignal: GracePeriodSignal? = null,
     /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
+    /** The seek completion budget, in monotonic milliseconds. Pinned in controls; fixed by contract. */
+    private val seekCompletionBudgetMs: Long = SEEK_COMPLETION_BUDGET_MS,
+    /**
+     * The monotonic clock the seek budget is measured against. Wall-clock arrival time is NOT a
+     * deadline (the wire carries no server-issued one), so this must never be a wall clock.
+     */
+    private val monotonicMs: () -> Long = { System.nanoTime() / 1_000_000L },
     /**
      * The journal-backed app-operation seam. Its default is [AppOperationSupport.Unwired]: no owner,
      * no store, so every v1 operation refuses rather than executing without a durable record.
@@ -1259,6 +1267,8 @@ class CloudRouteSink internal constructor(
                 observedAfterPause()
             }
 
+            "playback.seek_relative" -> observeSeekRelative(request, currentEpisode)
+
             "playback.resume" -> {
                 // Idempotent by observation (voice-intents.md df5def09): an ALREADY-PLAYING engine
                 // satisfies resume, so there is no paused precondition here — the sink runs and the
@@ -1276,6 +1286,118 @@ class CloudRouteSink internal constructor(
             }
 
             else -> AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_UNSUPPORTED)
+        }
+    }
+
+    /**
+     * `playback.seek_relative` under the bounded client completion contract (cloud-assistant.md,
+     * committed a3af56dd).
+     *
+     * Admitting the first valid delivery starts the [SEEK_COMPLETION_BUDGET_MS] monotonic budget;
+     * duplicates never restart it, because journal replay precedes execution. The budget is
+     * re-checked immediately before the effect is released: past it, `refused
+     * seek_deadline_expired` with NO effect. The completion signal -- the invocation's identity --
+     * travels WITH the skip call, so the arming happens only inside the owner boundary that
+     * validated the initiating episode; a completion can never be supplied by a seek this operation
+     * did not cause, and a shared state emission cannot be replayed into it.
+     *
+     * `zero delta` is ABSENT (voice-intents.md normalizes it away on the wire and the client): it
+     * applies the direction or the sink's own interval like any unstated amount -- it is not a
+     * successful no-op. A stated nonzero delta runs by its sign and ignores `direction`; only an
+     * unstated amount with an unrecognised direction is an invalid request.
+     *
+     * After an accepted skip, success rests ONLY on this invocation's native completion evidence
+     * (a seek callback or a confirmed end-of-file, with the engine-captured item clock), received
+     * within the REMAINING budget, for the episode this operation initiated, verified against a
+     * fresh observation. Expiry wins at and beyond the deadline. A missing callback, an
+     * uncorrelated completion (a replacement episode), an unreadable state or a null endpoint is
+     * `unknown seek_completion_unavailable` -- cancellation proves nothing about whether the seek
+     * occurred. The signal is scoped to THIS operation: settling it detaches the wait, so a late
+     * callback cannot publish another result or read a successor's state.
+     *
+     * Durable replay and restart follow the existing journal: a redelivery replays the settled
+     * outcome without seeking again; an unresolved claim after a restart reports unknown without
+     * re-execution.
+     */
+    private suspend fun observeSeekRelative(
+        request: AppOperationV1.Request,
+        currentEpisode: String?,
+    ): AppOperationDelivery.Observation {
+        // `opt`, never indexing: an ABSENT parameter is a fact about the request, and indexing a
+        // JSONObject for an absent key THROWS -- an absent direction would have crashed the arm into
+        // an unknown result instead of reading the request.
+        val delta = (request.params.opt("delta_seconds") as? Number)?.toInt()
+        val direction = request.params.optString("direction").takeIf { it.isNotBlank() }
+        // ZERO IS ABSENT, not a no-op: it carries no amount, so the direction or the sink's
+        // configured interval applies exactly as if the amount had not been stated.
+        val effectiveDelta = delta?.takeIf { it != 0 }
+        if (effectiveDelta == null && direction != null && direction != "forward" && direction != "backward") {
+            // An unstated amount with a stated unrecognised direction: refused rather than defaulted.
+            return AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_INVALID_REQUEST)
+        }
+        val deadlineMs = monotonicMs() + seekCompletionBudgetMs
+        // THE BUDGET BELONGS TO THE ORIGINAL ADMISSION. Re-checked immediately before releasing the
+        // effect: an expired operation releases no new effect.
+        if (monotonicMs() >= deadlineMs) {
+            return AppOperationDelivery.Observation.Refused(REASON_SEEK_DEADLINE_EXPIRED)
+        }
+        // THE INVOCATION'S IDENTITY IS CREATED BEFORE THE EFFECT. The skip call carries it down; the
+        // owner arms it only when the seek is actually issued, inside the boundary that validated
+        // the initiating episode.
+        val signal = PlaybackManager.SeekCompletionSignal()
+        val outcome = when {
+            effectiveDelta != null && effectiveDelta > 0 -> playbackSink.skipForward(effectiveDelta, currentEpisode, signal)
+            effectiveDelta != null -> playbackSink.skipBackward(-effectiveDelta, currentEpisode, signal)
+            direction == "backward" -> playbackSink.skipBackward(null, currentEpisode, signal)
+            else -> playbackSink.skipForward(null, currentEpisode, signal)
+        }
+        return when (outcome) {
+            // The owner refused: no seek was issued, so no completion can ever arrive. A typed
+            // refusal is truthful here and stays retryable at the server's discretion.
+            is EpisodeOperationResult.Refused -> AppOperationDelivery.Observation.Refused(REASON_PLAYER_REFUSED)
+
+            // ISSUED WITHOUT A LEARNABLE OUTCOME: never a refusal (that would invite a repeat), and
+            // not a success. The signal may still complete, but this operation's answer is already
+            // unknowable; settling unknown is final.
+            is EpisodeOperationResult.Unknown -> AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+
+            is EpisodeOperationResult.Accepted -> {
+                // WITHOUT THE INITIATING ITEM THERE IS NOTHING TO CORRELATE AGAINST: any completion
+                // could belong to another operation, so none can settle this one.
+                val initiatingEpisode = outcome.episodeId ?: currentEpisode
+                    ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                // WAIT WITHIN THE REMAINING BUDGET. Returning never depends on a callback arriving:
+                // expiry returns a settled unknown, it does not hang.
+                val completion = kotlinx.coroutines.withTimeoutOrNull((deadlineMs - monotonicMs()).coerceAtLeast(0L)) {
+                    signal.await()
+                } ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                // A COMPLETION FROM ANOTHER EPISODE IS NOT THIS OPERATION'S EVIDENCE: a replacement
+                // or automatic advancement cannot supply the original episode's result.
+                if (completion.episodeUuid != initiatingEpisode) {
+                    return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                }
+                // THE STATE IS OBSERVED NOW, FRESH: same engine item, strict boolean playing. A
+                // missing or non-boolean flag is no measurement, and no measurement cannot settle
+                // success.
+                val after = currentObservedState()
+                    ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                if (after.optString(OBSERVED_STATE_EPISODE_KEY).takeIf { it.isNotBlank() } != initiatingEpisode) {
+                    return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                }
+                val playing = observedPlaying(after)
+                    ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                // THE POSITION IS THE COMPLETION'S OWN CAPTURED ITEM CLOCK, not the requested
+                // target and not a post-hoc state read. An end-of-file outcome supplies the
+                // engine-confirmed endpoint; a null endpoint supplies NO position, which cannot
+                // settle success.
+                val positionMs = completion.positionMs
+                    ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                AppOperationDelivery.Observation.Observed(
+                    org.json.JSONObject()
+                        .put("position_seconds", positionMs / 1000)
+                        .put("playing", playing),
+                )
+            }
         }
     }
 
@@ -2127,10 +2249,19 @@ private const val REASON_RESUME_NOT_OBSERVED = "resume_not_observed"
 
 /** The field the engine's observed state carries. The contract names it `playing`. */
 private const val PLAYING_FIELD = "playing"
+
+/** The engine's observed-state episode key, used to verify a completion against the live item. */
+private const val OBSERVED_STATE_EPISODE_KEY = "episode_id"
 private const val REASON_PLAYER_REFUSED = "player_refused"
 
+/** The bounded client completion budget for an admitted seek, measured monotonically (cloud-assistant.md). */
+private const val SEEK_COMPLETION_BUDGET_MS = 15_000L
+private const val REASON_SEEK_DEADLINE_EXPIRED = "seek_deadline_expired"
+private const val REASON_SEEK_COMPLETION_UNAVAILABLE = "seek_completion_unavailable"
+
 /**
- * The only actions this client executes from a v1 operation: the two whose resulting state can be READ
- * BACK from the player. Anything else refuses before any effect is released.
+ * The only actions this client executes from a v1 operation: the three whose outcome the completion
+ * contract covers. `seek_relative` settles ONLY on correlated native completion evidence within the
+ * budget, never on a command acknowledgement. Anything else refuses before any effect is released.
  */
-private val SUPPORTED_APP_OPERATIONS = setOf("playback.pause", "playback.resume")
+private val SUPPORTED_APP_OPERATIONS = setOf("playback.pause", "playback.resume", "playback.seek_relative")

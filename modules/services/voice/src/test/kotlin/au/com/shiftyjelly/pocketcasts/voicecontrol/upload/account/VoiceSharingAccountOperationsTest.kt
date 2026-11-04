@@ -423,6 +423,47 @@ class VoiceSharingAccountOperationsTest {
     }
 
     @Test
+    fun `a bearer acquired for A is never rebound to B, even without any suspension mid-request`() = runTest {
+        // The interleaving the review named: acquiring the bearer suspends, so another thread can
+        // switch accounts BEFORE the ownership is captured. Send A's bearer under A's ownership or
+        // refuse — never A's bearer labelled as B's request.
+        enqueueProjection("rev-A")
+        assertTrue(operations.refreshProjection())
+
+        lateinit var switched: VoiceSharingAccountOperations
+        val ownerA = owner
+        val aurisToken = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+            var switchedOnce = false
+            override suspend fun currentToken(): String? {
+                val value = ownerA.authoritySnapshot().token?.value
+                if (!switchedOnce) {
+                    switchedOnce = true
+                    ownerA.switchAccount(to = "other@example.com", token = "token-B")
+                }
+                return value // A's bearer, handed over just before B became the owner
+            }
+
+            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(ownerA.authoritySnapshot().token?.value)
+        }
+        switched = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = owner,
+            aurisToken = aurisToken,
+            onCredentialInvalid = { },
+            onAurisCredentialRefused = { },
+        )
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = "rev-B-enrolled", withdrawal = "active", enrolled = true, epoch = "epoch-B", disclosure = "v3")))
+        val outcome = switched.enroll(acceptedDisclosureVersion = "v3")
+
+        assertEquals("PREMISE: B owns the account now", "other@example.com", owner.authoritySnapshot().accountName)
+        assertEquals("no request may carry A's bearer under B's ownership", 1, server.requestCount) // only the seeding GET
+        assertTrue("the operation is refused, not rebound", outcome is VoiceSharingMutationResult.Failure)
+        assertFalse("nothing may publish consent from that request", state.projection.value?.voiceSharingEnrolled ?: false)
+    }
+
+    @Test
     fun `a delayed answer for account A never becomes account B's consent`() = runTest {
         enqueueProjection("rev-A")
         assertTrue(operations.refreshProjection())

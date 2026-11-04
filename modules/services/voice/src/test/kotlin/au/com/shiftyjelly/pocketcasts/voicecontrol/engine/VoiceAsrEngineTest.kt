@@ -34,12 +34,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionCeilings
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
@@ -115,7 +115,6 @@ class VoiceAsrEngineTest {
         authority,
         issueAuthority = { issuedAuthorityForTests },
         handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-        allowance = PrepaidTestAllowance(),
     )
     private val translationStage = mock<TranslationStage>()
 
@@ -2003,19 +2002,22 @@ class VoiceAsrEngineTest {
     // / manually allocated array.
 
     @Test
-    fun `unavailable allowance - the engine allocates and drains NOTHING while recognition still proceeds`() = runTest {
+    fun `no allowance authority - a consented capture is still admitted and retained while recognition proceeds`() = runTest {
+        // Core c74d7e30 removed the allowance entirely: there is no prepaid token, no
+        // UnavailableCaptureAllowance fallback and no fail-closed allowance refusal. The only
+        // admission gates left are consent/policy and the compiled per-clip ceilings — so a
+        // consented, under-ceiling capture is ADMITTED with no allowance composed at all.
         val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val unavailableObserver = SegmentObserver(
+        val bareObserver = SegmentObserver(
             CollectionGate { _ -> true },
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance,
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(unavailableObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        createEngineWithSpeech(bareObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
         engine.start(
             backend = FakeAsrBackend("play something"),
             audioRoute = AudioRoute.Headset(hasMicrophone = true),
@@ -2026,14 +2028,8 @@ class VoiceAsrEngineTest {
         )
         advanceUntilIdle()
 
-        // The capture is refused fail-closed at admission: the engine NEVER reaches allocation —
-        // no drain of the native PCM into a ShortArray, no adopt, nothing retained.
-        verify(voiceAudioProcessor, times(0)).drainSpeechPcm(org.mockito.kotlin.any<ShortArray>())
-        verify(voiceAudioProcessor, times(0)).drainSpeechTail(org.mockito.kotlin.any<ShortArray>(), org.mockito.kotlin.any<Int>(), org.mockito.kotlin.any<Int>())
-        verify(voiceAudioProcessor, times(0)).peekSpeechDelta(org.mockito.kotlin.any<Int>())
-        assertEquals("nothing may be retained from a refused capture", 0, retention.retainedCount())
-        assertEquals(0L, retention.retainedBytes())
-        assertNull(retention.retainedSnapshot().firstOrNull())
+        assertTrue("a consented capture with no allowance authority must be admitted", recognizer.calls.any { it.startsWith("recognize:") })
+        assertEquals("exactly one capture retained from the bare path", 1, retention.retainedCount())
         engine.stop()
         advanceUntilIdle()
     }
@@ -2048,7 +2044,6 @@ class VoiceAsrEngineTest {
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance(),
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(prepaidObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
@@ -2070,21 +2065,26 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `mismatched prepaid bound - the REAL growth and final-tail paths stop at the charged clip bound`() = runTest {
+    fun `an over-ceiling capture is refused at admission and recognition still proceeds`() = runTest {
+        // Core c74d7e30 kept the per-clip bound but moved it into the compiled
+        // ContributionCeilings constant; there is no per-capture allowance bound to shrink. The
+        // engine-level bound control therefore drives the ceiling itself: an initial PCM size
+        // whose encoded-WAV encoding (2 B/sample + 44 B header) exceeds MAX_CLIP_BYTES is
+        // refused at admission — nothing drained, nothing retained — while recognition
+        // continues and the engine stops cleanly.
         val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        // Bound 51 bytes: the empty initial reservation (44-byte header only) fits, but the 4-sample
-        // final tail (8+44=52) exceeds it — the tail must be refused through observer.reserveDelta.
-        val mismatchObserver = SegmentObserver(
+        val overObserver = SegmentObserver(
             CollectionGate { _ -> true },
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance(maxClipBytes = 51),
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(mismatchObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        createEngineWithSpeech(overObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
+        // Ceiling-exceeding initial buffer: half the byte ceiling in samples + header > ceiling.
+        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn((ContributionCeilings.MAX_CLIP_BYTES / 2L + 44L).toInt())
         engine.start(
             backend = FakeAsrBackend("play something"),
             audioRoute = AudioRoute.Headset(hasMicrophone = true),
@@ -2095,52 +2095,13 @@ class VoiceAsrEngineTest {
         )
         advanceUntilIdle()
 
-        assertTrue("the over-bound tail must NOT be retained", retention.retainedSnapshot().isEmpty())
-        assertEquals("no byte may be charged past the prepaid bound", 0L, retention.retainedBytes())
-        // Recognition itself proceeded untouched (no crash, engine stops cleanly).
-        engine.stop()
-        advanceUntilIdle()
-    }
-
-    @Test
-    fun `growth refused - wake completion still happens yet nothing over-bound is retained while recognition continues`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        // Bound 51 bytes: the empty initial reservation (44-byte header only) fits; EVERY real
-        // growth - continuing buffers AND the final tail - is refused through reserveDelta. The
-        // completion drain can still hand back the FULL native segment, so the frozen bound is
-        // enforced AT completion too: the flattened segment (4 samples = 8 + 44 = 52 bytes)
-        // exceeds it, and the handoff must terminate retention with NO candidate - while the
-        // utterance itself still reaches recognition.
-        val mismatchObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retention,
-            liveAuthority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance(maxClipBytes = 51),
-        )
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(mismatchObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
-        engine.start(
-            backend = FakeAsrBackend("play something"),
-            audioRoute = AudioRoute.Headset(hasMicrophone = true),
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-
+        verify(voiceAudioProcessor, times(0)).drainSpeechPcm(org.mockito.kotlin.any<ShortArray>())
+        assertEquals("nothing may be retained from an over-ceiling capture", 0, retention.retainedCount())
+        assertEquals(0L, retention.retainedBytes())
         assertTrue(
             "recognition continues: the utterance still reached the recognizer after retention refused",
             recognizer.calls.any { it.startsWith("recognize:") },
         )
-        assertTrue(
-            "zero over-bound candidate: the completion flatten must not retain past the frozen bound",
-            retention.retainedSnapshot().isEmpty(),
-        )
-        assertEquals(0L, retention.retainedBytes())
         engine.stop()
         advanceUntilIdle()
     }
@@ -2915,7 +2876,6 @@ class VoiceAsrEngineTest {
             authority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -3056,7 +3016,6 @@ class VoiceAsrEngineTest {
             authority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -3133,7 +3092,6 @@ class VoiceAsrEngineTest {
             authority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -3333,7 +3291,6 @@ class VoiceAsrEngineTest {
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
@@ -3396,7 +3353,6 @@ class VoiceAsrEngineTest {
             liveAuthority,
             { issuedAuthorityForTests },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val pending = MutableSharedFlow<VoiceSegmenterResult>()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
@@ -3449,7 +3405,6 @@ class VoiceAsrEngineTest {
             deadAuthority,
             { issuedAuthorityForTests },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(

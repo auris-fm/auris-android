@@ -20,7 +20,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
@@ -498,7 +497,6 @@ class EngineProvenanceSeamControlTest {
             handoff = CompletionHandoff { ctx, onset, end, wake, provider, scope, live ->
                 scope.completeUnderOwner(ctx, onset, end, wake, provider)
             },
-            allowance = PrepaidTestAllowance(),
         )
         private var engine: VoiceAsrEngine? = null
         private var nextInvocation = AtomicLong(0L)

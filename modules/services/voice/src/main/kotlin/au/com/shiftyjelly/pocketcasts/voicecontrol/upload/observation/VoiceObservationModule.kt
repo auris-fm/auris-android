@@ -77,226 +77,12 @@ object VoiceObservationModule {
     @Singleton
     fun provideRetentionSink(budget: CollectionBudget): ContributionRetentionSink = ContributionRetentionSink(budget)
 
-    /**
-     * Production allowance authority binding. FAIL-CLOSED: no production limits, window or
-     * provisioning authority is selected, so the LIFECYCLE SLOT (reviewer c5d94af4 #4) starts at
-     * [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.UnavailableCaptureAllowance]
-     * and refuses EVERY capture before any sink reservation or engine allocation. The lifecycle
-     * slot is the composition that retires the bound authority on account/policy/lease/rebind
-     * lifecycle inputs (AllowanceRetirementWatcher); binding a real owner-backed authority is
-     * still a separate reviewed change - never an implicit default swap. Binding a real
-     * owner-backed authority through [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance
-     * .CaptureAllowanceLifecycle.bind] remains the reviewed activation step; production values
-     * stay unavailable.
-     */
-    @Provides
-    @Singleton
-    fun provideCaptureAllowanceLifecycle(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle()
-
-    /**
-     * MINIMUM CONNECTED PATH (spec scope correction 7dcb3a53): the reviewed install fence over
-     * the REAL owner. The enrollment basis is derived from ONE session-tagged projection read
-     * plus the lease-evaluated policy — an enrolled ACTIVE membership with a matching epoch and
-     * a live policy; anything else is a null basis and the fence refuses fail-closed.
-     */
-    @Provides
-    @Singleton
-    fun provideCaptureAllowanceInstallFence(
-        accountStartup: VoiceSharingAccountStartup,
-        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
-        policyProvider: VoiceSharingPolicyProvider,
-    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence(
-        ownership = accountStartup.ownerForHandoff(),
-        lifecycle = lifecycle,
-        enrollmentBasis = {
-            val tagged = accountStartup.state.taggedProjection.value
-            val projection = tagged.projection
-            if (projection == null ||
-                !projection.voiceSharingEnrolled ||
-                projection.withdrawalState != au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.ACTIVE ||
-                projection.enrollmentEpoch == null
-            ) {
-                null
-            } else {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence.EnrollmentBasis(
-                    enrollmentEpoch = projection.enrollmentEpoch,
-                    membershipActive = true,
-                    policyLive = policyProvider.snapshot().enabled,
-                )
-            }
-        },
-    )
-
-    /**
-     * MINIMUM CONNECTED PATH: the reviewed provisioner over the REAL transport (the transport
-     * interface IS the Retrofit contract), REAL owner snapshot (account, generation,
-     * session, epoch) with the AURIS credential as bearer, and the REAL install fence. Capture stays fail-closed until THIS path
-     * provisions a batch.
-     */
-    @Provides
-    @Singleton
-    fun provideCaptureAllowanceProvisioner(
-        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
-        @au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit retrofit: dagger.Lazy<retrofit2.Retrofit>,
-        aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider,
-        accountStartup: VoiceSharingAccountStartup,
-        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
-        fence: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceInstallFence,
-    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner {
-        val transport = retrofit.get().create(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.CaptureAllowanceTransport::class.java,
-        )
-
-        // The OWNER-side prerequisites a permitted attempt needs, read WITHOUT acquiring anything.
-        // Both the passive readiness probe and the credential supplier call THIS, so the cheap
-        // question and the strict one cannot drift apart (reviewer cfcfab6f). If it returns null an
-        // attempt would refuse, so readiness must also be false.
-        val prerequisiteSnapshot = { prerequisiteSnapshot(accountStartup) }
-
-        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner(
-            api = transport,
-            credential = {
-                // Bearer from the AURIS credential (reviewer b702cd53): the allowance route, like the
-                // account route, verifies Auris-issued tokens only. The owner snapshot remains the
-                // session/identity FENCE (account, generation, session) but is NOT the bearer.
-                val aurisBearer = aurisToken.currentToken() ?: return@CaptureAllowanceProvisioner null
-                val snap = prerequisiteSnapshot() ?: return@CaptureAllowanceProvisioner null
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Credential(
-                    bearer = aurisBearer,
-                    accountId = snap.accountId,
-                    enrollmentEpoch = snap.enrollmentEpoch,
-                    generation = snap.generation,
-                    session = snap.session,
-                )
-            },
-            baseArea = java.io.File(context.noBackupFilesDir, "voice_allowance"),
-            lifecycle = lifecycle,
-            ceilings = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings(
-                maxDailyRecords = 52,
-                maxDailyBytes = 100L * 1024 * 1024,
-                maxClipBytes = 1_920_044L,
-                maxMetadataBytes = 65_536,
-            ),
-            elapsedMs = { android.os.SystemClock.elapsedRealtime() },
-            // DURABLE ALLOCATION IDENTITY (reviewer b36642db). The server is idempotent on
-            // `request_id` alone, so this record is what makes a retry a replay instead of a new
-            // charged batch. It lives beside the allowance ledger in no-backup storage and is
-            // keyed by the enrollment epoch, which the credential supplier already scopes.
-            identityStore = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAllocationIdentityStore(
-                java.io.File(context.noBackupFilesDir, "voice_allowance/allocation_identity"),
-                // ACCOUNT-SCOPED (reviewer 3d1f87be #3): one fixed file keyed only by epoch would
-                // let a second signed-in account present the first account's request id, which the
-                // server reads as one account carrying another's allocation.
-                // NO ACCOUNT HERE (reviewer 7c220c1d #2): the account is supplied per decision
-                // from the credential that authorises that attempt. Capturing it at construction
-                // froze a cold-cache null forever and went stale on an account switch.
-            ),
-            // A 409 means a persisted id outlived its epoch: a client state-machine bug. Surfaced
-            // rather than retried, because a silent retry hides it and burns another batch.
-            identityConflict = {
-                // LOUD on purpose: this is the only in-app trace of a state-machine bug whose
-                // silent alternative is a charged batch that was never needed.
-                timber.log.Timber.e(
-                    "VoiceAllowance: 409 request_conflict -- persisted allocation identity outlived its epoch",
-                )
-            },
-            // SAME CONJUNCTS AS THE SUPPLIER, EVALUATED ON A SNAPSHOT (reviewer cfcfab6f,
-            // cloud 650fcc93). A predicate may be made cheaper only by removing COST, never by
-            // removing the conditions it shares with the work it gates: the supplier needs a
-            // bearer AND an authoritative account AND an enrollment epoch, so a probe checking
-            // only the bearer answers READY while every attempt refuses -- re-arm, attempt,
-            // acquire, refuse, repeat, now for free.
-            //
-            // Both sides therefore read the same snapshot function, so they cannot diverge:
-            // [prerequisiteSnapshot] is evaluated with no acquisition, and readiness is
-            // "the snapshot is complete". The BEARER is deliberately part of readiness only as
-            // CACHE PRESENCE (peek, never fetch); acquiring it is what a permitted attempt does.
-            // AN EMPTY CACHE IS NOT NOT-READY (spec 57492640's converse). Readiness is the
-            // AUTHORITATIVE prerequisites only. Requiring a cached token here would mean the gate
-            // never opens on the one occasion acquisition is genuinely needed -- the cache is
-            // empty and the permitted attempt is what fills it -- and would leave correctness
-            // depending on some unrelated caller happening to populate the cache first. Whether a
-            // token is cached is not a prerequisite; obtaining one is what a permitted attempt does.
-            // THE WIRING PREDICATE ITSELF, named and extractable so a control can assert on what
-            // production actually installs rather than on a description of it (reviewer 34af3bd5).
-            readinessProvider = readinessPredicate { prerequisiteSnapshot() },
-            beginInstallAttempt = { attempt -> fence.beginAttempt(attempt) },
-            installAuthority = { owner, gen, session, epoch, attempt, grant, publish ->
-                fence.install(owner, gen, session, epoch, attempt, grant, publish)
-            },
-        )
-    }
-
-    /**
-     * Owner-side prerequisites, captured passively so a probe and a supplier cannot disagree.
-     *
-     * TOP-LEVEL AND `internal` so a control can exercise THE ACTUAL SUPPLIED PREDICATE rather than
-     * a fixture that looks like it (reviewer 34af3bd5). As a local function inside the provider it
-     * was untestable, so the fixture and production drifted and a production blocker survived a
-     * green suite.
-     */
-    internal fun prerequisiteSnapshot(accountStartup: VoiceSharingAccountStartup): OwnerPrerequisite? {
-        val snapshot = accountStartup.ownerForHandoff().authoritySnapshot()
-        val epoch = accountStartup.state.projection.value?.enrollmentEpoch
-        return prerequisiteSnapshot(
-            accountName = snapshot.accountName,
-            enrollmentEpoch = epoch,
-            generation = snapshot.credential,
-            session = snapshot.session,
-        )
-    }
-
-    /**
-     * The readiness predicate PRODUCTION INSTALLS.
-     *
-     * Readiness is the AUTHORITATIVE prerequisites only. Requiring a cached token would mean the
-     * gate never opens on the one occasion acquisition is genuinely needed -- empty cache, and the
-     * permitted attempt is what fills it -- and would make correctness depend on an unrelated
-     * caller populating the cache first. This function exists so a control asserts the installed
-     * predicate rather than a lookalike (reviewer 34af3bd5).
-     */
-    internal fun readinessPredicate(prerequisites: () -> OwnerPrerequisite?): () -> Boolean = { prerequisites() != null }
-
-    /**
-     * The predicate ITSELF, over the values it reads. Kept separate so a control can drive the
-     * exact conjunctions production uses without constructing the Hilt-backed startup object.
-     */
-    internal fun prerequisiteSnapshot(
-        accountName: String?,
-        enrollmentEpoch: String?,
-        generation: Long,
-        session: Long,
-    ): OwnerPrerequisite? {
-        if (accountName == null || enrollmentEpoch == null) return null
-        return OwnerPrerequisite(
-            accountId = accountName,
-            enrollmentEpoch = enrollmentEpoch,
-            generation = generation,
-            session = session,
-        )
-    }
-
-    /** Owner-side prerequisites, captured passively so a probe and a supplier cannot disagree. */
-    internal data class OwnerPrerequisite(
-        val accountId: String,
-        val enrollmentEpoch: String,
-        val generation: Long,
-        val session: Long,
-    )
-
-    @Provides
-    @Singleton
-    fun provideCaptureAllowanceAuthority(
-        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
-    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority = lifecycle
-
     @Provides
     @Singleton
     fun provideSegmentObserver(
         authority: CollectionAuthority,
         sink: ContributionRetentionSink,
         collectionTx: CollectionAuthorityTransaction,
-        allowance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceAuthority,
     ): SegmentObserver = SegmentObserver(
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
@@ -311,7 +97,6 @@ object VoiceObservationModule {
         fenceGate = object : FenceGate {
             override fun <R> gate(block: () -> R): R = collectionTx.transaction(block)
         },
-        allowance = allowance,
     ).also { observer ->
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }
@@ -319,27 +104,6 @@ object VoiceObservationModule {
     // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
     // production, bound HERE at the Android construction boundary. A failed clear still reports
     // false and sets the admission latch; there is no unsupported-runtime success fallback.
-
-    /**
-     * EXPLICIT provider for the retirement watcher (reviewer 9d29473a #3): the watcher's clock
-     * and sleep seams are function types WITHOUT Dagger bindings — Kotlin default arguments do
-     * not supply them — so this singleton is composed HERE with the production clock
-     * (SystemClock.elapsedRealtime / kotlinx delay). Tests inject a virtual clock through the
-     * plain constructor.
-     */
-    @Provides
-    @Singleton
-    fun provideAllowanceRetirementWatcher(
-        lifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
-        policyProvider: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyProvider,
-        accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
-        @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
-    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceRetirementWatcher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceRetirementWatcher(
-        lifecycle = lifecycle,
-        policyProvider = policyProvider,
-        accountStartup = accountStartup,
-        scope = scope,
-    )
 
     /**
      * BATCH B bounded outcome finalization (reviewer c5d94af4 #1): composed with NO selected

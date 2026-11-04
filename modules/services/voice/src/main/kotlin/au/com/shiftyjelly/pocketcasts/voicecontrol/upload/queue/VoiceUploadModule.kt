@@ -121,7 +121,6 @@ object VoiceUploadModule {
         val accountStartupHasCredentials = { accountStartup.credentials.current() != null }
         val authority = {
             UploadIdentityAuthority(
-                state = accountStartup.state,
                 underOwnerTransaction = { block -> accountStartup.validateUnderOwnerTransaction(block) },
             )
         }
@@ -143,7 +142,6 @@ object VoiceUploadModule {
                     )
                 }
             },
-            identityHolds = { epoch -> accountStartup.state.projection.value?.enrollmentEpoch == epoch },
             // ONE full-identity credential authority: account, session, credential, token and epoch
             // projection read under the REAL owner lock in a single transaction; the ADMITTED
             // account/session/epoch are compared, not merely read.
@@ -195,7 +193,6 @@ object VoiceUploadModule {
                 binding = accountStartup.binding,
                 accountState = accountStartup.state,
                 snapshot = { accountStartup.authoritySnapshot() },
-                epoch = { accountStartup.state.projection.value?.enrollmentEpoch },
                 store = store,
             ),
             publishTrigger = publishTrigger,

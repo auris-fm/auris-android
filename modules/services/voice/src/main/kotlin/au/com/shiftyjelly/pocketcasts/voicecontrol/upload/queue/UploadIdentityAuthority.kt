@@ -1,19 +1,17 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountState
 
 /**
- * ONE account+epoch-bound credential authority (reviewer 064d5a00 / d2f1bfc8, spec 6480d0c5):
- * the account identity, session, credential and owner-published token are read under the REAL
- * owner lock in a single transaction, together with the epoch projection, and the ADMITTED
- * account AND session are compared, not merely read - any mismatch refuses. The projection and
- * the token come from the SAME transaction, so a concurrent account switch is observed wholly
- * before or wholly after; the launch revalidation covers the window between acquisition and
- * transmission, which the acquisition lock alone cannot.
+ * ONE account-bound credential authority (reviewer 064d5a00 / d2f1bfc8): the account identity,
+ * session and owner-published token are read under the REAL owner lock in a single transaction,
+ * and the ADMITTED account AND session are compared, not merely read - any mismatch refuses.
+ * The enrollment epoch is RECORD PROVENANCE only (spec 06392988): it travels with the record and
+ * is never a drain precondition. The token comes from the SAME transaction, so a concurrent
+ * account switch is observed wholly before or wholly after; the launch revalidation covers the
+ * window between acquisition and transmission, which the acquisition lock alone cannot.
  */
 class UploadIdentityAuthority(
-    private val state: VoiceSharingAccountState,
     private val underOwnerTransaction: ((AuthoritySnapshot) -> LiveCredential?) -> LiveCredential?,
 ) {
     /** The admitted identity a capture carries: full ownership snapshot, epoch included. */
@@ -29,17 +27,14 @@ class UploadIdentityAuthority(
      * weaker claim, never a weaker CHECK.
      */
     fun credentialFor(admitted: AdmittedIdentity): LiveCredential? = underOwnerTransaction { snapshot ->
-        val projection = state.projection.value
         val token = snapshot.token
         val account = snapshot.accountName
         when {
             account == null -> null
             admitted.account != null && admitted.account != account -> null
             admitted.session != null && admitted.session != snapshot.session -> null
-            projection?.enrollmentEpoch != admitted.epoch -> null
             token == null -> null
-            projection == null -> null
-            else -> LiveCredential(token.value, account, snapshot.session, projection.enrollmentEpoch)
+            else -> LiveCredential(token.value, account, snapshot.session, epoch = null)
         }
     }
 }

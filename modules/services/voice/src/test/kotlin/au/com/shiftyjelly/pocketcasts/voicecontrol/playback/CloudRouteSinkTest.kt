@@ -5708,6 +5708,41 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a legacy untokened seek notification cannot settle an operation`() = runTest {
+        // THE LEGACY OBSERVATION PATH: the engine's ordinary seek acknowledgment (requested-position
+        // shape, NO token) still flows through the real coordinator during an in-flight identified
+        // operation. It must leave the operation's state observable -- but can never be completion
+        // evidence: the operation settles unknown by the budget, with no position fabricated.
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        deps.playback.completionEpisodeForTest = null // no token-tagged completion is supplied
+        deps.playback.skipGate = CompletableDeferred()
+        val base = System.nanoTime() / 1_000_000L
+        deps.monotonicReads = ArrayDeque(listOf(base, base, base)) // dispatch timeout at entry: unknown settles
+        val route = launch { deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1") }
+        deps.playback.skipStarted.await()
+        deps.playback.skipGate?.complete(Unit)
+        route.join()
+        testScheduler.advanceUntilIdle()
+
+        // The legacy untokened notification arrives DURING the operation: dropped by the coordinator.
+        deps.playback.seekCoordinator.dispatch(
+            PlaybackManager.SeekCompletionEvent(
+                episodeUuid = "episode-A",
+                positionMs = 30_000,
+                endOfFile = false,
+                completionToken = null,
+            ),
+        )
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+        assertTrue(!result.has("state"))
+    }
+
+    @Test
     fun `a masked-position shaped late notification cannot settle success`() = runTest {
         // THE PINNED ENGINE'S MASKED NOTIFICATION SHAPE: the REQUESTED target position carrying an
         // operation's token, arriving after the operation already settled. The production engine

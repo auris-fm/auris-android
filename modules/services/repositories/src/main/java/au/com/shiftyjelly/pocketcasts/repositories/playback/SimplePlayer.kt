@@ -160,12 +160,16 @@ class SimplePlayer(
                 // discontinuity from the CALLING thread with the REQUESTED position masked in
                 // (ExoPlayerImpl.seekTo) -- an acknowledgment, not a completed-seek observation -- and
                 // no notification on this engine demonstrates completed processing with an
-                // invocation-owned landing clock. So this request is issued WITHOUT claiming a
-                // completion: it neither self-acknowledges nor trusts the masked notification. An
-                // operation awaiting landing evidence settles UNKNOWN by its budget, which is the
-                // contract's honest outcome; the owner's EOF path supplies the only local completion
-                // evidence (an engine-confirmed endpoint).
+                // invocation-owned landing clock. So this request is issued WITHOUT claiming trusted
+                // completion evidence.
                 player?.seekTo(positionMs.toLong())
+                // THE LEGACY STATE/PROGRESS NOTIFICATION IS PRESERVED, STRICTLY UNTOKENED: the seek
+                // relay publication and progress persistence still run for ordinary local/UI seeks
+                // (including a paused seek with no playback tick). Passing NO token makes it
+                // impossible for this acknowledgment to settle an identified operation -- the
+                // coordinator drops null-token events, so legacy observability and operation
+                // settlement stay separate paths.
+                super.onSeekComplete(positionMs, null)
             } catch (e: Exception) {
                 LogBuffer.e(LogBuffer.TAG_PLAYBACK, e, "Failed to seek to $positionMs ms.")
             }

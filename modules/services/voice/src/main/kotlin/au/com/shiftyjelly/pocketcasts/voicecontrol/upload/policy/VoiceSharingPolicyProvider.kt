@@ -159,8 +159,14 @@ class VoiceSharingPolicyProvider(
      */
     suspend fun refresh(): PolicySnapshot {
         val requestGen: Long = synchronized(fence) { ++requestGeneration }
-        // The WHOLE refresh is bounded: a fetch or activation that never completes cannot hang
-        // the caller; on deadline it fails closed (fenced).
+        return executeRefresh(requestGen)
+    }
+
+    /**
+     * The WHOLE refresh is bounded: a fetch or activation that never completes cannot hang
+     * the caller; on deadline it fails closed (fenced).
+     */
+    private suspend fun executeRefresh(requestGen: Long): PolicySnapshot {
         return withTimeoutOrNull(refreshTimeoutMs) { runRefresh(requestGen) }
             ?: publishDisabled(requestGen, "refresh deadline exceeded", transient = true)
     }
@@ -346,13 +352,19 @@ class VoiceSharingPolicyProvider(
             // ran. Re-validate the captured generation under the fence BEFORE refreshing —
             // publication fences make a stale retry's outcome harmless, but it must not even
             // start over a newer request.
-            val current = synchronized(fence) { retryGen == requestGeneration }
-            if (!current) {
+            // Check-and-CLAIM is one atomic step under the fence: the retry becomes the newest
+            // request AT CLAIM TIME, so a manual refresh starting in the gap between an old
+            // check and this claim can never be superseded by the stale retry (reviewer
+            // 7bdc0d3b). Publication fences make a claimed-but-superseded retry harmless.
+            val claimed: Long? = synchronized(fence) {
+                if (retryGen == requestGeneration) ++requestGeneration else null
+            }
+            if (claimed == null) {
                 Timber.i("voice-sharing policy: acquisition retry superseded before firing (gen=%d)", retryGen)
                 return@launch
             }
-            Timber.i("voice-sharing policy: acquisition retry attempting refresh")
-            refresh()
+            Timber.i("voice-sharing policy: acquisition retry attempting refresh (gen=%d)", claimed)
+            executeRefresh(claimed)
         }
     }
 

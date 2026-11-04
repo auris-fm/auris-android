@@ -9,6 +9,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAc
  * parity control as well: a fixture owned privately by one test class cannot serve both, and the
  * previous `@Before` wiring left parity with no producer at all.
  */
+internal fun au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup.publishEnrolledFixture(epoch: String = "epoch-1") {
+    state.publish(state.parseProjection(VoiceUploadCompositionFixtures.authenticatedProjection(epoch))!!)
+}
+
 internal object VoiceUploadCompositionFixtures {
     /**
      * The producer constructed the way production constructs it, EXCEPT that provenance is supplied
@@ -127,6 +131,10 @@ internal object VoiceUploadCompositionFixtures {
         }
     }
 
+    /**
+     * Publishes the authoritative enrolled projection for [startup]'s owner — exactly what the
+     * production membership GET does when it applies.
+     */
     internal fun authenticatedProjection(epoch: String): String = "{\"schema_version\":1,\"membership_revision\":\"rev-1\",\"plan\":\"free\"," +
         "\"voice_sharing_enrolled\":true,\"enrollment_epoch\":\"$epoch\"," +
         "\"accepted_disclosure_version\":\"1\",\"withdrawal_state\":\"active\"}"

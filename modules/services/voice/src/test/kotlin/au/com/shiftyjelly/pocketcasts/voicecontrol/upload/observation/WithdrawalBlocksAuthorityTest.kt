@@ -73,16 +73,9 @@ class WithdrawalBlocksAuthorityTest {
         // this session exactly as the post-commit projection hook does.
         val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
         owner.publish(account = "a@x", session = 7L, bearer = "Bearer token")
-        // The generation must be the OWNER's, not an invented one: beginOperation fences against the
-        // owner session, so inventing 7L here made the fence refuse and the fixture NPE further down.
-        val ownerSession = startup.authoritySnapshot().session
-        val token = startup.state.sessionStarted(ownerSession)
         val json = VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1")
-        // ownerSession must be threaded through BOTH the issue and the apply: the fence compares it
-        // against the live owner incarnation, so the default (Long.MIN_VALUE) is rejected.
-        val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = ownerSession)!!
-        startup.state.applyOutcome(token, ticket, json, ownerSession = ownerSession)
-        // The tagged projection published by applyOutcome IS the enrollment evidence now.
+        startup.state.publish(startup.state.parseProjection(json)!!)
+        // The published projection IS the enrollment evidence.
         val projection = startup.state.projection.value!!
 
         // Fixture diagnostics: name WHICH precondition is unmet instead of only reporting that the

@@ -36,17 +36,15 @@ object VoiceSharingSettingsModule {
             clearLocalPending = { runCatching { store.revokeAndPurge("withdrawal requested from settings") } },
         )
         return VoiceSharingSettingsViewModel(
-            taggedProjection = accountStartup.state.taggedProjection,
+            projection = accountStartup.state.projection,
             enrollmentController = controller,
             withdrawalIntent = withdrawalIntent,
             // THE SAME shared session source the controller fences with: the presentation
             // boundary and the correctness boundary must move together (reviewer a2136dd9).
             ownerSession = { accountStartup.authoritySnapshot().session },
-            // The membership GET the surface depends on: production-only request prefix.
-            refreshProjection = {
-                val token = accountStartup.sessionTokenForRefresh()
-                token != null && accountStartup.operations.refreshProjection(token)
-            },
+            // The membership GET the surface depends on: production-only request prefix. The
+            // ordinary signed-in bearer is read by the operations layer itself.
+            refreshProjection = { accountStartup.operations.refreshProjection() },
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
     }

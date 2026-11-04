@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.DeletionReceipt
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.SessionToken
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan
@@ -474,16 +473,8 @@ class EnrollmentControllerTest {
 
     @Test
     fun `enrollment sends the accepted disclosure version and surfaces a conflict without replaying`() = runTest {
-        // A conflict needs an issued context; obtain a real ticket from the state fence rather
-        // than stubbing an internal constructor.
-        val state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountState()
-        val token = state.sessionStarted()
-        state.applyOutcome(token, state.beginOperation(token, requireProjection = false)!!, projectionJsonFor("rev-2"))
-        val ticket = state.beginOperation(token, requireProjection = true)!!
         val conflicted = VoiceSharingMutationResult.MembershipConflict(
             currentProjection = projection(revision = "rev-2"),
-            token = token,
-            ticket = ticket,
         )
         val operations = FakeOperations(enrollResult = conflicted)
         val subject = controller(operations)

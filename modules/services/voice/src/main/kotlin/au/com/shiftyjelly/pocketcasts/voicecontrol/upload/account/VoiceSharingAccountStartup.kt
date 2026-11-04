@@ -43,7 +43,7 @@ class VoiceSharingAccountStartup @Inject constructor(
 
     /** Post-commit hook target: the collection authority registers itself here when composed. */
     @Volatile
-    var enrollmentEvidenceListener: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
+    var enrollmentEvidenceListener: ((VoiceSharingAccountProjection?, Long) -> Unit)? = null
 
     /** Session-end observer: evidence must die with the session even before a new one starts. */
     @Volatile
@@ -63,8 +63,9 @@ class VoiceSharingAccountStartup @Inject constructor(
         // State fence is the single commit point for every projection change (GET/enrollment/
         // withdrawal/401/session-end): post-commit mirror notification ONLY — no authority is
         // derived here; CollectionAuthority re-reads state + owner snapshot at each decision.
-        state.onProjectionApplied = { projection, ownerSession ->
-            enrollmentEvidenceListener?.invoke(projection, ownerSession)
+        state.onProjectionListener = { projection ->
+            // Mirror notification only: the listener re-reads the live owner snapshot itself.
+            enrollmentEvidenceListener?.invoke(projection, ownership.authoritySnapshot().session)
         }
     }
 
@@ -95,17 +96,14 @@ class VoiceSharingAccountStartup @Inject constructor(
      */
     fun enrollmentController(clearLocalPending: () -> Unit): EnrollmentController = EnrollmentController(
         enrollOperation = { acceptedDisclosureVersion ->
-            val token = currentToken() ?: return@EnrollmentController VoiceSharingMutationResult.Failure
-            operations.enroll(token, acceptedDisclosureVersion)
+            operations.enroll(acceptedDisclosureVersion)
         },
         withdrawOperation = {
-            val token = currentToken() ?: return@EnrollmentController VoiceSharingMutationResult.Failure
             // The epoch is captured from the fresh projection inside the owner transaction.
-            operations.withdraw(token)
+            operations.withdraw()
         },
         deleteOperation = {
-            val token = currentToken() ?: return@EnrollmentController null
-            operations.deleteData(token)
+            operations.deleteData()
         },
         clearLocalPending = clearLocalPending,
         // Results are fenced to the owner session they were issued under, so an account switch
@@ -118,26 +116,6 @@ class VoiceSharingAccountStartup @Inject constructor(
             ownership.transaction { block() }
         },
     )
-
-    /** The live session token, or null when no session is current (nothing may be mutated). */
-    private fun currentToken(): SessionToken? = state.currentSessionTokenForTest()
-
-    /**
-     * Session token for a memberLESS projection refresh: when this process has not armed a session
-     * token itself (the app's login landed before install, or the process restarted into a live
-     * account), arm one so the authenticated GET has an issued token to attribute its outcome to.
-     * Never wrong-account: the token is issued under the CURRENT live owner session, and a session
-     * that moves later revokes it (revokeIfSessionMoved).
-     */
-    fun sessionTokenForRefresh(): SessionToken? {
-        state.currentSessionTokenForTest()?.let { return it }
-        val live = ownership.authoritySnapshot()
-        if (live.accountName == null || live.token == null) return null
-        return ownership.transaction {
-            val current = state.currentSessionTokenForTest()
-            current ?: state.sessionStarted(ownership.authoritySnapshot().session)
-        }
-    }
 
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {

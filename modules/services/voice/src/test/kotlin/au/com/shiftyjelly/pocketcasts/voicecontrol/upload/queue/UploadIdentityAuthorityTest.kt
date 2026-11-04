@@ -59,9 +59,8 @@ class UploadIdentityAuthorityTest {
     private val authority = UploadIdentityAuthority { block -> owner.transaction { block(owner.authoritySnapshot()) } }
 
     private fun publish(epoch: String?, bearer: String, account: String, session: Long) {
-        val token = state.sessionStarted(session)
-        val ticket = state.beginOperation(token, requireProjection = false, ownerSession = session)!!
-        assertTrue(state.applyOutcome(token, ticket, projectionJson(epoch = epoch), ownerSession = session))
+        val projection = state.parseProjection(projectionJson(epoch = epoch))!!
+        state.publish(projection)
         owner.switchTo(account, session, bearer)
     }
 

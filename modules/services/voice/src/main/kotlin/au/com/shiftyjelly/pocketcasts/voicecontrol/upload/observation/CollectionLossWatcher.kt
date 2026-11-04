@@ -50,9 +50,9 @@ class CollectionLossWatcher @Inject constructor(
             observer.revoked("account-change")
         }
         val priorEvidence = accountStartup.enrollmentEvidenceListener
-        accountStartup.enrollmentEvidenceListener = { projection, _ ->
-            priorEvidence?.invoke(projection, 0L)
-            val permitted = enrollPermitted(
+        accountStartup.enrollmentEvidenceListener = { projection, ownerSession ->
+            priorEvidence?.invoke(projection, ownerSession)
+            val permitted = projection != null && enrollPermitted(
                 projection.voiceSharingEnrolled,
                 projection.enrollmentEpoch,
                 projection.acceptedDisclosureVersion,

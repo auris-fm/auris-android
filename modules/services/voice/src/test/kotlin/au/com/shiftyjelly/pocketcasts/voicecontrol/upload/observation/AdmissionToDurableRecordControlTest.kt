@@ -48,12 +48,9 @@ class AdmissionToDurableRecordControlTest {
         val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
         owner.publish(account = "a@x", session = 7L, bearer = "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
-        val ownerSession = startup.authoritySnapshot().session
-        val token = startup.state.sessionStarted(ownerSession)
         val json = VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1")
-        val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = ownerSession)!!
-        assertTrue(startup.state.applyOutcome(token, ticket, json, ownerSession = ownerSession))
-        // The tagged projection published by applyOutcome IS the enrollment evidence now.
+        startup.state.publish(startup.state.parseProjection(json)!!)
+        // The published projection IS the enrollment evidence.
     }
 
     private fun newStore(name: String): ContributionStore = ContributionStore(

@@ -1,8 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.DeletionReceipt
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.OperationTicket
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.SessionToken
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan
@@ -67,23 +65,15 @@ class VoiceSharingSettingsViewModelTest {
         }
     }
 
-    private val taggedProjection = MutableStateFlow(
-        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingTaggedProjection(
-            ownerSession = Long.MIN_VALUE,
-            projection = null,
-        ),
-    )
+    private val projection = MutableStateFlow<VoiceSharingAccountProjection?>(null)
 
-    /** Most tests run under the default session 1. */
-    private var tagSession = 1L
-
-    /** Publishes a projection tagged with the session that owns it (account-fence semantics). */
+    /** Publishes the account's projection (the surface reads it as ordinary account state). */
+    @Suppress("UNUSED_PARAMETER")
     private fun setProjection(session: Long, p: VoiceSharingAccountProjection?) {
-        taggedProjection.value =
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingTaggedProjection(session, p)
+        projection.value = p
     }
 
-    private fun setProjection(p: VoiceSharingAccountProjection?) = setProjection(tagSession, p)
+    private fun setProjection(p: VoiceSharingAccountProjection?) = setProjection(1L, p)
     private val enrollGate = Gate()
     private val withdrawGate = Gate()
 
@@ -158,7 +148,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = ownerSession,
         )
         return VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistence),
             ownerSession = ownerSession,
@@ -214,11 +204,7 @@ class VoiceSharingSettingsViewModelTest {
         // The tap alone must not flip the toggle: only the server projection does.
         assertFalse("a tap is not an application", vm.state.value.enrolled)
 
-        gate.result = VoiceSharingMutationResult.Applied(
-            enrolledProjection(),
-            SessionToken(),
-            OperationTicket(1L, null, 1L),
-        )
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
         gate.release.complete(Unit)
         // The applied result carries the server projection; the refreshed snapshot agrees.
         setProjection(enrolledProjection())
@@ -265,7 +251,7 @@ class VoiceSharingSettingsViewModelTest {
 
         vm.enroll()
         mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
         gate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -333,7 +319,7 @@ class VoiceSharingSettingsViewModelTest {
             PendingOperation.ENROLL,
             vm.state.value.pendingOperation,
         )
-        enrollGate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        enrollGate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
         enrollGate.release.complete(Unit)
         setProjection(enrolledProjection())
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -364,7 +350,7 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals("PREMISE: withdrawal B owns the pending label", PendingOperation.WITHDRAW, vm.state.value.pendingOperation)
 
         // A returns (it WOULD have succeeded) while B is still in flight - A comes back Superseded.
-        enrollGate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        enrollGate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
         enrollGate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -404,7 +390,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // A DIFFERENT account signs in; the projection switches.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -427,7 +412,7 @@ class VoiceSharingSettingsViewModelTest {
 
         vm.enroll()
         mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
         gate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -457,12 +442,11 @@ class VoiceSharingSettingsViewModelTest {
 
         // Account B signs in while A's enrollment is still in flight.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
 
         // A finishes now: the controller returns Superseded WITHOUT touching its own state.
-        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
         gate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -489,7 +473,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // The account switches BEFORE the queued action ever runs.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -516,8 +499,6 @@ class VoiceSharingSettingsViewModelTest {
         mainDispatcher.scheduler.advanceUntilIdle()
         gate.result = VoiceSharingMutationResult.Applied(
             enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.WITHDRAWN),
-            SessionToken(),
-            OperationTicket(1L, null, 1L),
         )
         gate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -568,7 +549,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { 1L },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
@@ -604,7 +585,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
@@ -621,7 +602,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // Account switch: a fresh projection for the new session emits through the collector.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(membershipRevision = "rev-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -648,7 +628,7 @@ class VoiceSharingSettingsViewModelTest {
 
         vm.withdraw()
         mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.MembershipConflict(enrolledProjection(), SessionToken(), OperationTicket(1L, null, 1L))
+        gate.result = VoiceSharingMutationResult.MembershipConflict(enrolledProjection())
         gate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
 
@@ -673,7 +653,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { 1L },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
@@ -709,7 +689,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
@@ -726,7 +706,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // Session switch, THEN A's deletion completes.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(membershipRevision = "rev-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
         deleteGate.release.complete(DeletionReceipt("req-1", "pending"))
@@ -738,10 +717,8 @@ class VoiceSharingSettingsViewModelTest {
     }
 
     @Test
-    fun `projectionObserved means the CURRENT session's projection, not a retained one`() = runTest(mainDispatcher) {
-        var currentSession = 1L
-        val gate = Gate()
-        val vm = viewModel(enrollGate = gate, ownerSession = { currentSession })
+    fun `a session end drops the projection, so the next account never sees the previous one`() = runTest(mainDispatcher) {
+        val vm = viewModel()
         assertFalse("PREMISE: nothing observed yet", vm.state.value.projectionObserved)
 
         setProjection(enrolledProjection())
@@ -749,20 +726,14 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue(vm.state.value.projectionObserved)
         assertTrue(vm.state.value.enrolled)
 
-        // Session switch WITHOUT a projection emission yet: the retained projection belongs to A.
-        // (production drops obsolete-account responses asynchronously; until B's projection
-        // lands the screen must not show A's membership as the current account's). The next
-        // render is a real user path: B taps the switch ON (no local stop is recorded, so the
-        // guard itself must refuse the foreign projection) before B's projection arrives.
-        currentSession = 2L
-        vm.enroll()
+        // The account boundary's session end (VoiceSharingAccountSessionCoordinator.onSessionEnded)
+        // clears the state; the screen follows the flow and shows nothing rather than A's membership.
+        setProjection(null)
         mainDispatcher.scheduler.advanceUntilIdle()
 
-        assertFalse("a retained foreign-session projection is not the current session's", vm.state.value.projectionObserved)
-        assertFalse("a foreign-session projection must not render as enrolled", vm.state.value.enrolled)
+        assertFalse("no projection means the section cannot claim membership", vm.state.value.projectionObserved)
+        assertFalse(vm.state.value.enrolled)
     }
-
-    // --- Reviewer 20b681f0: historical-data eligibility, confirmation ownership, tagged replay.
 
     @Test
     fun `deleting previously accepted data stays available after a withdrawal with an epoch`() = runTest(mainDispatcher) {
@@ -806,7 +777,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
@@ -820,7 +791,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // Account switch, THEN the user confirms the still-open dialog.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(membershipRevision = "rev-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
         vm.confirmDelete()
@@ -833,7 +803,6 @@ class VoiceSharingSettingsViewModelTest {
         // read directly, asynchronously). The dialog is still open under the stale session when
         // the user confirms - the confirm-time authority check is the only guard.
         session = 1L
-        tagSession = 1L
         setProjection(enrolledProjection())
         mainDispatcher.scheduler.advanceUntilIdle()
         vm.requestDelete()
@@ -844,40 +813,6 @@ class VoiceSharingSettingsViewModelTest {
         mainDispatcher.scheduler.advanceUntilIdle()
         assertEquals("a no-emission session move must also reject the confirmation", 0, deletions)
         assertFalse(vm.state.value.deleteConfirmationOpen)
-    }
-
-    @Test
-    fun `the initial replay of a foreign-session projection is not the current session's`() = runTest(mainDispatcher) {
-        // The singleton is constructed while A's projection exists in the flow (the replay
-        // scenario): ownerSession() is ALREADY B, the tagged value still carries A.
-        var session = 2L
-        tagSession = 2L
-        setProjection(1L, enrolledProjection())
-        lateinit var vm: VoiceSharingSettingsViewModel
-        val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
-            deleteOperation = { deleteGate.await() },
-            clearLocalPending = {},
-            ownerSession = { session },
-        )
-        vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
-            enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
-            ownerSession = { session },
-            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
-        )
-        mainDispatcher.scheduler.advanceUntilIdle()
-
-        assertFalse("the replayed A projection must not be observed for B", vm.state.value.projectionObserved)
-        assertFalse("the replayed A projection must not render as enrolled for B", vm.state.value.enrolled)
-
-        // B's own projection publishes under B's session and is then truthful.
-        setProjection(2L, enrolledProjection().copy(membershipRevision = "rev-B"))
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue(vm.state.value.projectionObserved)
-        assertTrue(vm.state.value.enrolled)
     }
 
     @Test
@@ -892,7 +827,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
@@ -931,7 +866,7 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { session },
         )
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = controller,
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
@@ -950,7 +885,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // Switch to B; B runs a DIFFERENT operation before the collector runs.
         session = 2L
-        tagSession = 2L
         vm.requestDelete()
         vm.confirmDelete()
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -963,10 +897,9 @@ class VoiceSharingSettingsViewModelTest {
         // the deletion fields itself) before the collector - the boundary retire is the only
         // thing that can clear them.
         session = 1L
-        tagSession = 1L
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         vm = VoiceSharingSettingsViewModel(
-            taggedProjection = taggedProjection,
+            projection = projection,
             enrollmentController = EnrollmentController(
                 enrollOperation = { enrollGate2.await() },
                 withdrawOperation = { withdrawGate2.await() },
@@ -987,7 +920,6 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue("PREMISE: A's deletion failure is visible", vm.state.value.deletionFailed)
 
         session = 2L
-        tagSession = 2L
         vm.enroll()
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse("B's enroll must not preserve A's deletion failure", vm.state.value.deletionFailed)
@@ -1015,7 +947,6 @@ class VoiceSharingSettingsViewModelTest {
 
         // The session switches, then a NEW tap B lands before the dispatcher runs anything.
         session = 2L
-        tagSession = 2L
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
         vm.enroll()
         mainDispatcher.scheduler.advanceUntilIdle()

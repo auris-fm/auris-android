@@ -33,7 +33,7 @@ object IdentityRevocationWatchers {
         // PROJECTION tail (reviewer dde0905a): same-session enrollment/withdrawal/GET/401 epoch
         // changes apply through the state fence and fire here - an epoch-1 call cannot survive an
         // epoch retirement just because no login happened.
-        accountState.projectionInvalidatedListener = { _, _ -> cancel() }
+        accountState.onProjectionListener = { cancel() }
         awaitCancellation()
     }
 }

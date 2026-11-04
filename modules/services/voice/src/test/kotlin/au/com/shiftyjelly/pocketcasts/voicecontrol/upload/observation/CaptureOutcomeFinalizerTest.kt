@@ -469,6 +469,58 @@ class CaptureOutcomeFinalizerTest {
     }
 
     //
+    // PRODUCTION OUTCOME-WAIT GUARD (core c74d7e30 connected fix, reviewer 91e13f28): the module
+    // selects a FINITE wait; CollectionStartup's outcomeWaitGuard = { limitsSelected } then admits.
+    // These controls drive the REAL production selection through the REAL harness above.
+    //
+
+    @Test
+    fun `the production module selects a finite 45s wait within the 60s ceiling`() {
+        val limits = VoiceObservationModule.PRODUCTION_OUTCOME_WAIT
+        assertEquals(45_000L, limits.selectedWaitMs)
+        assertEquals(60_000L, limits.ceilingWaitMs)
+        // The INSTALLED provider composes exactly these limits: its finalizer must admit.
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
+        val f = VoiceObservationModule.provideCaptureOutcomeFinalizer(
+            sink = ContributionRetentionSink(CollectionBudget(1L shl 20)),
+            scope = scope,
+        )
+        assertTrue("production limitsSelected must be TRUE (guard admits)", f.limitsSelected)
+        scope.cancel()
+    }
+
+    @Test
+    fun `the production 45s wait expires an outcome-less capture into outcome_wait_expired and publishes it`() {
+        // EXACTLY the production selection, through the REAL guard + trigger + store:
+        // admission succeeds (limitsSelected true), NO terminal outcome ever joins, and the
+        // bounded wait finalizes outcome_wait_expired and publishes the record.
+        val h = harness(waitLimits = VoiceObservationModule.PRODUCTION_OUTCOME_WAIT)
+        assertNotNull("the production guard must ADMIT", h.sink.retainedCandidateForTest(h.captureId))
+        assertNotNull(h.clock.drainDeadline())
+        h.clock.pump()
+        assertEquals("the expired capture is published exactly once", 1, h.readyFor().size)
+        val canonical = CanonicalJson.canonicalBytes(h.store.durableCapture(h.captureId.toString())!!.record).toString(Charsets.UTF_8)
+        assertTrue("the persisted record must be typed outcome_wait_expired", canonical.contains("outcome_wait_expired"))
+        assertNull("retention ended by expiry", h.sink.retainedCandidateForTest(h.captureId))
+        assertEquals(0L, h.sink.retainedBytes())
+    }
+
+    @Test
+    fun `a healthy capture completes well inside the production 45s wait`() {
+        // The wait must never expire a healthy capture: a Recognized outcome joined inside the
+        // window publishes on ITS terms and cancels the deadline.
+        val h = harness(waitLimits = VoiceObservationModule.PRODUCTION_OUTCOME_WAIT)
+        assertTrue(h.sink.joinOutcome(CollectionOutcome.Recognized(h.captureId, transcript = "play something", detectedLanguage = "en")))
+        // FULL settlement well inside the window: the dispatched outcome cancels the bounded
+        // wait, so no deadline is parked and the record seals on its own terms.
+        assertTrue(h.sink.joinOutcome(CollectionOutcome.Executed(h.captureId, dispatchedWithoutThrowing = true)))
+        h.clock.assertNothingParked()
+        assertEquals(1, h.readyFor().size)
+        val canonical = CanonicalJson.canonicalBytes(h.store.durableCapture(h.captureId.toString())!!.record).toString(Charsets.UTF_8)
+        assertTrue("a healthy capture is NOT typed outcome_wait_expired", !canonical.contains("outcome_wait_expired"))
+    }
+
+    //
     // STRICT WORKER PARITY ON THE PERSISTED RECORD (reviewer be6bb62e #4): the record fed to
     // the pinned Worker probe is the EXACT canonical record the harness's REAL module trigger
     // persisted — reconstructed fixtures prove nothing.

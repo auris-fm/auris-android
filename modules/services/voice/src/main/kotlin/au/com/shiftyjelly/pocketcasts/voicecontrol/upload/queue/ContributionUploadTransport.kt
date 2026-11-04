@@ -364,7 +364,13 @@ class ContributionUploadTransport(
             // the day-scale hint the transport supplies the floor itself — seconds until the next
             // UTC midnight. A present server hint always wins; the store treats the value as a
             // MINIMUM either way, so the jittered backoff can only lengthen it, never shorten.
-            Disposition.RETRY -> Response.Retryable(status, retryHint(retryAfterS) ?: quotaFloorS(code))
+            // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30, @cloud
+            // dc264066, spec 0d59b1d5): quota_exceeded must not permit a retry before the next
+            // UTC accounting day. The minimum sent downstream is the LARGER of the next-midnight
+            // floor and a valid server hint — a SHORT hint cannot buy an earlier retry, a LONGER
+            // server minimum still wins. The store treats the value as a MINIMUM either way, so
+            // the jittered backoff can only lengthen it, never shorten.
+            Disposition.RETRY -> Response.Retryable(status, quotaRetryMinimumS(code, retryAfterS))
 
             Disposition.UNAUTHORIZED -> Response.Unauthorized(status)
 
@@ -393,11 +399,16 @@ class ContributionUploadTransport(
     private fun retryHint(retryAfterS: Long?): Long? = retryAfterS?.takeIf { it > 0 }
 
     /**
-     * THE QUOTA BELT (core c74d7e30): for the daily-quota refusal ONLY, an absent server hint is
-     * replaced by the seconds until the next UTC midnight — the accounting boundary that will
-     * restore headroom. Any other retryable code keeps the plain jittered backoff.
+     * THE QUOTA BELT (core c74d7e30, spec 0d59b1d5): for the daily-quota refusal ONLY, the retry
+     * minimum is the LARGER of the next-UTC-midnight floor and the valid server hint — a short
+     * hint must not permit a retry before the accounting day rolls. Any other retryable code
+     * keeps the plain server-hint-or-backoff behavior.
      */
-    private fun quotaFloorS(code: String?): Long? = if (code == "quota_exceeded") secondsUntilNextUtcMidnight(nowEpochMs()) else null
+    private fun quotaRetryMinimumS(code: String?, retryAfterS: Long?): Long? {
+        val floor = if (code == "quota_exceeded") secondsUntilNextUtcMidnight(nowEpochMs()) else return retryHint(retryAfterS)
+        val hint = retryHint(retryAfterS) ?: return floor
+        return maxOf(floor, hint)
+    }
 
     // Codes this client does not know yet are RETRIED, never terminal disposal: deleting audio because a
     // server introduced a code we have not read is not a risk worth taking. 401 is the one status-class
@@ -489,20 +500,6 @@ class ContributionUploadTransport(
 
     private companion object {
         const val MAX_BODY_BYTES = 1 shl 20
-
-        /** Seconds from [nowMs] until the next 00:00:00 UTC, ceiled, always positive. */
-        fun secondsUntilNextUtcMidnight(nowMs: Long): Long {
-            val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
-            cal.timeInMillis = nowMs
-            cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
-            cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
-            cal.set(java.util.Calendar.MINUTE, 0)
-            cal.set(java.util.Calendar.SECOND, 0)
-            cal.set(java.util.Calendar.MILLISECOND, 0)
-            val untilMs = cal.timeInMillis - nowMs
-            require(untilMs > 0L) { "next UTC midnight must lie in the future" }
-            return (untilMs + 999L) / 1000L
-        }
         const val COPY_BUFFER_BYTES = 16 * 1024
         const val MAX_CONCURRENT_CALLS_DEFAULT = 2
 
@@ -514,6 +511,21 @@ class ContributionUploadTransport(
             .connectTimeout(15, TimeUnit.SECONDS)
             .build()
     }
+}
+
+/** Seconds from [nowMs] until the next 00:00:00 UTC, ceiled, always positive. Module-visible so
+ *  the durable-retry-boundary controls pin the same arithmetic the transport classifies with. */
+internal fun secondsUntilNextUtcMidnight(nowMs: Long): Long {
+    val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+    cal.timeInMillis = nowMs
+    cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+    cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+    cal.set(java.util.Calendar.MINUTE, 0)
+    cal.set(java.util.Calendar.SECOND, 0)
+    cal.set(java.util.Calendar.MILLISECOND, 0)
+    val untilMs = cal.timeInMillis - nowMs
+    require(untilMs > 0L) { "next UTC midnight must lie in the future" }
+    return (untilMs + 999L) / 1000L
 }
 
 /** The Worker's `UploadErrorBody`, read strictly: one pass, duplicate members refused, typed tokens.

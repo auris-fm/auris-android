@@ -127,6 +127,52 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `the quota day floor survives the DURABLE retry boundary across a restart`() {
+        // Spec 0d59b1d5 / reviewer a44dabe7: the transport raises a SHORT quota hint to the
+        // next-UTC-midnight floor; this control verifies the raised value through the DURABLE
+        // boundary — the .retry record — not only transport classification. Pinned 10:00:00Z
+        // 2026-11-04: the next midnight is exactly 14 h = 50,400 s away.
+        val now = 1_791_194_400_000L
+        val floorS = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.secondsUntilNextUtcMidnight(now)
+        assertEquals(50_400L, floorS)
+        // Exactly what the transport classifies for a quota refusal with a 120 s hint.
+        val classifiedMinimumS = maxOf(floorS, 120L)
+        val root = tmp.newFolder("queue-quota-floor-durable")
+        val id = "abababab-1111-4222-8333-444444444444"
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        val eligibleAt = store.scheduleRetryAfterFailure(generation, id, retryAfterS = classifiedMinimumS)
+        assertEquals(
+            "the durable boundary must sit exactly at the next UTC midnight",
+            now + 50_400L * 1000L,
+            eligibleAt,
+        )
+        assertTrue("before midnight the entry is NOT retry-eligible", store.retryEligible(now + 50_399L * 1000L).isEmpty())
+
+        // RESTART: a fresh instance over the same root must load the same boundary — the short
+        // hint cannot sneak back in through a restart.
+        store.close()
+        val revived = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        assertEquals(listOf(id), revived.recover().map { it.captureId })
+        assertTrue("a restart must not make the entry eligible before midnight", revived.retryEligible(now + 50_399L * 1000L).isEmpty())
+        assertEquals("at midnight the entry becomes eligible", listOf(id), revived.retryEligible(now + 50_400L * 1000L))
+        revived.close()
+    }
+
+    @Test
     fun `a FAILED retry-boundary persistence fails CLOSED until recovery resolves it`() {
         // reviewer e4820963 (1): writeText replaced content without sync/atomicity, the catch lied about
         // the original text being untouched, and retryEligible fell back to eligible-now on unknown state.

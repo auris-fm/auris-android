@@ -114,8 +114,6 @@ class AdmissionToDurableRecordControlTest {
             )
             val finalizer = VoiceObservationModule.provideCaptureOutcomeFinalizer(sink, scope)
             val observer = VoiceObservationModule.provideSegmentObserver(authority, sink, tx)
-            // CollectionStartup's real admission-guard wiring.
-            observer.outcomeWaitGuard = { finalizer.limitsSelected }
             val producer = VoiceUploadCompositionFixtures.producer(context, store, startup)
             VoiceUploadModule.provideRetentionPublishTrigger(
                 sink = sink,
@@ -124,7 +122,6 @@ class AdmissionToDurableRecordControlTest {
                 scope = scope,
             ).attach()
 
-            assertTrue("premise: the production outcome wait is selected", finalizer.limitsSelected)
             val frames = listOf(ShortArray(800) { (it + 1).toShort() })
             val admission = observer.speechStartedAdmitting(
                 captureSession = 1L,
@@ -181,7 +178,6 @@ class AdmissionToDurableRecordControlTest {
             )
             val finalizer = VoiceObservationModule.provideCaptureOutcomeFinalizer(sink, scope)
             val observer = VoiceObservationModule.provideSegmentObserver(authority, sink, tx)
-            observer.outcomeWaitGuard = { finalizer.limitsSelected }
             val producer = VoiceUploadCompositionFixtures.producer(context, store, startup)
             VoiceUploadModule.provideRetentionPublishTrigger(
                 sink = sink,
@@ -189,8 +185,6 @@ class AdmissionToDurableRecordControlTest {
                 accountStartup = startup,
                 scope = scope,
             ).attach()
-            assertTrue("premise: the production outcome wait is selected", finalizer.limitsSelected)
-
             val admission = observer.speechStartedAdmitting(
                 captureSession = 1L,
                 routeClass = "Headset",

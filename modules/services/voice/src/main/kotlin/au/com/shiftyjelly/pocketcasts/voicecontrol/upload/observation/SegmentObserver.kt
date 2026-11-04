@@ -135,14 +135,6 @@ class SegmentObserver(
         (sink as? ContributionRetentionSink)?.noteExecutionOutcome(captureId, outcome)
     }
 
-    /**
-     * BATCH B OUTCOME-WAIT ADMISSION GUARD (spec cf1b9809): when wired (production), admission
-     * REFUSES unless a bounded outcome wait is selected — a missing bounded wait must close
-     * contribution admission, never leave an unbounded positive path. Test fixtures that do not
-     * compose the finalizer leave this null (pre-Batch-B behavior unchanged).
-     */
-    var outcomeWaitGuard: (() -> Boolean)? = null
-
     fun speechStartedAdmitting(
         captureSession: Long,
         routeClass: String,
@@ -150,14 +142,8 @@ class SegmentObserver(
         asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
     ): AdmissionHandle? = fenceGate.gate {
-        // Fail-closed BEFORE consuming anything: a refused wait guard or a refused gate must not
-        // reserve sink bytes or allocate an engine buffer.
-        outcomeWaitGuard?.let { guard ->
-            if (!guard()) {
-                Timber.i("voice-capture admission: declined (outcome-wait-unselected)")
-                return@gate null
-            }
-        }
+        // Refusals consume nothing: a refused gate must not reserve sink bytes or allocate an
+        // engine buffer.
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
         if (!permitted) {

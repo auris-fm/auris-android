@@ -34,10 +34,8 @@ class CollectionStartup @Inject constructor(
         // loss watcher; both are set before any capture can start because initializeOnAppStart
         // runs at app startup, ahead of any voice session.
         watcher.start() // installs chained evidence + loss hooks (single composition point)
-        // BATCH B (reviewer 399cb2e6 / spec cf1b9809): bounded outcome finalization hooks onto
-        // the sink, and the ADMISSION GUARD is fail-closed: with no selected wait limits the
-        // finalizer never arms and contribution admission REFUSES — no unbounded positive path.
-        observer.outcomeWaitGuard = { outcomeFinalizer.limitsSelected }
+        // Bounded outcome finalization hooks onto the sink: a retained capture finalizes within
+        // the fixed window (background-only; it is never an admission gate).
         outcomeFinalizer.start()
     }
 }

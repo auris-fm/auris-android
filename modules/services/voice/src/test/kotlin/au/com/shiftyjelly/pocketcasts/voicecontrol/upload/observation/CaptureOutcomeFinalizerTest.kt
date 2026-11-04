@@ -99,7 +99,6 @@ class CaptureOutcomeFinalizerTest {
     private fun harness(
         waitLimits: OutcomeWaitLimits? = OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
         clock: VirtualClock = VirtualClock(),
-        expectAdmitted: Boolean = true,
         asrModel: ModelRef = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
         mono: (() -> Long)? = null,
     ): Harness {
@@ -138,7 +137,6 @@ class CaptureOutcomeFinalizerTest {
             authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
             issueAuthority = { IssuedAuthority("a@x", 7L, 1L, "epoch-1", "1") },
         )
-        // EXACTLY the production wiring (CollectionStartup): admission guard = limitsSelected.
         val finalizer = CaptureOutcomeFinalizer(
             sink = sink,
             waitLimits = waitLimits,
@@ -146,14 +144,9 @@ class CaptureOutcomeFinalizerTest {
             sleepMs = { clock.sleep(it) },
             nowMs = clockMs,
         )
-        observer.outcomeWaitGuard = { finalizer.limitsSelected }
         finalizer.start()
         val admission = observer.speechStartedAdmitting(captureSession = 1L, routeClass = "Bluetooth", producerSize = 800, asrModel = asrModel)
-        if (!expectAdmitted) {
-            assertNull("missing wait limits must CLOSE admission (spec cf1b9809)", admission)
-            return Harness(sink, store, UUID.randomUUID(), clock, finalizer)
-        }
-        assertNotNull("the allowance-admitted capture must start", admission)
+        assertNotNull("the consented capture must start", admission)
         val ctx = admission!!.context
         assertTrue(observer.adoptFirstChunk(admission, ShortArray(800), 800))
         assertTrue(
@@ -268,18 +261,8 @@ class CaptureOutcomeFinalizerTest {
     }
 
     @Test
-    fun `missing wait limits CLOSE contribution admission`() {
-        harness(waitLimits = null, clock = VirtualClock(), expectAdmitted = false)
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        fun observer(guard: (() -> Boolean)?) = SegmentObserver(
-            gate = CollectionGate { it.shouldRetainNewWork },
-            sink = sink,
-            authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
-            issueAuthority = { IssuedAuthority("a@x", 7L, 1L, "epoch-1", "1") },
-        ).apply { outcomeWaitGuard = guard }
-
-        assertNull("no limits → admission REFUSES (fail-closed, spec cf1b9809)", observer { false }.speechStartedAdmitting(1L, "Headset", 800))
-        assertNotNull("a selected wait admits", observer { true }.speechStartedAdmitting(2L, "Headset", 800))
+    fun `admission no longer depends on wait-limit selection`() {
+        harness(waitLimits = null, clock = VirtualClock())
     }
 
     @Test
@@ -485,7 +468,7 @@ class CaptureOutcomeFinalizerTest {
             sink = ContributionRetentionSink(CollectionBudget(1L shl 20)),
             scope = scope,
         )
-        assertTrue("production limitsSelected must be TRUE (guard admits)", f.limitsSelected)
+        assertTrue(f.limitsSelected)
         scope.cancel()
     }
 
@@ -495,7 +478,7 @@ class CaptureOutcomeFinalizerTest {
         // admission succeeds (limitsSelected true), NO terminal outcome ever joins, and the
         // bounded wait finalizes outcome_wait_expired and publishes the record.
         val h = harness(waitLimits = VoiceObservationModule.PRODUCTION_OUTCOME_WAIT)
-        assertNotNull("the production guard must ADMIT", h.sink.retainedCandidateForTest(h.captureId))
+        assertNotNull(h.sink.retainedCandidateForTest(h.captureId))
         assertNotNull(h.clock.drainDeadline())
         h.clock.pump()
         assertEquals("the expired capture is published exactly once", 1, h.readyFor().size)

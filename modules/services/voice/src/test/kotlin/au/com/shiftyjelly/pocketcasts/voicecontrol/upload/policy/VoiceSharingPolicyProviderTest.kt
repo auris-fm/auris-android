@@ -912,18 +912,25 @@ class VoiceSharingPolicyProviderTest {
         dispatcher.scheduler.runCurrent()
         val afterStaleStart = fetchCount
 
-        // A newer authoritative false publishes while gen1 is still in flight.
+        // A newer authoritative false publishes while gen1 is still in flight. The fetch gate
+        // is cleared so ONLY gen1 stays in flight — gen2 completes as a real authoritative
+        // answer rather than its own deadline failure.
         fetchOutcome = Unit
         rawValue = "false"
+        restubWithFetchGate(null)
         refresh(provider)
         assertFalse(provider.snapshot().enabled)
         val afterNewerAnswer = fetchCount
 
-        // The stale failure now completes: fenced out, and no retry may be scheduled.
+        // The stale failure now completes: fenced out, and no retry may be scheduled — the
+        // fetch count must stay EXACTLY where the newer answer left it (reviewer 4fa5210c: a
+        // re-fetch of another authoritative false would otherwise masquerade as "no retry").
         fetchGate.trySetException(IllegalStateException("stale fetch failure"))
         dispatcher.scheduler.runCurrent()
+        assertEquals("the stale failure must not fetch", afterNewerAnswer, fetchCount)
         dispatcher.scheduler.advanceTimeBy(15 * 60_000)
         dispatcher.scheduler.runCurrent()
+        assertEquals("and no retry fires across the backoff horizon", afterNewerAnswer, fetchCount)
         assertFalse(provider.snapshot().enabled)
     }
 }

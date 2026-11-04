@@ -12,12 +12,10 @@ import javax.inject.Singleton
  * authenticated GET. Consulted synchronously at every retention decision; a START-time decision
  * never authorizes later retention after withdrawal or account change.
  *
- * FAIL-CLOSED enrollment rule (reviewer 251afd7d): a permitted policy flag plus a logged-in
- * account is NOT enough to retain PCM. Retention additionally requires a fresh projection for
- * THIS session showing `voiceSharingEnrolled == true` with a non-null server-issued epoch AND a
- * non-null accepted disclosure version. Missing composition (no projection fetched under the
- * current session) keeps everything revoked until [markEnrollmentEstablished] runs — which only
- * the projection-success path of the operations layer may call.
+ * Enrollment rule: retention requires a projection for THIS owner session (tagged with the
+ * session it was fetched under) showing `voiceSharingEnrolled == true` with a non-null
+ * server-issued epoch and accepted disclosure version. No separate evidence cache: the tagged
+ * projection published by the account state IS the evidence.
  */
 @Singleton
 class CollectionAuthority @Inject constructor(
@@ -31,29 +29,6 @@ class CollectionAuthority @Inject constructor(
      */
     private val localWithdrawalIntent: LocalWithdrawalIntentStore,
 ) {
-
-    // Enrollment evidence bound to ONE owner session; any session change clears it fail-closed.
-    @Volatile
-    private var establishedSession: Long? = null
-
-    /** Called ONLY from the post-commit projection hook; establishes evidence for ONE session. */
-    fun markEnrollmentEstablished(projection: VoiceSharingAccountProjection, sessionGeneration: Long) {
-        if (projection.voiceSharingEnrolled &&
-            projection.enrollmentEpoch != null &&
-            projection.acceptedDisclosureVersion != null &&
-            projection.withdrawalState == WithdrawalState.ACTIVE
-        ) {
-            establishedSession = sessionGeneration
-        } else {
-            // Not enrolled / withdrawn / missing epoch or disclosure: fail closed.
-            establishedSession = null
-        }
-    }
-
-    /** Session end / account change: enrollment evidence dies with the session, fail-closed. */
-    fun clearEnrollmentEvidence() {
-        establishedSession = null
-    }
 
     /**
      * Freeze the ORIGINAL authority COHERENTLY under the COLLECTION fence in ONE acquisition
@@ -79,7 +54,7 @@ class CollectionAuthority @Inject constructor(
 
     /** Handoff check INSIDE the owner transaction against the value frozen at start. */
     fun validateIssuedAuthority(issued: IssuedAuthority): Boolean = accountStartup.validateUnderOwnerTransaction { live -> validateIssuedLocked(live, issued) } &&
-        enrollmentEvidenceMatches(issued)
+        enrollmentMatches(issued)
 
     /**
      * Handoff validation via ONE coherent acquisition of the SHARED primitive (reviewer
@@ -93,7 +68,7 @@ class CollectionAuthority @Inject constructor(
         return c.accountName == issued.accountName &&
             c.session == issued.sessionGeneration &&
             c.credential == issued.credentialIncarnation &&
-            enrollmentEvidenceMatches(issued)
+            enrollmentMatches(issued)
     }
 
     private fun validateIssuedLocked(
@@ -103,9 +78,10 @@ class CollectionAuthority @Inject constructor(
         live.session == issued.sessionGeneration &&
         live.credential == issued.credentialIncarnation
 
-    private fun enrollmentEvidenceMatches(issued: IssuedAuthority): Boolean {
-        val projection = accountStartup.state.projection.value ?: return false
-        return establishedSession == accountStartup.authoritySnapshot().session &&
+    private fun enrollmentMatches(issued: IssuedAuthority): Boolean {
+        val tagged = accountStartup.state.taggedProjection.value
+        val projection = tagged.projection ?: return false
+        return tagged.ownerSession == accountStartup.authoritySnapshot().session &&
             projection.enrollmentEpoch == issued.enrollmentEpoch &&
             projection.acceptedDisclosureVersion == issued.acceptedDisclosureVersion &&
             projection.voiceSharingEnrolled &&
@@ -120,14 +96,15 @@ class CollectionAuthority @Inject constructor(
     private fun decideLocked(): AuthorityDecision {
         val ownership = accountStartup.authoritySnapshot()
         val hasSession = ownership.accountName != null && ownership.session > 0L
-        val projection = accountStartup.state.projection.value
+        val tagged = accountStartup.state.taggedProjection.value
+        val projection = tagged.projection
         // THE LOCAL STOP OVERRIDES THE SERVER'S STALE VIEW. Every other condition here reads
         // server-derived state; this one reads what the user actually asked for, which is why it is
         // checked first and independently. A pending or failed withdrawal leaves the projection
         // saying enrolled, and without this clause collection would silently resume.
         val localIntentPermits = localWithdrawalIntent.collectionPermittedByLocalIntent(projection)
         val enrolledThisSession =
-            hasSession && establishedSession == ownership.session &&
+            hasSession && tagged.ownerSession == ownership.session &&
                 projection != null &&
                 projection.voiceSharingEnrolled &&
                 projection.enrollmentEpoch != null &&

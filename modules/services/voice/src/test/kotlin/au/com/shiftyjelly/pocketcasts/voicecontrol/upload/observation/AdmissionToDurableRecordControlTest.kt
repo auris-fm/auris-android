@@ -53,9 +53,7 @@ class AdmissionToDurableRecordControlTest {
         val json = VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1")
         val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = ownerSession)!!
         assertTrue(startup.state.applyOutcome(token, ticket, json, ownerSession = ownerSession))
-        // Production wiring (CollectionLossWatcher): post-commit projection -> enrollment evidence.
-        startup.enrollmentEvidenceListener = { p, session -> authority.markEnrollmentEstablished(p, session) }
-        startup.enrollmentEvidenceListener?.invoke(startup.state.projection.value!!, ownerSession)
+        // The tagged projection published by applyOutcome IS the enrollment evidence now.
     }
 
     private fun newStore(name: String): ContributionStore = ContributionStore(

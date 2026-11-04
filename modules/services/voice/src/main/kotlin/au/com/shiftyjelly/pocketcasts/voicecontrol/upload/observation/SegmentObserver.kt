@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import java.util.ArrayDeque
 import java.util.UUID
+import timber.log.Timber
 
 /**
  * Observes the ACTUAL segment path — start / incremental / cancel / completed — under ONE
@@ -151,14 +152,24 @@ class SegmentObserver(
     ): AdmissionHandle? = fenceGate.gate {
         // Fail-closed BEFORE consuming anything: a refused wait guard or a refused gate must not
         // reserve sink bytes or allocate an engine buffer.
-        outcomeWaitGuard?.let { guard -> if (!guard()) return@gate null }
+        outcomeWaitGuard?.let { guard ->
+            if (!guard()) {
+                Timber.i("voice-capture admission: declined (outcome-wait-unselected)")
+                return@gate null
+            }
+        }
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
+        if (!permitted) {
+            Timber.i("voice-capture admission: declined (gate-off)")
+            return@gate null
+        }
         // NO ALLOWANCE STEP HERE (core c74d7e30). Capture used to consult a prepaid allowance token
         // and fail closed when it was absent; that reserve-before-capture rule is removed, and the
         // daily limit is metered server-side at acceptance instead. Admission is now gated only by
         // consent/policy (above) and the compiled per-clip ceiling (below).
         speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel)?.let {
+            Timber.i("voice-capture admission: accepted capture=%s", it.captureId)
             AdmissionHandle(it, admissionToken, ContributionCeilings.MAX_CLIP_BYTES, ContributionCeilings.MAX_METADATA_BYTES)
         }
     }
@@ -168,17 +179,24 @@ class SegmentObserver(
         // INVALID SIZES refuse before any arithmetic or admission (reviewer fde5349e): a negative
         // producer size would create a negative open charge and REDUCE the sink budget reservation.
         // ZERO stays legal: the empty-prefix admission is a real, retained capture (deltas grow it).
-        if (producerSize < 0) return null
+        if (producerSize < 0) {
+            Timber.i("voice-capture admission: declined (invalid-producer-size)")
+            return null
+        }
         // The PER-CLIP CEILING binds BEFORE any allocation. It is a compiled constant now rather
         // than a server-selected bound, but it still binds: spec §"Actual upload usage" keeps
         // "at most 60,000 ms and 1,920,044 WAV bytes" per clip and calls these ceilings "not a
         // reservation or a daily charge". 2 bytes/sample, same accounting the sink uses.
         // 44-byte WAV header INCLUDED: MAX_CLIP_BYTES is an encoded-WAV bound.
         if (producerSize.toLong() * 2L + 44L > ContributionCeilings.MAX_CLIP_BYTES) {
+            Timber.i("voice-capture admission: declined (oversized)")
             return null
         }
         return synchronized(lock) {
-            if (open != null || !permitted) return@speechStartedAdmittingLocked null
+            if (open != null || !permitted) {
+                Timber.i("voice-capture admission: declined (capture-already-open)")
+                return@speechStartedAdmittingLocked null
+            }
             cumulativeAccounted = 0
             openPrepaidClipBytes = ContributionCeilings.MAX_CLIP_BYTES
             openChargedBytes = producerSize.toLong() * 2L // the sink reserves full capacity at admit
@@ -187,6 +205,7 @@ class SegmentObserver(
             // into the immutable retained candidate. No side map, no lookup race.
             val token = sink.admit(SegmentObservation.Admission(context, producerSize, ContributionCeilings.MAX_METADATA_BYTES))
             if (token == null) {
+                Timber.i("voice-capture admission: declined (sink-refused)")
                 return@speechStartedAdmittingLocked null
             }
             admissionToken = token // producer-held initial reservation until adopt/release
@@ -258,7 +277,10 @@ class SegmentObserver(
         if (open?.captureId != context.captureId) return null
         val addBytes = samples.toLong() * 2L
         // selectedMaxClipBytes is the encoded-WAV bound: PCM bytes + 44-byte header must fit.
-        if (openChargedBytes + addBytes + 44L > openPrepaidClipBytes) return null
+        if (openChargedBytes + addBytes + 44L > openPrepaidClipBytes) {
+            Timber.i("voice-capture skip: capture=%s over per-clip ceiling", context.captureId)
+            return null
+        }
         val token = sink.reserveDelta(context, samples) ?: return null
         outstanding[token] = addBytes
         openChargedBytes += addBytes

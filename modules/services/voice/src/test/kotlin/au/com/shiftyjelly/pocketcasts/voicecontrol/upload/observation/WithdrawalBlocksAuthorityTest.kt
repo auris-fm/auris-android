@@ -82,12 +82,8 @@ class WithdrawalBlocksAuthorityTest {
         // against the live owner incarnation, so the default (Long.MIN_VALUE) is rejected.
         val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = ownerSession)!!
         startup.state.applyOutcome(token, ticket, json, ownerSession = ownerSession)
+        // The tagged projection published by applyOutcome IS the enrollment evidence now.
         val projection = startup.state.projection.value!!
-        // In production CollectionLossWatcher installs this listener; installing it here mirrors the
-        // real composition instead of calling the authority's method directly, so the control
-        // exercises the same path the app does.
-        startup.enrollmentEvidenceListener = { p, session -> sut.markEnrollmentEstablished(p, session) }
-        startup.enrollmentEvidenceListener?.invoke(projection, ownerSession)
 
         // Fixture diagnostics: name WHICH precondition is unmet instead of only reporting that the
         // overall decision was false. A bare "fixture sanity" failure sent me guessing twice.

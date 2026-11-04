@@ -43,29 +43,22 @@ class CollectionLossWatcher @Inject constructor(
         scope.launch {
             syncAccountManager.emailFlow().collect { accountStartup.reconcileAndNotifySessionEnd() }
         }
-        // Loss fan-out WITHOUT replacing the evidence hooks: chain after whatever the startup
-        // composed (authority mark/clear), so one commit updates evidence AND purges in order.
+        // Loss fan-out: chain after whatever the startup composed.
         val priorSessionEnd = accountStartup.sessionEndedListener
         accountStartup.sessionEndedListener = {
             priorSessionEnd?.invoke()
-            authority.clearEnrollmentEvidence()
             observer.revoked("account-change")
         }
         val priorEvidence = accountStartup.enrollmentEvidenceListener
-        accountStartup.enrollmentEvidenceListener = { projection, ownerSession ->
-            priorEvidence?.invoke(projection, ownerSession)
+        accountStartup.enrollmentEvidenceListener = { projection, _ ->
+            priorEvidence?.invoke(projection, 0L)
             val permitted = enrollPermitted(
                 projection.voiceSharingEnrolled,
                 projection.enrollmentEpoch,
                 projection.acceptedDisclosureVersion,
                 projection.withdrawalState,
             )
-            if (permitted) {
-                authority.markEnrollmentEstablished(projection, ownerSession)
-            } else {
-                authority.clearEnrollmentEvidence()
-                observer.revoked("enrollment-change")
-            }
+            if (!permitted) observer.revoked("enrollment-change")
         }
     }
 

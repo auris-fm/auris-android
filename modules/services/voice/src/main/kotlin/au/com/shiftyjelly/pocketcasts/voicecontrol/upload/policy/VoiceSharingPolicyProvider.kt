@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy
 import au.com.shiftyjelly.pocketcasts.utils.config.FirebaseConfig
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.providers.FirebaseRemoteFeatureProvider
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
+import com.google.firebase.remoteconfig.FirebaseRemoteConfigFetchThrottledException
 import com.google.firebase.remoteconfig.FirebaseRemoteConfigValue
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -55,6 +56,8 @@ class VoiceSharingPolicyProvider(
     private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
     /** Base retry delay for transient acquisition failures; tests drive this and [sleepMs]. */
     private val retryDelayMs: Long = RETRY_DELAY_MS,
+    /** Wall clock for server throttle deadlines (epoch millis); test seam. */
+    private val wallClockMs: () -> Long = System::currentTimeMillis,
     /** SHARED serialization primitive: MUST be the SAME object as the account tier's
      * collectionSharedLock (reviewer 23cae70e b1). NO default — an independent fallback lock
      * would silently deserialize policy publication from account transitions. Composition passes
@@ -80,7 +83,10 @@ class VoiceSharingPolicyProvider(
      * process stayed disabled until an app restart (observed in the field 2026-11-04). While the
      * snapshot is disabled by TRANSIENT acquisition failures, each failure schedules the next
      * ordinary refresh after an exponentially growing, capped backoff — bounded rate, no
-     * permanent abandonment. Authoritative policy answers cancel the loop. Managed under [fence]
+     * permanent abandonment. A typed server throttle additionally defers the retry to the
+     * server's own boundary. Authoritative policy answers cancel the loop; ALL retry ownership
+     * mutations are fenced with publication (only the newest answer governs the timer), and each
+     * retry re-validates its captured generation before it refreshes. Managed under [fence]
      * like every other timer.
      */
     private var retryJob: Job? = null
@@ -197,9 +203,17 @@ class VoiceSharingPolicyProvider(
         // throttles repeated fetch() calls (status THROTTLED, fetchTimeMillis not advancing),
         // which would make the SUCCESS-and-advanced gate unsatisfiable — every refresh must be
         // a real network fetch.
-        val fetched = attemptFinite { taskSuccess(remoteConfig.fetch(0L)) }
+        // Typed server-side throttle: taskSuccess discards the failure, so the fetch outcome is
+        // read with its typed exception preserved — firebase-config 23.1.0's
+        // FirebaseRemoteConfigFetchThrottledException carries the authoritative retry boundary
+        // (getThrottleEndTimeMillis()), and the retry must not fire before the server is willing
+        // to answer again.
+        var throttleDeadlineMs: Long? = null
+        val fetched: Boolean? = attemptFinite { taskSuccessWithThrottleDeadline(remoteConfig.fetch(0L)) }
+            ?.also { (_, deadline) -> throttleDeadlineMs = deadline }
+            ?.first
         if (fetched != true) {
-            return publishDisabled(requestGen, "fetch task failed", transient = true)
+            return publishDisabled(requestGen, "fetch task failed", transient = true, throttleUntilMs = throttleDeadlineMs)
         }
 
         val info = attemptFinite { remoteConfig.info }
@@ -209,14 +223,9 @@ class VoiceSharingPolicyProvider(
         if (!statusOk || postFetchTimeMs == null || postFetchTimeMs <= baseline) {
             // Failure, or a cached success whose bookkeeping never advanced: not fresh, and the
             // lease must not renew.
-            // NOTE: firebase-config 23.1.0 exposes NO throttle deadline (no
-            // FirebaseRemoteConfigInfo.throttleEndTimeMillis, no typed THROTTLED code), so a
-            // server-side throttle is respected through the growing backoff below, not a
-            // machine-readable end time.
             return publishDisabled(
                 requestGen,
-                "fetch bookkeeping not fresh: status=$statusOk postFetchTimeMs=$postFetchTimeMs baseline=$baseline " +
-                    "(THROTTLED when statusOk=false)",
+                "fetch bookkeeping not fresh: status=$statusOk postFetchTimeMs=$postFetchTimeMs baseline=$baseline",
                 transient = true,
             )
         }
@@ -257,7 +266,7 @@ class VoiceSharingPolicyProvider(
                 }
                 activationGeneration = requestGen
                 state.value = snapshot
-                retryBackoffMs = RETRY_DELAY_MS
+                retryBackoffMs = retryDelayMs
                 retryJob?.cancel()
                 retryJob = null
                 Timber.i("voice-sharing policy ENABLED (gen=%d)", requestGen)
@@ -287,18 +296,22 @@ class VoiceSharingPolicyProvider(
         requestGen: Long,
         reason: String,
         transient: Boolean,
+        throttleUntilMs: Long? = null,
     ): PolicySnapshot {
         Timber.i("voice-sharing policy disabled: %s", reason)
         synchronized(sharedCollectionLock) {
             synchronized(fence) {
-                retryJob?.cancel()
-                retryJob = null
-                if (transient) {
-                    scheduleAcquisitionRetryLocked()
-                } else {
-                    retryBackoffMs = RETRY_DELAY_MS
-                }
                 if (requestGen == requestGeneration) {
+                    // Retry ownership is fenced WITH publication: only the NEWEST answer may
+                    // cancel/replace the pending retry or move the backoff — an older failed
+                    // refresh can never schedule retries over a newer authoritative answer.
+                    retryJob?.cancel()
+                    retryJob = null
+                    if (transient) {
+                        scheduleAcquisitionRetryLocked(throttleUntilMs)
+                    } else {
+                        retryBackoffMs = retryDelayMs
+                    }
                     activationGeneration = 0L
                     state.value = DISABLED
                     invalidationJob?.cancel()
@@ -310,21 +323,34 @@ class VoiceSharingPolicyProvider(
     }
 
     /**
-     * MUST be called while holding [fence] and only for a transient failure. Schedules ONE
-     * ordinary [refresh] after the current backoff, then widens the backoff for the next round
-     * (doubling, capped at [MAX_RETRY_BACKOFF_MS]). The retry runs the full freshness contract
-     * unchanged — fetch(0L), advancing bookkeeping, activation, strict decode — so a retry can
-     * never publish a stale true; a newer real refresh fences it via request generation; the
-     * snapshot stays DISABLED until a fresh successful fetch. Server-side throttling carries no
-     * machine-readable deadline on this SDK (see the note at the THROTTLED call site), so it is
-     * respected through this growing backoff.
+     * MUST be called while holding [fence] and only for a transient failure OF THE NEWEST
+     * REQUEST. Schedules ONE ordinary [refresh] at the LATER of the current backoff and, when
+     * the failure was a typed server throttle, the server's authoritative retry boundary
+     * ([throttleUntilMs], epoch millis against the wall clock — this may exceed
+     * [MAX_RETRY_BACKOFF_MS], which caps only the local backoff growth). The backoff doubles
+     * for the next round (capped). The retry runs the full freshness contract unchanged —
+     * fetch(0L), advancing bookkeeping, activation, strict decode — so a retry can never
+     * publish a stale true; and it validates its CAPTURED generation before starting, so a
+     * retry scheduled by a superseded request can never fire over a newer refresh.
      */
-    private fun scheduleAcquisitionRetryLocked() {
-        val delay = retryBackoffMs
+    private fun scheduleAcquisitionRetryLocked(throttleUntilMs: Long?) {
+        val backoffDelay = retryBackoffMs
+        val throttleDelay = throttleUntilMs?.let { (it - wallClockMs()).coerceAtLeast(0L) }
+        val delay = maxOf(backoffDelay, throttleDelay ?: 0L)
         retryBackoffMs = (retryBackoffMs * 2).coerceAtMost(MAX_RETRY_BACKOFF_MS)
-        Timber.i("voice-sharing policy: acquisition retry scheduled in %dms", delay)
+        val retryGen = requestGeneration
+        Timber.i("voice-sharing policy: acquisition retry scheduled in %dms (gen=%d)", delay, retryGen)
         retryJob = scope.launch {
             sleepMs(delay)
+            // The sleep is an await: a newer refresh may have superseded this schedule while it
+            // ran. Re-validate the captured generation under the fence BEFORE refreshing —
+            // publication fences make a stale retry's outcome harmless, but it must not even
+            // start over a newer request.
+            val current = synchronized(fence) { retryGen == requestGeneration }
+            if (!current) {
+                Timber.i("voice-sharing policy: acquisition retry superseded before firing (gen=%d)", retryGen)
+                return@launch
+            }
             Timber.i("voice-sharing policy: acquisition retry attempting refresh")
             refresh()
         }
@@ -402,6 +428,20 @@ class VoiceSharingPolicyProvider(
     private suspend fun <T> taskSuccess(task: com.google.android.gms.tasks.Task<T>): Boolean = suspendCancellableCoroutine { continuation ->
         task.addOnCompleteListener(directExecutor) { t ->
             continuation.resume(t.isSuccessful)
+        }
+    }
+
+    /**
+     * Like [taskSuccess], but a failed task's typed exception is inspected: a
+     * FirebaseRemoteConfigFetchThrottledException contributes its server-authoritative
+     * throttle-end boundary (epoch millis). Any other failure reads as plain (false, null).
+     */
+    private suspend fun taskSuccessWithThrottleDeadline(
+        task: com.google.android.gms.tasks.Task<Void>,
+    ): Pair<Boolean, Long?> = suspendCancellableCoroutine { continuation ->
+        task.addOnCompleteListener(directExecutor) { t ->
+            val throttled = t.exception as? FirebaseRemoteConfigFetchThrottledException
+            continuation.resume(t.isSuccessful to throttled?.throttleEndTimeMillis)
         }
     }
 

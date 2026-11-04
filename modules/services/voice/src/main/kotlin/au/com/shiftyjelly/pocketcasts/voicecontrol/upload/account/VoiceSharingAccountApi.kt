@@ -256,26 +256,14 @@ class VoiceSharingAccountOperations(
     private suspend fun issue(route: Route, disclosureVersion: String?): IssuedRequest? {
         val (accountName, session) = ownerNow()
         val bearer = aurisBearer() ?: return null
-        val issued = ownership.transaction {
+        return ownership.transaction {
             val snapshot = ownership.authoritySnapshot()
             if (snapshot.accountName != accountName || snapshot.session != session) return@transaction null
             IssuedRequest(frozen(bearer, route, disclosureVersion), Issued(accountName, session, state.publicationCount()))
-        } ?: return null
-        return issued
+        }
     }
 
     private class IssuedRequest(val op: FrozenOperation, val issued: Issued)
-
-    /**
-     * Issues one request under ONE ordinary owner, refusing rather than rebinding.
-     *
-     * The bearer acquisition SUSPENDS, so another thread can sign a different account in while it
-     * runs. Acquiring first and capturing afterwards would then send A's bearer under B's captured
-     * ownership — no suspension is needed for that interleaving, just a switch on another thread.
-     * So the owner is captured BEFORE the bearer, and must still be that same account and session
-     * AFTER it: a bearer that no longer belongs to the captured owner is DISCARDED, never relabelled.
-     * Same-account token refreshes pass, because they move the credential, not the session.
-     */
 
     private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
 

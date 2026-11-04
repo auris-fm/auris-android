@@ -5723,10 +5723,10 @@ class CloudRouteSinkTest {
         val route = launch { deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1") }
         deps.playback.skipStarted.await()
         deps.playback.skipGate?.complete(Unit)
-        route.join()
-        testScheduler.advanceUntilIdle()
+        testScheduler.runCurrent() // the fake's native path runs: the signal is now ARMED in the real coordinator
 
-        // The legacy untokened notification arrives DURING the operation: dropped by the coordinator.
+        // The legacy untokened notification arrives DURING the operation, while the signal is armed:
+        // dropped by the coordinator, so the operation keeps settling by its own budget alone.
         deps.playback.seekCoordinator.dispatch(
             PlaybackManager.SeekCompletionEvent(
                 episodeUuid = "episode-A",
@@ -5735,6 +5735,9 @@ class CloudRouteSinkTest {
                 completionToken = null,
             ),
         )
+
+        route.join()
+        testScheduler.advanceUntilIdle()
 
         val result = resultOf(transport.sender.sent.single())
         assertEquals("unknown", result.getString("outcome"))

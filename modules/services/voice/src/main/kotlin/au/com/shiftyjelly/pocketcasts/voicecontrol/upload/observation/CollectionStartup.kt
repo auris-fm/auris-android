@@ -1,8 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceRetirementWatcher
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -14,6 +12,13 @@ import javax.inject.Singleton
  *
  *   observer ← sink.onRetentionEnded wiring            (provider, VoiceObservationModule)
  *   watcher.start() → accounts listener, enrollment hook, policy flow, exact lease deadline
+ *
+ * NO ALLOWANCE COMPOSITION (core c74d7e30, spec §"Actual upload usage"). This class used to own the
+ * capture-allowance lifecycle, its retirement watcher and the provisioner entry point. Those are
+ * removed: capture no longer reserves daily capacity before it starts, and the daily limit is
+ * metered server-side at acceptance of actual audio bytes. Legacy `no_backup/voice_allowance/`
+ * files are deliberately left on disk as inert state — they are not read, not deleted, and not
+ * grounds to clear app data (plan delta item 2).
  */
 @Singleton
 class CollectionStartup @Inject constructor(
@@ -21,10 +26,7 @@ class CollectionStartup @Inject constructor(
     private val accountStartup: VoiceSharingAccountStartup,
     private val authority: CollectionAuthority,
     private val observer: SegmentObserver,
-    private val allowanceLifecycle: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceLifecycle,
-    private val allowanceRetirement: AllowanceRetirementWatcher,
     private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
-    private val allowanceProvisioner: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner,
 ) {
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {
@@ -32,27 +34,10 @@ class CollectionStartup @Inject constructor(
         // loss watcher; both are set before any capture can start because initializeOnAppStart
         // runs at app startup, ahead of any voice session.
         watcher.start() // installs chained evidence + loss hooks (single composition point)
-        // ALLOWANCE LIFECYCLE (reviewer c5d94af4 #4): a retirement purges the outstanding capture
-        // through the SAME fence-gated revocation the other loss causes use, then the slot is
-        // already back at the unavailable default. The watcher owns the subscriptions/deadline;
-        // in-process disposal goes through AllowanceRetirementWatcher.dispose (process death
-        // needs no hook - the prepared token is lost by design).
-        allowanceLifecycle.onRetired = { observer.revoked("allowance-retired") }
-        allowanceRetirement.start()
         // BATCH B (reviewer 399cb2e6 / spec cf1b9809): bounded outcome finalization hooks onto
         // the sink, and the ADMISSION GUARD is fail-closed: with no selected wait limits the
         // finalizer never arms and contribution admission REFUSES — no unbounded positive path.
         observer.outcomeWaitGuard = { outcomeFinalizer.limitsSelected }
         outcomeFinalizer.start()
     }
-
-    /**
-     * MINIMUM CONNECTED PATH (spec 7dcb3a53): the ONE entry the capture path calls before a
-     * consented recording may consume allowance. Provisioning through the reviewed provisioner
-     * — real transport, real owner snapshot, real install fence — binds the batch authority
-     * through [CaptureAllowanceLifecycle]; every refusal keeps capture fail-closed. Returns
-     * true only when a live grant is bound.
-     */
-    suspend fun provisionCaptureAllowance(): Boolean = allowanceProvisioner.provision() is
-        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceProvisioner.Result.Provisioned
 }

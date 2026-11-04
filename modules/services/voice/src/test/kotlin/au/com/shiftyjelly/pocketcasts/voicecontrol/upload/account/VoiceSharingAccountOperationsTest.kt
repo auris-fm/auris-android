@@ -605,8 +605,6 @@ class VoiceSharingAccountOperationsFencingTest {
 
         override suspend fun postEnrollment(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
 
-        override suspend fun postCaptureAllowance(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
-
         override suspend fun postWithdrawal(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
 
         override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()

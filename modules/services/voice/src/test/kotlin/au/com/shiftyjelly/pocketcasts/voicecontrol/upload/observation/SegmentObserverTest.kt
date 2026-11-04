@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -34,7 +33,6 @@ class SegmentObserverTest {
             { DEAD_REVOKED },
             { ISSUED },
             RefuseAllCompletionHandoff,
-            allowance = PrepaidTestAllowance(),
         )
         val spy = FrameSpy()
 
@@ -62,7 +60,6 @@ class SegmentObserverTest {
             },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val spy = FrameSpy()
 
@@ -91,7 +88,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
 
         val a = observer.speechStarted(3L, "Headset", ShortArray(0))!!
@@ -115,7 +111,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
 
         val context = observer.speechStarted(5L, "Headset", ShortArray(0))!!
@@ -140,7 +135,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
 
@@ -180,7 +174,6 @@ class SegmentObserverTest {
                 handoffsValidated++ // refusal: validation consumed the token, then NOTHING retains
                 scope.completeUnderOwner(context, onset, end, wake, provider, admit = false)
             },
-            allowance = PrepaidTestAllowance(),
         )
         val spy = FrameSpy()
         val context = observer.speechStarted(12L, "Headset", ShortArray(0))!!
@@ -207,7 +200,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { c, o, e, w, p, sc, live -> sc.completeUnderOwner(c, o, e, w, p) },
-            allowance = PrepaidTestAllowance(),
         )
         var allocated = false
         val producerSizeSamples = 80 // 160 bytes > budget: must be refused BEFORE any ShortArray
@@ -239,7 +231,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val context = observer.speechStarted(13L, "Headset", shortArrayOf(1, 2))!! // 4 bytes adopted
         observer.speechIncremental(context, shortArrayOf(3, 4)) // +4 => 8 charged
@@ -272,7 +263,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val context = observer.speechStarted(14L, "Headset", shortArrayOf(1, 2))!!
         observer.speechIncremental(context, shortArrayOf(3, 4))
@@ -308,7 +298,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
 
         // First capture completes normally.
@@ -336,7 +325,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val context = observer.speechStarted(8L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.NotDetected) { listOf(shortArrayOf(7, 8)) to 16000 }
@@ -360,7 +348,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val context = observer.speechStarted(9L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.Detected) { listOf(shortArrayOf(1)) to 16000 }
@@ -386,7 +373,6 @@ class SegmentObserverTest {
             { LIVE },
             { ISSUED },
             CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
-            allowance = PrepaidTestAllowance(),
         )
         val a = observer.speechStarted(10L, "Headset", ShortArray(0))!!
         // Admission is single-occupancy (blocker b1): a second start while A is open is REFUSED —

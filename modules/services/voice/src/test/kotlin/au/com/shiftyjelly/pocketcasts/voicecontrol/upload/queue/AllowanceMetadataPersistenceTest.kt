@@ -2,11 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceLimits
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceProvisioning
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.AllowanceWindow
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.CaptureAllowanceOwner
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.Ceilings
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
@@ -32,10 +27,12 @@ import org.mockito.kotlin.mock
 import org.robolectric.RobolectricTestRunner
 
 /**
- * Persistence-boundary controls for the prepaid METADATA bound (reviewer 55433b71 #3 / fde5349e,
- * spec 0987c46f). The bound is FROZEN into the immutable retained candidate by the REAL
- * allowance-admitted observer capture (no manual note), carried through the REAL
- * trigger→producer→store path, and counts the FULL canonical record/digest envelope:
+ * Persistence-boundary controls for the per-clip METADATA bound (reviewer 55433b71 #3 / fde5349e,
+ * spec 0987c46f; core c74d7e30 retired the allowance that used to select it — the bound is now the
+ * compiled [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionCeilings]
+ * constant or an explicitly set sink input). It is FROZEN into the immutable retained candidate,
+ * carried through the REAL trigger→producer→store path, and counts the FULL canonical
+ * record/digest envelope:
  *
  * - a bound that fits the record alone but not its required envelope refuses, with NO queue
  *   admission and NO write;
@@ -48,23 +45,10 @@ class AllowanceMetadataPersistenceTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
-    private val account = "a@example.com"
-    private val window = AllowanceWindow.Established("window-1")
-
-    private fun limits(maxMetadataBytes: Int) = AllowanceLimits(
-        10,
-        1_000_000,
-        maxClipBytes = 100_000 - 1024,
-        maxMetadataBytes = maxMetadataBytes,
-        ceilings = Ceilings(10, 1_000_000, 1_000_000L, 8_192),
-    )
-
-    private fun owner(dir: File, maxMetadataBytes: Int) = CaptureAllowanceOwner(dir, account, limits(maxMetadataBytes), window, AllowanceProvisioning.TestOnly)
-
     /**
-     * Drives the REAL path: provisioned-owner allowance admission (observer) → sink candidate
-     * (bound frozen by the admission event) → REAL trigger → producer → store. Returns the
-     * published entry's stored canonical size, or null when publication was refused.
+     * Drives the REAL path: sink candidate with an EXPLICIT metadata cap (the sink input that the
+     * observer admission used to freeze from the allowance) → REAL trigger → producer → store.
+     * Returns the published entry's stored canonical size, or null when publication was refused.
      */
     private fun publishThroughRealAdmission(maxMetadataBytes: Int): Int? {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -98,37 +82,25 @@ class AllowanceMetadataPersistenceTest {
         )
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
-        val allowance = this.owner(tmp.newFolder(), maxMetadataBytes)
-        assertTrue("the prepaid token must be minted off-path", allowance.prepareToken())
-        val observer = SegmentObserver(
-            gate = CollectionGate { it.shouldRetainNewWork },
-            sink = sink,
-            authority = {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(
-                    collectionPermitted = true,
-                    fullRevocation = false,
-                )
-            },
-            issueAuthority = {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
-                    accountName = "a@x",
-                    sessionGeneration = 7L,
-                    credentialIncarnation = 1L,
-                    enrollmentEpoch = "epoch-1",
-                    acceptedDisclosureVersion = "1",
-                )
-            },
-            allowance = allowance,
-        )
-        val admission = observer.speechStartedAdmitting(
+        val captureId = UUID.randomUUID()
+        val ctx = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext(
+            captureId,
             captureSession = 1L,
             routeClass = "Bluetooth",
-            producerSize = 800,
+            issuedAuthority = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
+                accountName = "a@x",
+                sessionGeneration = 7L,
+                credentialIncarnation = 1L,
+                enrollmentEpoch = "epoch-1",
+                acceptedDisclosureVersion = "1",
+            ),
             asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
         )
-        assertNotNull("the allowance-admitted capture must start", admission)
-        val ctx = admission!!.context
-        assertTrue(observer.adoptFirstChunk(admission, ShortArray(800), 800))
+        assertTrue(
+            sink.started(
+                SegmentObservation.Started(ctx, ShortArray(800) { it.toShort() }, validSamples = 800, allowanceMetadataCapBytes = maxMetadataBytes),
+            ),
+        )
         assertTrue(
             sink.completed(
                 SegmentObservation.Completed(
@@ -141,7 +113,7 @@ class AllowanceMetadataPersistenceTest {
                 ),
             ),
         )
-        // The bound is FROZEN on the immutable candidate by the admission itself.
+        // The bound is FROZEN on the immutable candidate by the start itself.
         assertEquals(
             maxMetadataBytes,
             sink.retainedCandidateForTest(ctx.captureId)?.allowanceMetadataCap,
@@ -167,6 +139,8 @@ class AllowanceMetadataPersistenceTest {
             ?: throw AssertionError("the positive companion must publish through the real path")
         // Refusal: the SELECTED bound fits the stored canonical record but NOT the record+digest
         // envelope the transport must send (the envelope overhead alone is far above 5 bytes).
+        // (The bound is set here as an explicit sink input; production freezes the compiled
+        // ContributionCeilings constant the same way through observer admission.)
         val refused = publishThroughRealAdmission(maxMetadataBytes = canonicalSize + 5)
         assertNull("a record-only bound must refuse publication", refused)
     }
@@ -205,7 +179,7 @@ class AllowanceMetadataPersistenceTest {
     }
 
     @Test
-    fun `a capture that was never allowance-admitted refuses publication fail-closed`() {
+    fun `a capture started with NO metadata bound refuses publication fail-closed`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val root = java.nio.file.Files.createTempDirectory("meta-missing").toFile()
         val store = ContributionStore(
@@ -251,13 +225,14 @@ class AllowanceMetadataPersistenceTest {
             ),
             asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
         )
-        // NO allowance admission: the direct-sink start freezes NO bound (default null).
+        // NO bound is set: the direct-sink start freezes NO cap (default null) — the sink-level
+        // fail-closed counterpart of an admission that never carried a metadata bound.
         assertTrue(
             sink.started(
                 SegmentObservation.Started(ctx, ShortArray(800) { it.toShort() }, validSamples = 800),
             ),
         )
-        assertNull("no frozen bound on a never-allowance-admitted capture", sink.retainedCandidateForTest(captureId)?.allowanceMetadataCap)
+        assertNull("no frozen bound on a capture started without one", sink.retainedCandidateForTest(captureId)?.allowanceMetadataCap)
         sink.completed(
             SegmentObservation.Completed(
                 ctx,

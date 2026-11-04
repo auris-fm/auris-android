@@ -8,7 +8,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSigna
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.allowance.PrepaidTestAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
@@ -94,7 +93,6 @@ class EngineProcessingJoinControlTest {
             handoff = CompletionHandoff { ctx, onset, end, wake, provider, scope, live ->
                 scope.completeUnderOwner(ctx, onset, end, wake, provider)
             },
-            allowance = PrepaidTestAllowance(),
         )
         return VoiceAsrEngine(
             voiceAudioProcessor = processor,

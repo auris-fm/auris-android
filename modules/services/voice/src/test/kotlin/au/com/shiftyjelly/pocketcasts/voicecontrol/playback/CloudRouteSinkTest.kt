@@ -3766,6 +3766,9 @@ class CloudRouteSinkTest {
         /** The deadline the LAST skip dispatch carried: the mutation boundary must receive the ORIGINAL admission deadline. */
         var lastAdmittedDeadlineMs: Long? = null
 
+/** Signals ARMED at the fake's issue boundary, callback or not: the arming is part of issuing. */
+        val armedSignals = mutableListOf<PlaybackManager.SeekCompletionSignal>()
+
         /** Releases recorded so a control can assert the settled operation's token is no longer addressable. */
         val releasedSignals = mutableListOf<PlaybackManager.SeekCompletionSignal>()
 
@@ -3782,9 +3785,13 @@ class CloudRouteSinkTest {
         }
 
         private fun completeSeek(seekCompletion: PlaybackManager.SeekCompletionSignal?, @Suppress("UNUSED_PARAMETER") episodeId: String?) {
-            val episode = completionEpisodeForTest ?: return
+            // ARMING IS PART OF ISSUING, even when the fake supplies no callback: a signal that was
+            // never armed does not model the production boundary, and a dispatch against it proves
+            // nothing. Only the DISPATCH depends on completionEpisodeForTest.
             if (seekCompletion == null) return
             seekCoordinator.arm(seekCompletion)
+            armedSignals.add(seekCompletion)
+            val episode = completionEpisodeForTest ?: return
             seekCoordinator.dispatch(
                 PlaybackManager.SeekCompletionEvent(
                     episodeUuid = episode,
@@ -5723,7 +5730,12 @@ class CloudRouteSinkTest {
         val route = launch { deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1") }
         deps.playback.skipStarted.await()
         deps.playback.skipGate?.complete(Unit)
-        testScheduler.runCurrent() // the fake's native path runs: the signal is now ARMED in the real coordinator
+        testScheduler.runCurrent() // the fake's native path runs: the signal is issued
+
+        // THE ARMED BOUNDARY IS ASSERTED BEFORE THE DISPATCH: the operation's signal is genuinely
+        // armed in the real coordinator even though no callback is supplied.
+        val armed = deps.playback.armedSignals.single()
+        assertTrue(deps.playback.seekCoordinator.isArmed(armed))
 
         // The legacy untokened notification arrives DURING the operation, while the signal is armed:
         // dropped by the coordinator, so the operation keeps settling by its own budget alone.

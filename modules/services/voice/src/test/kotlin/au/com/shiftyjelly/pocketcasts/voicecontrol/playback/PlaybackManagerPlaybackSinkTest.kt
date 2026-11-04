@@ -222,12 +222,15 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
-    fun `a paused ordinary seek publishes state and persists progress through the real manager path`() = runTest {
-        // THE LEGACY OBSERVATION PATH AT THE MANAGER: an ordinary local/UI seek with NO token (the
-        // engine's acknowledgment is not completion evidence) still publishes the seek relay state
-        // with its landed position and persists progress to the database -- a paused seek has no
-        // playback tick, so this notification is the only progress write. A null token dispatches
-        // into the real coordinator and completes NOTHING: no identified operation is settled.
+    fun `a paused seek's untokened notification publishes state and persists the episode's fallback progress through the real manager path`() = runTest {
+        // THE LEGACY OBSERVATION PATH AT THE MANAGER, AS A FALLBACK CONTROL: an ordinary local/UI
+        // seek with NO token (the engine's acknowledgment is not completion evidence) still publishes
+        // the seek relay state with its landed position, and the persistence path runs end to end.
+        // With no player bound this control intentionally verifies the FALLBACK write -- the
+        // episode's pre-existing playedUpToMs (45.0), NOT the 30-second notification position -- so
+        // it proves the persistence path executes, not that a live player's new seek position is
+        // what gets written. A null token dispatches into the real coordinator and completes
+        // NOTHING: no identified operation is settled.
         val manager = org.mockito.Mockito.mock(
             PlaybackManager::class.java,
             org.mockito.Mockito.CALLS_REAL_METHODS,
@@ -272,8 +275,9 @@ class PlaybackManagerPlaybackSinkTest {
                 au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager.LastChangeFrom.OnSeekComplete.value,
                 state.lastChangeFrom,
             )
-            // THE PAUSED SEEK'S PERSISTED PROGRESS: no player is bound, so the manager falls back to
-            // the episode's own playedUpToMs and writes it through to the database collaborators.
+            // THE PERSISTENCE PATH RUNS, WRITING THE FALLBACK VALUE: no player is bound, so the
+            // manager writes the episode's own playedUpToMs -- the path executes; the notification
+            // position itself is not the asserted write.
             verify(episodeManager).updatePlayedUpToBlocking(episode, 45.0, false)
             verify(episodeManager).updatePlaybackInteractionDate(episode)
             verify(statsManager).persistTimes()

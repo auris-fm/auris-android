@@ -35,6 +35,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
@@ -156,6 +157,15 @@ private class TestOwner(
     /** W1-equivalent session bump without re-arming the binding (test driver). */
     fun simulateAccountSwitch() = synchronized(lock) {
         session += 1
+    }
+
+    /** A DIFFERENT person signs in: new account name, new session, new credential. */
+    fun switchAccount(to: String, token: String) = synchronized(lock) {
+        accountName = to
+        this.token = AccessToken(token)
+        credential += 1
+        session += 1
+        binding?.onSessionStarted(session)
     }
 
     /** W2-equivalent: logout. */
@@ -410,6 +420,50 @@ class VoiceSharingAccountOperationsTest {
             "{\"schema_version\":1,\"deletion_request_id\":\"del-4\",\"status\":\"deletion_pending\",\"surprise\":1}",
         )
         assertTrue("an unknown key must not yield a receipt", unknownKey == null)
+    }
+
+    @Test
+    fun `a delayed answer for account A never becomes account B's consent`() = runTest {
+        enqueueProjection("rev-A")
+        assertTrue(operations.refreshProjection())
+        // A's enrollment pauses on the wire long enough for a DIFFERENT person to sign in.
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(projectionJson(revision = "rev-A-enrolled", withdrawal = "active", enrolled = true, epoch = "epoch-A", disclosure = "v3"))
+                .setHeadersDelay(400, TimeUnit.MILLISECONDS),
+        )
+        val slow = async { operations.enroll(acceptedDisclosureVersion = "v3") }
+        withContext(Dispatchers.IO) { Thread.sleep(150) } // A's request is now in flight
+
+        owner.switchAccount(to = "other@example.com", token = "token-B")
+        assertNotEquals("PREMISE: a different account owns the session now", "user@example.com", owner.authoritySnapshot().accountName)
+        val outcome = slow.await()
+
+        assertTrue("A's answer arrived for an account that no longer exists", outcome is VoiceSharingMutationResult.Failure)
+        // The GET's own answer still stands (B has published nothing to replace it); what must NOT
+        // happen is A's ENROLLMENT landing as B's consent evidence.
+        assertEquals("rev-A", state.projection.value?.membershipRevision)
+        assertFalse("B must NOT inherit A's enrollment as B's consent", state.projection.value?.voiceSharingEnrolled ?: false)
+    }
+
+    @Test
+    fun `a delayed answer for a SIGNED-OUT session never republishes consent`() = runTest {
+        enqueueProjection("rev-A")
+        assertTrue(operations.refreshProjection())
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(projectionJson(revision = "rev-A-enrolled", withdrawal = "active", enrolled = true, epoch = "epoch-A", disclosure = "v3"))
+                .setHeadersDelay(400, TimeUnit.MILLISECONDS),
+        )
+        val slow = async { operations.enroll(acceptedDisclosureVersion = "v3") }
+        withContext(Dispatchers.IO) { Thread.sleep(150) }
+
+        owner.logout() // the session the request was issued for is gone
+        val outcome = slow.await()
+
+        assertTrue(outcome is VoiceSharingMutationResult.Failure)
+        assertEquals("rev-A", state.projection.value?.membershipRevision)
+        assertFalse("a signed-out session must not regain consent evidence", state.projection.value?.voiceSharingEnrolled ?: false)
     }
 
     @Test

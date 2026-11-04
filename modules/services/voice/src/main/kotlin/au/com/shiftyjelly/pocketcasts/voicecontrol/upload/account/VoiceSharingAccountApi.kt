@@ -125,9 +125,10 @@ class VoiceSharingAccountOperations(
     suspend fun refreshProjection(): Boolean {
         val bearer = aurisBearer() ?: return false
         val op = frozen(bearer, Route.GET, null)
+        val issued = issuedUnder()
         return when (val outcome = execute(op) { b, _ -> api.getVoiceSharing(b) }) {
             is Outcome.Body -> {
-                val applied = apply(outcome.json)
+                val applied = apply(outcome.json, issued)
                 state.onRefreshObserved?.invoke(
                     VoiceSharingRefreshDiagnostic(kind = VoiceSharingRefreshDiagnostic.Kind.APPLIED, status = null, bodyBytes = outcome.json.length, requestIds = outcome.requestIds, detail = applied.toString()),
                 )
@@ -160,9 +161,10 @@ class VoiceSharingAccountOperations(
     suspend fun enroll(acceptedDisclosureVersion: String): VoiceSharingMutationResult {
         val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
         val op = frozen(bearer, Route.ENROLLMENT, acceptedDisclosureVersion)
+        val issued = issuedUnder()
         return when (val outcome = execute(op) { b, payload -> api.postEnrollment(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json)
-            is Outcome.Conflict -> conflictOrFailure(outcome.json)
+            is Outcome.Body -> appliedOrFailure(outcome.json, issued)
+            is Outcome.Conflict -> conflictOrFailure(outcome.json, issued)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
@@ -170,34 +172,43 @@ class VoiceSharingAccountOperations(
     suspend fun withdraw(): VoiceSharingMutationResult {
         val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
         val op = frozen(bearer, Route.WITHDRAWAL, null)
+        val issued = issuedUnder()
         return when (val outcome = execute(op) { b, payload -> api.postWithdrawal(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json)
-            is Outcome.Conflict -> conflictOrFailure(outcome.json)
+            is Outcome.Body -> appliedOrFailure(outcome.json, issued)
+            is Outcome.Conflict -> conflictOrFailure(outcome.json, issued)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
     /** Terminal apply of a 200 body; the newest publication wins. */
-    private fun appliedOrFailure(json: String): VoiceSharingMutationResult {
+    private fun appliedOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        return if (apply(json)) VoiceSharingMutationResult.Applied(projection) else VoiceSharingMutationResult.Failure
+        return if (apply(json, issued)) VoiceSharingMutationResult.Applied(projection) else VoiceSharingMutationResult.Failure
     }
 
     /** 409: a conflict ONLY when the body parses strictly AND it was applied; never a silent retry. */
-    private fun conflictOrFailure(json: String): VoiceSharingMutationResult {
+    private fun conflictOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        if (!apply(json)) return VoiceSharingMutationResult.Failure
+        if (!apply(json, issued)) return VoiceSharingMutationResult.Failure
         return VoiceSharingMutationResult.MembershipConflict(projection)
     }
 
     /**
-     * Publishes an answer UNLESS a newer publication landed while it was in flight. The comparison
-     * and the write are one critical section, so a stale answer can never overwrite newer state.
+     * Publishes an answer ONLY for the account that asked and ONLY if nothing newer landed while it
+     * was in flight. The validation and the write are ONE owner critical section, so an answer that
+     * belongs to a previous account — or that a newer answer already superseded — can never become
+     * the current projection. Without this, a slow request for account A could publish A's
+     * enrollment as B's consent.
      */
-    private fun apply(json: String): Boolean = ownership.transaction {
-        val observed = state.publicationCount()
+    private fun apply(json: String, issued: Issued): Boolean = ownership.transaction {
+        val current = ownership.authoritySnapshot()
+        if (current.accountName != issued.accountName || current.session != issued.session) {
+            return@transaction false // a different account (or a new login) owns the answer now
+        }
+        if (state.publicationCount() != issued.publication) {
+            return@transaction false // a newer answer already landed
+        }
         val projection = state.parseProjection(json) ?: return@transaction false
-        if (state.publicationCount() != observed) return@transaction false
         state.publish(projection)
         true
     }
@@ -216,6 +227,27 @@ class VoiceSharingAccountOperations(
      * that quietly supplies *some* credential is the defect being fixed and looks like success.
      */
     private suspend fun aurisBearer(): String? = aurisToken.currentToken()?.takeIf { it.isNotBlank() }
+
+    /**
+     * What must still hold when an answer is applied: the ORDINARY account ownership observed when
+     * the request was ISSUED, and the publication value the answer is allowed to replace.
+     *
+     * Both are captured BEFORE the request goes out, because the interesting changes happen while
+     * it is in flight: a logout or an account switch, or a newer answer landing first. Neither can
+     * be seen by reading state after the await — that read describes the moment of return, not the
+     * moment of issue.
+     */
+    private data class Issued(
+        val accountName: String?,
+        val session: Long,
+        val publication: Long,
+    )
+
+    /** Captures the ownership and publication this request is issued under. */
+    private fun issuedUnder(): Issued = ownership.transaction {
+        val snapshot = ownership.authoritySnapshot()
+        Issued(accountName = snapshot.accountName, session = snapshot.session, publication = state.publicationCount())
+    }
 
     private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
 

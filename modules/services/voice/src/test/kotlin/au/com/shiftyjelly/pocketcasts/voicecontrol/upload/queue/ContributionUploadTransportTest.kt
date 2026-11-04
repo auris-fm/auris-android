@@ -129,10 +129,11 @@ class ContributionUploadTransportTest {
         ),
     )
 
-    private fun transport(token: String = "test-token") = ContributionUploadTransport(
+    private fun transport(token: String = "test-token", nowEpochMs: () -> Long = System::currentTimeMillis) = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer $token" },
         callTimeoutMs = 10_000,
+        nowEpochMs = nowEpochMs,
     )
 
     @Test
@@ -408,14 +409,32 @@ class ContributionUploadTransportTest {
     }
 
     @Test
-    fun `a server hint on quota_exceeded wins over the client floor`() {
+    fun `a SHORT quota hint cannot buy a pre-midnight retry - the day floor holds`() {
+        // Spec 0d59b1d5: the retry minimum for quota_exceeded is the LARGER of the next-day
+        // floor and the hint. A 120 s hint (the shape @cloud says ships today) must NOT permit
+        // a retry before the accounting day rolls.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 429
         responseBody = """{"schema_version":1,"code":"quota_exceeded","retry_after_s":120}"""
-        val result = transport().upload(id, record(id), ownedOf(file))
+        val result = transport(nowEpochMs = { 1_791_194_400_000L }).upload(id, record(id), ownedOf(file))
         val hint = (result as ContributionUploadTransport.Response.Retryable).retryAfterS
-        assertEquals("the server minimum is authoritative when present", 120L, hint)
+        // Pinned 10:00:00 UTC: the next midnight is exactly 14 h = 50,400 s away.
+        val expectedFloor = secondsUntilNextUtcMidnight(1_791_194_400_000L)
+        assertEquals(50_400L, expectedFloor)
+        assertEquals("a short hint must be raised to the day floor", expectedFloor, hint)
+    }
+
+    @Test
+    fun `a LONGER quota hint still wins over the day floor`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 429
+        responseBody = """{"schema_version":1,"code":"quota_exceeded","retry_after_s":172800}"""
+        val pinned = transport(nowEpochMs = { 1_791_194_400_000L })
+        val result = pinned.upload(id, record(id), ownedOf(file))
+        val hint = (result as ContributionUploadTransport.Response.Retryable).retryAfterS
+        assertEquals("a longer server minimum is authoritative", 172_800L, hint)
     }
 
     @Test

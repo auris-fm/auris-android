@@ -376,7 +376,11 @@ class LoopbackRefusalSettlementTest {
             assertEquals("$code: nothing may be attempted before the boundary", 0, early.attempted)
             assertEquals("$code: no second exchange before the boundary", 1, requestCount.get())
 
-            now += 60_000
+            // The quota day floor (core c74d7e30, spec 0d59b1d5): a quota_exceeded refusal with
+            // even a 30 s hint is held to the next UTC midnight, so the virtual clock advances
+            // TO the persisted durable boundary rather than a flat 60 s. For every other code the
+            // plain hint/backoff path still re-attempts after one minute.
+            now = if (code == "quota_exceeded") boundary!! else now + 60_000
             responseStatus = 201
             responseBody = receiptFor(id, digestBefore)
             receivedBodies.clear()

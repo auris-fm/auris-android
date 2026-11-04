@@ -124,10 +124,13 @@ object VoiceObservationModule {
         // FINITE PRODUCTION OUTCOME WAIT (core c74d7e30 connected fix, reviewer 91e13f28): the
         // null selection closed EVERY production capture (CollectionStartup installs
         // outcomeWaitGuard = { outcomeFinalizer.limitsSelected }, and limitsSelected was false).
-        // Selected 45 s: the measured full pipeline (wake → ASR → intent → cloud turn, report
-        // 0c9710ac) completes in well under 25 s, so 45 s bounds a hung router/recognizer while
-        // never expiring a healthy capture; the 60 s ceiling is the reviewed construction bound
-        // used by every finalizer control. At expiry the retained capture is finalized as
+        // Selected 45 s as a BOUNDED WAIT (spec 0d59b1d5): it is a finite cap on how long a
+        // retained capture may stay open without a terminal outcome — not a claim that every
+        // healthy capture finishes inside it. The one measured full pipeline (report 0c9710ac,
+        // under 25 s) shows the bound is a plausible order of magnitude; a capture that exceeds
+        // the bound is finalized outcome_wait_expired and PUBLISHED, losing neither the audio
+        // nor the evidence. The 60 s ceiling is the reviewed construction bound used by every
+        // finalizer control. At expiry the retained capture is finalized as
         // outcome_wait_expired and published, never left open forever.
         waitLimits = PRODUCTION_OUTCOME_WAIT,
         scope = scope,

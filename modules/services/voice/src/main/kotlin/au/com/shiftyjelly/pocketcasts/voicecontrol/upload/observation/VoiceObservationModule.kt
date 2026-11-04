@@ -121,11 +121,23 @@ object VoiceObservationModule {
         @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
     ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer(
         sink = sink,
-        waitLimits = null,
+        // FINITE PRODUCTION OUTCOME WAIT (core c74d7e30 connected fix, reviewer 91e13f28): the
+        // null selection closed EVERY production capture (CollectionStartup installs
+        // outcomeWaitGuard = { outcomeFinalizer.limitsSelected }, and limitsSelected was false).
+        // Selected 45 s: the measured full pipeline (wake → ASR → intent → cloud turn, report
+        // 0c9710ac) completes in well under 25 s, so 45 s bounds a hung router/recognizer while
+        // never expiring a healthy capture; the 60 s ceiling is the reviewed construction bound
+        // used by every finalizer control. At expiry the retained capture is finalized as
+        // outcome_wait_expired and published, never left open forever.
+        waitLimits = PRODUCTION_OUTCOME_WAIT,
         scope = scope,
         // Same monotonic domain the sink composes by default (production clock).
         nowMs = { System.nanoTime() / 1_000_000L },
     )
+
+    /** The ONE reviewed production selection; asserted verbatim by the outcome-wait control. */
+    internal val PRODUCTION_OUTCOME_WAIT: OutcomeWaitLimits =
+        OutcomeWaitLimits(selectedWaitMs = 45_000L, ceilingWaitMs = 60_000L)
 
     @Provides
     @Singleton

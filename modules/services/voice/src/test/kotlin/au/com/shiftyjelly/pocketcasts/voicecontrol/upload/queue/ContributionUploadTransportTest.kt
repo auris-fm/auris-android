@@ -13,6 +13,7 @@ import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -384,6 +385,50 @@ class ContributionUploadTransportTest {
             val result = transport().upload(id, record(id), ownedOf(file))
             assertEquals("$status $code", expected, result::class)
         }
+    }
+
+    @Test
+    fun `a quota_exceeded refusal without a server hint carries the client next-day floor`() {
+        // Core c74d7e30: the daily limit is metered at acceptance, and its refusal
+        // (quota_exceeded, @cloud dc264066: NO retry_after_s today) must not burn the bounded
+        // attempt budget in hours of jittered backoff. When the server names no minimum, the
+        // transport supplies the floor itself: seconds until the next UTC midnight.
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 429
+        responseBody = """{"schema_version":1,"code":"quota_exceeded"}"""
+        val result = transport().upload(id, record(id), ownedOf(file))
+        assertTrue("quota_exceeded retains", result is ContributionUploadTransport.Response.Retryable)
+        val hint = (result as ContributionUploadTransport.Response.Retryable).retryAfterS
+        assertNotNull("an absent server hint must become the client next-day floor", hint)
+        assertTrue(
+            "the floor must be within one day (got $hint s)",
+            hint!! > 0L && hint <= 24L * 3600L + 1L,
+        )
+    }
+
+    @Test
+    fun `a server hint on quota_exceeded wins over the client floor`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 429
+        responseBody = """{"schema_version":1,"code":"quota_exceeded","retry_after_s":120}"""
+        val result = transport().upload(id, record(id), ownedOf(file))
+        val hint = (result as ContributionUploadTransport.Response.Retryable).retryAfterS
+        assertEquals("the server minimum is authoritative when present", 120L, hint)
+    }
+
+    @Test
+    fun `a rate_limited refusal without a hint keeps the plain backoff`() {
+        // The day floor is quota-specific (@cloud dc264066): rate limiting resolves on its own
+        // backoff and must not be pushed to the next UTC midnight.
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 429
+        responseBody = """{"schema_version":1,"code":"rate_limited"}"""
+        val result = transport().upload(id, record(id), ownedOf(file))
+        val hint = (result as ContributionUploadTransport.Response.Retryable).retryAfterS
+        assertNull("rate_limited keeps the jittered backoff (no floor)", hint)
     }
 
     @Test

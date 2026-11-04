@@ -39,6 +39,11 @@ class ContributionUploadTransport(
     private val client: OkHttpClient = SHARED_CLIENT,
     /** Bound for ONE whole exchange when the caller supplies no deadline of its own. */
     private val callTimeoutMs: Long = 120_000,
+    /**
+     * Wall-clock seam (core c74d7e30): the epoch-ms source for the client-side next-UTC-midnight
+     * retry floor. Production uses the system clock; controls pin it for exact assertions.
+     */
+    private val nowEpochMs: () -> Long = { System.currentTimeMillis() },
     /** Ceiling on calls in flight; attempts beyond it are refused locally and retried later. */
     private val maxConcurrentCalls: Int = MAX_CONCURRENT_CALLS_DEFAULT,
     /**
@@ -354,9 +359,17 @@ class ContributionUploadTransport(
         // A code whose status disagrees with the HTTP status is not a disposition this client acts on.
         if (code != null && statusForCode[code] != status) return Response.Retryable(status, retryHint(retryAfterS))
         return when (byCode[code] ?: unknownFor(status)) {
-            Disposition.RETRY -> Response.Retryable(status, retryHint(retryAfterS))
+            // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30, @cloud
+            // dc264066): quota_exceeded carries no retry_after_s today, so until the server adds
+            // the day-scale hint the transport supplies the floor itself — seconds until the next
+            // UTC midnight. A present server hint always wins; the store treats the value as a
+            // MINIMUM either way, so the jittered backoff can only lengthen it, never shorten.
+            Disposition.RETRY -> Response.Retryable(status, retryHint(retryAfterS) ?: quotaFloorS(code))
+
             Disposition.UNAUTHORIZED -> Response.Unauthorized(status)
+
             Disposition.POLICY -> Response.PolicyRefused(code ?: "policy")
+
             Disposition.TERMINAL -> Response.Terminal(status, code ?: "unknown")
         }
     }
@@ -378,6 +391,13 @@ class ContributionUploadTransport(
     }
 
     private fun retryHint(retryAfterS: Long?): Long? = retryAfterS?.takeIf { it > 0 }
+
+    /**
+     * THE QUOTA BELT (core c74d7e30): for the daily-quota refusal ONLY, an absent server hint is
+     * replaced by the seconds until the next UTC midnight — the accounting boundary that will
+     * restore headroom. Any other retryable code keeps the plain jittered backoff.
+     */
+    private fun quotaFloorS(code: String?): Long? = if (code == "quota_exceeded") secondsUntilNextUtcMidnight(nowEpochMs()) else null
 
     // Codes this client does not know yet are RETRIED, never terminal disposal: deleting audio because a
     // server introduced a code we have not read is not a risk worth taking. 401 is the one status-class
@@ -469,6 +489,20 @@ class ContributionUploadTransport(
 
     private companion object {
         const val MAX_BODY_BYTES = 1 shl 20
+
+        /** Seconds from [nowMs] until the next 00:00:00 UTC, ceiled, always positive. */
+        fun secondsUntilNextUtcMidnight(nowMs: Long): Long {
+            val cal = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC"))
+            cal.timeInMillis = nowMs
+            cal.add(java.util.Calendar.DAY_OF_MONTH, 1)
+            cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+            cal.set(java.util.Calendar.MINUTE, 0)
+            cal.set(java.util.Calendar.SECOND, 0)
+            cal.set(java.util.Calendar.MILLISECOND, 0)
+            val untilMs = cal.timeInMillis - nowMs
+            require(untilMs > 0L) { "next UTC midnight must lie in the future" }
+            return (untilMs + 999L) / 1000L
+        }
         const val COPY_BUFFER_BYTES = 16 * 1024
         const val MAX_CONCURRENT_CALLS_DEFAULT = 2
 

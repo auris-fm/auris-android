@@ -42,6 +42,35 @@ class CaptureWithoutAllowanceTest {
     }
 
     @Test
+    fun `consent refusal still closes admission under the production outcome-wait guard`() {
+        // The production guard (CollectionStartup: outcomeWaitGuard = { limitsSelected }, with the
+        // module's FINITE PRODUCTION_OUTCOME_WAIT) admits; a WITHDRAWN/revoked consent decision
+        // must STILL refuse — the wait guard never overrides consent/policy (spec e6b28827 keeps
+        // consent/policy checks).
+        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val finalizer = CaptureOutcomeFinalizer(
+            sink = sink,
+            waitLimits = VoiceObservationModule.PRODUCTION_OUTCOME_WAIT,
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob()),
+            nowMs = { 0L },
+        )
+        val refusedObserver = SegmentObserver(
+            gate = CollectionGate { it.shouldRetainNewWork },
+            sink = sink,
+            authority = { AuthorityDecision(collectionPermitted = false, fullRevocation = false) },
+            issueAuthority = { ISSUED_AUTHORITY },
+        )
+        refusedObserver.outcomeWaitGuard = { finalizer.limitsSelected }
+        assertTrue("premise: the production guard admits", finalizer.limitsSelected)
+        val admission = refusedObserver.speechStartedAdmitting(
+            captureSession = 1L,
+            routeClass = "Headset",
+            producerSize = 8,
+        )
+        assertEquals("consent refusal closes admission even with the production guard live", null, admission)
+    }
+
+    @Test
     fun `a consented capture is admitted with NO allowance authority composed`() {
         val (observer, _) = observer()
 

@@ -196,13 +196,6 @@ class CastPlayer(
         completionToken: String?,
         admittedDeadlineMs: Long?,
     ): Player.EpisodeSeekOutcome {
-        // THE DEADLINE IS ENFORCED BEFORE THE RECEIVER REQUEST IS ISSUED: past-deadline here means
-        // no effect was sent, so this is a refusal -- not an unknown outcome that could invite a
-        // retry into an operation the receiver never saw.
-        if (admittedDeadlineMs != null && System.nanoTime() / 1_000_000L >= admittedDeadlineMs) {
-            Timber.i("CastPlayer refused a seek: admitted deadline expired at the mutation")
-            return Player.EpisodeSeekOutcome.Refused
-        }
         // THE SAME CONTRACT AS LocalPlayer, enforced here because a cast player can be RE-POINTED by
         // `setEpisode` while a seek is in flight.
         //
@@ -215,6 +208,15 @@ class CastPlayer(
             synchronized(episodeLock) {
                 if (localEpisodeUuid != expectedEpisodeUuid) {
                     Timber.i("CastPlayer refused a seek: episode changed")
+                    return@synchronized Issued.Refused
+                }
+                // THE DEADLINE IS ENFORCED INSIDE THE RECEIVER-ISSUE BOUNDARY, under the same lock
+                // and immediately before any receiver request is sent: a re-pointing waits for this
+                // check, and nothing is issued after expiry. Past-deadline means NO effect was sent,
+                // so this is a refusal -- not an unknown outcome that could invite a retry into an
+                // operation the receiver never saw.
+                if (admittedDeadlineMs != null && System.nanoTime() / 1_000_000L >= admittedDeadlineMs) {
+                    Timber.i("CastPlayer refused a seek: admitted deadline expired at the mutation")
                     return@synchronized Issued.Refused
                 }
                 // THE RECEIVER'S OWN EPISODE MUST MATCH before its position can be called this

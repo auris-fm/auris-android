@@ -1760,6 +1760,14 @@ open class PlaybackManager @Inject constructor(
             statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
+            // THE DEADLINE BOUNDS THE EOF EFFECT PATH TOO. This branch never reaches the player, so
+            // the player's own mutation check would never run; without this check an expired
+            // admission could still end playback and supply completion evidence. Past-deadline, the
+            // effect simply never happens: no completion evidence is supplied and no completion fires.
+            if (admittedDeadlineMs != null && System.nanoTime() / 1_000_000L >= admittedDeadlineMs) {
+                Timber.w("[Playback] refused skip-forward to EOF: admitted deadline expired")
+                return SkipOutcome.Refused
+            }
             // AN EXPLICIT END-OF-FILE OUTCOME IS COMPLETION EVIDENCE. This branch never reaches the
             // player seek, so an armed signal would wait for a callback that never comes; the owner
             // completes it HERE with the engine-confirmed endpoint instead. A null endpoint supplies

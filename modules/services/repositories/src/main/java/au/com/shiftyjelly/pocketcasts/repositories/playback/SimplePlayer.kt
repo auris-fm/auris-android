@@ -79,6 +79,12 @@ class SimplePlayer(
 
     private var hasVideoSurface = false
 
+    /**
+     * SEEK LANDING CORRELATION. The engine's applied-seek discontinuity carries the landed item
+     * clock; this recorder names the request that landed. No landing is ever self-acknowledged.
+     */
+    private val seekCompletionEvidence = SeekCompletionEvidence()
+
     @Volatile
     private var prepared = false
 
@@ -156,9 +162,12 @@ class SimplePlayer(
             Toast.makeText(context, "Unable to seek. File headers appear to be invalid.", Toast.LENGTH_SHORT).show()
         } else {
             try {
+                // THE REQUEST IS RECORDED; THE COMPLETION COMES FROM THE ENGINE. Calling seekTo and
+                // immediately self-acknowledging would report the REQUESTED target as landing
+                // evidence -- an acknowledgment, not a completed-seek observation. The engine's own
+                // seek discontinuity supplies the landed position and this request's token.
+                seekCompletionEvidence.onRequestIssued(completionToken)
                 player?.seekTo(positionMs.toLong())
-                // THE COMPLETION IS ISSUED BY ITS OWN REQUEST SITE, carrying THAT request's token.
-                super.onSeekComplete(positionMs, completionToken)
             } catch (e: Exception) {
                 LogBuffer.e(LogBuffer.TAG_PLAYBACK, e, "Failed to seek to $positionMs ms.")
             }
@@ -241,6 +250,12 @@ class SimplePlayer(
             .build()
         player.addListener(WearUnsuitableOutputPlaybackSuppressionResolverListener(context))
         player.addListener(PlayPauseListener(playbackStatsCollector))
+        // THE SEEK-APPLIED WATCHER IS THE NATIVE COMPLETION PATH: see its class doc.
+        player.addListener(
+            SeekAppliedWatcher(seekCompletionEvidence) { positionMs, completionToken ->
+                onSeekComplete(positionMs, completionToken)
+            },
+        )
         player.addAnalyticsListener(renderer)
 
         handleStop()

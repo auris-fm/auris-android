@@ -56,7 +56,7 @@ class UploadIdentityAuthorityTest {
 
     private val owner = LockingOwner("a@x", 1L, "Bearer-A")
     private val state = VoiceSharingAccountState()
-    private val authority = UploadIdentityAuthority(state) { block -> owner.transaction { block(owner.authoritySnapshot()) } }
+    private val authority = UploadIdentityAuthority { block -> owner.transaction { block(owner.authoritySnapshot()) } }
 
     private fun publish(epoch: String?, bearer: String, account: String, session: Long) {
         val token = state.sessionStarted(session)
@@ -79,13 +79,14 @@ class UploadIdentityAuthorityTest {
     }
 
     @Test
-    fun `a live identity whose epoch differs from the admitted one resolves to null`() {
-        publish("epoch-2", "Bearer-B", "b@y", 2)
-        assertNull("epoch-1 is retired: retain, never send", authority.credentialFor(admittedA))
+    fun `an epoch difference alone never refuses - epoch is provenance, not a drain gate`() {
+        publish("epoch-1", "Bearer-A", "a@x", 1)
+        owner.switchTo("a@x", 1L, "Bearer-A2")
+        assertEquals("same account+session, rotated epoch: the drain proceeds", "Bearer-A2", authority.credentialFor(admittedA)?.bearer)
     }
 
     @Test
-    fun `no owner token or no account resolves to null even when the epoch matches`() {
+    fun `no owner token or no account resolves to null`() {
         publish("epoch-1", "Bearer-A", "a@x", 1)
         owner.clearAccount()
         assertNull(authority.credentialFor(admittedA))
@@ -105,7 +106,7 @@ class UploadIdentityAuthorityTest {
     }
 
     @Test
-    fun `soak - concurrent switching never yields a mixed bearer-epoch pair (owner-contract soak, not production interleaving proof)`() {
+    fun `soak - concurrent switching never yields a bearer from another account (owner-contract soak, not production interleaving proof)`() {
         publish("epoch-1", "Bearer-A", "a@x", 1)
         val stop = AtomicInteger(0)
         val reads = AtomicInteger(0)
@@ -121,13 +122,13 @@ class UploadIdentityAuthorityTest {
         val reader = Thread {
             while (stop.get() == 0) {
                 for (admitted in listOf(admittedA, UploadIdentityAuthority.AdmittedIdentity("b@y", 2L, "epoch-2"))) {
-                    val resolved = authority.credentialFor(admitted)
-                    reads.incrementAndGet()
-                    if (resolved != null) {
-                        val pair = resolved.bearer to resolved.epoch
-                        val consistent = pair == ("Bearer-A" to "epoch-1") || pair == ("Bearer-B" to "epoch-2")
-                        if (!consistent) mixed.incrementAndGet()
+                    // Compare INSIDE the same owner transaction, or the diagnostic itself races.
+                    val pair = owner.transaction {
+                        val resolved = authority.credentialFor(admitted)
+                        resolved?.bearer to owner.snap.token?.value
                     }
+                    reads.incrementAndGet()
+                    if (pair.first != null && pair.first != pair.second) mixed.incrementAndGet()
                 }
             }
         }

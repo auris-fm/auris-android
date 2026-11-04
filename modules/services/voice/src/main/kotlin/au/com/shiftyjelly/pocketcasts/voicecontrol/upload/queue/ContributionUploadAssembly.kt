@@ -33,14 +33,9 @@ class ContributionUploadAssembly(
     /** Called after a VALIDATED acceptance releases the entry; never on an unvalidated one. */
     private val onAccepted: (generation: Long, captureId: String) -> Unit = { _, _ -> },
     /**
-     * IDENTITY BINDING (reviewer 13eeec80): the admitted entry's enrollment epoch must still be the
-     * account's current epoch at send time. A switch - including during credential await, which the
-     * fence revocation covers - retains the capture instead of sending it under a retired identity.
-     */
-    private val identityHolds: ((epoch: String) -> Boolean)? = null,
-    /**
-     * Acquires the credential FOR THE ADMITTED IDENTITY (account/session/epoch) as one owner-lock
-     * snapshot, or null when any component disagrees. The assembly freezes the returned bearer into
+     * Acquires the credential FOR THE ADMITTED IDENTITY (account/session; epoch is provenance
+     * only) as one owner-lock snapshot, or null when any component disagrees. The assembly freezes
+     * the returned bearer into
      * the attempt, so the transport can never consult a fresher identity mid-flight.
      */
     private val credentialFor: ((admitted: UploadIdentityAuthority.AdmittedIdentity) -> UploadIdentityAuthority.LiveCredential?)? = null,
@@ -116,12 +111,8 @@ class ContributionUploadAssembly(
             // so it is refused as unavailable (and retained) rather than sent by pathname.
             val owned = capture.owned ?: throw CaptureUnavailable(captureId)
             try {
-                // IDENTITY BINDING: an admitted epoch that is no longer the account's current epoch is a
-                // retired identity - the capture is RETAINED, never sent under it.
-                if (capture.enrollmentEpoch != null && identityHolds?.invoke(capture.enrollmentEpoch) == false) {
-                    throw CaptureUnavailable(captureId)
-                }
-                // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY (account/session/epoch): one
+                // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY (account/session; epoch is
+                // provenance only): one
                 // owner-lock snapshot; any component mismatch retains.
                 val admitted = UploadIdentityAuthority.AdmittedIdentity(
                     capture.enrollmentAccount,

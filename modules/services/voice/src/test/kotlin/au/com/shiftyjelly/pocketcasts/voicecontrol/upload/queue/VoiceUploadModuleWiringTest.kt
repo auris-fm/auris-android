@@ -155,49 +155,6 @@ class VoiceUploadModuleWiringTest {
     }
 
     @Test
-    fun `an epoch switch RETAINS the capture instead of sending under a retired identity`() {
-        val root = tmp.newFolder("wiring-identity")
-        val store = newStore(root)
-        val id = UUID.randomUUID().toString()
-        prepareCapture(store, id)
-        requests.set(0)
-        responseStatus = 201
-        responseBody = receiptFor(store, id, "accepted")
-        val port = startServer()
-
-        // PREMISE ONLY: prove the capture opens. Its descriptor is released at once - the assembly opens
-        // its own source below, and the source bound is process-wide, so abandoning this one starves a
-        // later test rather than failing this one (reviewer 2c7dc375).
-        store.durableCapture(id)!!.owned?.settle(1_000L)
-        val capture = store.durableCapture(id)!!
-        capture.owned?.settle(1_000L)
-        val assembly = ContributionUploadAssembly(
-            store = store,
-            transport = ContributionUploadTransport(
-                endpoint = "http://127.0.0.1:$port/v1/contributions",
-                authorization = { "Bearer t" },
-            ),
-            captureFor = { captureId ->
-                store.durableCapture(captureId)?.let {
-                    // The admitted epoch travels with the capture (as the module does).
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, owned = it.owned)
-                }
-            },
-            clock = { 51_000_000L },
-            networkAvailable = { true },
-            // The account has MOVED to epoch-2: epoch-1 captures are a retired identity.
-            identityHolds = { epoch -> epoch == "epoch-2" },
-        )
-        val result = assembly.poll()
-
-        assertEquals("nothing was sent under the retired epoch", 0, requests.get())
-        // attempted counts "ran and retained" - the identity refusal is an unconfirmed retain by design.
-        assertEquals("the attempt ran but settled as retained", 1, result.attempted)
-        assertTrue("the capture is RETAINED, not released", store.readyEntries().any { it.captureId == id })
-        assertNull("and the server never answered", (null as kotlin.Int?))
-    }
-
-    @Test
     fun `an authority that refuses the admitted identity retains instead of sending`() {
         val root = tmp.newFolder("wiring-switch")
         val store = newStore(root)
@@ -223,7 +180,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             // A REAL authority refuses (null) when any admitted component disagrees with the live one.
             credentialFor = { null },
         )
@@ -262,7 +218,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 val live = UploadIdentityAuthority.LiveCredential("Bearer-A", "a@x", 1L, admitted.epoch)
                 acquired.countDown()
@@ -363,7 +318,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 check(admitted.account == liveAccount.get() && admitted.session == 7L)
                 UploadIdentityAuthority.LiveCredential("Bearer-A", liveAccount.get(), 7L, admitted.epoch)
@@ -410,7 +364,6 @@ class VoiceUploadModuleWiringTest {
             binding,
             accountState,
             { owner.authoritySnapshot() },
-            { accountState.projection.value?.enrollmentEpoch },
             store,
         )
         val assembly = ContributionUploadAssembly(
@@ -427,7 +380,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
             },
@@ -490,7 +442,6 @@ class VoiceUploadModuleWiringTest {
             binding,
             accountState,
             { owner.authoritySnapshot() },
-            { accountState.projection.value?.enrollmentEpoch },
             store,
         )
         val assembly = ContributionUploadAssembly(
@@ -507,7 +458,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
             },
@@ -575,7 +525,6 @@ class VoiceUploadModuleWiringTest {
             binding,
             accountState,
             { owner.authoritySnapshot() },
-            { accountState.projection.value?.enrollmentEpoch },
             store,
         )
         val assembly = ContributionUploadAssembly(
@@ -592,7 +541,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
             },
@@ -649,7 +597,6 @@ class VoiceUploadModuleWiringTest {
             binding,
             accountState,
             { owner.authoritySnapshot() },
-            { accountState.projection.value?.enrollmentEpoch },
             store,
         )
         val assembly = ContributionUploadAssembly(
@@ -666,7 +613,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
             },
@@ -732,7 +678,6 @@ class VoiceUploadModuleWiringTest {
             binding,
             accountState,
             { owner.authoritySnapshot() },
-            { accountState.projection.value?.enrollmentEpoch },
             store,
         )
         val assembly = ContributionUploadAssembly(
@@ -749,7 +694,6 @@ class VoiceUploadModuleWiringTest {
             },
             clock = { 51_000_000L },
             networkAvailable = { true },
-            identityHolds = { true },
             credentialFor = { admitted ->
                 UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
             },

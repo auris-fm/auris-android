@@ -123,12 +123,10 @@ class VoiceSharingAccountOperations(
 
     /** Current-session GET: the way the state gains authority. */
     suspend fun refreshProjection(): Boolean {
-        val bearer = aurisBearer() ?: return false
-        val op = frozen(bearer, Route.GET, null)
-        val issued = issuedUnder()
-        return when (val outcome = execute(op) { b, _ -> api.getVoiceSharing(b) }) {
+        val request = issue(Route.GET, null) ?: return false
+        return when (val outcome = execute(request.op) { b, _ -> api.getVoiceSharing(b) }) {
             is Outcome.Body -> {
-                val applied = apply(outcome.json, issued)
+                val applied = apply(outcome.json, request.issued)
                 state.onRefreshObserved?.invoke(
                     VoiceSharingRefreshDiagnostic(kind = VoiceSharingRefreshDiagnostic.Kind.APPLIED, status = null, bodyBytes = outcome.json.length, requestIds = outcome.requestIds, detail = applied.toString()),
                 )
@@ -159,23 +157,19 @@ class VoiceSharingAccountOperations(
     }
 
     suspend fun enroll(acceptedDisclosureVersion: String): VoiceSharingMutationResult {
-        val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
-        val op = frozen(bearer, Route.ENROLLMENT, acceptedDisclosureVersion)
-        val issued = issuedUnder()
-        return when (val outcome = execute(op) { b, payload -> api.postEnrollment(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json, issued)
-            is Outcome.Conflict -> conflictOrFailure(outcome.json, issued)
+        val request = issue(Route.ENROLLMENT, acceptedDisclosureVersion) ?: return VoiceSharingMutationResult.Failure
+        return when (val outcome = execute(request.op) { b, payload -> api.postEnrollment(b, payload) }) {
+            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
+            is Outcome.Conflict -> conflictOrFailure(outcome.json, request.issued)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
     suspend fun withdraw(): VoiceSharingMutationResult {
-        val bearer = aurisBearer() ?: return VoiceSharingMutationResult.Failure
-        val op = frozen(bearer, Route.WITHDRAWAL, null)
-        val issued = issuedUnder()
-        return when (val outcome = execute(op) { b, payload -> api.postWithdrawal(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json, issued)
-            is Outcome.Conflict -> conflictOrFailure(outcome.json, issued)
+        val request = issue(Route.WITHDRAWAL, null) ?: return VoiceSharingMutationResult.Failure
+        return when (val outcome = execute(request.op) { b, payload -> api.postWithdrawal(b, payload) }) {
+            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
+            is Outcome.Conflict -> conflictOrFailure(outcome.json, request.issued)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
@@ -214,9 +208,8 @@ class VoiceSharingAccountOperations(
     }
 
     suspend fun deleteData(): DeletionReceipt? {
-        val bearer = aurisBearer() ?: return null
-        val op = frozen(bearer, Route.DELETION, null)
-        val body = execute(op, expectedStatus = 202) { b, payload -> api.deleteData(b, payload) }
+        val request = issue(Route.DELETION, null) ?: return null
+        val body = execute(request.op, expectedStatus = 202) { b, payload -> api.deleteData(b, payload) }
             .let { (it as? Outcome.Body)?.json } ?: return null
         return parseDeletionReceipt(body)
     }
@@ -243,11 +236,46 @@ class VoiceSharingAccountOperations(
         val publication: Long,
     )
 
-    /** Captures the ownership and publication this request is issued under. */
-    private fun issuedUnder(): Issued = ownership.transaction {
+    /** Captures the ordinary owner this request will be issued for. */
+    private fun ownerNow(): Pair<String?, Long> = ownership.transaction {
         val snapshot = ownership.authoritySnapshot()
-        Issued(accountName = snapshot.accountName, session = snapshot.session, publication = state.publicationCount())
+        snapshot.accountName to snapshot.session
     }
+
+    /**
+     * Issues one request under ONE ordinary owner, refusing rather than rebinding.
+     *
+     * The bearer acquisition SUSPENDS, so another thread can sign a different account in while it
+     * runs. Acquiring first and capturing afterwards would send A's bearer under B's captured
+     * ownership — that interleaving needs no suspension at all, just a switch on another thread.
+     * So the owner is captured BEFORE the bearer and must still be the same account and session
+     * AFTER it: a bearer that no longer belongs to the captured owner is DISCARDED, never
+     * relabelled. A same-account token refresh passes, because it moves the credential, not the
+     * session.
+     */
+    private suspend fun issue(route: Route, disclosureVersion: String?): IssuedRequest? {
+        val (accountName, session) = ownerNow()
+        val bearer = aurisBearer() ?: return null
+        val issued = ownership.transaction {
+            val snapshot = ownership.authoritySnapshot()
+            if (snapshot.accountName != accountName || snapshot.session != session) return@transaction null
+            IssuedRequest(frozen(bearer, route, disclosureVersion), Issued(accountName, session, state.publicationCount()))
+        } ?: return null
+        return issued
+    }
+
+    private class IssuedRequest(val op: FrozenOperation, val issued: Issued)
+
+    /**
+     * Issues one request under ONE ordinary owner, refusing rather than rebinding.
+     *
+     * The bearer acquisition SUSPENDS, so another thread can sign a different account in while it
+     * runs. Acquiring first and capturing afterwards would then send A's bearer under B's captured
+     * ownership — no suspension is needed for that interleaving, just a switch on another thread.
+     * So the owner is captured BEFORE the bearer, and must still be that same account and session
+     * AFTER it: a bearer that no longer belongs to the captured owner is DISCARDED, never relabelled.
+     * Same-account token refreshes pass, because they move the credential, not the session.
+     */
 
     private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
 

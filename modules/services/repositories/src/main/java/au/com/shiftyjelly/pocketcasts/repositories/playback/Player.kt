@@ -96,7 +96,7 @@ interface Player {
      * UNAVAILABLE, which is what stops a direct caller reaching an unrestricted seek through the
      * default.
      */
-    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): EpisodeSeekOutcome {
+    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String, completionToken: String? = null): EpisodeSeekOutcome {
         // THE DEFAULT REFUSES RATHER THAN PRETENDING. It cannot enforce the binding -- it checks and then
         // delegates, leaving the window this contract exists to close -- so returning a position here
         // would report an enforcement that did not happen. An implementation that CAN enforce it

@@ -233,6 +233,14 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
+    /**
+     * THROUGH THE OWNER: only the manager's registry holds the armed token, so only it can release.
+     * A settled or timed-out operation's token must not stay addressable by the native path.
+     */
+    override fun releaseSeekCompletion(seekCompletion: PlaybackManager.SeekCompletionSignal?) {
+        if (seekCompletion != null) playbackManager.removeSeekCompletion(seekCompletion)
+    }
+
     override fun nextEpisode(): VoiceResponse {
         playbackManager.playNextInQueue(sourceView = SourceView.VOICE_COMMANDS)
         return VoiceResponse.Earcon(EarconId.NEXT_EPISODE)

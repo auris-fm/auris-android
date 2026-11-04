@@ -555,6 +555,13 @@ interface VoicePlaybackSink {
     ): EpisodeOperationResult
 
     /**
+     * Release a seek completion signal after its operation has settled: its token can no longer be
+     * completed from the native path, so a timed-out or settled operation cannot linger addressable.
+     * No-op by default for callers that never pass signals.
+     */
+    fun releaseSeekCompletion(seekCompletion: PlaybackManager.SeekCompletionSignal?) {}
+
+    /**
      * Seek to a signed absolute episode position, ON [expectedEpisodeId].
      *
      * [expectedEpisodeId] MAKES VALIDATION AND MUTATION ONE DECISION. A separate check cannot work: the

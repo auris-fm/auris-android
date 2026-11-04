@@ -142,6 +142,7 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = seekOutcome
         }
         val fields = PlaybackManager::class.java
@@ -305,6 +306,7 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 entered.complete(Unit)
                 proceed.await()
@@ -401,6 +403,7 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
                 .accepted(positionMs = null)
         }
@@ -587,6 +590,7 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
+                completionToken: String?,
             ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 // THE PLAYER'S OWN MUTATION POINT: it records the seek only while it still addresses the
                 // episode it was asked about, which is what makes a re-pointing REFUSED rather than

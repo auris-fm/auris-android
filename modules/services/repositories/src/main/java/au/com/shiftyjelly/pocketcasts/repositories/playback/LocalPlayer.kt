@@ -24,6 +24,9 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
     @Volatile private var positionMs: Int = 0
 
     private var seekingToPositionMs: Int = 0
+
+    /** The invocation token of the seek in flight, carried back on its completion event. */
+    private var pendingSeekToken: String? = null
     private var seekRetryAllowed: Boolean = false
 
     protected var episodeLocation: EpisodeLocation? = null
@@ -143,7 +146,11 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
             return
         }
         this.positionMs = positionMs
-        onPlayerEvent(this, PlayerEvent.SeekComplete(positionMs))
+        // THE TOKEN IS THE INVOCATION IDENTITY. It was set by the seek request itself -- an
+        // episode-bound operation's token, or null for an untracked UI seek -- so this event is
+        // addressable to exactly the invocation that caused it, never to whoever collects first.
+        onPlayerEvent(this, PlayerEvent.SeekComplete(positionMs, pendingSeekToken))
+        pendingSeekToken = null
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer onSeekComplete %.3f", positionMs / 1000f)
     }
 
@@ -182,6 +189,9 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
 
             this@LocalPlayer.positionMs = positionMs
+            // AN UNTRACKED UI SEEK CARRIES NO TOKEN: any in-flight token is not this seek's, and a
+            // stale one must never be emitted as this event's identity.
+            pendingSeekToken = null
             if (handleIsPrepared()) {
                 onSeekStart(positionMs)
                 handleSeekToTimeMs(positionMs)
@@ -202,7 +212,7 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Player.EpisodeSeekOutcome {
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String, completionToken: String?): Player.EpisodeSeekOutcome {
         return withContext(Dispatchers.Main) {
             if (positionMs < 0) return@withContext Player.EpisodeSeekOutcome.Refused
             // THE CHECK, THE PRE-ACTION SNAPSHOT AND THE MUTATION ARE ONE STEP, under the lock
@@ -217,6 +227,9 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
                 val before = handleCurrentPositionMs().toLong()
                 LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
                 this@LocalPlayer.positionMs = positionMs
+                // THE TOKEN IS SET WITH THE REQUEST, under the same lock: from here until the
+                // completion fires, the event this seek produces carries THIS invocation's identity.
+                pendingSeekToken = completionToken
                 if (handleIsPrepared()) {
                     onSeekStart(positionMs)
                     handleSeekToTimeMs(positionMs)

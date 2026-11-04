@@ -12,7 +12,11 @@ sealed class PlayerEvent {
     object PlayerPaused : PlayerEvent()
     class Completion(val episodeUUID: String?) : PlayerEvent()
     object DurationAvailable : PlayerEvent()
-    class SeekComplete(val positionMs: Int) : PlayerEvent()
+    class SeekComplete(
+        val positionMs: Int,
+        // The invocation identity carried through the seek request; null for a seek nobody awaits.
+        val completionToken: String? = null,
+    ) : PlayerEvent()
     class MetadataAvailable(val metaData: EpisodeFileMetadata) : PlayerEvent()
     class RemoteMetadataNotMatched(val remoteEpisodeUuid: String) : PlayerEvent()
     class EpisodeChanged(val episodeUuid: String) : PlayerEvent()

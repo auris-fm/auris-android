@@ -1360,6 +1360,8 @@ open class PlaybackManager @Inject constructor(
         val episodeUuid: String,
         val positionMs: Int?,
         val endOfFile: Boolean,
+        /** The invocation identity that travelled through the native seek request. Null for a seek nobody awaits. */
+        val completionToken: String? = null,
     )
 
     /**
@@ -1370,6 +1372,9 @@ open class PlaybackManager @Inject constructor(
      * seek did not happen.
      */
     class SeekCompletionSignal {
+        /** The invocation identity carried into the native seek request and back on its completion event. */
+        val token: String = java.util.UUID.randomUUID().toString()
+
         private val completed = kotlinx.coroutines.CompletableDeferred<SeekCompletionEvent>()
 
         /** Blocks until THIS invocation's completion arrives. Budgeting is the caller's job. */
@@ -1384,8 +1389,13 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    /** Armed seek invocations, oldest first: the next native completion belongs to the head. */
-    private val pendingSeekCompletions = java.util.concurrent.ConcurrentLinkedQueue<SeekCompletionSignal>()
+    /** Token-addressed registry: an armed invocation is completed only by ITS OWN native completion. */
+    private val seekCompletions = SeekCompletionCoordinator()
+
+    /** The operation is settling or settled: its token can no longer be completed from the native path. */
+    fun removeSeekCompletion(seekCompletion: SeekCompletionSignal) {
+        seekCompletions.release(seekCompletion)
+    }
 
     /**
      * The DECISION a skip's scoped mutation implies, in ONE place for both directions.
@@ -1518,18 +1528,18 @@ open class PlaybackManager @Inject constructor(
             return null
         }
         // THE SIGNAL IS ARMED AT THE ISSUE POINT, under the same boundary that validated the
-        // initiating episode: only a seek that was actually issued to THIS player arms its waiter, so
-        // the waiter can only ever be completed by a completion of a seek this invocation caused.
+        // initiating episode, and the invocation token travels INTO the player request: the completion
+        // event can only be matched back to THIS invocation by the player itself.
         if (seekCompletion != null) {
-            pendingSeekCompletions.add(seekCompletion)
+            seekCompletions.arm(seekCompletion)
         }
-        val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid)
+        val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid, seekCompletion?.token)
         if (!outcome.accepted) {
-            // A KNOWN REFUSAL DISARMS: the seek never reached the player, so its waiter must not sit
-            // in the queue absorbing a LATER operation's completion. An UNKNOWN outcome keeps the
-            // arm: the seek may still complete, and its evidence belongs to this invocation.
+            // A KNOWN REFUSAL DISARMS: the seek never reached the player, so its token must not stay
+            // addressable. An UNKNOWN outcome keeps the arm: the seek may still complete, and its
+            // evidence belongs to this invocation.
             if (!outcome.unknown && seekCompletion != null) {
-                pendingSeekCompletions.remove(seekCompletion)
+                seekCompletions.release(seekCompletion)
             }
             // UNKNOWN IS NOT REFUSAL, and it is not "no result" either: the caller must be able to tell
             // that the operation may have run. Refusing here would look like a retryable failure and
@@ -2524,7 +2534,7 @@ open class PlaybackManager @Inject constructor(
         episodeManager.updateDurationBlocking(episode, playerDurationSecs, true)
     }
 
-    suspend fun onSeekComplete(positionMs: Int) {
+    suspend fun onSeekComplete(positionMs: Int, completionToken: String? = null) {
         val state = playbackStateRelay.blockingFirst()
         playbackStateRelay.accept(
             state.copy(
@@ -2532,14 +2542,13 @@ open class PlaybackManager @Inject constructor(
                 lastChangeFrom = LastChangeFrom.OnSeekComplete.value,
             ),
         )
-        // ONE EVENT TO ONE WAITING INVOCATION, in engine processing order. Each seek that was issued
-        // while carrying a caller's signal armed that signal here; the oldest armed invocation owns
-        // THIS completion, so two overlapping same-episode seeks cannot settle each other's result.
-        // A completion read out of the shared state relay instead would let the FIRST collector see
-        // the PREVIOUS seek's relay value -- a replay of an old completion -- which is exactly the
-        // false settling the per-invocation signal exists to prevent.
-        pendingSeekCompletions.poll()?.completeWith(
-            SeekCompletionEvent(episodeUuid = state.episodeUuid, positionMs = positionMs, endOfFile = false),
+        // ONE EVENT TO ONE WAITING INVOCATION, BY TOKEN. The token travelled through the native seek
+        // request and back on this event, so the completion is dispatched to EXACTLY the invocation
+        // that caused it: an untracked UI seek (null token) drops here, a stale timed-out operation
+        // cannot be completed by someone else's seek, and two overlapping same-episode seeks settle
+        // by their own identities rather than by arrival order.
+        seekCompletions.dispatch(
+            SeekCompletionEvent(episodeUuid = state.episodeUuid, positionMs = positionMs, endOfFile = false, completionToken = completionToken),
         )
         updateCurrentPositionInDatabase()
     }
@@ -3244,7 +3253,7 @@ open class PlaybackManager @Inject constructor(
                 is PlayerEvent.PlayerPlaying -> onPlayerPlaying()
                 is PlayerEvent.BufferingStateChanged -> onBufferingStateChanged()
                 is PlayerEvent.DurationAvailable -> onDurationAvailable()
-                is PlayerEvent.SeekComplete -> onSeekComplete(event.positionMs)
+                is PlayerEvent.SeekComplete -> onSeekComplete(event.positionMs, event.completionToken)
                 is PlayerEvent.MetadataAvailable -> onMetadataAvailable(event.metaData)
                 is PlayerEvent.PlayerError -> onPlayerError(event)
                 is PlayerEvent.RemoteMetadataNotMatched -> onRemoteMetaDataNotMatched(event.remoteEpisodeUuid)

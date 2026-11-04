@@ -1341,16 +1341,37 @@ class CloudRouteSink internal constructor(
         if (monotonicMs() >= deadlineMs) {
             return AppOperationDelivery.Observation.Refused(REASON_SEEK_DEADLINE_EXPIRED)
         }
-        // THE INVOCATION'S IDENTITY IS CREATED BEFORE THE EFFECT. The skip call carries it down; the
-        // owner arms it only when the seek is actually issued, inside the boundary that validated
-        // the initiating episode.
+        // THE INVOCATION'S IDENTITY IS CREATED BEFORE THE EFFECT, and RELEASED after settlement:
+        // a settled or timed-out operation's token must not stay addressable by the native path.
         val signal = PlaybackManager.SeekCompletionSignal()
-        val outcome = when {
-            effectiveDelta != null && effectiveDelta > 0 -> playbackSink.skipForward(effectiveDelta, currentEpisode, signal)
-            effectiveDelta != null -> playbackSink.skipBackward(-effectiveDelta, currentEpisode, signal)
-            direction == "backward" -> playbackSink.skipBackward(null, currentEpisode, signal)
-            else -> playbackSink.skipForward(null, currentEpisode, signal)
+        try {
+            return observeSeekRelativeSettling(request, currentEpisode, signal, deadlineMs, effectiveDelta, direction)
+        } finally {
+            playbackSink.releaseSeekCompletion(signal)
         }
+    }
+
+    private suspend fun observeSeekRelativeSettling(
+        request: AppOperationV1.Request,
+        currentEpisode: String?,
+        signal: PlaybackManager.SeekCompletionSignal,
+        deadlineMs: Long,
+        effectiveDelta: Int?,
+        direction: String?,
+    ): AppOperationDelivery.Observation {
+        // THE DEADLINE BOUNDS THE WHOLE CONNECTED OPERATION, not just the await: the sink dispatch
+        // runs inside the remaining budget, so a stalled or slow dispatch settles unknown (the seek
+        // may still have been issued -- never a refusal) and cannot issue after expiry or hang
+        // before the wait. On timeout the signal is released by the caller, so the token can no
+        // longer be completed from the native path.
+        val outcome = kotlinx.coroutines.withTimeoutOrNull((deadlineMs - monotonicMs()).coerceAtLeast(0L)) {
+            when {
+                effectiveDelta != null && effectiveDelta > 0 -> playbackSink.skipForward(effectiveDelta, currentEpisode, signal)
+                effectiveDelta != null -> playbackSink.skipBackward(-effectiveDelta, currentEpisode, signal)
+                direction == "backward" -> playbackSink.skipBackward(null, currentEpisode, signal)
+                else -> playbackSink.skipForward(null, currentEpisode, signal)
+            }
+        } ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
         return when (outcome) {
             // The owner refused: no seek was issued, so no completion can ever arrive. A typed
             // refusal is truthful here and stays retryable at the server's discretion.
@@ -1371,6 +1392,12 @@ class CloudRouteSink internal constructor(
                 val completion = kotlinx.coroutines.withTimeoutOrNull((deadlineMs - monotonicMs()).coerceAtLeast(0L)) {
                     signal.await()
                 } ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                // EXPIRY WINS AT AND BEYOND THE DEADLINE, including over evidence that arrived just
+                // before it: a completion received within the budget cannot settle AFTER it. This
+                // monotonic recheck is the settlement gate, not a formality.
+                if (monotonicMs() >= deadlineMs) {
+                    return AppOperationDelivery.Observation.Unconfirmed(REASON_SEEK_COMPLETION_UNAVAILABLE)
+                }
                 // A COMPLETION FROM ANOTHER EPISODE IS NOT THIS OPERATION'S EVIDENCE: a replacement
                 // or automatic advancement cannot supply the original episode's result.
                 if (completion.episodeUuid != initiatingEpisode) {

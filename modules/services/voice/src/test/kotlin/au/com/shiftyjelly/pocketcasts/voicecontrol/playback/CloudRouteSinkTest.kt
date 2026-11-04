@@ -15,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
+import au.com.shiftyjelly.pocketcasts.repositories.playback.SeekCompletionCoordinator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
@@ -3762,17 +3763,31 @@ class CloudRouteSinkTest {
         var skipGate: CompletableDeferred<Unit>? = null
         val skipStarted = CompletableDeferred<Unit>()
 
+        /** Releases recorded so a control can assert the settled operation's token is no longer addressable. */
+        val releasedSignals = mutableListOf<PlaybackManager.SeekCompletionSignal>()
+
+        /**
+         * THE FAKE'S NATIVE PATH, shaped like the real one: the signal is ARMED in a real
+         * [SeekCompletionCoordinator] when the seek is issued, and the completion arrives as a
+         * DISPATCHED event carrying this invocation's token -- never as a direct completion. A null
+         * [completionEpisodeForTest] is the missing-callback case: nothing is dispatched at all.
+         */
+        val seekCoordinator = SeekCompletionCoordinator()
+
+        override fun releaseSeekCompletion(seekCompletion: PlaybackManager.SeekCompletionSignal?) {
+            seekCompletion?.let { releasedSignals.add(it) }
+        }
+
         private fun completeSeek(seekCompletion: PlaybackManager.SeekCompletionSignal?, @Suppress("UNUSED_PARAMETER") episodeId: String?) {
-            // THROUGH THE OWNER'S COMPLETION EVENT, the way PlaybackManager.onSeekComplete delivers
-            // one. A null [completionEpisodeForTest] IS the missing-callback case: no completion is
-            // supplied at all -- never fallen back to the sink's expectation, which would make the
-            // missing-callback control succeed by construction.
             val episode = completionEpisodeForTest ?: return
-            seekCompletion?.completeWith(
+            if (seekCompletion == null) return
+            seekCoordinator.arm(seekCompletion)
+            seekCoordinator.dispatch(
                 PlaybackManager.SeekCompletionEvent(
                     episodeUuid = episode,
                     positionMs = completionPositionMsForTest,
                     endOfFile = completionEndOfFileForTest,
+                    completionToken = seekCompletion.token,
                 ),
             )
         }
@@ -5637,6 +5652,67 @@ class CloudRouteSinkTest {
         val result = resultOf(transport.sender.sent.single())
         assertEquals("unknown", result.getString("outcome"))
         assertEquals("seek_completion_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `a stalled sink dispatch past the remaining budget settles unknown and releases the token`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The third read IS the deadline: the dispatch itself runs with ZERO remaining budget, so
+        // its internal timeout fires at entry -- no dependence on any scheduler's virtual clock.
+        // The effect is cancelled at the budget -- it may or may not have been issued -- so the
+        // outcome is unknown, never a refusal, and the token is released so it cannot be completed
+        // later. The gate is never released: a stall must not be able to hang the answer.
+        val base = System.nanoTime() / 1_000_000L
+        deps.monotonicReads = ArrayDeque(listOf(base, base, base))
+        deps.playback.skipGate = CompletableDeferred() // never released: models a stalled sink
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+        testScheduler.advanceUntilIdle()
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+        assertEquals(1, deps.playback.releasedSignals.size)
+    }
+
+    @Test
+    fun `a completion arriving within the budget cannot settle after the deadline`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(listOf(seekFrame(), CloudRouteEvent.Done(0, 0)))
+        val deps = appOpsDeps(transport, root)
+        // The completion IS received inside the budget (the three reads before settlement are just
+        // inside the deadline), but the settlement-time recheck -- the FIFTH read, taken after the
+        // await -- is past the deadline: expiry wins, no success.
+        deps.playback.skipGate = CompletableDeferred()
+        val inside = System.nanoTime() / 1_000_000L + 15_000L - 1
+        deps.monotonicReads = ArrayDeque(listOf(System.nanoTime() / 1_000_000L, inside, inside, inside, inside + 1))
+        val route = launch { deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1") }
+        deps.playback.skipStarted.await()
+        deps.playback.skipGate?.complete(Unit)
+        route.join()
+
+        val result = resultOf(transport.sender.sent.single())
+        assertEquals("unknown", result.getString("outcome"))
+        assertEquals("seek_completion_unavailable", result.getString("reason"))
+    }
+
+    @Test
+    fun `a settled operation's token is no longer completable from the native path`() = runTest {
+        val root = tempJournal()
+        val transport = AppOpsTransport(
+            listOf(seekFrame(), seekFrame(operationId = "22222222-3333-4444-5555-666666666666"), CloudRouteEvent.Done(0, 0)),
+        )
+        val deps = appOpsDeps(transport, root)
+        deps.sink().routeToCloud("skip ahead", VoiceIntent.CloudTier.Premium, playbackContext, admitted = "turn-1")
+
+        // BOTH operations settled; each released its signal. A late native event for a released
+        // token must find nothing to complete -- asserted here against the coordinator the fake
+        // armed through: no released signal remains armed.
+        for (released in deps.playback.releasedSignals) {
+            assertTrue(!deps.playback.seekCoordinator.isArmed(released))
+        }
+        assertEquals(2, deps.playback.releasedSignals.size)
     }
 
     @Test

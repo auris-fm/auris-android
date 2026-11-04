@@ -190,7 +190,7 @@ class CastPlayer(
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Player.EpisodeSeekOutcome {
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String, completionToken: String?): Player.EpisodeSeekOutcome {
         // THE SAME CONTRACT AS LocalPlayer, enforced here because a cast player can be RE-POINTED by
         // `setEpisode` while a seek is in flight.
         //

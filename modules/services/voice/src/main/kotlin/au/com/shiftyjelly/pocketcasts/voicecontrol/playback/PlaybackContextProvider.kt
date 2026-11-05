@@ -26,25 +26,33 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
             playbackState.episodeUuid == episode.uuid -> playbackState.positionMs.toLong()
             else -> episode.playedUpToMs.toLong()
         }
-        val referencePositionMs = if (
-            episode != null &&
-            clientPositionMs != null &&
-            fingerprintTimingManager.activeEpisodeUuid == episode.uuid
-        ) {
-            fingerprintTimingManager.matchedReferenceTime(clientPositionMs.toInt())
-                ?.times(1000)
-                ?.toLong()
+        // ONE CONSISTENT MANAGER SNAPSHOT (reviewer finding on the provenance follow-up): episode,
+        // mapped position and digest are read together, so a reset/rebind or a same-episode
+        // reference replacement between two separate reads can never pair an old position with a new
+        // digest. The version is bound to the MATCHED position -- in an unmatched or ad region there
+        // is no mapped position, and provenance without one is not sent.
+        val activeReference = if (clientPositionMs != null) {
+            fingerprintTimingManager.activeReference(clientPositionMs.toInt())
         } else {
             null
         }
-        // THE REFERENCE PROVENANCE rides the same episode gate as the mapped position: a version
-        // belongs to the active mapping of THE episode being played, and a version for another
-        // episode's map would claim provenance this turn cannot verify.
+        val referencePositionMs = if (
+            episode != null &&
+            activeReference != null &&
+            activeReference.episodeUuid == episode.uuid
+        ) {
+            activeReference.matchedReferenceTimeMs
+        } else {
+            null
+        }
+        // THE REFERENCE PROVENANCE is bound to the mapped position from the same snapshot: a known
+        // digest for an instant the map did not measure (ad break, unmapped region) is NOT sent.
         val referenceAssetVersion = if (
             episode != null &&
-            fingerprintTimingManager.activeEpisodeUuid == episode.uuid
+            referencePositionMs != null &&
+            activeReference?.episodeUuid == episode.uuid
         ) {
-            fingerprintTimingManager.activeReferenceVersion
+            activeReference.referenceVersion
         } else {
             null
         }

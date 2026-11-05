@@ -35,14 +35,16 @@ class PlaybackContextProviderTest {
         val playbackState = PlaybackState(positionMs = 10_000, episodeUuid = "episode-id")
         whenever(playbackManager.getCurrentEpisode()).thenReturn(episode)
         whenever(playbackManager.playbackStateRelay).thenReturn(BehaviorRelay.createDefault(playbackState).toSerialized())
-        whenever(fingerprintTimingManager.activeEpisodeUuid).thenReturn("episode-id")
-
         val version = "a".repeat(64)
-        whenever(fingerprintTimingManager.activeReferenceVersion).thenReturn(version)
+        whenever(
+            fingerprintTimingManager.activeReference(10_000),
+        ).thenReturn(FingerprintTimingManager.ActiveReference("episode-id", version, 9_000L))
         assertEquals(version, provider.current().referenceAssetVersion)
 
         // The mapping moved to ANOTHER episode: no provenance for this one.
-        whenever(fingerprintTimingManager.activeEpisodeUuid).thenReturn("episode-other")
+        whenever(
+            fingerprintTimingManager.activeReference(10_000),
+        ).thenReturn(FingerprintTimingManager.ActiveReference("episode-other", version, 9_000L))
         assertEquals(null, provider.current().referenceAssetVersion)
     }
 
@@ -64,9 +66,9 @@ class PlaybackContextProviderTest {
         val playbackState = PlaybackState(positionMs = 42_500, episodeUuid = "episode-id")
         whenever(playbackManager.getCurrentEpisode()).thenReturn(episode)
         whenever(playbackManager.playbackStateRelay).thenReturn(BehaviorRelay.createDefault(playbackState).toSerialized())
-        whenever(fingerprintTimingManager.activeEpisodeUuid).thenReturn("episode-id")
-        whenever(fingerprintTimingManager.matchedReferenceTime(42_500)).thenReturn(41.0)
-        whenever(fingerprintTimingManager.activeReferenceVersion).thenReturn(null)
+        whenever(
+            fingerprintTimingManager.activeReference(42_500),
+        ).thenReturn(FingerprintTimingManager.ActiveReference("episode-id", null, 41_000L))
 
         val context = provider.current()
 
@@ -95,9 +97,11 @@ class PlaybackContextProviderTest {
         )
         whenever(playbackManager.getCurrentEpisode()).thenReturn(episode)
         whenever(playbackManager.playbackStateRelay).thenReturn(BehaviorRelay.createDefault(playbackState).toSerialized())
-        whenever(fingerprintTimingManager.activeEpisodeUuid).thenReturn("episode-id")
-        whenever(fingerprintTimingManager.referenceTime(42_500)).thenReturn(41.0)
-        whenever(fingerprintTimingManager.matchedReferenceTime(42_500)).thenReturn(null)
+        // The ad-region contrast (reviewer finding 2): a KNOWN digest for an instant the map did
+        // not measure is NOT sent -- no mapped position means no provenance.
+        whenever(
+            fingerprintTimingManager.activeReference(42_500),
+        ).thenReturn(FingerprintTimingManager.ActiveReference("episode-id", "f".repeat(64), null))
 
         val context = provider.current()
 
@@ -107,9 +111,10 @@ class PlaybackContextProviderTest {
                 podcastId = "podcast-id",
                 referencePositionMs = null,
                 clientPositionMs = 42_500L,
+                referenceAssetVersion = null,
             ),
             context,
         )
-        verify(fingerprintTimingManager).matchedReferenceTime(42_500)
+        verify(fingerprintTimingManager).activeReference(42_500)
     }
 }

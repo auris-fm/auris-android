@@ -1115,10 +1115,13 @@ class CloudRouteSink internal constructor(
             } else {
                 null
             },
-            // THE PROVENANCE IS EPISODE-BOUND like every reference field: a version without an
-            // episode describes nothing. Captured snapshots carry it unchanged; a captured EMPTY
-            // context (nothing playing) has no version by construction.
-            referenceAssetVersion = context.referenceAssetVersion?.takeIf { hasEpisode && it.isNotEmpty() },
+            // THE PROVENANCE IS EPISODE-BOUND AND POSITION-BOUND: a version without an episode
+            // describes nothing, and a version without the mapped position for the same instant
+            // would claim the speaker heard content of an unmapped provenance (ad break, unmapped
+            // region). Captured snapshots carry it unchanged; a captured EMPTY context has none.
+            referenceAssetVersion = context.referenceAssetVersion?.takeIf {
+                hasEpisode && it.isNotEmpty() && context.referencePositionMs != null
+            },
         )
     }
 

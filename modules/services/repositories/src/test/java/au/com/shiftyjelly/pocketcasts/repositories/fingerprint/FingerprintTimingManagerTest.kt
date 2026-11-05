@@ -9,6 +9,82 @@ import org.junit.Test
 
 class FingerprintTimingManagerTest {
 
+    private fun newManager(): FingerprintTimingManager {
+        val chapterManager = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager>()
+        return FingerprintTimingManager(
+            playbackManager = org.mockito.kotlin.mock(),
+            referenceRetriever = org.mockito.kotlin.mock(),
+            eventHorizon = org.mockito.kotlin.mock(),
+            context = org.mockito.kotlin.mock(),
+            chapterManager = dagger.Lazy { chapterManager },
+            settings = org.mockito.kotlin.mock(),
+            dataSourceFactory = org.mockito.kotlin.mock(),
+            pcmTap = org.mockito.kotlin.mock(),
+            cloudIdentity = org.mockito.kotlin.mock(),
+            cloudConfig = org.mockito.kotlin.mock(),
+            cloudFetcher = org.mockito.kotlin.mock(),
+            decodePolicy = org.mockito.kotlin.mock(),
+        )
+    }
+
+    private fun setPrivateField(target: Any, name: String, value: Any?) {
+        val field = target.javaClass.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(target, value)
+    }
+
+    @Test
+    fun `episode, digest and matched position are bound to one map snapshot across a replacement`() {
+        // Reviewer finding 1: reading matchedReferenceTime and the version separately lets a
+        // reset/rebind or a same-episode reference replacement pair an OLD position with a NEW
+        // digest. The digest is published together with the entries, so a read is always one whole
+        // snapshot: the version never runs ahead of the entries it belongs to.
+        val manager = newManager()
+        setPrivateField(manager, "activeEpisodeUuid", "ep")
+        setPrivateField(manager, "activeReferenceVersion", "v1")
+        // A dense-enough map (gaps well under the highlight gap) around playback 15s.
+        for (p in 10..20) {
+            manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = p.toDouble(), referenceTime = (p * 2).toDouble()))
+        }
+
+        val first = manager.activeReference(15_000)!!
+        assertEquals("ep", first.episodeUuid)
+        assertEquals("v1", first.referenceVersion)
+        assertEquals(30_000L, first.matchedReferenceTimeMs)
+
+        // THE REPLACEMENT: same episode, new reference bytes. Until the new map is published, a read
+        // still sees the WHOLE old snapshot; after it, the whole new one. Neither pairs v2 with the
+        // old map's position.
+        setPrivateField(manager, "activeReferenceVersion", "v2")
+        assertEquals(
+            "before publication the read is still entirely the old snapshot",
+            "v1",
+            manager.activeReference(15_000)!!.referenceVersion,
+        )
+        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 21.0, referenceTime = 42.0))
+        val second = manager.activeReference(15_000)!!
+        assertEquals("v2", second.referenceVersion)
+        assertEquals(30_000L, second.matchedReferenceTimeMs)
+
+        // Provenance cleared: no version, no active reference at all.
+        setPrivateField(manager, "activeReferenceVersion", null)
+        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 22.0, referenceTime = 44.0))
+        assertEquals(null, manager.activeReference(15_000))
+    }
+
+    @Test
+    fun `a playback time outside matched content yields no position but the snapshot is still one object`() {
+        val manager = newManager()
+        setPrivateField(manager, "activeEpisodeUuid", "ep")
+        setPrivateField(manager, "activeReferenceVersion", "v1")
+        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 10.0, referenceTime = 20.0))
+
+        // Far outside the map: no matched position, and the caller must not send provenance for it.
+        val outside = manager.activeReference(999_000)!!
+        assertEquals("v1", outside.referenceVersion)
+        assertEquals(null, outside.matchedReferenceTimeMs)
+    }
+
     @Test
     fun `interpolate returns null for empty list`() {
         val result = FingerprintTimingManager.interpolate(

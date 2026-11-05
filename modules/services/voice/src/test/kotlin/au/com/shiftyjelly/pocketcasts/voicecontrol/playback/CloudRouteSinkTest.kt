@@ -1364,6 +1364,9 @@ class CloudRouteSinkTest {
             context = PlaybackContext(
                 episodeId = "A",
                 clientPositionMs = 120_000L,
+                // Provenance rides WITH its mapped position: the version describes the reference
+                // the position was mapped against.
+                referencePositionMs = 118_000L,
                 referenceAssetVersion = version,
             ),
             isLiveGraceTurn = false,
@@ -1381,6 +1384,39 @@ class CloudRouteSinkTest {
             version,
             prepared.context.referenceAssetVersion,
         )
+    }
+
+    @Test
+    fun `a reference version without its mapped position is not sent`() = runTest {
+        // Reviewer finding 2: in an unmatched or ad region the snapshot can carry a known digest
+        // with no mapped position. The wire contract requires omission then -- provenance for a
+        // moment the map never measured would claim the speaker heard content of that provenance.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        val prepared = sink.prepareTurn(
+            request = "skip this ad",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(
+                episodeId = "A",
+                clientPositionMs = 500_000L,
+                referencePositionMs = null,
+                referenceAssetVersion = "e".repeat(64),
+            ),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-no-position",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+
+        assertEquals(null, prepared.context.referenceAssetVersion)
+        assertEquals(null, prepared.context.referencePositionMs)
     }
 
     @Test

@@ -36,7 +36,7 @@ class VoiceControlServiceRenderTest {
         val service = VoiceControlService().apply {
             audioFeedbackRenderer = renderer
             voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
-                whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any())).thenReturn(VoiceResponse.Silent)
+                whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any())).thenReturn(VoiceResponse.Silent)
             }
         }
         try {
@@ -77,7 +77,7 @@ class VoiceControlServiceRenderTest {
         val service = VoiceControlService().apply {
             audioFeedbackRenderer = renderer
             voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
-                whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+                whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
                     .thenAnswer { invocation ->
                         // The production write: the executor fills the caller's holder.
                         invocation.getArgument<VoicePlaybackIntentExecutor.TurnOutcome>(1).action =
@@ -105,7 +105,7 @@ class VoiceControlServiceRenderTest {
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
         val executor = mock(VoicePlaybackIntentExecutor::class.java)
-        whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+        whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
             .thenThrow(kotlinx.coroutines.CancellationException("caller withdrew"))
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
         val service = VoiceControlService().apply {

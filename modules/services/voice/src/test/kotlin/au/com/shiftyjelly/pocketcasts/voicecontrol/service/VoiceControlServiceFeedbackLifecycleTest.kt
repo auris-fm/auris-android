@@ -74,7 +74,7 @@ class VoiceControlServiceFeedbackLifecycleTest {
         notificationManager = mock<VoiceControlNotificationManager>()
         voiceControlServiceController = mock<VoiceControlServiceController>()
         voicePlaybackIntentExecutor = mock<VoicePlaybackIntentExecutor>().also { executor ->
-            whenever(executor.execute(any(), any())).thenReturn(VoiceResponse.Combined(EarconId.SUCCESS, reply))
+            whenever(executor.execute(any(), any(), any())).thenReturn(VoiceResponse.Combined(EarconId.SUCCESS, reply))
         }
         // OS transport is outside this boundary test; the actual service teardown runs unchanged.
         doNothing().whenever(this).stopForeground(Service.STOP_FOREGROUND_REMOVE)

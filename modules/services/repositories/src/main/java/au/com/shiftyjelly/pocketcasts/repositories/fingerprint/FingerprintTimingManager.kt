@@ -696,10 +696,12 @@ class FingerprintTimingManager @Inject constructor(
     fun activeReference(forPlaybackTimeMs: Int): ActiveReference? {
         val snapshot = publishedReference
         val uuid = snapshot.episodeUuid ?: return null
-        val version = snapshot.referenceVersion ?: return null
+        // UNKNOWN PROVENANCE IS NOT NO MAPPING: a cloud-only turn can clear the digest while
+        // processCloudMatches keeps publishing usable entries. The episode and matched position
+        // survive with a null version; only the version is omitted downstream.
         return ActiveReference(
             episodeUuid = uuid,
-            referenceVersion = version,
+            referenceVersion = snapshot.referenceVersion,
             matchedReferenceTimeMs = matchedReferenceTimeFrom(snapshot.playbackToReference, forPlaybackTimeMs)
                 ?.times(1000)
                 ?.toLong(),

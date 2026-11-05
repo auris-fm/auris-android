@@ -33,6 +33,13 @@ class FingerprintTimingManagerTest {
         field.set(target, value)
     }
 
+    private fun replaceMapping(manager: FingerprintTimingManager, entries: List<FingerprintTimingManager.TimeMappingEntry>) {
+        val field = manager.javaClass.getDeclaredField("mapping")
+        field.isAccessible = true
+        (field.get(manager) as MappingAccumulator)
+            .replaceAll(entries)
+    }
+
     @Test
     fun `episode, digest and matched position are bound to one map snapshot across a replacement`() {
         // Reviewer finding 1: reading matchedReferenceTime and the version separately lets a
@@ -42,7 +49,8 @@ class FingerprintTimingManagerTest {
         val manager = newManager()
         setPrivateField(manager, "activeEpisodeUuid", "ep")
         setPrivateField(manager, "activeReferenceVersion", "v1")
-        // A dense-enough map (gaps well under the highlight gap) around playback 15s.
+        // A dense-enough map (gaps well under the highlight gap) around playback 15s:
+        // playback p maps to reference 2p.
         for (p in 10..20) {
             manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = p.toDouble(), referenceTime = (p * 2).toDouble()))
         }
@@ -50,26 +58,54 @@ class FingerprintTimingManagerTest {
         val first = manager.activeReference(15_000)!!
         assertEquals("ep", first.episodeUuid)
         assertEquals("v1", first.referenceVersion)
-        assertEquals(30_000L, first.matchedReferenceTimeMs)
+        assertEquals("old pair", Pair("v1", 30_000L), Pair(first.referenceVersion, first.matchedReferenceTimeMs))
 
-        // THE REPLACEMENT: same episode, new reference bytes. Until the new map is published, a read
-        // still sees the WHOLE old snapshot; after it, the whole new one. Neither pairs v2 with the
-        // old map's position.
+        // THE REPLACEMENT: same episode, a DIFFERENT map (playback p maps to reference 3p) and new
+        // reference bytes. Until the new map is published, a read still sees the WHOLE old snapshot;
+        // after it, the whole new one. Neither pairs v2 with the old map's position, and the new
+        // position differs from the old one, so a mixed pair could not pass silently.
         setPrivateField(manager, "activeReferenceVersion", "v2")
         assertEquals(
             "before publication the read is still entirely the old snapshot",
-            "v1",
-            manager.activeReference(15_000)!!.referenceVersion,
+            Pair("v1", 30_000L),
+            manager.activeReference(15_000)!!.let { Pair(it.referenceVersion, it.matchedReferenceTimeMs) },
         )
-        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 21.0, referenceTime = 42.0))
+        replaceMapping(
+            manager,
+            (10..20).map { FingerprintTimingManager.TimeMappingEntry(playbackTime = it.toDouble(), referenceTime = (it * 3).toDouble()) },
+        )
+        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 21.0, referenceTime = 63.0))
         val second = manager.activeReference(15_000)!!
-        assertEquals("v2", second.referenceVersion)
-        assertEquals(30_000L, second.matchedReferenceTimeMs)
+        assertEquals(
+            "after publication the read is entirely the new snapshot",
+            Pair("v2", 45_000L),
+            Pair(second.referenceVersion, second.matchedReferenceTimeMs),
+        )
 
-        // Provenance cleared: no version, no active reference at all.
-        setPrivateField(manager, "activeReferenceVersion", null)
-        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 22.0, referenceTime = 44.0))
+        // RESET: the whole snapshot is retired, not just the digest.
+        val reset = manager.javaClass.getDeclaredMethod("resetState")
+        reset.isAccessible = true
+        reset.invoke(manager)
         assertEquals(null, manager.activeReference(15_000))
+    }
+
+    @Test
+    fun `unknown provenance keeps the episode and mapped position in the real manager`() {
+        // Reviewer correction: activeReference used to early-return when the digest was cleared,
+        // discarding a valid mapped position. The cloud-only path clears the digest while
+        // processCloudMatches still publishes usable entries -- the position must survive with a
+        // null version; only the version is omitted downstream.
+        val manager = newManager()
+        setPrivateField(manager, "activeEpisodeUuid", "ep")
+        setPrivateField(manager, "activeReferenceVersion", null)
+        for (p in 10..20) {
+            manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = p.toDouble(), referenceTime = (p * 2).toDouble()))
+        }
+
+        val active = manager.activeReference(15_000)!!
+        assertEquals("ep", active.episodeUuid)
+        assertEquals(null, active.referenceVersion)
+        assertEquals(30_000L, active.matchedReferenceTimeMs)
     }
 
     @Test

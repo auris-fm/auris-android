@@ -1,5 +1,4 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
-
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter
 import java.io.File
@@ -11,6 +10,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.experimental.categories.Category
 import org.junit.rules.TemporaryFolder
 
 /**
@@ -24,6 +24,7 @@ import org.junit.rules.TemporaryFolder
  * The authority is pinned to [approvedWorkerRevision] and this test FAILS - it does not skip - when the
  * authority is absent, dirty, or at another revision.
  */
+@Category(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity::class)
 class TransportBytesParityTest {
 
     @get:Rule

@@ -1,5 +1,4 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
-
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter
 import java.io.File
 import java.nio.file.Files
@@ -8,6 +7,7 @@ import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.experimental.categories.Category
 
 /**
  * END-TO-END WIRE PARITY: an Android-built record PLUS its WAV, through the Cloud Worker's real
@@ -28,6 +28,7 @@ import org.junit.Test
  * skip — when the authority is absent, dirty, or at a different revision. A parity control that
  * green-skips or accepts an arbitrary clean checkout reports success it has not earned.
  */
+@Category(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity::class)
 class WorkerIntakeParityE2ETest {
 
     private data class Case(

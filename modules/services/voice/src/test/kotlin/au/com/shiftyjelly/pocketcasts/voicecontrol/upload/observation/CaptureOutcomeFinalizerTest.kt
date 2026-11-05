@@ -1,5 +1,4 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
-
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineStageProvenance
@@ -33,6 +32,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
+import org.junit.experimental.categories.Category
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.mockito.kotlin.mock
@@ -547,6 +547,7 @@ class CaptureOutcomeFinalizerTest {
     }
 
     @Test(timeout = 60_000)
+    @Category(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity::class)
     fun `the EXACT record persisted by the hung-router harness is accepted by the strict Worker intake`() {
         val h = harness()
         assertTrue(h.sink.joinOutcome(CollectionOutcome.Recognized(h.captureId, transcript = "skip this ad", detectedLanguage = "en")))
@@ -574,6 +575,7 @@ class CaptureOutcomeFinalizerTest {
     }
 
     @Test(timeout = 60_000)
+    @Category(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity::class)
     fun `a persisted no-ASR expired-wait record is accepted by the strict Worker intake`() {
         val h = harness(asrModel = ModelRef.None)
         assertNotNull(h.clock.drainDeadline())

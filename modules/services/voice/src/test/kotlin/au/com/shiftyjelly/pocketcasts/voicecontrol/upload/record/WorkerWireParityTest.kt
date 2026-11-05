@@ -1,5 +1,4 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
-
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter
 import java.io.File
 import java.nio.file.Files
@@ -8,6 +7,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.experimental.categories.Category
 
 /**
  * WIRE PARITY: the Android builder's output must be accepted by the Cloud Worker's OWN validator.
@@ -25,6 +25,7 @@ import org.junit.Test
  */
 @org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
 @org.robolectric.annotation.Config(sdk = [35])
+@Category(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity::class)
 class WorkerWireParityTest {
 
     /**

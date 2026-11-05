@@ -25,3 +25,17 @@ tasks.withType<Test>().configureEach {
     loopbackKeys.associateWith { key -> providers.environmentVariable(key).getOrElse("") }
         .forEach { (key, value) -> environment(key, value) }
 }
+
+// OWNER a793f239: the ordinary code-test suite is SELF-CONTAINED and never fails because an
+// external repository is absent. The REAL-Worker parity tests (category
+// upload.WorkerParity) are excluded from every ordinary Test task; they run only when the
+// suite is EXPLICITLY invoked with -PaurisIncludeWorkerParity, and then they still FAIL
+// honestly (never skip) when the pinned-worker authority is missing.
+val includeWorkerParity = providers.gradleProperty("aurisIncludeWorkerParity").isPresent
+tasks.withType<Test>().configureEach {
+    useJUnit {
+        if (!includeWorkerParity) {
+            excludeCategories("au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity")
+        }
+    }
+}

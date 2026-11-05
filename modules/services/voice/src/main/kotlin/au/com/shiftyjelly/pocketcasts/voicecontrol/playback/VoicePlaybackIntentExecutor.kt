@@ -11,7 +11,7 @@ import kotlin.math.abs
 import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 
-class VoicePlaybackIntentExecutor @Inject constructor(
+open class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackSink: VoicePlaybackSink,
     private val effectsSink: VoiceEffectsSink,
     private val volumeSink: VoiceVolumeSink,
@@ -132,7 +132,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      * two overlapping dispatches each carry their own reporter, and one dispatch's cleanup can
      * never detach another's.
      */
-    suspend fun execute(
+    open suspend fun execute(
         intent: VoiceIntent,
         outcome: TurnOutcome = TurnOutcome(),
         onOutcome: ((VoiceActionOutcome) -> Unit)? = null,

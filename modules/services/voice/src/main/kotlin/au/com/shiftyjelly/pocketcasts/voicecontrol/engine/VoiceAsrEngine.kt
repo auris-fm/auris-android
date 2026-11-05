@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
@@ -26,6 +27,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
@@ -74,11 +76,24 @@ class VoiceAsrEngine @Inject constructor(
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
+    /**
+     * Supplies the playback snapshot captured at UTTERANCE START (core c6ebc2ed).
+     *
+     * Optional so existing construction sites keep compiling; when absent the pipeline simply has no
+     * snapshot to carry, and the executor's provider fallback applies unchanged.
+     */
+    private val playbackContext: PlaybackContextProvider? = null,
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
+
+    /**
+     * The playback captured at the CURRENT segment's speech-start boundary, carried through ASR and
+     * routing to the dispatch (core c6ebc2ed). Null means no snapshot was taken for this segment.
+     */
+    private var speechStartSnapshot: PlaybackContext? = null
 
     private var backend: AsrBackend? = null
     private var onIntent: ((VoiceIntent) -> Unit)? = null
@@ -142,7 +157,14 @@ class VoiceAsrEngine @Inject constructor(
             try {
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
-                        is VoiceSegmenterResult.SpeechStarted -> { /* utterance started */ }
+                        is VoiceSegmenterResult.SpeechStarted -> {
+                            // THE PLAYBACK SNAPSHOT IS TAKEN AT THE SPEECH-START BOUNDARY (core
+                            // c6ebc2ed): before ASR, translation and routing, all of which can take
+                            // seconds. Reading it later -- at SpeechEnded, or at dispatch -- describes
+                            // the turn by whatever was playing by then instead of what the speaker was
+                            // hearing when they began.
+                            speechStartSnapshot = playbackContext?.current()
+                        }
 
                         is VoiceSegmenterResult.SpeechContinuing -> { /* accumulating frames */ }
 
@@ -209,6 +231,11 @@ class VoiceAsrEngine @Inject constructor(
          * wire request_id unchanged.
          */
         val admittedId: String = java.util.UUID.randomUUID().toString(),
+        /**
+         * The playback captured at the speech-start boundary for THIS segment, or null when nothing
+         * captured one. Carried so ASR/translation cannot change which moment the turn describes.
+         */
+        val playbackAtSpeechStart: PlaybackContext? = null,
     )
 
     /**
@@ -217,6 +244,16 @@ class VoiceAsrEngine @Inject constructor(
      * wake. `speechEndSample` is 0 when the segmenter does not report it, and 0 must read as
      * unknown — otherwise every capture would look wake-only and every turn would go silent.
      */
+    // The snapshot captured when THIS segment STARTED speaking, consumed once per segment. Taken at
+    // `SpeechStarted` and read here, so the value carried to the dispatch is the moment the speaker
+    // began -- not the moment the segment was classified, and not the moment the turn is sent.
+    // Consuming it (rather than leaving it) keeps one segment's snapshot from describing the next.
+    private fun takeSpeechStartSnapshot(): PlaybackContext? {
+        val snapshot = speechStartSnapshot ?: playbackContext?.current()
+        speechStartSnapshot = null
+        return snapshot
+    }
+
     private fun isWakeOnly(request: TranscribeRequest): Boolean = request.speechEndSample > 0 &&
         request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
         request.speechEndSample
@@ -295,6 +332,8 @@ class VoiceAsrEngine @Inject constructor(
                 sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
                 wakePositive = true,
                 completionSample = wwResult.completionSample,
+                // The boundary snapshot, carried through ASR/translation to the dispatch.
+                playbackAtSpeechStart = takeSpeechStartSnapshot(),
             )
         }
 
@@ -302,7 +341,11 @@ class VoiceAsrEngine @Inject constructor(
         return when (mode) {
             ListeningMode.Continuous -> {
                 Timber.i("[VoicePipeline] wake %s → ASR (grace/continuous)", wakeCmp)
-                TranscribeRequest(samples = floatSamples, wakePositive = false)
+                TranscribeRequest(
+                    samples = floatSamples,
+                    wakePositive = false,
+                    playbackAtSpeechStart = takeSpeechStartSnapshot(),
+                )
             }
 
             ListeningMode.WakeWord -> {
@@ -419,10 +462,22 @@ class VoiceAsrEngine @Inject constructor(
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
-        processUtterance(routePrep.input!!, addressed = request.wakePositive, admittedId = request.admittedId)
+        processUtterance(
+            routePrep.input!!,
+            addressed = request.wakePositive,
+            admittedId = request.admittedId,
+            // THE SNAPSHOT FROM THE SPEECH-START BOUNDARY, threaded through ASR and translation
+            // unchanged. Passing it here rather than re-reading is the whole point.
+            playbackAtSpeechStart = request.playbackAtSpeechStart,
+        )
     }
 
-    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, admittedId: String) {
+    private suspend fun processUtterance(
+        input: IntentRoutingInput,
+        addressed: Boolean,
+        admittedId: String,
+        playbackAtSpeechStart: PlaybackContext?,
+    ) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
@@ -475,6 +530,14 @@ class VoiceAsrEngine @Inject constructor(
                         intent.copy(
                             request = input.sourceTranscript ?: input.routerTranscript,
                             sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
+                            // The captured snapshot, not a fresh reading: this is the moment the
+                            // speech began, and the turn must describe that moment through dispatch.
+                            // The captured snapshot even when it is EMPTY: "nothing was playing when
+                            // the speaker started" is the answer, not a reason to look again later.
+                            // THE CAPTURED SNAPSHOT, INCLUDING AN EMPTY ONE: "nothing was playing
+                            // when the speaker started" is the answer, not a reason to look again
+                            // later. Only a genuinely absent snapshot (null) leaves the field as-is.
+                            context = playbackAtSpeechStart ?: intent.context,
                         )
                     } else {
                         intent
@@ -549,6 +612,10 @@ class VoiceAsrEngine @Inject constructor(
                     VoiceIntent.CloudRoute(
                         request = input.sourceTranscript ?: input.routerTranscript,
                         sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
+                        // THE SAME SPEECH-START SNAPSHOT as the chosen-route path. This escalation is
+                        // an ordinary cloud turn, and building it without the snapshot sent it back to
+                        // the dispatch-time resample this change exists to remove.
+                        context = playbackAtSpeechStart,
                         tier = VoiceIntent.CloudTier.Unknown,
                         // STAMPED WITH THE CAPTURED ORIGIN, matching the window this recognition was
                         // issued under -- the same value the chosen-route path uses.

@@ -9,6 +9,118 @@ import org.junit.Test
 
 class FingerprintTimingManagerTest {
 
+    private fun newManager(): FingerprintTimingManager {
+        val chapterManager = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager>()
+        return FingerprintTimingManager(
+            playbackManager = org.mockito.kotlin.mock(),
+            referenceRetriever = org.mockito.kotlin.mock(),
+            eventHorizon = org.mockito.kotlin.mock(),
+            context = org.mockito.kotlin.mock(),
+            chapterManager = dagger.Lazy { chapterManager },
+            settings = org.mockito.kotlin.mock(),
+            dataSourceFactory = org.mockito.kotlin.mock(),
+            pcmTap = org.mockito.kotlin.mock(),
+            cloudIdentity = org.mockito.kotlin.mock(),
+            cloudConfig = org.mockito.kotlin.mock(),
+            cloudFetcher = org.mockito.kotlin.mock(),
+            decodePolicy = org.mockito.kotlin.mock(),
+        )
+    }
+
+    private fun setPrivateField(target: Any, name: String, value: Any?) {
+        val field = target.javaClass.getDeclaredField(name)
+        field.isAccessible = true
+        field.set(target, value)
+    }
+
+    private fun replaceMapping(manager: FingerprintTimingManager, entries: List<FingerprintTimingManager.TimeMappingEntry>) {
+        val field = manager.javaClass.getDeclaredField("mapping")
+        field.isAccessible = true
+        (field.get(manager) as MappingAccumulator)
+            .replaceAll(entries)
+    }
+
+    @Test
+    fun `episode, digest and matched position are bound to one map snapshot across a replacement`() {
+        // Reviewer finding 1: reading matchedReferenceTime and the version separately lets a
+        // reset/rebind or a same-episode reference replacement pair an OLD position with a NEW
+        // digest. The digest is published together with the entries, so a read is always one whole
+        // snapshot: the version never runs ahead of the entries it belongs to.
+        val manager = newManager()
+        setPrivateField(manager, "activeEpisodeUuid", "ep")
+        setPrivateField(manager, "activeReferenceVersion", "v1")
+        // A dense-enough map (gaps well under the highlight gap) around playback 15s:
+        // playback p maps to reference 2p.
+        for (p in 10..20) {
+            manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = p.toDouble(), referenceTime = (p * 2).toDouble()))
+        }
+
+        val first = manager.activeReference(15_000)!!
+        assertEquals("ep", first.episodeUuid)
+        assertEquals("v1", first.referenceVersion)
+        assertEquals("old pair", Pair("v1", 30_000L), Pair(first.referenceVersion, first.matchedReferenceTimeMs))
+
+        // THE REPLACEMENT: same episode, a DIFFERENT map (playback p maps to reference 3p) and new
+        // reference bytes. Until the new map is published, a read still sees the WHOLE old snapshot;
+        // after it, the whole new one. Neither pairs v2 with the old map's position, and the new
+        // position differs from the old one, so a mixed pair could not pass silently.
+        setPrivateField(manager, "activeReferenceVersion", "v2")
+        assertEquals(
+            "before publication the read is still entirely the old snapshot",
+            Pair("v1", 30_000L),
+            manager.activeReference(15_000)!!.let { Pair(it.referenceVersion, it.matchedReferenceTimeMs) },
+        )
+        replaceMapping(
+            manager,
+            (10..20).map { FingerprintTimingManager.TimeMappingEntry(playbackTime = it.toDouble(), referenceTime = (it * 3).toDouble()) },
+        )
+        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 21.0, referenceTime = 63.0))
+        val second = manager.activeReference(15_000)!!
+        assertEquals(
+            "after publication the read is entirely the new snapshot",
+            Pair("v2", 45_000L),
+            Pair(second.referenceVersion, second.matchedReferenceTimeMs),
+        )
+
+        // RESET: the whole snapshot is retired, not just the digest.
+        val reset = manager.javaClass.getDeclaredMethod("resetState")
+        reset.isAccessible = true
+        reset.invoke(manager)
+        assertEquals(null, manager.activeReference(15_000))
+    }
+
+    @Test
+    fun `unknown provenance keeps the episode and mapped position in the real manager`() {
+        // Reviewer correction: activeReference used to early-return when the digest was cleared,
+        // discarding a valid mapped position. The cloud-only path clears the digest while
+        // processCloudMatches still publishes usable entries -- the position must survive with a
+        // null version; only the version is omitted downstream.
+        val manager = newManager()
+        setPrivateField(manager, "activeEpisodeUuid", "ep")
+        setPrivateField(manager, "activeReferenceVersion", null)
+        for (p in 10..20) {
+            manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = p.toDouble(), referenceTime = (p * 2).toDouble()))
+        }
+
+        val active = manager.activeReference(15_000)!!
+        assertEquals("ep", active.episodeUuid)
+        assertEquals(null, active.referenceVersion)
+        assertEquals(30_000L, active.matchedReferenceTimeMs)
+    }
+
+    @Test
+    fun `a playback time outside matched content yields no position but the snapshot is still one object`() {
+        val manager = newManager()
+        setPrivateField(manager, "activeEpisodeUuid", "ep")
+        setPrivateField(manager, "activeReferenceVersion", "v1")
+        manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 10.0, referenceTime = 20.0))
+
+        // Far outside the map: no matched position, and the caller must not send provenance for it.
+        val outside = manager.activeReference(999_000)!!
+        assertEquals("v1", outside.referenceVersion)
+        assertEquals(null, outside.matchedReferenceTimeMs)
+    }
+
     @Test
     fun `interpolate returns null for empty list`() {
         val result = FingerprintTimingManager.interpolate(

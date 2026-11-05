@@ -164,6 +164,13 @@ object FingerprintMappingCache {
         return "$base.map.fp.json"
     }
 
+    /**
+     * The reference-data version string, the same SHA-256 hex this cache stores to validate a
+     * mapping against its reference. Exposed so the active mapping's provenance can be carried as
+     * `reference_asset_version` without a second hashing implementation that could drift.
+     */
+    internal fun referenceDataVersion(data: ByteArray): String = sha256(data)
+
     private fun sha256(data: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256")
         return digest.digest(data).joinToString("") { "%02x".format(it) }

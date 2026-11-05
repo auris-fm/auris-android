@@ -205,7 +205,20 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     outcome.turnSucceeded = retried.succeeded
                     return retried.feedback
                 }
-                val context = playbackContextProvider.current()
+                // THE PLAYBACK THE SPEAKER HEARD, NOT THE PLAYBACK AT SEND TIME (core c6ebc2ed,
+                // "Playback snapshot and parallel passage retrieval"). The snapshot is captured when
+                // the utterance STARTS and carried on the intent; the executor runs after ASR and
+                // routing, which can take seconds, and sampling here described the turn by whatever
+                // was playing when it happened to be sent -- exactly the resample the spec forbids.
+                //
+                // The provider remains the fallback for a dispatch that carries no snapshot (a path
+                // with no utterance boundary behind it). An utterance-originated turn always carries
+                // one, and its carried value wins.
+                // NULL MEANS "NO SNAPSHOT WAS TAKEN", and only then is a live reading legitimate --
+                // a dispatch with no utterance boundary behind it. An EMPTY snapshot is a real answer
+                // (the utterance began with nothing playing) and must be carried as-is rather than
+                // replaced by whatever is playing now.
+                val context = intent.context ?: playbackContextProvider.current()
                 // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
                 // not the current one read here. The executor runs later than the dispatch, so reading
                 // the live window would let a fresh wake look like a continuation of the previous
@@ -250,6 +263,9 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // defect the refusal exists to prevent.
                     isRetry = intent.isRetry,
                     sourceLanguage = intent.sourceLanguage,
+                    // NON-NULL MEANS CAPTURED: only a genuinely absent snapshot (the live fallback)
+                    // may be enriched from saved state at preparation.
+                    snapshotCaptured = intent.context != null,
                 ) ?: return VoiceResponse.Silent
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
@@ -665,6 +681,13 @@ interface VoiceCloudRouteSink {
         isWakeOriginated: Boolean = false,
         /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
         admitted: String?,
+        /**
+         * True when [context] is the snapshot captured at the utterance boundary rather than a live
+         * reading. A captured snapshot must reach the wire EXACTLY as captured: the sink must not fill
+         * its empty reference history from saved state, because a same-episode action completing
+         * during ASR would attach references that did not exist when speech began.
+         */
+        snapshotCaptured: Boolean = false,
     ): CloudTurnResult
 
     /**
@@ -687,6 +710,8 @@ interface VoiceCloudRouteSink {
         isRetry: Boolean = false,
         /** ASR source language retained with the prepared request, including retries. */
         sourceLanguage: String? = null,
+        /** True when [context] is the utterance-boundary snapshot, so the sink must not enrich it from live state. */
+        snapshotCaptured: Boolean = false,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**
@@ -746,6 +771,7 @@ interface VoiceCloudRouteSink {
         isWakeOriginated: Boolean = false,
         /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
         admitted: String?,
+        snapshotCaptured: Boolean = false,
     ): CloudTurnResult = routeToCloud(
         request,
         tier,
@@ -754,6 +780,7 @@ interface VoiceCloudRouteSink {
         capturedOrigin,
         isWakeOriginated,
         admitted,
+        snapshotCaptured,
     )
 }
 

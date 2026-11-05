@@ -26,14 +26,33 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
             playbackState.episodeUuid == episode.uuid -> playbackState.positionMs.toLong()
             else -> episode.playedUpToMs.toLong()
         }
+        // ONE CONSISTENT MANAGER SNAPSHOT (reviewer finding on the provenance follow-up): episode,
+        // mapped position and digest are read together, so a reset/rebind or a same-episode
+        // reference replacement between two separate reads can never pair an old position with a new
+        // digest. The version is bound to the MATCHED position -- in an unmatched or ad region there
+        // is no mapped position, and provenance without one is not sent.
+        val activeReference = if (clientPositionMs != null) {
+            fingerprintTimingManager.activeReference(clientPositionMs.toInt())
+        } else {
+            null
+        }
         val referencePositionMs = if (
             episode != null &&
-            clientPositionMs != null &&
-            fingerprintTimingManager.activeEpisodeUuid == episode.uuid
+            activeReference != null &&
+            activeReference.episodeUuid == episode.uuid
         ) {
-            fingerprintTimingManager.matchedReferenceTime(clientPositionMs.toInt())
-                ?.times(1000)
-                ?.toLong()
+            activeReference.matchedReferenceTimeMs
+        } else {
+            null
+        }
+        // THE REFERENCE PROVENANCE is bound to the mapped position from the same snapshot: a known
+        // digest for an instant the map did not measure (ad break, unmapped region) is NOT sent.
+        val referenceAssetVersion = if (
+            episode != null &&
+            referencePositionMs != null &&
+            activeReference?.episodeUuid == episode.uuid
+        ) {
+            activeReference.referenceVersion
         } else {
             null
         }
@@ -51,6 +70,7 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
             clientPositionMs = clientPositionMs,
             recentReferencePositions = state.recentReferencePositions,
             previousReferencePositionMs = state.previousReferencePositionMs,
+            referenceAssetVersion = referenceAssetVersion,
         )
     }
 }

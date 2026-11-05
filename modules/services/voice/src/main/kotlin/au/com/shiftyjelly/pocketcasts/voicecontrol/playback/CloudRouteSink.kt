@@ -220,6 +220,7 @@ class CloudRouteSink internal constructor(
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
         admitted: String?,
+        snapshotCaptured: Boolean,
     ): CloudTurnResult = routeTurn(
         request = request,
         tier = tier,
@@ -229,6 +230,7 @@ class CloudRouteSink internal constructor(
         isWakeOriginated = isWakeOriginated,
         hint = null,
         admittedId = admitted,
+        snapshotCaptured = snapshotCaptured,
     )
 
     override suspend fun routeToCloudWithHint(
@@ -240,6 +242,7 @@ class CloudRouteSink internal constructor(
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
         admitted: String?,
+        snapshotCaptured: Boolean,
     ): CloudTurnResult = routeTurn(
         request = request,
         tier = tier,
@@ -249,6 +252,7 @@ class CloudRouteSink internal constructor(
         isWakeOriginated = isWakeOriginated,
         hint = hint,
         admittedId = admitted,
+        snapshotCaptured = snapshotCaptured,
     )
 
     /**
@@ -275,6 +279,8 @@ class CloudRouteSink internal constructor(
         /** True when the caller is RETRYING, so a lookup miss is a refusal rather than a first attempt. */
         isRetry: Boolean,
         sourceLanguage: String?,
+        /** True when [context] is the utterance-boundary snapshot, so the sink must not enrich it from live state. */
+        snapshotCaptured: Boolean,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
             // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
@@ -293,7 +299,7 @@ class CloudRouteSink internal constructor(
             CloudRouteTurn(
                 request = request,
                 sourceLanguage = sourceLanguage,
-                context = buildRouteContext(context),
+                context = buildRouteContext(context, snapshotCaptured),
                 requestId = admitted,
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
@@ -387,6 +393,8 @@ class CloudRouteSink internal constructor(
         prepared: CloudRouteTurn? = null,
         /** The admitted client-minted UUID when the caller did not prepare a turn; refused when absent with none prepared. */
         admittedId: String? = null,
+        /** True when [context] is the utterance-boundary snapshot, so the sink must not enrich it from live state. */
+        snapshotCaptured: Boolean = false,
     ): CloudTurnResult {
         if (prepared == null && admittedId.isNullOrBlank()) {
             // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
@@ -529,7 +537,7 @@ class CloudRouteSink internal constructor(
             }
             if (previous != null && previous !== myJob) previous.cancel()
 
-            val routeContext = buildRouteContext(context)
+            val routeContext = buildRouteContext(context, snapshotCaptured)
             // The turn's WIRE identity: the frame's `turn_id` is this value, and a deterministic hold
             // must be attributed against it. Read straight off the turn that was built (the admitted
             // identity, prepared or supplied), so the two cannot drift.
@@ -1061,11 +1069,19 @@ class CloudRouteSink internal constructor(
         emptyList()
     }
 
-    private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
+    private fun buildRouteContext(context: PlaybackContext, snapshotCaptured: Boolean = false): CloudRouteContext {
         // The saved positions are requested FOR THIS EPISODE: a position recorded while another
         // episode played describes that episode, and sending it here would name a reference in a
         // recording the turn is not about.
-        val state = cloudPlaybackContextState.snapshot(context.episodeId)
+        // A CAPTURED snapshot is never enriched: its empty reference history and absent previous
+        // position are what existed when speech began, and a same-episode action completing during
+        // ASR would otherwise attach references the speaker could not have been hearing. Live-state
+        // filling is only for a live reading (a dispatch with no utterance boundary behind it).
+        val state = if (snapshotCaptured) {
+            null
+        } else {
+            cloudPlaybackContextState.snapshot(context.episodeId)
+        }
         val episodeId = context.episodeId?.takeIf { it.isNotEmpty() }
         // THE NO-EPISODE RULE IS APPLIED HERE, LAST, after every source of enrichment. The saved state
         // holds reference positions accumulated while an episode WAS playing; merging them into a turn
@@ -1090,14 +1106,21 @@ class CloudRouteSink internal constructor(
             referencePositionMs = context.referencePositionMs.takeIf { hasEpisode },
             clientPositionMs = context.clientPositionMs.takeIf { hasEpisode },
             recentReferencePositions = if (hasEpisode) {
-                context.recentReferencePositions.ifEmpty { state.recentReferencePositions }
+                context.recentReferencePositions.ifEmpty { state?.recentReferencePositions ?: emptyList() }
             } else {
                 emptyList()
             },
             previousReferencePositionMs = if (hasEpisode) {
-                context.previousReferencePositionMs ?: state.previousReferencePositionMs
+                context.previousReferencePositionMs ?: state?.previousReferencePositionMs
             } else {
                 null
+            },
+            // THE PROVENANCE IS EPISODE-BOUND AND POSITION-BOUND: a version without an episode
+            // describes nothing, and a version without the mapped position for the same instant
+            // would claim the speaker heard content of an unmapped provenance (ad break, unmapped
+            // region). Captured snapshots carry it unchanged; a captured EMPTY context has none.
+            referenceAssetVersion = context.referenceAssetVersion?.takeIf {
+                hasEpisode && it.isNotEmpty() && context.referencePositionMs != null
             },
         )
     }

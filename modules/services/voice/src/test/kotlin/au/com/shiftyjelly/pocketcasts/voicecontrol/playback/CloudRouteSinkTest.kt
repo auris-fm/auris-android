@@ -1349,6 +1349,195 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a known reference version reaches the prepared turn with its episode`() = runTest {
+        // core 351dd308 follow-up: the client retains the SHA-256 of the active map's reference data
+        // and carries it in the snapshot field. On the wire it appears ONLY bound to its episode.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        val version = "b".repeat(64)
+
+        val prepared = sink.prepareTurn(
+            request = "about A",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(
+                episodeId = "A",
+                clientPositionMs = 120_000L,
+                // Provenance rides WITH its mapped position: the version describes the reference
+                // the position was mapped against.
+                referencePositionMs = 118_000L,
+                referenceAssetVersion = version,
+            ),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-version",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+
+        assertEquals(
+            "the provenance the snapshot captured is carried unchanged",
+            version,
+            prepared.context.referenceAssetVersion,
+        )
+    }
+
+    @Test
+    fun `a reference version without its mapped position is not sent`() = runTest {
+        // Reviewer finding 2: in an unmatched or ad region the snapshot can carry a known digest
+        // with no mapped position. The wire contract requires omission then -- provenance for a
+        // moment the map never measured would claim the speaker heard content of that provenance.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        val prepared = sink.prepareTurn(
+            request = "skip this ad",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(
+                episodeId = "A",
+                clientPositionMs = 500_000L,
+                referencePositionMs = null,
+                referenceAssetVersion = "e".repeat(64),
+            ),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-no-position",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+
+        assertEquals(null, prepared.context.referenceAssetVersion)
+        assertEquals(null, prepared.context.referencePositionMs)
+    }
+
+    @Test
+    fun `a reference version without an episode is dropped, and absence is omitted not fabricated`() = runTest {
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        // Version WITHOUT an episode: provenance describes nothing, so it must not ride a
+        // discovery turn.
+        val discovery = sink.prepareTurn(
+            request = "what should I listen to",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(referenceAssetVersion = "c".repeat(64)),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-no-episode",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+        assertEquals(null, discovery.context.referenceAssetVersion)
+
+        // KNOWN ABSENCE: no version in, no version out -- never an empty-string stand-in.
+        val unprovenanced = sink.prepareTurn(
+            request = "about A",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(episodeId = "A", clientPositionMs = 1_000L),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-absent",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+        assertEquals(null, unprovenanced.context.referenceAssetVersion)
+    }
+
+    @Test
+    fun `a captured snapshot keeps its empty reference history even when saved state exists`() = runTest {
+        // @reviewer's sink-enrichment finding: buildRouteContext filled an empty recent/previous from
+        // live saved state AT PREPARATION. A snapshot captured at the utterance boundary must reach
+        // the wire exactly as captured -- a same-episode action completing during ASR must not attach
+        // references that did not exist when speech began.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        // The action completed while ASR ran: episode A now HAS saved reference history.
+        deps.cloudPlaybackContextState.record(
+            referencePositionMs = 100L,
+            previousReferencePositionMs = 300L,
+            episodeId = "A",
+        )
+        val sink = deps.sink()
+
+        // The utterance began BEFORE that action: the captured snapshot carries the episode but an
+        // EMPTY history and NO previous reference.
+        val prepared = sink.prepareTurn(
+            request = "what did he just say",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(
+                episodeId = "A",
+                clientPositionMs = 120_000L,
+            ),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-sink-capture",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+
+        assertEquals(
+            "the captured empty history is not filled from state saved after speech began " +
+                "(recent=${prepared.context.recentReferencePositions})",
+            emptyList<Long>(),
+            prepared.context.recentReferencePositions,
+        )
+        assertNull(
+            "and the previous reference recorded after capture stays off the turn",
+            prepared.context.previousReferencePositionMs,
+        )
+        assertEquals("the episode itself is kept", "A", prepared.context.episodeId)
+        assertEquals(120_000L, prepared.context.clientPositionMs)
+    }
+
+    @Test
+    fun `a live reading still gains saved reference history at preparation`() = runTest {
+        // The counter-control: a dispatch with NO utterance boundary behind it is a live reading, and
+        // the existing state fill must survive -- the captured-only rule above is about capture, not
+        // about removing enrichment.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        deps.cloudPlaybackContextState.record(
+            referencePositionMs = 100L,
+            previousReferencePositionMs = 300L,
+            episodeId = "A",
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+            admitted = testWireId,
+        ).feedback
+
+        val turn = deps.routeTurns.last()
+        assertEquals(listOf(100L), turn.context.recentReferencePositions)
+        assertEquals(300L, turn.context.previousReferencePositionMs)
+    }
+
+    @Test
     fun `a turn with a current episode keeps its saved reference history`() = runTest {
         // The positive control @spec asked for: with an episode current, the saved reference history is
         // retained, so the omission above is about the missing episode rather than about the builder

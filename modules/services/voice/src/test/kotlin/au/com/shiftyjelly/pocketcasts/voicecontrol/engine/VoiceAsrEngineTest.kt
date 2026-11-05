@@ -20,6 +20,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic
@@ -40,6 +41,7 @@ import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -2595,6 +2597,117 @@ class VoiceAsrEngineTest {
             calls += "recognize:${input.routerTranscript}"
             inputs += input
             return VoiceRecognizeResult(intent = intent)
+        }
+
+        override fun release() = Unit
+    }
+
+    /**
+     * Returns a cloud route and SUSPENDS inside recognize() until released, so the test controls how
+     * long ASR takes -- long enough for playback to move on between the speech-start boundary and the
+     * dispatch.
+     */
+    @Test
+    fun `the cloud turn carries the playback captured when the utterance started, not when ASR finishes`() = runTest {
+        // core c6ebc2ed: capture at the SPEECH-START boundary, before ASR/translation/routing, and
+        // carry it unchanged to the dispatch. ASR here is gated: playback visibly moves on while it
+        // runs, and the dispatched turn must still describe the moment speech began.
+        val signal = GracePeriodSignal()
+        signal.onWakeWordDetected()
+
+        // The provider is read EXACTLY ONCE, at SpeechStarted. Any later read would be a resample.
+        var reads = 0
+        val provider = object : au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider {
+            override fun current(): PlaybackContext {
+                reads++
+                return PlaybackContext(
+                    episodeId = "episode-A",
+                    podcastId = "podcast-A",
+                    clientPositionMs = 120_000L,
+                    referencePositionMs = 118_000L,
+                )
+            }
+        }
+
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val intents = mutableListOf<VoiceIntent>()
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = GatingCloudRecognizer(gate),
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+            playbackContext = provider,
+        )
+        engine.scope = this
+
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        // SpeechStarted first (the boundary), so the snapshot is taken; THEN the segment. The
+        // segmenter's SpeechEnded carries the whole utterance, but the engine must hold the snapshot
+        // from the earlier boundary -- not sample again when the segment is classified.
+        val segments = flow {
+            emit(VoiceSegmenterResult.SpeechStarted)
+            emit(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            )
+        }
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(segments)
+
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+
+        // Speech has started and the snapshot has been taken. Release ASR only now: everything after
+        // this point -- recognition, routing, dispatch -- happens AFTER the boundary, and none of it
+        // may change what the turn says.
+        advanceUntilIdle()
+        assertEquals("exactly one boundary read, at SpeechStarted", 1, reads)
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        val cloud = intents.filterIsInstance<VoiceIntent.CloudRoute>().single()
+        assertEquals("the episode playing when the utterance started", "episode-A", cloud.context?.episodeId)
+        assertEquals("the position the speaker heard", 120_000L, cloud.context?.clientPositionMs)
+        assertEquals("still exactly one boundary read after dispatch -- no resample", 1, reads)
+        engine.stop()
+    }
+
+    private class GatingCloudRecognizer(
+        private val gate: kotlinx.coroutines.CompletableDeferred<Unit>,
+    ) : VoiceRecognizer {
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+        override suspend fun recognize(
+            input: IntentRoutingInput,
+            context: VoiceRecognitionContext,
+            logicalRequestId: String,
+        ): VoiceRecognizeResult {
+            gate.await()
+            return VoiceRecognizeResult(
+                intent = VoiceIntent.CloudRoute(
+                    request = input.routerTranscript,
+                    tier = VoiceIntent.CloudTier.Premium,
+                ),
+            )
         }
 
         override fun release() = Unit

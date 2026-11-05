@@ -126,6 +126,17 @@ class FingerprintTimingManager @Inject constructor(
     var activeEpisodeUuid: String? = null
         private set
 
+    /**
+     * SHA-256 of the reference data the ACTIVE mapping was built from, or null when no mapping is
+     * active (core cloud-assistant.md `reference_asset_version`). Computed ONCE when the reference
+     * is bound, never re-hashed per read, and cleared with the rest of the state on reset and on the
+     * cloud-only path -- a version without an active map would claim provenance the turn cannot
+     * verify. Missing provenance is ordinary: callers omit it and the turn proceeds.
+     */
+    @Volatile
+    var activeReferenceVersion: String? = null
+        private set
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val decodeDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val mutex = Mutex()
@@ -137,6 +148,20 @@ class FingerprintTimingManager @Inject constructor(
 
     @Volatile
     private var snapshotPlaybackToReference: List<TimeMappingEntry> = emptyList()
+
+    /**
+     * The immutable publication backing [activeReference]: the mapping entries are published
+     * TOGETHER with the episode and digest they belong to, so a reader can never combine one map's
+     * position with another map's provenance. A reset/rebind replaces this object wholesale.
+     */
+    private data class PublishedReference(
+        val playbackToReference: List<TimeMappingEntry>,
+        val episodeUuid: String?,
+        val referenceVersion: String?,
+    )
+
+    @Volatile
+    private var publishedReference = PublishedReference(emptyList(), null, null)
 
     @Volatile
     private var snapshotReferenceToPlayback: List<TimeMappingEntry> = emptyList()
@@ -652,9 +677,41 @@ class FingerprintTimingManager @Inject constructor(
     private var lastMatchedContentResult = true
 
     /** Reference time gated on matched content. Returns null during ads or unmapped regions. */
-    fun matchedReferenceTime(forPlaybackTimeMs: Int): Double? {
+
+    // One consistent snapshot of the active reference: episode, digest and matched position read
+    // from the SAME immutable publication (reviewer finding on the provenance follow-up). Reading
+    // matchedReferenceTime and activeReferenceVersion separately lets a reset/rebind or a
+    // same-episode reference replacement between the two reads pair an OLD position with a NEW
+    // digest -- provenance for a moment the new map never measured. The digest is published
+    // together with the mapping entries, so one volatile read binds all three and a replacement is
+    // visible only as a whole new snapshot. Null when there is no active mapping; null position when
+    // the playback time is not within matched content, which the caller must treat as "no provenance
+    // this instant" rather than "provenance without a position".
+    data class ActiveReference(
+        val episodeUuid: String,
+        val referenceVersion: String?,
+        val matchedReferenceTimeMs: Long?,
+    )
+
+    fun activeReference(forPlaybackTimeMs: Int): ActiveReference? {
+        val snapshot = publishedReference
+        val uuid = snapshot.episodeUuid ?: return null
+        // UNKNOWN PROVENANCE IS NOT NO MAPPING: a cloud-only turn can clear the digest while
+        // processCloudMatches keeps publishing usable entries. The episode and matched position
+        // survive with a null version; only the version is omitted downstream.
+        return ActiveReference(
+            episodeUuid = uuid,
+            referenceVersion = snapshot.referenceVersion,
+            matchedReferenceTimeMs = matchedReferenceTimeFrom(snapshot.playbackToReference, forPlaybackTimeMs)
+                ?.times(1000)
+                ?.toLong(),
+        )
+    }
+
+    fun matchedReferenceTime(forPlaybackTimeMs: Int): Double? = matchedReferenceTimeFrom(snapshotPlaybackToReference, forPlaybackTimeMs)
+
+    private fun matchedReferenceTimeFrom(entries: List<TimeMappingEntry>, forPlaybackTimeMs: Int): Double? {
         val playbackTimeSec = forPlaybackTimeMs / 1000.0
-        val entries = snapshotPlaybackToReference
         if (!isWithinMatchedContent(playbackTimeSec, entries, allowTrailingGrace = !isLiveEdgeUnmatched(entries))) {
             if (lastMatchedContentResult) {
                 lastMatchedContentResult = false
@@ -702,6 +759,10 @@ class FingerprintTimingManager @Inject constructor(
         downloadObserverJob?.cancel()
         downloadObserverJob = null
         mapping.reset()
+        // Cleared BEFORE publishSnapshot so the published snapshot never carries the old episode's
+        // provenance after a reset.
+        activeEpisodeUuid = null
+        activeReferenceVersion = null
         debugRejections.clear()
         debugRejectionsSnapshot = emptyList()
         publishSnapshot()
@@ -713,6 +774,7 @@ class FingerprintTimingManager @Inject constructor(
         currentSharedCacheKey = null
         currentDurationSec = 0.0
         currentReferenceData = null
+        activeReferenceVersion = null
         currentReferenceFilePath = null
         currentReference = null
         currentMatcher?.close()
@@ -930,6 +992,9 @@ class FingerprintTimingManager @Inject constructor(
                 return
             }
             currentReferenceData = referenceData
+            // THE PROVENANCE IS THE ACTIVE MAP'S OWN REFERENCE BYTES: exactly the data the mapping
+            // cache validates and a fresh map is built from, hashed once here.
+            activeReferenceVersion = FingerprintMappingCache.referenceDataVersion(referenceData)
             currentReferenceFilePath = refPath
             currentReference = reference
             currentMatcher = matcher
@@ -969,10 +1034,14 @@ class FingerprintTimingManager @Inject constructor(
         mutex.withLock {
             if (gen != generation) return
             currentReferenceData = null
+            activeReferenceVersion = null
             currentReferenceFilePath = null
             currentReference = reference
             currentMatcher = null
             _stateFlow.value = State.Preparing
+            // Republish WITHOUT the digest: a cloud-only turn has no active map, and the last
+            // published snapshot must not keep naming one after this transition.
+            publishSnapshot()
             startTapCollection(gen, null)
         }
     }
@@ -1691,6 +1760,13 @@ class FingerprintTimingManager @Inject constructor(
     /** Publish an immutable snapshot of the mapping lists for lock-free reads. */
     private fun publishSnapshot() {
         snapshotPlaybackToReference = mapping.playbackToReference.toList()
+        // THE PROVENANCE TRAVELS WITH THE ENTRIES: one immutable object is the only thing readers of
+        // activeReference consult, so episode/digest/position are bound by construction.
+        publishedReference = PublishedReference(
+            playbackToReference = snapshotPlaybackToReference,
+            episodeUuid = activeEpisodeUuid,
+            referenceVersion = activeReferenceVersion,
+        )
         snapshotReferenceToPlayback = mapping.referenceToPlayback.toList()
         _mappingVersion.value++
     }

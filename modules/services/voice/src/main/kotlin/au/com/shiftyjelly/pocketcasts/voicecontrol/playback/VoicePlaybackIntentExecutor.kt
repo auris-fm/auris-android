@@ -214,7 +214,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // The provider remains the fallback for a dispatch that carries no snapshot (a path
                 // with no utterance boundary behind it). An utterance-originated turn always carries
                 // one, and its carried value wins.
-                val context = intent.context.takeIf { it != PlaybackContext() } ?: playbackContextProvider.current()
+                // NULL MEANS "NO SNAPSHOT WAS TAKEN", and only then is a live reading legitimate --
+                // a dispatch with no utterance boundary behind it. An EMPTY snapshot is a real answer
+                // (the utterance began with nothing playing) and must be carried as-is rather than
+                // replaced by whatever is playing now.
+                val context = intent.context ?: playbackContextProvider.current()
                 // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
                 // not the current one read here. The executor runs later than the dispatch, so reading
                 // the live window would let a fresh wake look like a continuation of the previous

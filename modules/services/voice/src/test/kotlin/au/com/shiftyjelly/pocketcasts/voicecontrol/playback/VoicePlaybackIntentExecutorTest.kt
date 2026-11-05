@@ -272,6 +272,74 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `an utterance that began with nothing playing keeps that answer instead of a later reading`() = runTest {
+        // @reviewer's distinction: an EMPTY snapshot is not the same as NO snapshot. A discovery turn
+        // spoken with nothing playing legitimately captures an empty context. If the executor treats
+        // empty as absent it re-samples at dispatch, and the turn is then described by an episode the
+        // speaker was not listening to when they spoke -- the exact resample, just in the other
+        // direction.
+        val sinks = FakeSinks()
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-started-later",
+            podcastId = "podcast-later",
+            clientPositionMs = 5_000L,
+        )
+        val executor = sinks.executor()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what should I listen to",
+                tier = VoiceIntent.CloudTier.Premium,
+                // Captured at utterance start: nothing was playing.
+                context = PlaybackContext(),
+            ),
+        )
+
+        val prepared = sinks.cloudRoute.preparedTurns.single()
+        assertEquals(
+            "the turn reports no episode, because none was playing when the utterance began",
+            null,
+            prepared.context.episodeId,
+        )
+        assertEquals(
+            "and no invented position to go with it",
+            null,
+            prepared.context.clientPositionMs,
+        )
+        assertEquals(
+            "the provider must not have been consulted for a turn that captured its snapshot",
+            0,
+            sinks.playbackContext.calls,
+        )
+    }
+
+    @Test
+    fun `a dispatch with no captured snapshot still falls back to a live reading`() = runTest {
+        // The fallback is legitimate for a dispatch with no utterance boundary behind it; the point of
+        // the nullable field is that this case is now DISTINGUISHED from an empty snapshot rather than
+        // inferred from emptiness.
+        val sinks = FakeSinks()
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-live",
+            podcastId = "podcast-live",
+            clientPositionMs = 42_000L,
+        )
+        val executor = sinks.executor()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "play something",
+                tier = VoiceIntent.CloudTier.Premium,
+            ),
+        )
+
+        val prepared = sinks.cloudRoute.preparedTurns.single()
+        assertEquals("episode-live", prepared.context.episodeId)
+        assertEquals(42_000L, prepared.context.clientPositionMs)
+        assertEquals("the fallback is the only path that reads live", 1, sinks.playbackContext.calls)
+    }
+
+    @Test
     fun `the turn is described by the playback the speaker heard, not by whatever plays at dispatch`() = runTest {
         // SPEC (core c6ebc2ed, "Playback snapshot and parallel passage retrieval"): the pipeline
         // captures episode/position when the UTTERANCE STARTS, before ASR and routing, and retains

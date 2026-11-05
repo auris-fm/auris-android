@@ -103,7 +103,16 @@ sealed interface VoiceIntent {
     data class CloudRoute(
         val request: String,
         val tier: CloudTier,
-        val context: PlaybackContext = PlaybackContext(),
+        /**
+         * The playback snapshot captured when the UTTERANCE STARTED, or null when nothing captured one.
+         *
+         * NULL IS "NO SNAPSHOT WAS TAKEN", which is NOT the same as an empty snapshot: a discovery turn
+         * spoken with nothing playing legitimately captures an empty context, and an empty context must
+         * not be read as "we never captured". Encoding the absence in the type is what lets the executor
+         * fall back to a live reading ONLY for a dispatch that has no utterance boundary behind it, and
+         * never re-sample a turn that genuinely captured "nothing was playing".
+         */
+        val context: PlaybackContext? = null,
         /**
          * The grace window this dispatch was issued under, stamped by whoever
          * dispatched it. Handling the command may extend that window only while

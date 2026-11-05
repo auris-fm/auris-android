@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSigna
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -269,6 +270,179 @@ class VoicePlaybackIntentExecutorTest {
         // 6s since the wake but only ~3s since execute: only a renewal explains a live window.
         kotlinx.coroutines.delay(3_000L)
         assertTrue("a successful answer renews the window", signal.isActive.value)
+    }
+
+    /**
+     * Routes a prepared turn through the REAL CloudTurnRoute over a captured transport, so the
+     * assertions land on the Authenticate frame that would actually go out -- not on the fake sink's
+     * in-memory turn. The wire encoder (key omission, snake_case names) is separately controlled in
+     * CloudTurnRouteTest; this is the chain utterance -> dispatch -> outgoing frame.
+     */
+    private fun outgoingFrameOf(
+        turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+    ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate {
+        val frames = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame>()
+        val transport = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
+            override fun exchange(frame: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame): kotlinx.coroutines.flow.Flow<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                frames += frame
+                emit(au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent.Connected("pcm_s16le@24k"))
+            }
+        }
+        val token = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+            override suspend fun currentToken(): String? = "control-token"
+            override suspend fun refreshToken() = Unit
+        }
+        kotlinx.coroutines.runBlocking {
+            au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute(
+                "wss://control.invalid",
+                token,
+                transport = transport,
+            ).route(turn).toList()
+        }
+        return frames.single() as au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate
+    }
+
+    @Test
+    fun `an episode replaced mid-utterance still leaves the episode the speaker was hearing, on the outgoing frame`() = runTest {
+        // Plan control (b)+(a), asserted on the ACTUAL outgoing request, not the prepared object: the
+        // intent carries the utterance-start snapshot (episode A); by dispatch time the provider
+        // reports episode B. The turn -- and the frame the route builds from it -- must describe A.
+        val sinks = FakeSinks()
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-B",
+            podcastId = "podcast-B",
+            clientPositionMs = 500_000L,
+            referencePositionMs = 480_000L,
+        )
+        val executor = sinks.executor()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what did he just say",
+                tier = VoiceIntent.CloudTier.Premium,
+                context = PlaybackContext(
+                    episodeId = "episode-A",
+                    podcastId = "podcast-A",
+                    clientPositionMs = 120_000L,
+                    referencePositionMs = 118_000L,
+                    recentReferencePositions = listOf(110_000L, 115_000L),
+                ),
+            ),
+        )
+
+        val frame = outgoingFrameOf(sinks.cloudRoute.preparedTurns.single())
+        assertEquals("the frame names the episode heard at utterance start", "episode-A", frame.context.episodeId)
+        assertEquals("with the position the speaker heard", 120_000L, frame.context.clientPositionMs)
+        assertEquals("and the reference position mapped for THAT moment", 118_000L, frame.context.referencePositionMs)
+        assertEquals(listOf(110_000L, 115_000L), frame.context.recentReferencePositions)
+        assertTrue(
+            "the later episode must not appear anywhere on the frame (json-context=${frame.context})",
+            frame.context.episodeId != "episode-B" && frame.context.podcastId != "podcast-B",
+        )
+    }
+
+    @Test
+    fun `a retried turn carries the same snapshot on both outgoing frames`() = runTest {
+        // Plan control (c): retention is of the SNAPSHOT too. The retry dispatches the retained turn,
+        // so both attempts put the SAME utterance-start playback on the wire; a retry that re-read
+        // live playback would answer a different moment than the one the speaker asked about.
+        val sinks = FakeSinks()
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-live-now",
+            podcastId = "podcast-live",
+            clientPositionMs = 900_000L,
+        )
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val intent = VoiceIntent.CloudRoute(
+            request = "summarize this chapter",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(
+                episodeId = "episode-A",
+                podcastId = "podcast-A",
+                clientPositionMs = 120_000L,
+                referencePositionMs = 118_000L,
+            ),
+            windowGeneration = window,
+            logicalRequestId = "logical-retry",
+        )
+        executor.execute(intent)
+        executor.execute(intent) // retry: resolves the retained turn
+
+        assertEquals("two attempts dispatched", 2, sinks.cloudRoute.preparedDispatches.size)
+        val firstFrame = outgoingFrameOf(sinks.cloudRoute.preparedDispatches[0])
+        val retryFrame = outgoingFrameOf(sinks.cloudRoute.preparedDispatches[1])
+        assertEquals("the retry's frame carries the same episode", firstFrame.context, retryFrame.context)
+        assertEquals("episode-A", retryFrame.context.episodeId)
+        assertEquals(120_000L, retryFrame.context.clientPositionMs)
+        assertTrue(
+            "the retry must not resample live playback (context=${retryFrame.context})",
+            retryFrame.context.episodeId != "episode-live-now",
+        )
+    }
+
+    @Test
+    fun `a discovery turn with no episode sends a frame that names no episode and no positions`() = runTest {
+        // Plan control (d), on the outgoing frame: absence stays absence end to end. The encoder's
+        // key omission is controlled in CloudTurnRouteTest; this proves the executor hands the route
+        // an EMPTY context (not a fabricated one) for a turn that captured nothing playing.
+        val sinks = FakeSinks()
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-started-after",
+            clientPositionMs = 7_000L,
+        )
+        val executor = sinks.executor()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what should I listen to",
+                tier = VoiceIntent.CloudTier.Premium,
+                context = PlaybackContext(),
+            ),
+        )
+
+        val frame = outgoingFrameOf(sinks.cloudRoute.preparedTurns.single())
+        assertNull("no episode on the wire", frame.context.episodeId)
+        assertNull("no podcast", frame.context.podcastId)
+        assertNull("no client position -- nothing is playing to have one", frame.context.clientPositionMs)
+        assertNull("and no reference position", frame.context.referencePositionMs)
+        assertTrue("no accumulated history either", frame.context.recentReferencePositions.isEmpty())
+    }
+
+    @Test
+    fun `a turn carries its snapshot with sharing and upload consent entirely absent`() = runTest {
+        // Plan control (e): the playback snapshot is cloud-ROUTE context, not upload/observation
+        // state. No consent projection, no enrollment, no sharing identity is wired into this
+        // executor -- and the utterance's snapshot must still reach the outgoing frame whole.
+        val sinks = FakeSinks()
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-A",
+            podcastId = "podcast-A",
+            clientPositionMs = 120_000L,
+            referencePositionMs = 118_000L,
+        )
+        val executor = sinks.executor()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what am I hearing",
+                tier = VoiceIntent.CloudTier.Premium,
+                context = PlaybackContext(
+                    episodeId = "episode-A",
+                    podcastId = "podcast-A",
+                    clientPositionMs = 120_000L,
+                    referencePositionMs = 118_000L,
+                ),
+            ),
+        )
+
+        val frame = outgoingFrameOf(sinks.cloudRoute.preparedTurns.single())
+        assertEquals("episode-A", frame.context.episodeId)
+        assertEquals(120_000L, frame.context.clientPositionMs)
+        assertEquals(118_000L, frame.context.referencePositionMs)
     }
 
     @Test

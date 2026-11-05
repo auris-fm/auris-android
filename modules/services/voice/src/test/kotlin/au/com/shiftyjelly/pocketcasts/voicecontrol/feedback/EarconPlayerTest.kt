@@ -185,9 +185,21 @@ class EarconPlayerTest {
         // rather than to behaviour. Now that the module loads real resources (needed by
         // RealServiceLifecycleControlTest), the correct assertions are: a PRESENT earcon plays, and a
         // genuinely unresolvable resource id degrades to false instead of crashing.
+        // The REAL AudioTrack is not representable inside Robolectric (its shadow cannot accept
+        // writes), so the playback boundary is the same `trackFactoryForTest` seam the concurrency
+        // controls use: the clip below is the REAL resource-loaded clip (real decode, real frames),
+        // only the constructed track is substituted, accepting what production would accept.
+        val acceptingTrack = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(acceptingTrack.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            acceptingTrack.write(org.mockito.ArgumentMatchers.any<ShortArray>(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt()),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        player.trackFactoryForTest = { acceptingTrack }
+
+        val result = player.play(EarconId.SUCCESS)
         assertNotNull(
             "a present earcon resource must actually play",
-            player.play(EarconId.SUCCESS),
+            result,
         )
 
         // The missing-resource path still has to be safe. Play through a player whose context cannot

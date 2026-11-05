@@ -31,11 +31,15 @@ tasks.withType<Test>().configureEach {
 // upload.WorkerParity) are excluded from every ordinary Test task; they run only when the
 // suite is EXPLICITLY invoked with -PaurisIncludeWorkerParity, and then they still FAIL
 // honestly (never skip) when the pinned-worker authority is missing.
+val parityCategory = "au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity"
 val includeWorkerParity = providers.gradleProperty("aurisIncludeWorkerParity").isPresent
 tasks.withType<Test>().configureEach {
     useJUnit {
-        if (!includeWorkerParity) {
-            excludeCategories("au.com.shiftyjelly.pocketcasts.voicecontrol.upload.WorkerParity")
+        if (includeWorkerParity) {
+            // Explicit integration mode selects the parity category ONLY.
+            includeCategories(parityCategory)
+        } else {
+            excludeCategories(parityCategory)
         }
     }
 }

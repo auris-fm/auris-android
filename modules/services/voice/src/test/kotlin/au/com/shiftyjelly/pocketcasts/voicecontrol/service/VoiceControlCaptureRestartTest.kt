@@ -509,6 +509,10 @@ class VoiceControlCaptureRestartTest {
         setField(service, "playbackBufferRecorder", playbackBufferRecorder)
         val modelManager = mock(ModelManager::class.java)
         whenever(modelManager.isModelReady(any())).thenReturn(true)
+        // ensureModelsReady reads the DIGEST-VERIFIED readiness, not the cached flag; an
+        // unstubbed verified check returns a null Boolean and the unboxing NPE silently kills
+        // the IO start job, so the observer never installs.
+        whenever(modelManager.isModelReadyVerified(any())).thenReturn(true)
         whenever(modelManager.isLfmModelReady()).thenReturn(true)
         whenever(modelManager.ensureModel(any())).thenReturn(Result.success(Unit))
         whenever(modelManager.ensureLfmModel()).thenReturn(Result.success(Unit))

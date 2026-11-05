@@ -89,6 +89,12 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         if (context.previousReferencePositionMs != null) {
             writer.name("previous_reference_position_ms").value(context.previousReferencePositionMs)
         }
+        // Reported provenance only: written when the client KNOWS the version of the reference data
+        // its mapping was built from, omitted otherwise. A turn with unknown provenance dispatches
+        // without it -- the field is never fabricated.
+        if (context.referenceAssetVersion?.isNotEmpty() == true) {
+            writer.name("reference_asset_version").value(context.referenceAssetVersion)
+        }
         writer.endObject()
     }
 

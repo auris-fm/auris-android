@@ -1349,6 +1349,82 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a known reference version reaches the prepared turn with its episode`() = runTest {
+        // core 351dd308 follow-up: the client retains the SHA-256 of the active map's reference data
+        // and carries it in the snapshot field. On the wire it appears ONLY bound to its episode.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        val version = "b".repeat(64)
+
+        val prepared = sink.prepareTurn(
+            request = "about A",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(
+                episodeId = "A",
+                clientPositionMs = 120_000L,
+                referenceAssetVersion = version,
+            ),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-version",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+
+        assertEquals(
+            "the provenance the snapshot captured is carried unchanged",
+            version,
+            prepared.context.referenceAssetVersion,
+        )
+    }
+
+    @Test
+    fun `a reference version without an episode is dropped, and absence is omitted not fabricated`() = runTest {
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        // Version WITHOUT an episode: provenance describes nothing, so it must not ride a
+        // discovery turn.
+        val discovery = sink.prepareTurn(
+            request = "what should I listen to",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(referenceAssetVersion = "c".repeat(64)),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-no-episode",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+        assertEquals(null, discovery.context.referenceAssetVersion)
+
+        // KNOWN ABSENCE: no version in, no version out -- never an empty-string stand-in.
+        val unprovenanced = sink.prepareTurn(
+            request = "about A",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = PlaybackContext(episodeId = "A", clientPositionMs = 1_000L),
+            isLiveGraceTurn = false,
+            capturedOrigin = null,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = "logical-ref-absent",
+            isRetry = false,
+            sourceLanguage = null,
+            snapshotCaptured = true,
+        )!!
+        assertEquals(null, unprovenanced.context.referenceAssetVersion)
+    }
+
+    @Test
     fun `a captured snapshot keeps its empty reference history even when saved state exists`() = runTest {
         // @reviewer's sink-enrichment finding: buildRouteContext filled an empty recent/previous from
         // live saved state AT PREPARATION. A snapshot captured at the utterance boundary must reach

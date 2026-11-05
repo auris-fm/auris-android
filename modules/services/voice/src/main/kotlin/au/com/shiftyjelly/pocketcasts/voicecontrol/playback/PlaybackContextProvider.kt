@@ -37,6 +37,17 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
         } else {
             null
         }
+        // THE REFERENCE PROVENANCE rides the same episode gate as the mapped position: a version
+        // belongs to the active mapping of THE episode being played, and a version for another
+        // episode's map would claim provenance this turn cannot verify.
+        val referenceAssetVersion = if (
+            episode != null &&
+            fingerprintTimingManager.activeEpisodeUuid == episode.uuid
+        ) {
+            fingerprintTimingManager.activeReferenceVersion
+        } else {
+            null
+        }
         // Screened by episode for the same reason as the sink's: a saved position belongs to the
         // episode it was recorded from.
         val state = cloudPlaybackContextState.snapshot(episode?.uuid)
@@ -51,6 +62,7 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
             clientPositionMs = clientPositionMs,
             recentReferencePositions = state.recentReferencePositions,
             previousReferencePositionMs = state.previousReferencePositionMs,
+            referenceAssetVersion = referenceAssetVersion,
         )
     }
 }

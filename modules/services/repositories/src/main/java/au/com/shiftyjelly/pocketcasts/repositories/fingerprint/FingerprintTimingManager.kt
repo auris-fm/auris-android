@@ -126,6 +126,17 @@ class FingerprintTimingManager @Inject constructor(
     var activeEpisodeUuid: String? = null
         private set
 
+    /**
+     * SHA-256 of the reference data the ACTIVE mapping was built from, or null when no mapping is
+     * active (core cloud-assistant.md `reference_asset_version`). Computed ONCE when the reference
+     * is bound, never re-hashed per read, and cleared with the rest of the state on reset and on the
+     * cloud-only path -- a version without an active map would claim provenance the turn cannot
+     * verify. Missing provenance is ordinary: callers omit it and the turn proceeds.
+     */
+    @Volatile
+    var activeReferenceVersion: String? = null
+        private set
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val decodeDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val mutex = Mutex()
@@ -713,6 +724,7 @@ class FingerprintTimingManager @Inject constructor(
         currentSharedCacheKey = null
         currentDurationSec = 0.0
         currentReferenceData = null
+        activeReferenceVersion = null
         currentReferenceFilePath = null
         currentReference = null
         currentMatcher?.close()
@@ -930,6 +942,9 @@ class FingerprintTimingManager @Inject constructor(
                 return
             }
             currentReferenceData = referenceData
+            // THE PROVENANCE IS THE ACTIVE MAP'S OWN REFERENCE BYTES: exactly the data the mapping
+            // cache validates and a fresh map is built from, hashed once here.
+            activeReferenceVersion = FingerprintMappingCache.referenceDataVersion(referenceData)
             currentReferenceFilePath = refPath
             currentReference = reference
             currentMatcher = matcher
@@ -969,6 +984,7 @@ class FingerprintTimingManager @Inject constructor(
         mutex.withLock {
             if (gen != generation) return
             currentReferenceData = null
+            activeReferenceVersion = null
             currentReferenceFilePath = null
             currentReference = reference
             currentMatcher = null

@@ -181,4 +181,10 @@ data class PlaybackContext(
     val clientPositionMs: Long? = null,
     val recentReferencePositions: List<Long> = emptyList(),
     val previousReferencePositionMs: Long? = null,
+    /**
+     * SHA-256 of the reference data the ACTIVE mapping was built from (core `reference_asset_version`),
+     * or null when no mapping is active. Missing provenance is ordinary: omitted on the wire, never
+     * fetched or manufactured, and never a reason to block a turn.
+     */
+    val referenceAssetVersion: String? = null,
 )

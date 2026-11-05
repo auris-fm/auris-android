@@ -97,6 +97,48 @@ class CloudTurnRouteTest {
     }
 
     @Test
+    fun `a known reference version serializes on the wire and unknown provenance omits the key`() = runTest {
+        // core cloud-assistant.md reference_asset_version: reported provenance only. The exact bytes
+        // matter, so the assertion is on the serialized frame, not the typed field.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val versioned = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+            request = "what did he just say",
+            context = CloudRouteContext(
+                episodeId = "e-42",
+                clientPositionMs = 91_000L,
+                referenceAssetVersion = "d".repeat(64),
+            ),
+            requestId = "req-versioned",
+        )
+
+        route(transport).route(versioned).toList()
+
+        val json = CloudRouteJson.authenticateAdapter.toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
+        assertTrue(
+            "the version reaches the wire with its exact value (json=$json)",
+            json.contains("\"reference_asset_version\":\"${"d".repeat(64)}\""),
+        )
+
+        // Unknown provenance: the key is absent entirely, not an empty string.
+        transport.frames.clear()
+        val unprovenanced = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+            request = "play something",
+            context = CloudRouteContext(episodeId = "e-42", clientPositionMs = 91_000L),
+            requestId = "req-unprovenanced",
+        )
+        route(transport).route(unprovenanced).toList()
+        val plainJson = CloudRouteJson.authenticateAdapter.toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
+        assertFalse(
+            "unknown provenance omits the key (json=$plainJson)",
+            plainJson.contains("reference_asset_version"),
+        )
+    }
+
+    @Test
     fun `a turn with a current episode carries its local position`() = runTest {
         // The control for the case above: with an episode the fields ARE present, so the omission
         // above is about absence rather than about the encoder dropping them.

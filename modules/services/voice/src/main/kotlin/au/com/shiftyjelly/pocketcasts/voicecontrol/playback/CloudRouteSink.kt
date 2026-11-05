@@ -1115,6 +1115,10 @@ class CloudRouteSink internal constructor(
             } else {
                 null
             },
+            // THE PROVENANCE IS EPISODE-BOUND like every reference field: a version without an
+            // episode describes nothing. Captured snapshots carry it unchanged; a captured EMPTY
+            // context (nothing playing) has no version by construction.
+            referenceAssetVersion = context.referenceAssetVersion?.takeIf { hasEpisode && it.isNotEmpty() },
         )
     }
 

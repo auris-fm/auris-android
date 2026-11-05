@@ -25,6 +25,12 @@ data class CloudRouteContext(
     @Json(name = "client_position_ms") val clientPositionMs: Long? = null,
     @Json(name = "recent_reference_positions") val recentReferencePositions: List<Long> = emptyList(),
     @Json(name = "previous_reference_position_ms") val previousReferencePositionMs: Long? = null,
+    /**
+     * SHA-256 of the reference data the client's active mapping was built from, when known. OMITTED
+     * on the wire when absent: provenance is reported, never manufactured, and a turn with unknown
+     * provenance still dispatches.
+     */
+    @Json(name = "reference_asset_version") val referenceAssetVersion: String? = null,
 )
 
 /**

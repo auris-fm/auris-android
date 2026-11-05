@@ -4704,17 +4704,14 @@ class CloudRouteSinkTest {
         // cancellation catch must release the transferred hold before rethrowing.
         val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
         graceSignal.onWakeWordDetected()
-        val executor = org.mockito.Mockito.mock(VoicePlaybackIntentExecutor::class.java)
         var answerRan = false
-        org.mockito.kotlin.whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
-            .thenAnswer {
-                answerRan = true
-                // Simulate the sink's completed transfer, then the caller withdrawing.
-                val intent = it.getArgument<VoiceIntent.CloudRoute>(0)
-                val hold = graceSignal.holdCloudTurn(owner = 3L)!!
-                graceSignal.transferHoldToOutput(intent.logicalRequestId ?: testWireId, hold)
-                throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
-            }
+        val executor = au.com.shiftyjelly.pocketcasts.voicecontrol.service.StubVoiceExecutor { intent, _, _ ->
+            answerRan = true
+            // Simulate the sink's completed transfer, then the caller withdrawing.
+            val hold = graceSignal.holdCloudTurn(owner = 3L)!!
+            graceSignal.transferHoldToOutput(testWireId, hold)
+            throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
+        }
         val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
             voicePlaybackIntentExecutor = executor
             audioFeedbackRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(

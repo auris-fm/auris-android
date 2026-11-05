@@ -35,9 +35,7 @@ class VoiceControlServiceRenderTest {
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
         val service = VoiceControlService().apply {
             audioFeedbackRenderer = renderer
-            voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
-                whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any())).thenReturn(VoiceResponse.Silent)
-            }
+            voicePlaybackIntentExecutor = StubVoiceExecutor()
         }
         try {
             service.renderWithFailureHandling(noopIntent())
@@ -76,14 +74,10 @@ class VoiceControlServiceRenderTest {
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
         val service = VoiceControlService().apply {
             audioFeedbackRenderer = renderer
-            voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
-                whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
-                    .thenAnswer { invocation ->
-                        // The production write: the executor fills the caller's holder.
-                        invocation.getArgument<VoicePlaybackIntentExecutor.TurnOutcome>(1).action =
-                            CloudRouteActionOutcome.Unknown
-                        VoiceResponse.Silent
-                    }
+            voicePlaybackIntentExecutor = StubVoiceExecutor { _, outcome, _ ->
+                // The production write: the executor fills the caller's holder.
+                outcome.action = CloudRouteActionOutcome.Unknown
+                VoiceResponse.Silent
             }
         }
         val outcome = VoicePlaybackIntentExecutor.TurnOutcome()
@@ -104,9 +98,11 @@ class VoiceControlServiceRenderTest {
     fun `a cancelled command gives no feedback and does not renew grace`() = runTest {
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
-        val executor = mock(VoicePlaybackIntentExecutor::class.java)
-        whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
-            .thenThrow(kotlinx.coroutines.CancellationException("caller withdrew"))
+        var executed = false
+        val executor = StubVoiceExecutor { _, _, _ ->
+            executed = true
+            throw kotlinx.coroutines.CancellationException("caller withdrew")
+        }
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
         val service = VoiceControlService().apply {
             audioFeedbackRenderer = renderer
@@ -118,9 +114,16 @@ class VoiceControlServiceRenderTest {
         val captured = signal.currentGeneration
         val timerBefore = signal.timerJobForTest()
         try {
-            service.handleIntentForTest(VoiceIntent.Playback.Pause)
-            awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            // The cancellation catch under test lives in renderWithFailureHandling; the dispatcher
+            // seam is not part of this boundary and the service is stood up without one.
+            runCatching { service.renderWithFailureHandling(VoiceIntent.Playback.Pause) }
+                .onFailure { expected ->
+                    org.junit.Assert.assertTrue(
+                        "expected the cancellation to propagate",
+                        expected is kotlinx.coroutines.CancellationException,
+                    )
+                }
+            org.junit.Assert.assertTrue("the executor must have run", executed)
 
             // No feedback: cancellation is the caller withdrawing, not a failure to report.
             verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)

@@ -499,7 +499,7 @@ class VoiceControlCaptureRestartTest {
         setField(service, "gate", gate)
         setField(service, "notificationManager", notificationManager)
         setField(service, "voiceRecognizer", NoopRecognizer())
-        setField(service, "voicePlaybackIntentExecutor", mock(VoicePlaybackIntentExecutor::class.java))
+        setField(service, "voicePlaybackIntentExecutor", StubVoiceExecutor())
         setField(service, "voiceDialogManager", mock(au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager::class.java))
         setField(service, "playbackContextMonitor", mock(PlaybackContextMonitor::class.java))
         setField(service, "audioRouteMonitor", monitor)

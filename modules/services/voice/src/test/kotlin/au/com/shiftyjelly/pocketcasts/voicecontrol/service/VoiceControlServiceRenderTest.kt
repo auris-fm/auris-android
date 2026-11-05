@@ -116,13 +116,11 @@ class VoiceControlServiceRenderTest {
         try {
             // The cancellation catch under test lives in renderWithFailureHandling; the dispatcher
             // seam is not part of this boundary and the service is stood up without one.
-            runCatching { service.renderWithFailureHandling(VoiceIntent.Playback.Pause) }
-                .onFailure { expected ->
-                    org.junit.Assert.assertTrue(
-                        "expected the cancellation to propagate",
-                        expected is kotlinx.coroutines.CancellationException,
-                    )
-                }
+            val result = runCatching { service.renderWithFailureHandling(VoiceIntent.Playback.Pause) }
+            org.junit.Assert.assertTrue(
+                "cancellation must propagate out of the service, not be swallowed: " + result,
+                result.exceptionOrNull() is kotlinx.coroutines.CancellationException,
+            )
             org.junit.Assert.assertTrue("the executor must have run", executed)
 
             // No feedback: cancellation is the caller withdrawing, not a failure to report.

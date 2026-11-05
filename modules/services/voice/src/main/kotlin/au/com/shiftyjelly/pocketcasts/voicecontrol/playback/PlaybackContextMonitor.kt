@@ -38,6 +38,20 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
         .stateIn(scope, SharingStarted.Eagerly, PlaybackContext.Inactive)
 
     /**
+     * True when the host app (Pocket Casts) is actively playing audio. Used by
+     * [OtherAppPlayingCondition], together with a short time-bounded recency window,
+     * to distinguish the host's own audio from another app's during a play/pause/route
+     * transition (see voice-control-core).
+     *
+     * DECLARED BEFORE THE INIT BLOCK: the init watcher reads this on a Dispatchers.Default
+     * worker that can interleave with construction, so a declaration after init would race
+     * the property's own initializer and NPE on a null read (seen on the CI fork).
+     */
+    val isHostAudioActive: StateFlow<Boolean> = context.map {
+        it is PlaybackContext.Active && it.isPlaying
+    }.stateIn(scope, SharingStarted.Eagerly, false)
+
+    /**
      * How many play/pause/stop commands the playback layer has seen, including
      * this app's own. Read synchronously rather than through a flow: a caller
      * compares it before and after its own command, and a `stateIn` value can
@@ -107,16 +121,6 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
         // own pause reaches the player through the same VOICE_COMMANDS tag, and a voice-path skip or
         // next-episode carries it too, so the tag says nothing about whose stop this was.
         !causedByVoiceHold
-
-    /**
-     * True when the host app (Pocket Casts) is actively playing audio. Used by
-     * [OtherAppPlayingCondition], together with a short time-bounded recency window,
-     * to distinguish the host's own audio from another app's during a play/pause/route
-     * transition (see voice-control-core).
-     */
-    val isHostAudioActive: StateFlow<Boolean> = context.map {
-        it is PlaybackContext.Active && it.isPlaying
-    }.stateIn(scope, SharingStarted.Eagerly, false)
 
     private fun toPlaybackContext(playbackState: PlaybackState): PlaybackContext {
         val currentEpisodeUuid = playbackState.episodeUuid

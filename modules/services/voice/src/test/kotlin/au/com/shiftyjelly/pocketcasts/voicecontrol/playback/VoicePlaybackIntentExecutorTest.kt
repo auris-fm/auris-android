@@ -272,6 +272,64 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `the turn is described by the playback the speaker heard, not by whatever plays at dispatch`() = runTest {
+        // SPEC (core c6ebc2ed, "Playback snapshot and parallel passage retrieval"): the pipeline
+        // captures episode/position when the UTTERANCE STARTS, before ASR and routing, and retains
+        // that immutable snapshot through dispatch and retries. It must NOT resample at cloud-open
+        // time.
+        //
+        // The defect this pins: the executor called `playbackContextProvider.current()` at dispatch,
+        // so a turn spoken at 10:00 and sent after ASR/routing was described by then-current playback.
+        // Here the speaker was listening to episode A at 120_000ms; by dispatch, playback has moved on.
+        // The turn must still carry A at 120_000.
+        val sinks = FakeSinks()
+        // What the provider would say AT DISPATCH -- deliberately different from utterance start.
+        sinks.playbackContext.context = PlaybackContext(
+            episodeId = "episode-B",
+            podcastId = "podcast-B",
+            clientPositionMs = 999_000L,
+            referencePositionMs = 888_000L,
+        )
+        val executor = sinks.executor()
+        val spokenUnder = PlaybackContext(
+            episodeId = "episode-A",
+            podcastId = "podcast-A",
+            clientPositionMs = 120_000L,
+            referencePositionMs = 118_000L,
+        )
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what did they just say",
+                tier = VoiceIntent.CloudTier.Premium,
+                context = spokenUnder,
+            ),
+        )
+
+        val prepared = sinks.cloudRoute.preparedTurns.single()
+        assertEquals(
+            "the episode is the one playing when the utterance started",
+            "episode-A",
+            prepared.context.episodeId,
+        )
+        assertEquals(
+            "the podcast is the one playing when the utterance started",
+            "podcast-A",
+            prepared.context.podcastId,
+        )
+        assertEquals(
+            "the client position is the one the speaker actually heard",
+            120_000L,
+            prepared.context.clientPositionMs,
+        )
+        assertEquals(
+            "and the mapped reference position belongs to that same moment",
+            118_000L,
+            prepared.context.referencePositionMs,
+        )
+    }
+
+    @Test
     fun `a dispatched turn carries its own window stamp, so a fresh wake creates`() = runTest {
         // @reviewer's bound-path case: the STAMP ON THE INTENT is the captured origin. A fresh wake
         // must create even while the previous conversation is still live, and a follow-up stamped with
@@ -1435,7 +1493,16 @@ class VoicePlaybackIntentExecutorTest {
                 // The logical id is carried in the request text so the fake can key on it exactly as
                 // production keys on the identity field.
                 request = if (logicalRequestId != null) "$request|$logicalRequestId" else request,
-                context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
+                // CARRIED THROUGH, not discarded: a case that asserts the turn's playback context must
+                // read what the executor actually handed the sink, or it reads only the fake.
+                context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(
+                    episodeId = context.episodeId,
+                    podcastId = context.podcastId,
+                    referencePositionMs = context.referencePositionMs,
+                    clientPositionMs = context.clientPositionMs,
+                    recentReferencePositions = context.recentReferencePositions,
+                    previousReferencePositionMs = context.previousReferencePositionMs,
+                ),
                 requestId = "prepared-${preparedTurns.size + 1}",
                 conversationId = "handle-${preparedTurns.size + 1}",
                 conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
@@ -1493,7 +1560,13 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     private class FakePlaybackContextProvider : PlaybackContextProvider {
-        override fun current(): PlaybackContext = PlaybackContext()
+        /** Settable so a case can make the DISPATCH-TIME reading differ from the utterance-start one. */
+        var context: PlaybackContext = PlaybackContext()
+        var calls = 0
+        override fun current(): PlaybackContext {
+            calls++
+            return context
+        }
     }
 
     private class FakeQueueSink : VoiceQueueSink {

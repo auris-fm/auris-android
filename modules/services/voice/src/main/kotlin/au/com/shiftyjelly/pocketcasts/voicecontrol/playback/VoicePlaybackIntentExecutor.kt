@@ -205,7 +205,16 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     outcome.turnSucceeded = retried.succeeded
                     return retried.feedback
                 }
-                val context = playbackContextProvider.current()
+                // THE PLAYBACK THE SPEAKER HEARD, NOT THE PLAYBACK AT SEND TIME (core c6ebc2ed,
+                // "Playback snapshot and parallel passage retrieval"). The snapshot is captured when
+                // the utterance STARTS and carried on the intent; the executor runs after ASR and
+                // routing, which can take seconds, and sampling here described the turn by whatever
+                // was playing when it happened to be sent -- exactly the resample the spec forbids.
+                //
+                // The provider remains the fallback for a dispatch that carries no snapshot (a path
+                // with no utterance boundary behind it). An utterance-originated turn always carries
+                // one, and its carried value wins.
+                val context = intent.context.takeIf { it != PlaybackContext() } ?: playbackContextProvider.current()
                 // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
                 // not the current one read here. The executor runs later than the dispatch, so reading
                 // the live window would let a fresh wake look like a continuation of the previous

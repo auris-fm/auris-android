@@ -20,6 +20,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic
@@ -2106,6 +2107,91 @@ class VoiceAsrEngineTest {
                 completionSample = 4000,
             ),
         )
+
+        @Test
+        fun `the cloud turn carries the playback captured when the utterance started, not when it was sent`() = runTest {
+            // core c6ebc2ed: capture episode/position at UTTERANCE START, before recognition and routing,
+            // and retain it through dispatch. Recognition here suspends (as real ASR does) while playback
+            // moves on; the dispatched turn must still describe the moment the speech began.
+            val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+            signal.onWakeWordDetected()
+            val startSnapshot = PlaybackContext(
+                episodeId = "episode-A",
+                podcastId = "podcast-A",
+                clientPositionMs = 120_000L,
+                referencePositionMs = 118_000L,
+            )
+            // The provider moves on between the two reads: the FIRST read is the utterance boundary,
+            // the later one would be the dispatch-time resample the spec forbids.
+            var reads = 0
+            val provider = object : au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider {
+                override fun current(): PlaybackContext {
+                    reads++
+                    return if (reads == 1) {
+                        startSnapshot
+                    } else {
+                        PlaybackContext(
+                            episodeId = "episode-B",
+                            podcastId = "podcast-B",
+                            clientPositionMs = 999_000L,
+                            referencePositionMs = 888_000L,
+                        )
+                    }
+                }
+            }
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                    detected = false,
+                    confidence = 0f,
+                    completionSample = 4000,
+                ),
+            )
+
+            val intents = mutableListOf<VoiceIntent>()
+            val engine = VoiceAsrEngine(
+                voiceAudioProcessor = voiceAudioProcessor,
+                utteranceFilter = utteranceFilter,
+                intentRecognizer = intentRecognizer,
+                wakeWordDetector = wakeWordDetector,
+                gracePeriodSignal = signal,
+                audioFeedbackRenderer = audioFeedbackRenderer,
+                translationStage = translationStage,
+                context = context,
+                playbackContext = provider,
+            )
+            engine.scope = this
+            `when`(voiceAudioProcessor.startProcessing()).thenReturn(captureFlow)
+            `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+            `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+            engine.start(
+                backend = FakeAsrBackend("play something"),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+                micExposureProvider = { MicExposure.Exposed },
+                onIntent = { intents += it },
+            )
+            advanceUntilIdle()
+
+            val cloud = intents.filterIsInstance<VoiceIntent.CloudRoute>().single()
+            assertEquals(
+                "the episode played when the utterance started",
+                "episode-A",
+                cloud.context.episodeId,
+            )
+            assertEquals(
+                "the position the speaker heard",
+                120_000L,
+                cloud.context.clientPositionMs,
+            )
+            assertEquals(
+                "and the mapped reference for that same moment",
+                118_000L,
+                cloud.context.referencePositionMs,
+            )
+            engine.stop()
+        }
 
         val intents = mutableListOf<VoiceIntent>()
         val recognizer = SuccessorWakeWithCloudResultRecognizer(

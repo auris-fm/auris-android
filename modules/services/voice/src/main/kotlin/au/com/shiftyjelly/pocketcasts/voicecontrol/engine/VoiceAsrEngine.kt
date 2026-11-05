@@ -26,6 +26,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
@@ -74,6 +75,13 @@ class VoiceAsrEngine @Inject constructor(
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
+    /**
+     * Supplies the playback snapshot captured at UTTERANCE START (core c6ebc2ed).
+     *
+     * Optional so existing construction sites keep compiling; when absent the pipeline simply has no
+     * snapshot to carry, and the executor's provider fallback applies unchanged.
+     */
+    private val playbackContext: PlaybackContextProvider? = null,
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -448,6 +456,11 @@ class VoiceAsrEngine @Inject constructor(
         // the window that opened during the wait, so a request issued before a successor wake would
         // act as though it belonged to the successor.
         val windowAtRequest = gracePeriodSignal.capturedGeneration()
+        // THE PLAYBACK SNAPSHOT IS TAKEN HERE, AT UTTERANCE START -- before recognition, translation
+        // and routing, all of which can take seconds (core c6ebc2ed, "Playback snapshot and parallel
+        // passage retrieval"). Reading it at dispatch instead described the turn by whatever was
+        // playing when it was finally sent. One capture, carried immutably from here to the wire.
+        val playbackAtUtterance = playbackContext?.current()
         // THE ADMITTED IDENTITY arrives from capture admission (TranscribeRequest.admittedId),
         // minted BEFORE ASR/trim/translation so every diagnostic from that point forward names
         // the same request. A retry of the same request reuses this value; two separate user acts
@@ -475,6 +488,9 @@ class VoiceAsrEngine @Inject constructor(
                         intent.copy(
                             request = input.sourceTranscript ?: input.routerTranscript,
                             sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
+                            // The captured snapshot, not a fresh reading: this is the moment the
+                            // speech began, and the turn must describe that moment through dispatch.
+                            context = playbackAtUtterance ?: intent.context,
                         )
                     } else {
                         intent

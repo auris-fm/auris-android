@@ -3,13 +3,14 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,18 +29,12 @@ import org.mockito.kotlin.mock
  * Determinism: this control constructs the REAL monitor under
  * Dispatchers.Unconfined, which runs the launched watcher inline on the
  * constructing thread — so the old declaration order fails HERE, not by suite
- * timing. Failures are observed through the default uncaught-exception handler,
- * because a `launch` failure surfaces there, not at the construction call site.
- * The scope is cancelled so no watcher outlives the test.
+ * timing. The failure is observed through a [CoroutineExceptionHandler] on THIS
+ * test's own scope, so only this monitor's failures are seen and no JVM-wide
+ * handler is touched. The scope is cancelled so no watcher outlives the test.
  */
 class PlaybackContextMonitorConstructionRaceTest {
-    private val captured = mutableListOf<Throwable>()
-    private var previousHandler: Thread.UncaughtExceptionHandler? = null
-
-    @After
-    fun restoreHandler() {
-        previousHandler?.let { Thread.setDefaultUncaughtExceptionHandler(it) }
-    }
+    private val failures = CopyOnWriteArrayList<Throwable>()
 
     @Test
     fun `the construction watcher reads an initialized flow and still counts a real stop`() = runTest {
@@ -48,36 +43,39 @@ class PlaybackContextMonitorConstructionRaceTest {
             on { playbackStateFlow } doReturn playbackStates
         }
         val signal = GracePeriodSignal()
-        previousHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { _, e -> captured.add(e) }
-
-        val scope = CoroutineScope(Job() + Dispatchers.Unconfined)
-        val monitor: PlaybackContextMonitor
-        try {
-            // Construction itself: with the old declaration order the inline watcher
-            // NPEs here via the uncaught handler before this line returns.
-            monitor = PlaybackContextMonitor(playbackManager, signal, scope)
-        } finally {
-            try {
-                // Playback behavior on the REAL watcher: playing -> privacy closed -> stopped
-                // must advance the playback-stop closure count.
-                playbackStates.value = PlaybackState(state = PlaybackState.State.PLAYING, episodeUuid = "ep")
-                signal.onAppBackgrounded()
-                assertTrue("the window must be closed by privacy before the stop", signal.isClosedByPrivacy())
-                playbackStates.value = PlaybackState(state = PlaybackState.State.STOPPED, episodeUuid = "ep")
-                assertEquals(
-                    "the watcher must count the playing-to-stopped closure (old order would have NPE'd instead)",
-                    1L,
-                    signal.playbackStopClosureCount(),
-                )
-            } finally {
-                scope.cancel()
-            }
-        }
-        assertEquals(
-            "constructing the monitor must not leak an uncaught watcher failure (the CI fork NPE)",
-            emptyList<Throwable>(),
-            captured,
+        val scope = CoroutineScope(
+            Job() + Dispatchers.Unconfined + CoroutineExceptionHandler { _, e -> failures.add(e) },
         )
+        try {
+            // Construction itself: with the old declaration order the inline watcher dies
+            // here on the uninitialized property and the handler records the failure.
+            val monitor = PlaybackContextMonitor(playbackManager, signal, scope)
+            assertTrue(
+                "constructing the monitor must not fail the watcher (old order read an " +
+                    "uninitialized flow): $failures",
+                failures.isEmpty(),
+            )
+            assertEquals(
+                "the idle monitor reports no host audio and no privacy closure",
+                false to false,
+                monitor.isHostAudioActive.value to monitor.isPrivacyClosed(),
+            )
+
+            // Playback behavior on the REAL watcher: playing -> privacy closed -> stopped
+            // must still advance the playback-stop closure count.
+            playbackStates.value = PlaybackState(state = PlaybackState.State.PLAYING, episodeUuid = "ep")
+            signal.onAppBackgrounded()
+            assertTrue("the window must be closed by privacy before the stop", signal.isClosedByPrivacy())
+            playbackStates.value = PlaybackState(state = PlaybackState.State.STOPPED, episodeUuid = "ep")
+            assertEquals(
+                "the watcher must count the playing-to-stopped closure (old order would have " +
+                    "died on the uninitialized property instead): $failures",
+                1L,
+                signal.playbackStopClosureCount(),
+            )
+            assertTrue("no watcher failure may occur during the whole control: $failures", failures.isEmpty())
+        } finally {
+            scope.cancel()
+        }
     }
 }

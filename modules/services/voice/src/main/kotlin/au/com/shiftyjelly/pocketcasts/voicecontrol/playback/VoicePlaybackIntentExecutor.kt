@@ -263,6 +263,9 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // defect the refusal exists to prevent.
                     isRetry = intent.isRetry,
                     sourceLanguage = intent.sourceLanguage,
+                    // NON-NULL MEANS CAPTURED: only a genuinely absent snapshot (the live fallback)
+                    // may be enriched from saved state at preparation.
+                    snapshotCaptured = intent.context != null,
                 ) ?: return VoiceResponse.Silent
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
@@ -678,6 +681,13 @@ interface VoiceCloudRouteSink {
         isWakeOriginated: Boolean = false,
         /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
         admitted: String?,
+        /**
+         * True when [context] is the snapshot captured at the utterance boundary rather than a live
+         * reading. A captured snapshot must reach the wire EXACTLY as captured: the sink must not fill
+         * its empty reference history from saved state, because a same-episode action completing
+         * during ASR would attach references that did not exist when speech began.
+         */
+        snapshotCaptured: Boolean = false,
     ): CloudTurnResult
 
     /**
@@ -700,6 +710,8 @@ interface VoiceCloudRouteSink {
         isRetry: Boolean = false,
         /** ASR source language retained with the prepared request, including retries. */
         sourceLanguage: String? = null,
+        /** True when [context] is the utterance-boundary snapshot, so the sink must not enrich it from live state. */
+        snapshotCaptured: Boolean = false,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**
@@ -759,6 +771,7 @@ interface VoiceCloudRouteSink {
         isWakeOriginated: Boolean = false,
         /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
         admitted: String?,
+        snapshotCaptured: Boolean = false,
     ): CloudTurnResult = routeToCloud(
         request,
         tier,
@@ -767,6 +780,7 @@ interface VoiceCloudRouteSink {
         capturedOrigin,
         isWakeOriginated,
         admitted,
+        snapshotCaptured,
     )
 }
 

@@ -1643,6 +1643,9 @@ class VoicePlaybackIntentExecutorTest {
         val capturedOrigins = mutableListOf<Long?>()
         val wakeOrigins = mutableListOf<Boolean>()
 
+        /** The captured-presence flag each call carried, so a case can assert what the executor forwarded. */
+        val snapshotCapturedFlags = mutableListOf<Boolean>()
+
         /**
          * The action outcome the sink reports.
          *
@@ -1711,6 +1714,7 @@ class VoicePlaybackIntentExecutorTest {
             logicalRequestId: String?,
             isRetry: Boolean,
             sourceLanguage: String?,
+            snapshotCaptured: Boolean,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
             onPrepareSeam?.invoke()
             // RETIRE AT THE SEAM, once, on the retry: a retirement landing after the executor's guards
@@ -1789,7 +1793,9 @@ class VoicePlaybackIntentExecutorTest {
             capturedOrigin: Long?,
             isWakeOriginated: Boolean,
             admitted: String?,
+            snapshotCaptured: Boolean,
         ): CloudTurnResult {
+            snapshotCapturedFlags += snapshotCaptured
             calls += "routeToCloud:$request:${tier.name}"
             graceFlags += isLiveGraceTurn
             capturedOrigins += capturedOrigin

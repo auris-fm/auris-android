@@ -48,6 +48,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
@@ -153,6 +154,7 @@ class MixedFactsPersistControlTest {
             whenever(voiceAudioProcessor.attachCapture()).thenReturn(true)
             whenever(voiceAudioProcessor.peekSpeechDelta(any())).thenReturn(0 to ShortArray(0))
             whenever(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            whenever(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
             whenever(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
             whenever(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
             whenever(voiceAudioProcessor.startProcessing()).thenReturn(

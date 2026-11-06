@@ -201,9 +201,50 @@ class SavedSharingChoiceControlTest {
     }
 
     @Test
+    fun `a failed stop for A is not cleared by a successful write for B`() {
+        val persistence = InMemoryChoicePersistence()
+        persistence.write(SavedSharingChoice("a@x", SharingChoiceState.ENROLLED, "epoch-a", "1"))
+        val store = SavedSharingChoiceStore(persistence)
+
+        // A's withdraw persist FAILS: A is latched.
+        persistence.failWrites = true
+        assertFalse(store.recordWithdrawn("a@x"))
+        assertFalse(
+            "A must refuse while A's stop could not be made durable",
+            authority("a@x", store).decide().collectionPermitted,
+        )
+
+        // B's enroll persist SUCCEEDS: it must NOT clear A's latch...
+        persistence.failWrites = false
+        assertTrue(store.recordEnrolled("b@x", "epoch-b", "2"))
+
+        // ...and A's file still holds the stale ENROLLED record, which A must not read as consent.
+        assertFalse(
+            "A's latch survives B's success: A must not run on its stale enrolled file",
+            authority("a@x", store).decide().collectionPermitted,
+        )
+        // B reads its own genuine record.
+        assertTrue(
+            "B is admitted on B's own persisted choice",
+            authority("b@x", store).decide().collectionPermitted,
+        )
+        // Only A's own successful write clears A's latch.
+        assertTrue(store.recordNotEnrolled("a@x"))
+        assertFalse(
+            "after A's own successful write the latch clears, and the not_enrolled state refuses",
+            authority("a@x", store).decide().collectionPermitted,
+        )
+    }
+
+    @Test
     fun `a corrupt or failed write fails closed and names the missing choice`() {
         val dir = tmpDir("choice-corrupt")
-        java.io.File(dir, "voice-sharing-choice").writeText("garbage not a record")
+        // Corrupt the ACTUAL per-account file, not the retired global name.
+        val accountFile = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("a@x".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+            .let { java.io.File(dir, "voice-sharing-choice-$it") }
+        accountFile.writeText("garbage not a record")
 
         val decision = authority("a@x", fileStore(dir)).decide()
         assertFalse("an unreadable record must never read as consent", decision.collectionPermitted)

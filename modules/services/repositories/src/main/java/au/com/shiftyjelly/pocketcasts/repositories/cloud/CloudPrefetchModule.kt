@@ -18,6 +18,11 @@ import javax.inject.Singleton
 internal abstract class CloudPrefetchModule {
 
     @Binds
+    abstract fun bindAurisScopedTokenProviding(
+        impl: AurisTokenProvider,
+    ): AurisScopedTokenProviding
+
+    @Binds
     abstract fun bindPrefetchFlag(impl: CloudPrefetchSettings): CloudPrefetchFlag
 
     @Binds

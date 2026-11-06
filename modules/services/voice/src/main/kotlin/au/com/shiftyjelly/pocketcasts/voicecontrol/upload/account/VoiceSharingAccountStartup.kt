@@ -11,6 +11,10 @@ import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * The actual production STARTUP CONSUMER for the voice-sharing account boundary: installs the
@@ -26,15 +30,17 @@ class VoiceSharingAccountStartup @Inject constructor(
     @ApplicationContext private val context: Context,
     @SyncServiceRetrofit private val retrofit: Lazy<retrofit2.Retrofit>,
     /**
-     * THE AURIS PROVIDER, injected as its CONCRETE type rather than the routing `CloudTokenProviding`.
+     * THE AURIS PROVIDER, injected as the AURIS-SCOPED interface rather than the routing
+     * `CloudTokenProviding` (formerly the concrete type; the same shared singleton sits behind the
+     * new binding -- the interface seam is what the acquisition controls stub, spec ecc411b8).
      *
      * This is deliberate and it is the fix. The router picks the Auris provider only when a cloud
      * base URL is configured and answers with the static `user_<uuid>` bearer otherwise -- the same
      * fallback defect iOS found in `cloudEdgeTokens` (@ios). For the sharing path there must be no
      * branch to consult: the account route verifies Auris tokens only, so this path either has one
-     * or is refused.
+     * or is refused. `AurisScopedTokenProviding` carries NO fallback branch by construction.
      */
-    private val aurisToken: AurisTokenProvider,
+    private val aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding,
     /** The durable saved choice; every accepted server answer mirrors into it. */
     private val savedSharingChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
 ) {
@@ -138,6 +144,11 @@ class VoiceSharingAccountStartup @Inject constructor(
         // The account may ALREADY be readable when the app starts (normal cold start): announce it
         // once here so the policy owner gets the same trigger a later transition would give.
         ownership.authoritySnapshot().let { live -> live.accountName?.let { accountReadableListener?.invoke(it, live.session) } }
+        // THE ORDINARY STARTUP ACQUISITION (spec ecc411b8): the projection refresh is how a signed-in
+        // account with NO saved sharing choice obtains its EXISTING server consent exactly once,
+        // without visiting Settings or toggling. A saved known choice collects immediately without
+        // any this-process fetch prerequisite. Account switch paths use the same guard below.
+        ownership.authoritySnapshot().let { live -> live.accountName?.let { refreshOrdinaryChoiceIfUnsaved(it) } }
         AccountManager.get(context).addOnAccountsUpdatedListener({
             val before = ownership.authoritySnapshot().session
             val after = ownership.reconcileExternalState()
@@ -146,6 +157,8 @@ class VoiceSharingAccountStartup @Inject constructor(
             // Readability transition: the policy owner reacquires policy for the NEW owner identity
             // (account + session), deduping repeats for the same identity.
             after.accountName?.let { accountReadableListener?.invoke(it, after.session) }
+            // Same acquisition on a REAL account transition to the new identity (guard is per account).
+            after.accountName?.let { refreshOrdinaryChoiceIfUnsaved(it) }
         }, null, false)
     }
 
@@ -161,6 +174,29 @@ class VoiceSharingAccountStartup @Inject constructor(
         val after = ownership.reconcileExternalState()
         if (after.accountName == null || after.session != before) sessionEndedListener?.invoke()
         after.accountName?.let { accountReadableListener?.invoke(it, after.session) }
+        // Same acquisition when this path is the first to observe the readable identity.
+        after.accountName?.let { refreshOrdinaryChoiceIfUnsaved(it) }
+    }
+
+    /**
+     * ONE ordinary account refresh per process per account, ONLY while that account has no saved
+     * sharing choice/provenance. The refresh is the EXISTING ordinary GET (`refreshProjection`):
+     * the server's real answer is applied through the existing owner-transaction funnel, which is
+     * what mirrors the saved choice. Nothing is fabricated: a refused/failed fetch leaves the saved
+     * state absent (fail-closed collection refuses), and the next process launch may try again —
+     * once, not on a loop. No poller, no session-readiness or cache-freshness gate; off choices,
+     * local stops and account fences are untouched (this only ACQUIRES, never admits).
+     */
+    private val refreshAttemptedAccounts = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private fun refreshOrdinaryChoiceIfUnsaved(account: String) {
+        if (savedSharingChoice.read(account) != null) return // a saved known choice never needs a fetch
+        if (!refreshAttemptedAccounts.add(account)) return // once per process per account; no loop
+        refreshScope.launch {
+            val fetched = operations.refreshProjection()
+            timber.log.Timber.i("voice-sharing startup acquisition: account-refreshed=%s applied=%s", account.hashCode(), fetched)
+        }
     }
 
     /** Last observable authority — exposed for diagnostics; never reconstructs from cache. */

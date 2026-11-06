@@ -102,7 +102,14 @@ class CollectionAuthority @Inject constructor(
 
     private fun decideLocked(): AuthorityDecision {
         val ownership = accountStartup.authoritySnapshot()
-        val hasSession = ownership.accountName != null && ownership.session > 0L
+        // SIGNED-IN ORDINARY ACCOUNT OWNERSHIP, not a generation-readiness gate (spec ea8be666).
+        // The real owner's sessionGenerationCounter starts at ZERO and increments only on session
+        // TRANSITIONS (login/logout/switch): an ordinary signed-in cold start legitimately reads
+        // session == 0. Requiring > 0 here was a leftover readiness gate that refused every
+        // ordinary signed-in start with NO_SESSION (measured on Pixel 2026-11-06, Merlin's test).
+        // Presence of the account IS the session condition; the EQUALITY fences below (and in
+        // issue/handoff/publication) still bind every authority to the actual generation value.
+        val hasSession = ownership.accountName != null
         // THE SAVED ORDINARY CHOICE, NOT A REFRESH IN THIS PROCESS (spec 1af5e705). The membership
         // projection stays in the app for the Settings display, but it is no longer an admission
         // prerequisite: requiring one made saved consent unusable after a restart and refused a user

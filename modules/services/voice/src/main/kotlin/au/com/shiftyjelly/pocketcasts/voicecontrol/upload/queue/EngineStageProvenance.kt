@@ -93,8 +93,13 @@ object EngineStageProvenance {
             )
         }
         // ACTUAL DETECTED LANGUAGE (spec phase 2): source_language is recorded whenever ASR
-        // measured it — honest absence (null) stays absent.
-        val sourceLanguage = recognized?.detectedLanguage?.let { mapOf("source_language" to RecordNode.Str(it)) } ?: emptyMap()
+        // measured it — honest absence (null) stays absent. A language measured on a result with no
+        // usable text comes from the observation that ENDED ASR, so an empty or non-content result
+        // still carries what the backend reported (reviewer 1f7fe074). A failed or cancelled ASR
+        // measures nothing, and a stage that never invoked ASR carries no language at all.
+        val measuredLanguage = recognized?.detectedLanguage
+            ?: history.filterIsInstance<CollectionOutcome.NotCollected>().firstNotNullOfOrNull { it.measuredLanguage }
+        val sourceLanguage = measuredLanguage?.let { mapOf("source_language" to RecordNode.Str(it)) } ?: emptyMap()
         return listOf(
             StageName.Wake to wakeEntry,
             // WIRED PRODUCTION FACT (spec audit): VoiceAsrEngine.transcribeSegment joins
@@ -123,7 +128,13 @@ object EngineStageProvenance {
                 // contract, c6f3df7) — only when ASR was actually INVOKED; a wake-only drop
                 // with recognized text preserves the transcript as Recognized instead.
                 notCollected == "empty" && sealed.asrInvocationModel != null ->
-                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result")))
+                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result")) + sourceLanguage)
+
+                // A result with NO usable content (punctuation/symbols only) is the same kind of
+                // outcome: the check ran and produced nothing usable. The measured language travels
+                // with it (reviewer 1f7fe074).
+                notCollected == "non_content" && sealed.asrInvocationModel != null ->
+                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result")) + sourceLanguage)
 
                 // P1: known provider FAILURE joined at the transcribe call.
                 asrFailed -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("provider_error")))

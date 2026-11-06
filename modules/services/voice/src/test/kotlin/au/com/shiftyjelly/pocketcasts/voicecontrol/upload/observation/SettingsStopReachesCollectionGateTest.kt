@@ -47,7 +47,7 @@ class SettingsStopReachesCollectionGateTest {
         // Baseline: a healthy enrolled projection permits collection.
         assertTrue(
             "fixture sanity: a healthy enrollment must permit collection before anything is stopped",
-            store.collectionPermittedByLocalIntent(enrolledProjection()),
+            store.collectionPermittedByLocalIntent(),
         )
 
         // EXACTLY what the Settings row does on an Off tap, before any request.
@@ -55,7 +55,7 @@ class SettingsStopReachesCollectionGateTest {
 
         assertFalse(
             "the tap alone must stop collection while the server has not answered yet",
-            store.collectionPermittedByLocalIntent(enrolledProjection()),
+            store.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -69,7 +69,7 @@ class SettingsStopReachesCollectionGateTest {
 
         assertFalse(
             "a network failure is not consent to resume: collection must stay stopped",
-            store.collectionPermittedByLocalIntent(enrolledProjection()),
+            store.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -84,7 +84,7 @@ class SettingsStopReachesCollectionGateTest {
         assertFalse(
             "the server's own withdrawn state, or a stale enrolled one, must never resume collection " +
                 "once the user stopped us",
-            store.collectionPermittedByLocalIntent(enrolledProjection()),
+            store.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -99,7 +99,7 @@ class SettingsStopReachesCollectionGateTest {
 
         assertTrue(
             "an explicit opt-in after the server applied it must permit collection again",
-            store.collectionPermittedByLocalIntent(enrolledProjection()),
+            store.collectionPermittedByLocalIntent(),
         )
     }
 }

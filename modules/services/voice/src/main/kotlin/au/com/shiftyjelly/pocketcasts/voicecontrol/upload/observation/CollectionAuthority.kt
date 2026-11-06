@@ -28,6 +28,13 @@ class CollectionAuthority @Inject constructor(
      * enrolled, so the next capture admitted itself under the new queue generation.
      */
     private val localWithdrawalIntent: LocalWithdrawalIntentStore,
+    /**
+     * THE SAVED ORDINARY CHOICE (spec 1af5e705). The durable record of what the user actually decided,
+     * written at the existing enrollment/withdrawal operations. Admission reads THIS rather than the
+     * in-process membership projection, so saved consent authorizes a capture without waiting for a
+     * server refresh in the current process.
+     */
+    private val savedSharingChoice: SavedSharingChoiceStore,
 ) {
 
     /**
@@ -94,26 +101,31 @@ class CollectionAuthority @Inject constructor(
     private fun decideLocked(): AuthorityDecision {
         val ownership = accountStartup.authoritySnapshot()
         val hasSession = ownership.accountName != null && ownership.session > 0L
-        val projection = accountStartup.state.projection.value
-        // THE LOCAL STOP OVERRIDES THE SERVER'S STALE VIEW. Every other condition here reads
-        // server-derived state; this one reads what the user actually asked for, which is why it is
-        // checked first and independently. A pending or failed withdrawal leaves the projection
-        // saying enrolled, and without this clause collection would silently resume.
-        val localIntentPermits = localWithdrawalIntent.collectionPermittedByLocalIntent(projection)
-        val enrolledThisSession =
-            hasSession &&
-                projection != null &&
-                projection.voiceSharingEnrolled &&
-                projection.enrollmentEpoch != null &&
-                projection.acceptedDisclosureVersion != null &&
-                projection.withdrawalState == WithdrawalState.ACTIVE &&
-                localIntentPermits
-        // Full revocation covers: no session, OR enrollment not established for this session
-        // (missing composition fails closed — login alone cannot authorize retention).
+        // THE SAVED ORDINARY CHOICE, NOT A REFRESH IN THIS PROCESS (spec 1af5e705). The membership
+        // projection stays in the app for the Settings display, but it is no longer an admission
+        // prerequisite: requiring one made saved consent unusable after a restart and refused a user
+        // who had already opted in. The record is account-scoped, so another account never inherits it.
+        val saved = savedSharingChoice.enrolledChoiceFor(ownership.accountName)
+        // THE LOCAL STOP OVERRIDES EVERYTHING, checked independently and first: a user who asked to
+        // stop must never be admitted, even in the window where the withdrawal request is inline or
+        // has failed and any cached state still says enrolled.
+        val localIntentPermits = localWithdrawalIntent.collectionPermittedByLocalIntent()
+        // Full revocation covers: no session, OR no saved opt-in for THIS account.
+        // Missing state fails closed — login alone cannot authorize retention.
+        val enrolledThisSession = hasSession && saved != null && localIntentPermits
         val fullRevocation = !hasSession || !enrolledThisSession
         return AuthorityDecision(
             collectionPermitted = hasSession && enrolledThisSession,
             fullRevocation = fullRevocation,
+            // FIXED REASON at the decision site itself (@spec 56184117, Merlin a611202c): the refusal
+            // must name WHICH clause failed, not a generic gate-off. The reason is a fixed token, not
+            // free text, and carries no account or epoch contents.
+            refusalReason = when {
+                !hasSession -> AdmissionRefusalReason.NO_SESSION
+                saved == null -> AdmissionRefusalReason.NO_SAVED_CHOICE
+                !localIntentPermits -> AdmissionRefusalReason.LOCAL_STOP
+                else -> null
+            },
         )
     }
 }

@@ -678,7 +678,7 @@ class LoopbackHostDriverTest {
         val enrolled = enrolledProjection()
         assertTrue(
             "the recorded stop vetoes a healthy enrolled projection",
-            !intents.collectionPermittedByLocalIntent(enrolled),
+            !intents.collectionPermittedByLocalIntent(),
         )
 
         // REAL account client against a REFUSING endpoint: connection-refused cannot be confused
@@ -699,7 +699,7 @@ class LoopbackHostDriverTest {
         val recreated = LocalWithdrawalIntentStore(FileIntentPersistence(marker))
         assertTrue(
             "the durable stop survives store recreation and the failed request",
-            !recreated.collectionPermittedByLocalIntent(enrolled),
+            !recreated.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -740,7 +740,7 @@ class LoopbackHostDriverTest {
         val afterAgreement = LocalWithdrawalIntentStore(FileIntentPersistence(marker))
         assertTrue(
             "a server-agreed withdrawal KEEPS the local stop",
-            !afterAgreement.collectionPermittedByLocalIntent(enrolledProjection()),
+            !afterAgreement.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -789,7 +789,7 @@ class LoopbackHostDriverTest {
         )
         assertTrue(
             "control 5's durable local stop must persist and still read as a stop",
-            !control5Stop.collectionPermittedByLocalIntent(projection),
+            !control5Stop.collectionPermittedByLocalIntent(),
         )
 
         val receipt = runBlocking { operations.deleteData() }

@@ -147,8 +147,25 @@ sealed interface SegmentObservation {
 data class AuthorityDecision(
     val collectionPermitted: Boolean,
     val fullRevocation: Boolean,
+    /**
+     * WHY collection is refused, as a FIXED token evaluated at the decision site itself. Null when
+     * permitted. Never carries account or epoch contents - it names the failing clause only.
+     */
+    val refusalReason: AdmissionRefusalReason? = null,
 ) {
     val shouldRetainNewWork: Boolean get() = collectionPermitted && !fullRevocation
+}
+
+/** The distinct clauses the admission decision can fail on. Deliberately closed and small. */
+enum class AdmissionRefusalReason {
+    /** No signed-in account session. */
+    NO_SESSION,
+
+    /** The account has no durably saved opt-in (nothing ever saved, other account's, or withdrawn). */
+    NO_SAVED_CHOICE,
+
+    /** The user's durable local stop (or a failed stop write) vetoes. */
+    LOCAL_STOP,
 }
 
 /**

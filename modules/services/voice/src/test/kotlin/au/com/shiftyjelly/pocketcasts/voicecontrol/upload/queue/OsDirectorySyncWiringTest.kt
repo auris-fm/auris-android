@@ -176,7 +176,7 @@ class OsDirectorySyncWiringTest {
 
         assertTrue(
             "precondition: collection starts permitted",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
         // The user enrolls (a CLEAR), and the Os barrier refuses.
         val cleared = intent.clearOnUserEnrollment()
@@ -184,7 +184,7 @@ class OsDirectorySyncWiringTest {
         assertFalse(
             "the Os failure must reach the admission latch: collection must be REFUSED after a clear " +
                 "that could not be made durable",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 

@@ -35,6 +35,8 @@ class VoiceSharingAccountStartup @Inject constructor(
      * or is refused.
      */
     private val aurisToken: AurisTokenProvider,
+    /** The durable saved choice; every accepted server answer mirrors into it. */
+    private val savedSharingChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
 ) {
     val state = VoiceSharingAccountState()
     val credentials = VoiceSharingCredentialStore()
@@ -82,6 +84,7 @@ class VoiceSharingAccountStartup @Inject constructor(
             // The upstream session is left alone -- clearing it would sign the user out of the
             // account that minted the token, which is a worse failure than the one we fixed.
             onAurisCredentialRefused = { aurisToken.refreshToken() },
+            savedSharingChoice = savedSharingChoice,
         )
     }
 

@@ -40,7 +40,13 @@ internal object VoiceUploadCompositionFixtures {
 
     fun startup(app: android.app.Application): VoiceSharingAccountStartup {
         val retrofit = retrofit2.Retrofit.Builder().baseUrl("http://127.0.0.1:1/").build()
-        return VoiceSharingAccountStartup(AppContextOwner(app), app, dagger.Lazy { retrofit }, noEnvironmentAuris())
+        return VoiceSharingAccountStartup(
+            AppContextOwner(app),
+            app,
+            dagger.Lazy { retrofit },
+            noEnvironmentAuris(),
+            savedSharingChoice = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.choiceStore(),
+        )
     }
 
     /** No Auris environment configured: the provider yields NO token, so the composition refuses

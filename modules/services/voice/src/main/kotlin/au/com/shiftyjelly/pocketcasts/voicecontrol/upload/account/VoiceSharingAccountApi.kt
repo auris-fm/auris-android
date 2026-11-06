@@ -22,7 +22,7 @@ import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.HTTP
 import retrofit2.http.Header
-import retrofit2.http.POST
+import retrofit2.http.PUT
 import timber.log.Timber
 
 /**
@@ -35,15 +35,15 @@ interface VoiceSharingAccountApi {
     @GET("/api/v1/account/voice-sharing")
     suspend fun getVoiceSharing(@Header("Authorization") bearer: String?): Response<ResponseBody>
 
-    @POST("/api/v1/account/voice-sharing/enrollment")
-    suspend fun postEnrollment(
+    /**
+     * THE SWITCH (spec 0264051b): one desired-state request. `If-Match` carries the last-read
+     * `membership_revision` as an HTTP precondition, so a stale device is refused by the server
+     * instead of overwriting a newer choice.
+     */
+    @PUT("/api/v1/account/voice-sharing")
+    suspend fun putVoiceSharing(
         @Header("Authorization") bearer: String?,
-        @Body body: okhttp3.RequestBody,
-    ): Response<ResponseBody>
-
-    @POST("/api/v1/account/voice-sharing/withdrawal")
-    suspend fun postWithdrawal(
-        @Header("Authorization") bearer: String?,
+        @Header("If-Match") ifMatch: String?,
         @Body body: okhttp3.RequestBody,
     ): Response<ResponseBody>
 
@@ -163,23 +163,29 @@ class VoiceSharingAccountOperations(
         }
     }
 
-    suspend fun enroll(acceptedDisclosureVersion: String): VoiceSharingMutationResult {
-        val request = issue(Route.ENROLLMENT, acceptedDisclosureVersion) ?: return VoiceSharingMutationResult.Failure
-        return when (val outcome = execute(request.op) { b, payload -> api.postEnrollment(b, payload) }) {
+    /**
+     * THE SWITCH: send the state the user picked. On/off are the same request, so a repeat or a
+     * resend after a network failure is safe by construction — the server derives whether to start
+     * an epoch, keep it, or withdraw.
+     *
+     * [acceptedDisclosureVersion] is required when turning sharing ON; the server refuses an opt-in
+     * that names no accepted disclosure, so this refuses to send one rather than letting the record
+     * of what the user agreed to be absent.
+     */
+    suspend fun setVoiceSharing(enrolled: Boolean, acceptedDisclosureVersion: String?): VoiceSharingMutationResult {
+        if (enrolled && acceptedDisclosureVersion.isNullOrBlank()) return VoiceSharingMutationResult.Failure
+        val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null)
+            ?: return VoiceSharingMutationResult.Failure
+        return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, request.op.ifMatch, payload) }) {
             is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
             is Outcome.Conflict -> conflictOrFailure(outcome.json, request.issued)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
-    suspend fun withdraw(): VoiceSharingMutationResult {
-        val request = issue(Route.WITHDRAWAL, null) ?: return VoiceSharingMutationResult.Failure
-        return when (val outcome = execute(request.op) { b, payload -> api.postWithdrawal(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
-            is Outcome.Conflict -> conflictOrFailure(outcome.json, request.issued)
-            is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
-        }
-    }
+    suspend fun enroll(acceptedDisclosureVersion: String): VoiceSharingMutationResult = setVoiceSharing(enrolled = true, acceptedDisclosureVersion = acceptedDisclosureVersion)
+
+    suspend fun withdraw(): VoiceSharingMutationResult = setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null)
 
     /** Terminal apply of a 200 body; the newest publication wins. */
     private fun appliedOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
@@ -301,7 +307,7 @@ class VoiceSharingAccountOperations(
 
     private class IssuedRequest(val op: FrozenOperation, val issued: Issued)
 
-    private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
+    private enum class Route { GET, SWITCH, DELETION }
 
     private sealed interface Outcome {
         /** Server correlation ids harvested from every HTTP attempt of this call, in order. */
@@ -322,7 +328,7 @@ class VoiceSharingAccountOperations(
         data class Unavailable(val status: Int?, override val requestIds: List<String> = emptyList()) : Outcome
     }
 
-    private fun frozen(aurisBearer: String, route: Route, disclosureVersion: String?): FrozenOperation {
+    private fun frozen(aurisBearer: String, route: Route, disclosureVersion: String?, projection: VoiceSharingAccountProjection? = state.projection.value): FrozenOperation {
         val bearer = "Bearer " + aurisBearer
         // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else: it answers whether
         // THIS app's token names a signing key staging publishes (cloud 84a4d25e). Only the JOSE
@@ -330,9 +336,12 @@ class VoiceSharingAccountOperations(
         logTokenKeyId(aurisBearer)
         val body = when (route) {
             Route.GET -> EMPTY_BODY
-            else -> writeBody(state.projection.value, route, disclosureVersion)
+
+            // The desired state IS "a disclosure was accepted": turning on names one, turning off
+            // names none. Both are the same request shape.
+            else -> writeBody(enrolled = disclosureVersion != null, projection = projection, route = route, disclosureVersion = disclosureVersion)
         }
-        return FrozenOperation(bearer, body, route)
+        return FrozenOperation(bearer, body, route, projection?.membershipRevision)
     }
 
     /** Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint status. */
@@ -411,24 +420,18 @@ class VoiceSharingAccountOperations(
     }
 
     /** Endpoint-EXACT bodies from the observed projection, built once, byte-identical retries. */
-    private fun writeBody(projection: VoiceSharingAccountProjection?, route: Route, disclosureVersion: String?): okhttp3.RequestBody {
+    private fun writeBody(projection: VoiceSharingAccountProjection?, route: Route, disclosureVersion: String?, enrolled: Boolean = false): okhttp3.RequestBody {
         val requestId = UUID.randomUUID().toString()
         val buffer = okio.Buffer()
         val writer = JsonWriter.of(buffer)
-        if (route == Route.WITHDRAWAL) writer.setSerializeNulls(true) // withdrawal requires explicit null epoch
         writer.beginObject()
         writer.name("request_id").value(requestId)
         when (route) {
-            Route.ENROLLMENT, Route.WITHDRAWAL -> {
-                writer.name("expected_membership_revision").value(projection?.membershipRevision ?: "")
-                if (route == Route.ENROLLMENT && disclosureVersion != null) {
-                    writer.name("accepted_disclosure_version").value(disclosureVersion)
-                }
-                if (route == Route.WITHDRAWAL) {
-                    writer.name("enrollment_epoch")
-                    val epoch = projection?.enrollmentEpoch
-                    if (epoch != null) writer.value(epoch) else writer.nullValue()
-                }
+            // The desired state, and nothing the server can derive itself: no epoch, no expected
+            // revision in the body (that precondition IS the If-Match header).
+            Route.SWITCH -> {
+                writer.name("enrolled").value(enrolled)
+                if (enrolled) writer.name("disclosure_version").value(disclosureVersion)
             }
 
             else -> Unit // GET sends nothing; deletion carries ONLY the request_id
@@ -497,6 +500,8 @@ class VoiceSharingAccountOperations(
         val bearer: String?,
         val requestBody: okhttp3.RequestBody,
         val route: Route,
+        /** The last-read `membership_revision`, sent as `If-Match`; null when nothing was read yet. */
+        val ifMatch: String? = null,
     )
 
     private companion object {

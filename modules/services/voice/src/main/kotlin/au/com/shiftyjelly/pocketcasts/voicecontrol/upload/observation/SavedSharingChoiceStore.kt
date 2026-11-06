@@ -32,14 +32,16 @@ class SavedSharingChoiceStore(
     private val persistence: SharingChoicePersistence,
 ) {
     /**
-     * FAILED-PERSIST LATCH (@spec 3f1e939a). Once any write reports failure, every consent read
-     * refuses until a write SUCCEEDS: the file may still hold a stale ENROLLED record while the
-     * user's latest instruction (withdrawn / not enrolled) did not land. Logging the failure is
-     * not enough — a log cannot stop a capture. Cleared only by a successful write, mirroring the
-     * withdrawal marker's latch discipline.
+     * FAILED-PERSIST LATCH (@spec 3f1e939a, per-account @spec 57cef12c). Once an account's write
+     * reports failure, THAT account's consent reads refuse until THAT account's write SUCCEEDS:
+     * the file may still hold a stale ENROLLED record while the user's latest instruction for the
+     * account (withdrawn / not enrolled) did not land. Logging the failure is not enough — a log
+     * cannot stop a capture.
+     *
+     * Scope is deliberately PER ACCOUNT: a global latch let a successful write for account B clear
+     * a failed stop for account A, after which A read its stale enrolled file. A's latch is A's.
      */
-    @Volatile
-    private var persistFailed: Boolean = false
+    private val persistFailedAccounts = java.util.Collections.synchronizedSet(HashSet<String>())
 
     /** The stored choice for [account], or null when nothing is saved or the file is unusable. */
     fun read(account: String): SavedSharingChoice? = persistence.read(account)
@@ -65,7 +67,7 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = acceptedDisclosureVersion,
             ),
         )
-        persistFailed = !written
+        if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
         return written
     }
 
@@ -85,7 +87,7 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = null,
             ),
         )
-        persistFailed = !written
+        if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
         return written
     }
 
@@ -107,7 +109,7 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = previous?.takeIf { it.account == account }?.acceptedDisclosureVersion,
             ),
         )
-        persistFailed = !written
+        if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
         return written
     }
 
@@ -117,9 +119,9 @@ class SavedSharingChoiceStore(
      */
     fun enrolledChoiceFor(account: String?): SavedSharingChoice? {
         if (account.isNullOrBlank()) return null
-        // A persist that failed leaves the file's meaning unknown relative to the user's latest
-        // instruction: refuse until a write succeeds.
-        if (persistFailed) return null
+        // A persist that failed for THIS account leaves the file's meaning unknown relative to the
+        // user's latest instruction for it: refuse until a write for the account succeeds.
+        if (account in persistFailedAccounts) return null
         val choice = persistence.read(account) ?: return null
         if (choice.account != account) return null
         if (choice.state != SharingChoiceState.ENROLLED) return null

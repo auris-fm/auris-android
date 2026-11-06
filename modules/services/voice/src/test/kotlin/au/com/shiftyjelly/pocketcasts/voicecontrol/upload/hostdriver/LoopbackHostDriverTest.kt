@@ -521,6 +521,7 @@ class LoopbackHostDriverTest {
             is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport.Response.Unauthorized -> "Unauthorized(status=${response.statusCode})"
             is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport.Response.PolicyRefused -> "PolicyRefused(reason=${response.reason})"
             is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport.Response.Terminal -> "Terminal(status=${response.statusCode}, code=${response.code})"
+            is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport.Response.Unservable -> "Unservable(status=${response.statusCode}, code=${response.code})"
             is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport.Response.Cancelled -> "Cancelled"
             is au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport.Response.Ambiguous -> "Ambiguous(status=${response.statusCode})"
         }

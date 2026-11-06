@@ -365,7 +365,7 @@ class ContributionUploadTransportTest {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         val cases = listOf(
-            Triple(400, "invalid_request", ContributionUploadTransport.Response.Terminal::class),
+            Triple(400, "invalid_request", ContributionUploadTransport.Response.Unservable::class),
             Triple(409, "capture_conflict", ContributionUploadTransport.Response.Terminal::class),
             Triple(410, "record_gone", ContributionUploadTransport.Response.Terminal::class),
             Triple(413, "payload_too_large", ContributionUploadTransport.Response.Terminal::class),

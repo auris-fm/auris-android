@@ -33,14 +33,31 @@ object VoiceObservationModule {
 
     @Provides
     @Singleton
+    fun provideSavedSharingChoiceStore(
+        persistence: SharingChoicePersistence,
+    ): SavedSharingChoiceStore = SavedSharingChoiceStore(persistence)
+
+    @Provides
+    @Singleton
+    fun provideSharingChoicePersistence(
+        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
+    ): SharingChoicePersistence = FileSharingChoicePersistence(
+        context,
+        directorySync = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync.PRODUCTION,
+    )
+
+    @Provides
+    @Singleton
     fun provideCollectionAuthority(
         accountStartup: VoiceSharingAccountStartup,
         collectionTx: CollectionAuthorityTransaction,
         localWithdrawalIntent: LocalWithdrawalIntentStore,
+        savedSharingChoice: SavedSharingChoiceStore,
     ): CollectionAuthority = CollectionAuthority(
         accountStartup,
         collectionTx,
         localWithdrawalIntent,
+        savedSharingChoice,
     )
 
     /** Aggregate collection-retention budget: one shared cap across open/ready/queued owners. */

@@ -44,13 +44,19 @@ class AdmissionToDurableRecordControlTest {
      * enrollment projection applied, and the enrollment evidence marked exactly as the production
      * post-commit hook (CollectionLossWatcher's listener) does.
      */
-    private fun establishLiveEnrolledSession(startup: VoiceSharingAccountStartup, authority: CollectionAuthority) {
+    private fun establishLiveEnrolledSession(
+        startup: VoiceSharingAccountStartup,
+        authority: CollectionAuthority,
+        choice: SavedSharingChoiceStore,
+    ) {
         val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
         owner.publish(account = "a@x", session = 7L, bearer = "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
         val json = VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1")
         startup.state.publish(startup.state.parseProjection(json)!!)
-        // The published projection IS the enrollment evidence.
+        // The SAVED CHOICE is the enrollment evidence now (spec 1af5e705): recorded exactly as the
+        // account layer records a genuine server answer.
+        choice.recordEnrolled("a@x", "epoch-1", "1")
     }
 
     private fun newStore(name: String): ContributionStore = ContributionStore(
@@ -67,12 +73,14 @@ class AdmissionToDurableRecordControlTest {
         val startup = VoiceUploadCompositionFixtures.startup(context)
         val tx = collectionTx(startup)
         val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
+        val choice = choiceStore()
         val authority = CollectionAuthority(
             accountStartup = startup,
             collectionTx = tx,
             localWithdrawalIntent = intent,
+            savedSharingChoice = choice,
         )
-        establishLiveEnrolledSession(startup, authority)
+        establishLiveEnrolledSession(startup, authority, choice)
 
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         try {
@@ -127,12 +135,14 @@ class AdmissionToDurableRecordControlTest {
         val startup = VoiceUploadCompositionFixtures.startup(context)
         val tx = collectionTx(startup)
         val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
+        val choice = choiceStore()
         val authority = CollectionAuthority(
             accountStartup = startup,
             collectionTx = tx,
             localWithdrawalIntent = intent,
+            savedSharingChoice = choice,
         )
-        establishLiveEnrolledSession(startup, authority)
+        establishLiveEnrolledSession(startup, authority, choice)
         // THE NEGATIVE INPUT: the user's local stop, through the real durable store the
         // module-built authority consults at every decision.
         intent.recordWithdrawalRequested()

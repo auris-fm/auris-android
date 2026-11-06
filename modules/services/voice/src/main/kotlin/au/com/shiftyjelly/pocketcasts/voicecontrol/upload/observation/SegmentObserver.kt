@@ -145,9 +145,13 @@ class SegmentObserver(
         // Refusals consume nothing: a refused gate must not reserve sink bytes or allocate an
         // engine buffer.
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
-        val permitted = gate.accepts(authority()) // same: decision read before the monitor
+        val decision = authority() // ONE decision read: the reason comes from the SAME evaluation
+        val permitted = gate.accepts(decision) // decision read before the monitor
         if (!permitted) {
-            Timber.i("voice-capture admission: declined (gate-off)")
+            // Name the failing clause, not a generic gate-off (@spec 56184117): the fixed token comes
+            // from the decision that was actually evaluated, one read, no second state read.
+            val reason = decision.refusalReason?.name?.lowercase()?.replace('_', '-') ?: "unknown"
+            Timber.i("voice-capture admission: declined (gate-off reason=%s)", reason)
             return@gate null
         }
         // NO ALLOWANCE STEP HERE (core c74d7e30). Capture used to consult a prepaid allowance token

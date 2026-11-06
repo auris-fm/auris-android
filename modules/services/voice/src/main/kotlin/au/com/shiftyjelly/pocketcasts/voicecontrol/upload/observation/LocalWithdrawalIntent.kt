@@ -61,16 +61,19 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
     }
 
     /**
-     * Collection is permitted locally only when the user has NOT asked to stop. The server
-     * projection is consulted by the caller; this answers the narrower, overriding question.
+     * Collection is permitted locally only when the user has NOT asked to stop.
+     *
+     * This answers the NARROW, OVERRIDING question about the user's own stop, and nothing else. It
+     * used to re-test `projection == null`, `voiceSharingEnrolled` and `withdrawalState == ACTIVE`,
+     * which the caller had already decided (spec 1af5e705): three conditions evaluated twice, one of
+     * them the very refresh dependency being removed. Consent is now answered once, from the saved
+     * account-owned choice; this store contributes only the veto.
      */
-    fun collectionPermittedByLocalIntent(projection: VoiceSharingAccountProjection?): Boolean {
+    fun collectionPermittedByLocalIntent(): Boolean {
         // A latch from a failed write outranks everything: the user asked to stop and the disk does
         // not know it, so the only safe answer is no.
         if (stopCouldNotPersist) return false
-        if (persistence.read()) return false
-        if (projection == null) return false
-        return projection.voiceSharingEnrolled && projection.withdrawalState == WithdrawalState.ACTIVE
+        return !persistence.read()
     }
 
     /**

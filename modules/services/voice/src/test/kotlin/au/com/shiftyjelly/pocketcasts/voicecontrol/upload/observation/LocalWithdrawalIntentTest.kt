@@ -45,13 +45,13 @@ class LocalWithdrawalIntentTest {
         assertFalse(
             "the user's decision to stop must override the server's stale 'enrolled' view; " +
                 "otherwise a pending or failed withdrawal keeps collecting",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
     @Test
     fun `without a withdrawal intent a healthy enrollment is permitted`() {
-        assertTrue(store().collectionPermittedByLocalIntent(projection()))
+        assertTrue(store().collectionPermittedByLocalIntent())
     }
 
     @Test
@@ -67,14 +67,14 @@ class LocalWithdrawalIntentTest {
         // the assertion below could pass for the wrong reason.
         assertTrue(
             "precondition: collection must be permitted before the stop, or this control is vacuous",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
 
         assertFalse("the stop write must report failure", intent.recordWithdrawalRequested())
         assertFalse(
             "after a FAILED stop write the collection gate must still refuse admission - the user " +
                 "asked to stop, and the disk not knowing it is not permission",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
 
         // A DURABLE clear is the only thing that releases the latch.
@@ -82,7 +82,7 @@ class LocalWithdrawalIntentTest {
         assertTrue("a successful clear must report success", intent.clearOnUserEnrollment())
         assertTrue(
             "an explicit durable opt-in must release the latch",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -98,7 +98,7 @@ class LocalWithdrawalIntentTest {
 
         assertTrue(
             "precondition: with the latch unset and a permitted marker, collection is permitted",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
 
         assertFalse(
@@ -110,7 +110,7 @@ class LocalWithdrawalIntentTest {
         assertFalse(
             "a clear that installed CLEARED but failed its barrier must STILL refuse collection: " +
                 "the durability claim rests on the barrier, so its failure cannot leave us permitting",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -122,7 +122,7 @@ class LocalWithdrawalIntentTest {
         assertFalse("the clear write must report failure", intent.clearOnUserEnrollment())
         assertFalse(
             "a failed clear must never release the stop",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -135,7 +135,7 @@ class LocalWithdrawalIntentTest {
         val afterRestart = LocalWithdrawalIntentStore(persistence)
         assertFalse(
             "a restart must not resurrect collection the user turned off",
-            afterRestart.collectionPermittedByLocalIntent(projection()),
+            afterRestart.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -148,9 +148,7 @@ class LocalWithdrawalIntentTest {
 
         assertFalse(
             "after the server agrees, the withdrawn projection still blocks collection",
-            intent.collectionPermittedByLocalIntent(
-                projection(enrolled = false, withdrawal = WithdrawalState.WITHDRAWN),
-            ),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -162,7 +160,7 @@ class LocalWithdrawalIntentTest {
 
         assertTrue(
             "an explicit new opt-in is a fresh user action and must permit collection again",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -174,7 +172,7 @@ class LocalWithdrawalIntentTest {
 
         assertFalse(
             "a failed server withdrawal must not silently resume collection",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 }

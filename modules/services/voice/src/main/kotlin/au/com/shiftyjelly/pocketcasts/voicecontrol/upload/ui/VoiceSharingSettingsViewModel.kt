@@ -464,7 +464,7 @@ class VoiceSharingSettingsViewModel(
         val p = currentProjection() ?: return false
         return p.voiceSharingEnrolled &&
             p.withdrawalState == WithdrawalState.ACTIVE &&
-            withdrawalIntent.collectionPermittedByLocalIntent(p)
+            withdrawalIntent.collectionPermittedByLocalIntent()
     }
 
     /**

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,7 +22,27 @@ import org.junit.Test
  * contributing. These controls pin down that the answer is now NO at every point in that sequence,
  * and that it survives the two ways intent gets lost: closing the screen and restarting the app.
  */
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [35])
 class WithdrawalBlocksNewCollectionTest {
+
+    private fun startup(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.startup(
+        androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+    )
+
+    private fun authority(
+        startup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
+        intent: LocalWithdrawalIntentStore,
+        choice: SavedSharingChoiceStore = choiceStore(),
+    ): CollectionAuthority = CollectionAuthority(
+        accountStartup = startup,
+        collectionTx = CollectionAuthorityTransaction(
+            ownership = startup.ownerForHandoff(),
+            sharedLock = startup.sharedCollectionLock(),
+        ),
+        localWithdrawalIntent = intent,
+        savedSharingChoice = choice,
+    )
 
     private fun projection(
         enrolled: Boolean = true,
@@ -47,7 +68,7 @@ class WithdrawalBlocksNewCollectionTest {
         assertFalse(
             "a capture during a pending withdrawal must be refused; the server projection is stale " +
                 "by definition while our own request is in flight",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -59,7 +80,7 @@ class WithdrawalBlocksNewCollectionTest {
 
         assertFalse(
             "a failed withdrawal is a network problem, not consent to keep recording",
-            intent.collectionPermittedByLocalIntent(projection()),
+            intent.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -73,7 +94,7 @@ class WithdrawalBlocksNewCollectionTest {
         assertFalse(
             "the screen must read the durable stop, not derive the toggle from the unchanged " +
                 "server projection",
-            reopened.collectionPermittedByLocalIntent(projection()),
+            reopened.collectionPermittedByLocalIntent(),
         )
     }
 
@@ -85,36 +106,66 @@ class WithdrawalBlocksNewCollectionTest {
         val afterRestart = LocalWithdrawalIntentStore(persistence)
         assertFalse(
             "killing the app must not re-enable a feature the user turned off",
-            afterRestart.collectionPermittedByLocalIntent(projection()),
+            afterRestart.collectionPermittedByLocalIntent(),
         )
     }
 
+    /**
+     * Contract after spec 1af5e705: the intent store answers ONLY the stop veto. Consent lives in
+     * the saved account-owned choice, so "resumes only after an explicit new opt-in" is asserted at
+     * the authority level: clearing the veto alone must NOT admit, and a saved opt-in must.
+     */
     @Test
-    fun `collection resumes only after an explicit new opt-in, and only with a healthy projection`() {
+    fun `collection resumes only after an explicit new opt-in`() {
         val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
         intent.recordWithdrawalRequested()
         intent.clearOnUserEnrollment()
 
         assertTrue(
-            "a fresh opt-in plus a healthy projection must permit collection again",
-            intent.collectionPermittedByLocalIntent(projection()),
+            "an explicit new opt-in clears the local veto",
+            intent.collectionPermittedByLocalIntent(),
         )
-        // ...but the local stop never GRANTS anything on its own.
+
+        // The veto being gone is NOT consent: with no saved choice the authority still refuses.
+        val startup = startup()
+        val owner = startup.ownerForHandoff() as au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.AppContextOwner
+        owner.publish(account = "a@x", session = 7L, bearer = "Bearer token")
+        val refused = authority(startup, intent).decide()
         assertFalse(
-            "clearing the local stop must not permit collection for a withdrawn account",
-            intent.collectionPermittedByLocalIntent(
-                projection(enrolled = false, withdrawal = WithdrawalState.WITHDRAWN),
-            ),
+            "clearing the local stop must not by itself permit collection",
+            refused.collectionPermitted,
+        )
+        assertEquals(
+            "the refusal must name the missing saved choice",
+            AdmissionRefusalReason.NO_SAVED_CHOICE,
+            refused.refusalReason,
+        )
+
+        // Recording the user's genuine opt-in (what the account layer does on an Applied answer)
+        // is what admits - the veto and the choice TOGETHER.
+        val choice = choiceStore().apply { recordEnrolled("a@x", "epoch-1", "1") }
+        val permitted = authority(startup, intent, choice).decide()
+        assertTrue(
+            "a cleared veto plus a saved opt-in permits collection",
+            permitted.collectionPermitted,
         )
     }
 
     @Test
-    fun `with no projection at all the local intent still refuses`() {
-        val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
-        intent.clearOnUserEnrollment()
+    fun `an account with no saved choice refuses and names the missing choice`() {
+        val startup = startup()
+        val owner = startup.ownerForHandoff() as au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures.AppContextOwner
+        owner.publish(account = "a@x", session = 7L, bearer = "Bearer token")
+        val sut = authority(startup, LocalWithdrawalIntentStore(InMemoryIntentPersistence()))
+        val decision = sut.decide()
         assertFalse(
-            "absence of a projection must fail closed, not read as permission",
-            intent.collectionPermittedByLocalIntent(null),
+            "a session without a durably saved opt-in must fail closed",
+            decision.collectionPermitted,
+        )
+        assertEquals(
+            "absence of a saved choice must be NAMED, not read as permission",
+            AdmissionRefusalReason.NO_SAVED_CHOICE,
+            decision.refusalReason,
         )
     }
 }

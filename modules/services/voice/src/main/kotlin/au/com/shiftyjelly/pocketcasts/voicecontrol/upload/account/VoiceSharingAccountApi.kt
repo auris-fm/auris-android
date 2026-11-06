@@ -118,6 +118,13 @@ class VoiceSharingAccountOperations(
      * a 401 on this route can only speak about the derived Auris token.
      */
     private val onAurisCredentialRefused: suspend () -> Unit = { aurisToken.refreshToken() },
+    /**
+     * THE DURABLE MIRROR OF THE USER'S OWN CHOICE (spec 1af5e705). Every genuine server answer that
+     * [apply] accepts lands here too, so the saved choice tracks exactly what the account flow
+     * obtained: enroll responses write the enrolled record, withdrawal responses write the stopped
+     * one. No polling, no extra request - the same answer that feeds the Settings display.
+     */
+    private val savedSharingChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore? = null,
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -204,7 +211,32 @@ class VoiceSharingAccountOperations(
         }
         val projection = state.parseProjection(json) ?: return@transaction false
         state.publish(projection)
+        persistSavedChoiceLocked(current.accountName, projection)
         true
+    }
+
+    /**
+     * Persist the saved choice INSIDE the same owner transaction that accepted the answer, so the
+     * durable record and the account it belongs to can never disagree. A failed write does not undo
+     * the server answer, but admission fails closed on the missing record rather than silently
+     * resuming, and the failure is logged rather than swallowed.
+     */
+    private fun persistSavedChoiceLocked(account: String?, projection: VoiceSharingAccountProjection) {
+        val store = savedSharingChoice ?: return
+        if (account.isNullOrBlank()) return
+        val persisted = when {
+            projection.voiceSharingEnrolled && projection.enrollmentEpoch != null &&
+                projection.acceptedDisclosureVersion != null ->
+                store.recordEnrolled(account, projection.enrollmentEpoch, projection.acceptedDisclosureVersion)
+
+            projection.withdrawalState == WithdrawalState.WITHDRAWN ->
+                store.recordWithdrawn(account)
+
+            else -> null // not_enrolled: nothing the user decided at this surface; nothing to store
+        }
+        if (persisted == false) {
+            android.util.Log.w("VoiceSharingChoice", "voice-sharing choice persist: outcome=failed")
+        }
     }
 
     suspend fun deleteData(): DeletionReceipt? {

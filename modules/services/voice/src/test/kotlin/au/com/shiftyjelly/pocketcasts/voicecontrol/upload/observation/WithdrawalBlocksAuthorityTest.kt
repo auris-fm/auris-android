@@ -2,10 +2,10 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionFixtures
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.cancel
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -33,6 +33,7 @@ class WithdrawalBlocksAuthorityTest {
     private fun authority(
         startup: VoiceSharingAccountStartup,
         intent: LocalWithdrawalIntentStore,
+        choice: SavedSharingChoiceStore = choiceStore(),
     ): CollectionAuthority = CollectionAuthority(
         accountStartup = startup,
         collectionTx = CollectionAuthorityTransaction(
@@ -40,15 +41,22 @@ class WithdrawalBlocksAuthorityTest {
             sharedLock = startup.sharedCollectionLock(),
         ),
         localWithdrawalIntent = intent,
+        savedSharingChoice = choice,
     )
 
     @Test
     fun `a recorded local stop makes the authority refuse even though everything else looks healthy`() {
         val persistence = InMemoryIntentPersistence()
         val intent = LocalWithdrawalIntentStore(persistence)
+        // The stop must be the REASON for the refusal, not one refusal among several: record a
+        // healthy saved choice first so the gate would admit without the stop.
+        val choice = choiceStore().apply { recordEnrolled("a@x", "epoch-1", "1") }
         intent.recordWithdrawalRequested()
 
-        val sut = authority(startup(), intent)
+        val startup = startup()
+        val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
+        owner.publish(account = "a@x", session = 7L, bearer = "Bearer token")
+        val sut = authority(startup, intent, choice)
 
         val decision = sut.decide()
 
@@ -60,38 +68,36 @@ class WithdrawalBlocksAuthorityTest {
             "refusal must be a full revocation, so existing entries are purged rather than retained",
             decision.fullRevocation,
         )
+        assertEquals(
+            "the fixed reason must name the LOCAL STOP, not a missing choice",
+            AdmissionRefusalReason.LOCAL_STOP,
+            decision.refusalReason,
+        )
     }
 
     @Test
     fun `admission true becomes false the moment the stop is recorded - a real transition`() {
         val startup = startup()
         val intent = LocalWithdrawalIntentStore(InMemoryIntentPersistence())
-        val sut = authority(startup, intent)
+        val choice = choiceStore()
+        val sut = authority(startup, intent, choice)
 
-        // Establish a GENUINE enrolled session: the fixture's owner is signed in, and we publish the
-        // authenticated projection the account layer parses, then mark the enrollment established for
-        // this session exactly as the post-commit projection hook does.
+        // Establish a GENUINE enrolled session: the fixture's owner is signed in, and we record the
+        // saved choice exactly as the account layer records a genuine server answer (spec 1af5e705).
         val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
         owner.publish(account = "a@x", session = 7L, bearer = "Bearer token")
-        val json = VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1")
-        startup.state.publish(startup.state.parseProjection(json)!!)
-        // The published projection IS the enrollment evidence.
-        val projection = startup.state.projection.value!!
+        assertTrue("fixture: the saved choice must persist", choice.recordEnrolled("a@x", "epoch-1", "1"))
 
         // Fixture diagnostics: name WHICH precondition is unmet instead of only reporting that the
         // overall decision was false. A bare "fixture sanity" failure sent me guessing twice.
         val ownership = startup.authoritySnapshot()
-        val liveProjection = startup.state.projection.value
         assertTrue(
             "fixture: a session must be live, got account=${ownership.accountName} session=${ownership.session}",
             ownership.accountName != null && ownership.session > 0L,
         )
         assertTrue(
-            "fixture: projection must be enrolled+active with epoch+disclosure, got=$liveProjection",
-            liveProjection?.voiceSharingEnrolled == true &&
-                liveProjection.enrollmentEpoch != null &&
-                liveProjection.acceptedDisclosureVersion != null &&
-                liveProjection.withdrawalState == WithdrawalState.ACTIVE,
+            "fixture: a saved ENROLLED choice for this account must exist",
+            choice.enrolledChoiceFor(ownership.accountName) != null,
         )
 
         val beforeStop = sut.decide()

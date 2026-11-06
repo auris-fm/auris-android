@@ -197,6 +197,7 @@ class ContributionRecordBuilder(
 ) {
     private val stages = LinkedHashMap<StageName, StageEntry>()
     private val modelEntries = LinkedHashMap<String, RecordNode>()
+    private var wakeRequired: Boolean? = null
 
     init {
         require(HEX_UUID.matches(captureId)) { "capture_id must be a UUID string" }
@@ -215,6 +216,16 @@ class ContributionRecordBuilder(
     fun replaceStage(stage: StageName, entry: StageEntry): ContributionRecordBuilder {
         stages.remove(stage)
         return stage(stage, entry)
+    }
+
+    /**
+     * The client's REAL grace state when the segment starts (`true` = the wake word was
+     * required). REQUIRED before [build]: the server refuses a record without it, so absence is
+     * never a legal emission — the caller must state the observed fact, even when it is `false`.
+     */
+    fun wakeRequired(required: Boolean): ContributionRecordBuilder {
+        wakeRequired = required
+        return this
     }
 
     fun stage(stage: StageName, entry: StageEntry): ContributionRecordBuilder {
@@ -323,6 +334,7 @@ class ContributionRecordBuilder(
         // not-run/unknown explicitly rather than being omitted.
         for (key in MODEL_KEYS) require(modelEntries.containsKey(key)) { "models.$key must be present (use ModelRef.None when not run)" }
         for (stage in StageName.entries) require(stages.containsKey(stage)) { "observations.${stage.wire} must be present" }
+        val requiredWake = wakeRequired ?: throw IllegalStateException("wake_required must be set (use wakeRequired) before build")
         val root = RecordNode.ObjBuilder()
             .put("schema_version", RecordNode.ofInt(SCHEMA_VERSION))
             .put("capture_id", RecordNode.Str(captureId))
@@ -331,6 +343,7 @@ class ContributionRecordBuilder(
             .put("app_version", RecordNode.Str(appVersion))
             .put("build", RecordNode.Str(build))
             .put("capture_session_id", RecordNode.Str(captureSessionId))
+            .put("wake_required", RecordNode.Bool(requiredWake))
             .put("audio", audio.toNode())
             .put("models", RecordNode.Obj(modelEntries.toMap()))
             .put("observations", observationsNode())

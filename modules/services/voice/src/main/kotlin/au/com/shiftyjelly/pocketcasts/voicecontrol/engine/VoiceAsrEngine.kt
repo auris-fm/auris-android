@@ -298,7 +298,15 @@ class VoiceAsrEngine @Inject constructor(
                             // the daily limit is metered server-side at acceptance of actual audio
                             // bytes. A refusal here is therefore FINAL for this utterance and
                             // means no eligible collection, never "waiting for a batch".
-                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
+                            val admission = segmentObserver.speechStartedAdmitting(
+                                captureSessionIncarnation,
+                                currentRouteClass,
+                                initialSize,
+                                asrRef,
+                                // REAL GRACE STATE FROZEN AT SEGMENT START (spec phase 2):
+                                // wake word required unless the follow-up grace window is active.
+                                wakeRequired = !gracePeriodSignal.isActive.value,
+                            )
                             openContext = admission?.context
                             if (admission != null) {
                                 // Lease-protected initial allocation (reviewers 23cae70e b4 /
@@ -620,6 +628,11 @@ class VoiceAsrEngine @Inject constructor(
             speechOnsetSample = segment.speechOnsetSample,
             speechEndSample = segment.speechEndSample,
             wakeState = if (wwResult.detected) SegmentObservation.WakeState.Detected else SegmentObservation.WakeState.NotDetected,
+            // MEASURED WAKE FACTS (spec phase 2): recorded whenever the detector measured them.
+            wakeMeasurement = SegmentObservation.WakeMeasurement(
+                score = wwResult.confidence.takeUnless { it.isNaN() }?.toDouble(),
+                threshold = wwResult.threshold.takeUnless { it.isNaN() }?.toDouble(),
+            ),
             framesProvider = { segment.frames.map { it.samples } to (segment.frames.firstOrNull()?.sampleRateHz ?: 16000) },
         )
 

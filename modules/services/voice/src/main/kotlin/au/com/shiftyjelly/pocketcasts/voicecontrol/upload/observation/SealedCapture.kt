@@ -21,6 +21,8 @@ class SealedCapture(
     val pcm: ShortArray,
     val sampleRateHz: Int,
     val wakeState: SegmentObservation.WakeState,
+    /** Measured wake score/threshold (null component = not measured). Null = detector never measured. */
+    val wakeMeasurement: SegmentObservation.WakeMeasurement? = null,
     val outcome: CollectionOutcome?,
     val stageHistory: List<CollectionOutcome>,
     val translation: TranslationProvenance?,

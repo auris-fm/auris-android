@@ -142,8 +142,8 @@ class MixedFactsPersistControlTest {
             retention,
             authority,
             issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1") },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live ->
-                scope.completeUnderOwner(context, onset, end, wake, provider)
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement ->
+                scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement)
             },
         )
         private val nextId = AtomicLong(0L)

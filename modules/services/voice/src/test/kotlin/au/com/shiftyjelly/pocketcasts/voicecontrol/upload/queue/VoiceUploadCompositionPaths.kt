@@ -98,7 +98,9 @@ internal object VoiceUploadCompositionPaths {
                 acceptedDisclosureVersion = "1",
             ),
             asrModel = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
+            wakeRequired = true,
         )
+
         assertTrue(
             sink.started(
                 au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.Started(

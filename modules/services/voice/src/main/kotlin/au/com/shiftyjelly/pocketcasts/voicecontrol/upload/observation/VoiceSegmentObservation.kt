@@ -30,6 +30,12 @@ data class CaptureContext(
      * translation ran or its identity was not observed. Never claimed when unobserved.
      */
     val translation: TranslationProvenance? = null,
+    /**
+     * THE REAL GRACE STATE FROZEN AT SEGMENT START (spec phase 2): `true` = the wake word was
+     * required for this utterance; `false` = the follow-up grace window was active. This is the
+     * record's REQUIRED `wake_required` fact, frozen synchronously with the rest of the context.
+     */
+    val wakeRequired: Boolean,
 )
 
 /** What the translation stage actually did for one capture. */
@@ -112,6 +118,13 @@ sealed interface SegmentObservation {
     enum class WakeState { Detected, NotDetected, DetectorFailed }
 
     /**
+     * The MEASURED wake score/threshold for THIS capture (spec phase 2: recorded whenever they
+     * were measured). A null component = that value was not measured (e.g. a NaN threshold);
+     * never synthesized.
+     */
+    data class WakeMeasurement(val score: Double?, val threshold: Double?)
+
+    /**
      * VAD closed the segment with its audio. [pcm] is the PRODUCTION frame list handed over
      * without an upload-side copy: the sink either adopts it (retention) or drops it, and the
      * pipeline's own float conversion proceeds independently.
@@ -124,6 +137,7 @@ sealed interface SegmentObservation {
         val speechOnsetSample: Int,
         val speechEndSample: Int,
         val wakeState: WakeState,
+        val wakeMeasurement: WakeMeasurement? = null,
     ) : SegmentObservation {
         override fun equals(other: Any?): Boolean = this === other || (
             other is Completed && context == other.context &&

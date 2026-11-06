@@ -137,6 +137,7 @@ class RetentionPublishTrigger(
                     ),
                     stagesProvider(sealed),
                     metadataCapBytes = metadataCapBytes,
+                    wakeRequired = sealed.context.wakeRequired,
                 )
                 true
             }

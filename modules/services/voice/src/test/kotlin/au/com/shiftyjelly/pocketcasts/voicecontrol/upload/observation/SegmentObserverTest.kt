@@ -39,7 +39,7 @@ class SegmentObserverTest {
         val context = observer.speechStarted(1L, "Headset", ShortArray(0))
         assertNull("refused capture issues no context", context)
         observer.speechIncremental(context, ShortArray(160))
-        observer.wakeCompleted(context, 0, 300, SegmentObservation.WakeState.NotDetected, spy.provider(listOf(shortArrayOf(1, 2)), 16000))
+        observer.wakeCompleted(context, 0, 300, SegmentObservation.WakeState.NotDetected, null, spy.provider(listOf(shortArrayOf(1, 2)), 16000))
 
         // ALLOCATION PROOF: the flatten/provider ran ZERO times — zero upload-side bytes.
         assertEquals(0, spy.invocations)
@@ -59,7 +59,7 @@ class SegmentObserverTest {
                 if (live) LIVE else DEAD_REVOKED
             },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val spy = FrameSpy()
 
@@ -71,7 +71,7 @@ class SegmentObserverTest {
         assertTrue(observer.revoked("account-change"))
 
         // Handoff attempt after revocation: revalidation refuses; NO allocation happens.
-        observer.wakeCompleted(context!!, 0, 99, SegmentObservation.WakeState.Detected, spy.provider(listOf(shortArrayOf(1, 2, 3)), 16000))
+        observer.wakeCompleted(context!!, 0, 99, SegmentObservation.WakeState.Detected, null, spy.provider(listOf(shortArrayOf(1, 2, 3)), 16000))
         assertEquals(0, spy.invocations)
         assertEquals(0, sink.retainedCount())
         assertEquals(0L, sink.retainedBytes())
@@ -87,7 +87,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
 
         val a = observer.speechStarted(3L, "Headset", ShortArray(0))!!
@@ -110,7 +110,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
 
         val context = observer.speechStarted(5L, "Headset", ShortArray(0))!!
@@ -134,7 +134,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
 
@@ -170,15 +170,15 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             issueAuthority = { ISSUED },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live ->
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement ->
                 handoffsValidated++ // refusal: validation consumed the token, then NOTHING retains
-                scope.completeUnderOwner(context, onset, end, wake, provider, admit = false)
+                scope.completeUnderOwner(context, onset, end, wake, provider, admit = false, wakeMeasurement = measurement)
             },
         )
         val spy = FrameSpy()
         val context = observer.speechStarted(12L, "Headset", ShortArray(0))!!
 
-        observer.wakeCompleted(context, 0, 300, SegmentObservation.WakeState.NotDetected, spy.provider(listOf(shortArrayOf(1, 2)), 16000))
+        observer.wakeCompleted(context, 0, 300, SegmentObservation.WakeState.NotDetected, null, spy.provider(listOf(shortArrayOf(1, 2)), 16000))
 
         assertEquals(1, handoffsValidated) // consulted AT the handoff, inside the owner transaction
         assertEquals(0, sink.retainedCount()) // refused: nothing adopted
@@ -199,7 +199,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { c, o, e, w, p, sc, live -> sc.completeUnderOwner(c, o, e, w, p) },
+            CompletionHandoff { c, o, e, w, p, sc, live, measurement -> sc.completeUnderOwner(c, o, e, w, p, wakeMeasurement = measurement) },
         )
         var allocated = false
         val producerSizeSamples = 80 // 160 bytes > budget: must be refused BEFORE any ShortArray
@@ -230,7 +230,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val context = observer.speechStarted(13L, "Headset", shortArrayOf(1, 2))!! // 4 bytes adopted
         observer.speechIncremental(context, shortArrayOf(3, 4)) // +4 => 8 charged
@@ -241,6 +241,7 @@ class SegmentObserverTest {
             0,
             6,
             SegmentObservation.WakeState.NotDetected,
+            null,
             { listOf(shortArrayOf(1, 2, 3, 4, 5, 6)) to 16000 },
         )
 
@@ -262,7 +263,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val context = observer.speechStarted(14L, "Headset", shortArrayOf(1, 2))!!
         observer.speechIncremental(context, shortArrayOf(3, 4))
@@ -273,6 +274,7 @@ class SegmentObserverTest {
             0,
             6,
             SegmentObservation.WakeState.NotDetected,
+            null,
             { listOf(shortArrayOf(1, 2, 3, 4, 5, 6)) to 16000 },
         )
 
@@ -297,7 +299,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
 
         // First capture completes normally.
@@ -324,7 +326,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val context = observer.speechStarted(8L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.NotDetected) { listOf(shortArrayOf(7, 8)) to 16000 }
@@ -347,7 +349,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val context = observer.speechStarted(9L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.Detected) { listOf(shortArrayOf(1)) to 16000 }
@@ -372,7 +374,7 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             { ISSUED },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val a = observer.speechStarted(10L, "Headset", ShortArray(0))!!
         // Admission is single-occupancy (blocker b1): a second start while A is open is REFUSED —

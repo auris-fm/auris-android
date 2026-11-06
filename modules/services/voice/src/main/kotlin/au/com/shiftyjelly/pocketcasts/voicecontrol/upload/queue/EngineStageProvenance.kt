@@ -59,24 +59,44 @@ object EngineStageProvenance {
             } else {
                 RecordNode.Str("observation_unavailable")
             }
-        return listOf(
-            StageName.Wake to when (candidate.wakeState) {
-                SegmentObservation.WakeState.Detected ->
-                    StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected")))
+        // MEASURED WAKE FACTS (spec phase 2): score/threshold are recorded whenever the detector
+        // measured them; a null component is honest absence, never a synthesized value.
+        val wakeFields = buildMap {
+            when (candidate.wakeState) {
+                SegmentObservation.WakeState.Detected -> put("decision", RecordNode.Str("detected"))
 
                 // SCHEMA VOCABULARY (found by the bleed delivery control): a wake DECISION is
                 // `detected` or `rejected`; `no_wake_detected` is a REASON, not a decision, and the
                 // recovery validator refused the pair. A detector that ran and did not fire is a
                 // completed check with decision `rejected` — the same shape bleed uses.
-                SegmentObservation.WakeState.NotDetected ->
-                    StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("rejected")))
+                SegmentObservation.WakeState.NotDetected -> put("decision", RecordNode.Str("rejected"))
 
                 // The observer KNOWS the detector threw, so this is a known failure — never unknown.
                 // Recording it as observation_unavailable would launder a known outcome into an
                 // unavailable observation (reviewer 6d68ac4a, spec 15:46Z).
-                SegmentObservation.WakeState.DetectorFailed ->
-                    StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("detector_error")))
-            },
+                SegmentObservation.WakeState.DetectorFailed -> put("reason", RecordNode.Str("detector_error"))
+            }
+            candidate.wakeMeasurement?.score?.let { put("score", RecordNode.Num(it)) }
+            candidate.wakeMeasurement?.threshold?.let { put("threshold", RecordNode.Num(it)) }
+        }
+        // HONEST PAIRING (recovery validator rule, end to end): a score is only meaningful with the
+        // threshold it was judged against. A measurement whose threshold is absent (the detector
+        // reported no threshold) CANNOT be recorded as score alone, so the pair is dropped rather
+        // than emitting a record the recovery path would refuse.
+        val wakeEntry = when (candidate.wakeState) {
+            SegmentObservation.WakeState.DetectorFailed ->
+                StageEntry(StageState.Failed, wakeFields - "decision")
+
+            else -> StageEntry(
+                StageState.Completed,
+                if ("score" in wakeFields && "threshold" !in wakeFields) wakeFields - "score" else wakeFields,
+            )
+        }
+        // ACTUAL DETECTED LANGUAGE (spec phase 2): source_language is recorded whenever ASR
+        // measured it — honest absence (null) stays absent.
+        val sourceLanguage = recognized?.detectedLanguage?.let { mapOf("source_language" to RecordNode.Str(it)) } ?: emptyMap()
+        return listOf(
+            StageName.Wake to wakeEntry,
             // WIRED PRODUCTION FACT (spec audit): VoiceAsrEngine.transcribeSegment joins
             // NotCollected(captureId, "bleed") when UtteranceFilter's correlator rejects the
             // segment. That join IS the bleed observation - a completed check with a rejected
@@ -94,7 +114,10 @@ object EngineStageProvenance {
             },
             StageName.Asr to when {
                 recognized != null ->
-                    StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str(recognized.transcript)))
+                    StageEntry(
+                        StageState.Completed,
+                        mapOf("text" to RecordNode.Str(recognized.transcript)) + sourceLanguage,
+                    )
 
                 // P1: a GENUINELY empty raw recognition is completed/empty_result (owning
                 // contract, c6f3df7) — only when ASR was actually INVOKED; a wake-only drop

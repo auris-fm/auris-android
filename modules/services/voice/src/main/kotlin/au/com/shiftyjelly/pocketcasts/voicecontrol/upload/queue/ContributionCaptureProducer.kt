@@ -73,6 +73,11 @@ class ContributionCaptureProducer(
         stages: List<Pair<StageName, StageEntry>>,
         /** Frozen allowance metadata bound for THIS capture (null = no allowance constraint). */
         metadataCapBytes: Int? = null,
+        /**
+         * THE REAL GRACE STATE AT SEGMENT START (spec phase 2): the record's REQUIRED
+         * `wake_required` boolean. No default — the caller must state the observed fact.
+         */
+        wakeRequired: Boolean,
     ): ContributionStore.Entry? {
         if (!captureId.matches(UUID_RE)) return null
         val samples = pcmChunks.sumOf { it.second.toLong() }
@@ -121,6 +126,7 @@ class ContributionCaptureProducer(
         )
         for ((name, ref) in models) builder.model(name, ref)
         for ((stage, entry) in stages) builder.stage(stage, entry)
+        builder.wakeRequired(wakeRequired)
         // A blank identity is a WIRING defect, not a bad capture: the Cloud intake refuses an empty
         // app_version/build, so returning null here would drop the capture silently after its audio
         // was retained and queued, with nothing reported anywhere. Fail loudly instead, and name the

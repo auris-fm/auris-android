@@ -90,8 +90,8 @@ class EngineProcessingJoinControlTest {
             NoopSegmentSink,
             authority,
             issueAuthority = { issued },
-            handoff = CompletionHandoff { ctx, onset, end, wake, provider, scope, live ->
-                scope.completeUnderOwner(ctx, onset, end, wake, provider)
+            handoff = CompletionHandoff { ctx, onset, end, wake, provider, scope, live, measurement ->
+                scope.completeUnderOwner(ctx, onset, end, wake, provider, wakeMeasurement = measurement)
             },
         )
         return VoiceAsrEngine(

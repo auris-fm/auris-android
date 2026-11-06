@@ -171,6 +171,7 @@ class EngineToProducerPublishTest {
         routeClass = "Bluetooth",
         issuedAuthority = authority,
         asrModel = asrModel,
+        wakeRequired = true,
     )
 
     private fun retainCapture(sink: ContributionRetentionSink, context: CaptureContext, samples: Int = 1600) {
@@ -346,7 +347,9 @@ class EngineToProducerPublishTest {
             routeClass = "Bluetooth",
             issuedAuthority = issued,
             asrModel = ModelRef.None,
+            wakeRequired = true,
         )
+
         retainCapture(sink, ctx)
         // An EXECUTED outcome is a publishable terminal: the capture publishes (it does NOT stay
         // retained), and the record may claim no asr model because no invocation happened.
@@ -535,6 +538,7 @@ class EngineToProducerPublishTest {
                 "router" to ModelRef.None,
             ),
             stages,
+            wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a bleed-rejected capture", stored != null)
         val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
@@ -585,6 +589,7 @@ class EngineToProducerPublishTest {
                 "router" to ModelRef.None,
             ),
             stages,
+            wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a failed invocation", stored != null)
         val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
@@ -633,6 +638,7 @@ class EngineToProducerPublishTest {
                 "router" to ModelRef.None,
             ),
             stages,
+            wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a wake-only capture with text", stored != null)
         val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
@@ -821,6 +827,7 @@ class EngineToProducerPublishTest {
                 "router" to ModelRef.None,
             ),
             stages,
+            wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a failed-detector capture", stored != null)
         // ...and survive a round trip through the RECOVERY authority, which is where the pairing rule

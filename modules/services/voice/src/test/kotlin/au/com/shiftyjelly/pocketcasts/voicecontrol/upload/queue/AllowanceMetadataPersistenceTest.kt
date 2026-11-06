@@ -81,6 +81,7 @@ class AllowanceMetadataPersistenceTest {
                 acceptedDisclosureVersion = "1",
             ),
             asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
+            wakeRequired = true,
         )
         assertTrue(
             sink.started(
@@ -139,11 +140,13 @@ class AllowanceMetadataPersistenceTest {
             UUID.randomUUID(),
             captureSession = 1L,
             routeClass = "Headset",
+            wakeRequired = true,
         )
         val ctxB = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext(
             UUID.randomUUID(),
             captureSession = 2L,
             routeClass = "Headset",
+            wakeRequired = true,
         )
         fun complete(ctx: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext) = sink.completed(
             SegmentObservation.Completed(
@@ -196,6 +199,7 @@ class AllowanceMetadataPersistenceTest {
                 acceptedDisclosureVersion = "1",
             ),
             asrModel = ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
+            wakeRequired = true,
         )
         // NO bound is set: the direct-sink start freezes NO cap (default null) — the sink-level
         // fail-closed counterpart of an admission that never carried a metadata bound.

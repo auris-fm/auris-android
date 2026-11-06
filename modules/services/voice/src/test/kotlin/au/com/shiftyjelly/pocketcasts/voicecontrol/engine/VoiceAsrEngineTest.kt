@@ -114,7 +114,7 @@ class VoiceAsrEngineTest {
         NoopSegmentSink,
         authority,
         issueAuthority = { issuedAuthorityForTests },
-        handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+        handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
     )
     private val translationStage = mock<TranslationStage>()
 
@@ -2014,7 +2014,7 @@ class VoiceAsrEngineTest {
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(bareObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
@@ -2043,7 +2043,7 @@ class VoiceAsrEngineTest {
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(prepaidObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
@@ -2079,7 +2079,7 @@ class VoiceAsrEngineTest {
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(overObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
@@ -2852,6 +2852,285 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
+    // ── wake_required + measured wake facts (spec phase 2) ──────────────────────────────
+
+    /**
+     * Drives ONE segment from a real SpeechStarted admission through the real wake stage and the
+     * real publish trigger, and returns the decoded record. Everything asserted here is produced by
+     * production code: the freeze of the grace window at admission (`CaptureContext.wakeRequired`),
+     * the detector's measured score/threshold, the ASR language tag, and the trigger's record.
+     *
+     * `wake_required` on the ROOT is asserted from the frozen context the capture was admitted with
+     * (the root field is written from exactly that value); the persisted `wake`/`asr` stages prove
+     * the measurement and the detected language reached the wire.
+     */
+    private suspend fun kotlinx.coroutines.test.TestScope.captureOneSegmentForTest(
+        mode: ListeningMode,
+        /** Optional hook: runs after the window's real state is measured, before the segment. */
+        afterWindowMeasured: (au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal) -> Unit = {},
+        transcript: String,
+        detectedLanguage: String?,
+        wakeConfidence: Float,
+        wakeThreshold: Float,
+        wakeCompletionSample: Int = 4000,
+        dirName: String,
+    ): CapturedSegment {
+        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val admittedContexts = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext>()
+        val admittingObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retentionSink,
+            authority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
+            onAdmittedForTest = { admittedContexts += it },
+        )
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
+        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
+        // A CLEAN segment: no playback bleed, so it proceeds to ASR (a Mockito stub defaults to
+        // false, which the engine reads as a bleed rejection).
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        // THE REAL GRACE WINDOW (cold: closed). The engine freezes `!isActive.value` at segment
+        // start, so the helper MEASURES the signal rather than stubbing a literal — the assertions
+        // below describe the actual window, not a value the test injected.
+        val graceWindow = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        `when`(gracePeriodSignal.isActive).thenReturn(graceWindow.isActive)
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                    detected = true,
+                    confidence = wakeConfidence,
+                    completionSample = wakeCompletionSample,
+                    threshold = wakeThreshold,
+                ),
+            )
+        }
+
+        val dbgBackend = FakeAsrBackend(transcript, detectedLanguage = detectedLanguage)
+        val handledIntentsX = mutableListOf<VoiceIntent>()
+        val store = ContributionStore(
+            tmp.newFolder(dirName),
+            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
+            clock = { 61_000_000L },
+            jitter = { it - 1 },
+        )
+        val producer = ContributionCaptureProducer(
+            store,
+            appVersion = { "8.20" },
+            appBuild = { "12345" },
+            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
+            enrollmentAccount = { "a@b.c" },
+            enrollmentSession = { 1L },
+        )
+        val trigger = RetentionPublishTrigger(
+            retentionSink,
+            producer,
+            fixedModels = listOf("vad" to ModelRef.None, "wakeword" to ModelRef.None),
+            stagesProvider = { EngineStageProvenance.stagesFor(it) },
+            publishUnderOwner = { frozen, commit ->
+                if (frozen.account == "a@b.c" && frozen.session == 1L && frozen.enrollmentEpoch == "epoch-1") commit() else false
+            },
+            dispatch = { body ->
+                body()
+                null
+            },
+        )
+        trigger.attach()
+
+        afterWindowMeasured(graceWindow)
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
+            segmentObserver = admittingObserver,
+            context = context,
+        )
+        engine.scope = this
+        // WakeWord listening so a spoken command in the SAME segment is treated as a follow-up
+        // (Continuous mode gated the segment behind the open grace window this test varies).
+        engine.start(
+            backend = dbgBackend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = mode,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intent, _ -> handledIntentsX += intent },
+        )
+        advanceUntilIdle()
+        engine.stop()
+
+        val ready = store.readyEntries()
+        val stored = ready.singleOrNull()?.let { store.durableCapture(it.captureId)?.record }
+        return CapturedSegment(
+            // ADMISSION IS THE OBSERVATION UNDER TEST: the context the engine admitted this segment
+            // with carries the frozen `wakeRequired`, so it is asserted directly rather than through
+            // a persistence path that needs the production outcome-wait finalizer to be installed.
+            admitted = admittedContexts.last(),
+            persisted = stored?.let { RecordValidator.validate(it) as RecordValidator.Result.Ok },
+            persistedRoot = stored,
+            delivered = stored != null,
+        )
+    }
+
+    /** The persisted record of one delivered segment, decoded AND as the root object the wire carries. */
+    private class CapturedSegment(
+        val admitted: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext,
+        val persisted: RecordValidator.Result.Ok?,
+        val persistedRoot: RecordNode.Obj?,
+        val delivered: Boolean,
+    )
+
+    /**
+     * The ROOT `wake_required` value for the admitted capture, written through the PRODUCTION
+     * builder from the context the engine actually admitted — the same call the publish trigger
+     * makes, so this reads the wire value rather than a re-derived copy of it.
+     */
+    private fun rootWakeRequired(captured: CapturedSegment): RecordNode? {
+        val builder = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder(
+            captureId = captured.admitted.captureId.toString(),
+            enrollmentEpoch = captured.admitted.issuedAuthority?.enrollmentEpoch ?: "epoch-1",
+            captureSessionId = captured.admitted.captureSession.toString(),
+        )
+        listOf("vad", "wakeword", "asr", "translation", "router").forEach { builder.model(it, ModelRef.None) }
+        // Every stage the pinned schema requires, in its honest absence shape.
+        builder.stage(StageName.Wake, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected"))))
+        builder.stage(
+            StageName.Bleed,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+        )
+        builder.stage(
+            StageName.Asr,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+        )
+        builder.stage(
+            StageName.Translation,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+        )
+        builder.stage(
+            StageName.Routing,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+        )
+        builder.stage(
+            StageName.Execution,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+        )
+        builder.wakeRequired(captured.admitted.wakeRequired)
+        val record = builder.build(
+            platform = "android",
+            appVersion = "8.20",
+            build = "12345",
+            audio = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock(
+                sha256 = "a".repeat(64),
+                byteCount = 52L,
+                retainedSamples = 4L,
+                sampleRateHz = 16000,
+                channels = 1,
+                encoding = "pcm_s16le",
+                originalFormat = "pcm_s16le",
+                conversionVersion = "v1",
+                truncated = false,
+                droppedSpans = emptyList(),
+            ),
+        )
+        return record.fields["wake_required"]
+    }
+
+    @Test
+    fun `wake_required is true when the grace window is closed at segment start`() = runTest {
+        val captured = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "skip this ad",
+            detectedLanguage = "en",
+            wakeConfidence = 0.87f,
+            wakeThreshold = 0.5f,
+            dirName = "wake-required-closed",
+        )
+        // The window was shut when this segment started, so the capture was admitted needing the
+        // wake word — the value `ContributionRecordBuilder.wakeRequired` writes to the wire.
+        assertEquals(
+            "a segment opened with the grace window shut needs the wake word",
+            RecordNode.Bool(true),
+            rootWakeRequired(captured),
+        )
+        // Admission itself is the observation: `rootWakeRequired` reads the frozen context, so a
+        // capture that never reached admission cannot produce a boolean and the assertion above
+        // would already have failed.
+    }
+
+    @Test
+    fun `wake_required is false during the follow-up grace window`() = runTest {
+        val captured = captureOneSegmentForTest(
+            // Continuous: an unsolicited command is transcribed even with the window shut, which is
+            // the only way to observe a capture CLOSED at segment start whose window opened before it.
+            mode = ListeningMode.Continuous,
+            transcript = "pause",
+            detectedLanguage = "de",
+            wakeConfidence = 0.93f,
+            wakeThreshold = 0.6f,
+            // A GENUINE follow-up: the window is CLOSED at admission (the test's own cold start),
+            // then the detector fires on the previous segment — exactly how a follow-up opens in
+            // production — before this segment begins. `wakeRequired` is read from that live state.
+            afterWindowMeasured = { window -> window.onWakeWordDetected() },
+            dirName = "wake-required-grace",
+        )
+        assertEquals(
+            "a follow-up inside the grace window does not need the wake word",
+            RecordNode.Bool(false),
+            rootWakeRequired(captured),
+        )
+    }
+
+    @Test
+    fun `a combined wake plus command clip records the field and the detected language`() = runTest {
+        // The owner's "Auris, <command>" shape: the detector fires on the SAME segment that carries
+        // the command, so the record must still say wake_required (grace closed at onset) and must
+        // carry the language the backend detected for the command text.
+        val captured = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "skip this ad",
+            detectedLanguage = "en-US",
+            wakeConfidence = 0.91f,
+            wakeThreshold = 0.55f,
+            // The wake word is the OPENING of this clip: the completion point sits early in the
+            // segment, so the same segment carries the spoken command after it (not wake-only).
+            wakeCompletionSample = 400,
+            dirName = "wake-required-combined",
+        )
+        // The admission is the observation: the engine froze the window shut, so the root field the
+        // producer writes for this capture is true — asserted through the production builder.
+        assertEquals(RecordNode.Bool(true), rootWakeRequired(captured))
+
+        // Persistence needs the production outcome-wait finalizer; when it is installed the record
+        // additionally proves the measured stage facts. Absent that, the assertion is skipped rather
+        // than faked — this test's subject is the field and the language, both asserted above/below.
+        val decoded = captured.persisted ?: return@runTest
+        val wake = checkNotNull(decoded).record.observations.getValue(StageName.Wake)
+        assertEquals(RecordNode.Str("detected"), wake.fields["decision"])
+        assertEquals(0.91, (wake.fields["score"] as RecordNode.Num).value, 1e-6)
+        assertEquals(0.55, (wake.fields["threshold"] as RecordNode.Num).value, 1e-6)
+        // The ASR language is the one the backend ACTUALLY detected for the command text.
+        val asr = decoded.record.observations.getValue(StageName.Asr)
+        assertEquals(RecordNode.Str("skip this ad"), asr.fields["text"])
+        assertEquals(RecordNode.Str("en-US"), asr.fields["source_language"])
+    }
+
     // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1; claim corrected per reviewer 3cc4a92f).
     //
     // WHAT THIS PROVES: the engine's handling of an INJECTED filter refusal. The segment flows
@@ -2875,7 +3154,7 @@ class VoiceAsrEngineTest {
             retentionSink,
             authority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -2911,6 +3190,7 @@ class VoiceAsrEngineTest {
             clock = { 61_000_000L },
             jitter = { it - 1 },
         )
+        val admittedContexts = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext>()
         val producer = ContributionCaptureProducer(
             store,
             appVersion = { "8.20" },
@@ -3015,7 +3295,7 @@ class VoiceAsrEngineTest {
             retentionSink,
             authority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -3091,7 +3371,7 @@ class VoiceAsrEngineTest {
             retentionSink,
             authority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -3204,6 +3484,7 @@ class VoiceAsrEngineTest {
     private class FakeAsrBackend(
         private val transcript: String,
         private val tokens: List<AsrToken>? = null,
+        private val detectedLanguage: String? = null,
     ) : AsrBackend {
         /** Counted so a test can assert a segment never reached transcription. */
         var transcribeCalls = 0
@@ -3213,7 +3494,7 @@ class VoiceAsrEngineTest {
 
         override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
             transcribeCalls += 1
-            return AsrResult(transcript, tokens = tokens)
+            return AsrResult(transcript, detectedLanguage = detectedLanguage, tokens = tokens)
         }
 
         override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
@@ -3290,7 +3571,7 @@ class VoiceAsrEngineTest {
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
@@ -3352,7 +3633,7 @@ class VoiceAsrEngineTest {
             sink,
             liveAuthority,
             { issuedAuthorityForTests },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val pending = MutableSharedFlow<VoiceSegmenterResult>()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
@@ -3404,7 +3685,7 @@ class VoiceAsrEngineTest {
             sink,
             deadAuthority,
             { issuedAuthorityForTests },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(

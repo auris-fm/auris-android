@@ -145,6 +145,8 @@ class CollectionFenceContractTest {
             { listOf(ShortArray(8)) to 8 },
             observer,
             liveGateAllowed = false,
+
+            wakeMeasurement = null,
         )
         assertEquals("the first denied capture ends closed", false, observer.isOpen(first.context.captureId))
 
@@ -162,6 +164,8 @@ class CollectionFenceContractTest {
             { listOf(ShortArray(8)) to 8 },
             observer,
             liveGateAllowed = false,
+
+            wakeMeasurement = null,
         )
 
         assertEquals("the denied capture ends closed", false, observer.isOpen(denied.context.captureId))
@@ -192,26 +196,28 @@ class CollectionFenceContractTest {
         val coordinator = HandoffCoordinator(tx, validateIssuedLocked = { false })
         // Stale/unknown context: late outcome — refused as a NO-OP, current capture untouched.
         coordinator.handoff(
-            CaptureContext(java.util.UUID.randomUUID(), 9L, "X", IssuedAuthority(null, 0L, 0L, null, null)),
+            CaptureContext(java.util.UUID.randomUUID(), 9L, "X", IssuedAuthority(null, 0L, 0L, null, null), wakeRequired = true),
             0,
             8,
             SegmentObservation.WakeState.NotDetected,
             { emptyList<ShortArray>() to 0 },
             observer,
             liveGateAllowed = true,
+
+            wakeMeasurement = null,
         )
         assertTrue(observer.isOpen(ctx.context.captureId))
         // The OPEN capture's own invalid handoff terminates exactly once and releases everything.
-        coordinator.handoff(ctx.context, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true)
+        coordinator.handoff(ctx.context, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true, wakeMeasurement = null)
         assertFalse(observer.isOpen(ctx.context.captureId)) // terminated exactly once
         assertEquals(0L, sink.totalChargedBytesForTest()) // prefix charge released, nothing retained
         // Direct wake with a stale context is a NO-OP (late outcome), never a second terminal.
         val ctx2 = observer.speechStartedAdmitting(2L, "Headset", 8)!!
         observer.adoptFirstChunk(ctx2, ShortArray(8))
-        observer.wakeCompleted(CaptureContext(java.util.UUID.randomUUID(), 9L, "X", IssuedAuthority(null, 0L, 0L, null, null)), 0, 8, SegmentObservation.WakeState.NotDetected) { emptyList<ShortArray>() to 0 }
+        observer.wakeCompleted(CaptureContext(java.util.UUID.randomUUID(), 9L, "X", IssuedAuthority(null, 0L, 0L, null, null), wakeRequired = true), 0, 8, SegmentObservation.WakeState.NotDetected) { emptyList<ShortArray>() to 0 }
         assertTrue(observer.isOpen(ctx2.context.captureId))
         // Null-context handoff through the coordinator closes the OPEN capture with one terminal.
-        coordinator.handoff(null, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true)
+        coordinator.handoff(null, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true, wakeMeasurement = null)
         assertFalse(observer.isOpen(ctx2.context.captureId))
         assertEquals(0L, sink.totalChargedBytesForTest())
     }

@@ -54,6 +54,7 @@ object RecordValidator {
         "app_version",
         "build",
         "capture_session_id",
+        "wake_required",
         "audio",
         "models",
         "observations",
@@ -124,6 +125,7 @@ object RecordValidator {
             if (key !in fields) return reject("missing required root field")
         }
         if (intOf(fields["schema_version"]) != SCHEMA_VERSION) return reject("unsupported schema_version")
+        if (fields["wake_required"] !is RecordNode.Bool) return reject("wake_required must be a boolean")
 
         val captureId = boundedStr(fields["capture_id"], WireBounds.SHORT_FIELD_BYTES) ?: return reject("capture_id invalid")
         if (!HEX_UUID.matches(captureId)) return reject("capture_id not a uuid")

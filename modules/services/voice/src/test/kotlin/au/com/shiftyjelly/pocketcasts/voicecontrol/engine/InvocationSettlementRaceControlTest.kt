@@ -115,8 +115,8 @@ class InvocationSettlementRaceControlTest {
                 sink,
                 authority,
                 issueAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority("a@b.c", 1L, 1L, "e", "d") },
-                handoff = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff { context, onset, end, wake, provider, scope, live ->
-                    scope.completeUnderOwner(context, onset, end, wake, provider)
+                handoff = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement ->
+                    scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement)
                 },
             )
             return VoiceAsrEngine(

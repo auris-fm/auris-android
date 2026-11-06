@@ -27,6 +27,7 @@ class RecordValidatorNegativeTest {
         "capture_id" to "6f1e5c2a-0000-4000-8000-000000000001",
         "enrollment_epoch" to "epoch-1",
         "capture_session_id" to "42",
+        "wake_required" to true,
         "platform" to "android",
         "app_version" to "8.20",
         "build" to "12345",
@@ -101,6 +102,8 @@ class RecordValidatorNegativeTest {
     private fun baseValid(): Map<String, Any?> {
         val r = baseRecord()
         val result = validate(r)
+        println("BASELINE-DEBUG keys=" + r.keys + " node=" + toNode(r).toString().take(400))
+        println("BASELINE-DEBUG result=$result")
         assertTrue("baseline fixture must be ACCEPTED but got: $result", result is RecordValidator.Result.Ok)
         return r
     }
@@ -227,7 +230,7 @@ class RecordValidatorNegativeTest {
                 ),
             )
             .stage(StageName.Execution, StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
         Unit
     }
 

@@ -105,7 +105,7 @@ class RetryableRefusalRetentionTest {
                 .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
                 .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
                 .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("outcome_wait_expired"))))
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = block),
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = block),
         )
     }
 

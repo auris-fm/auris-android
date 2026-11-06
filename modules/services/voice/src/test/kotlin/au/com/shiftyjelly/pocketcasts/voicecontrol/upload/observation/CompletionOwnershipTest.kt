@@ -9,7 +9,7 @@ import org.junit.Test
 // Reviewer b81c61df controls for aggregate ownership at completion and delta growth.
 class CompletionOwnershipTest {
 
-    private fun ctx() = CaptureContext(UUID.randomUUID(), 1L, "Headset", IssuedAuthority("a@b.c", 1L, 1L, "e", "d"))
+    private fun ctx() = CaptureContext(UUID.randomUUID(), 1L, "Headset", IssuedAuthority("a@b.c", 1L, 1L, "e", "d"), wakeRequired = true)
 
     private fun sinkWithOpenPrefix(cap: Long): Pair<ContributionRetentionSink, CaptureContext> {
         val sink = ContributionRetentionSink(CollectionBudget(cap))

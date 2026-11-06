@@ -218,7 +218,7 @@ class WorkerWireParityTest {
                 ),
             )
             .stage(StageName.Execution, StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
     }
 
     /** A record using only declared-absence forms: null models, not_run stages with reasons. */
@@ -236,7 +236,7 @@ class WorkerWireParityTest {
             .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
             .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
             .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("outcome_wait_expired"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
     }
 
     @Test
@@ -434,7 +434,7 @@ class WorkerWireParityTest {
             val (builder, audio) = baseBuilder()
             return CanonicalJson.canonicalBytes(
                 builder.replaceStage(stage, entry)
-                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio),
+                    .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio),
             ).toString(Charsets.UTF_8)
         }
 
@@ -574,7 +574,7 @@ class WorkerWireParityTest {
                     .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
                     .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
                     .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
-                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio),
+                    .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio),
             ).toString(Charsets.UTF_8)
         }
 
@@ -671,7 +671,7 @@ class WorkerWireParityTest {
                 .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
                 .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
                 .replaceStage(stage, StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))))
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
         }.mapValues { (_, record) -> CanonicalJson.canonicalBytes(record).toString(Charsets.UTF_8) }
 
         // REJECT cells: the same canonical bytes with the state flipped to a known state. Built by

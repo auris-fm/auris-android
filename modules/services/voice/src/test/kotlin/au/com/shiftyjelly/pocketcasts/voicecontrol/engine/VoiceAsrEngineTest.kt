@@ -3305,6 +3305,14 @@ class VoiceAsrEngineTest {
             (asr.fields["reason"] as? RecordNode.Str)?.value,
         )
         assertEquals(RecordNode.Str("zh"), asr.fields["source_language"])
+        // iOS found the router was recorded as having received input it was never given (spec
+        // aed257b6). The command WAS discarded, so no routing input exists: the observation must
+        // describe only what ASR produced. Android's provenance never writes `router_input` for a
+        // non-content result — this control holds it that way through the real producer and store.
+        assertFalse(
+            "the router never ran, so no router_input may be recorded",
+            asr.fields.containsKey("router_input"),
+        )
     }
 
     /** A delivered record, decoded, plus its persisted root — the two shapes the controls read. */

@@ -31,8 +31,18 @@ import java.io.FileOutputStream
 class SavedSharingChoiceStore(
     private val persistence: SharingChoicePersistence,
 ) {
-    /** The stored choice, or null when nothing has ever been saved or the file is unusable. */
-    fun read(): SavedSharingChoice? = persistence.read()
+    /**
+     * FAILED-PERSIST LATCH (@spec 3f1e939a). Once any write reports failure, every consent read
+     * refuses until a write SUCCEEDS: the file may still hold a stale ENROLLED record while the
+     * user's latest instruction (withdrawn / not enrolled) did not land. Logging the failure is
+     * not enough — a log cannot stop a capture. Cleared only by a successful write, mirroring the
+     * withdrawal marker's latch discipline.
+     */
+    @Volatile
+    private var persistFailed: Boolean = false
+
+    /** The stored choice for [account], or null when nothing is saved or the file is unusable. */
+    fun read(account: String): SavedSharingChoice? = persistence.read(account)
 
     /**
      * Record an EXPLICIT opt-in with the server's real epoch and accepted disclosure version.
@@ -47,7 +57,7 @@ class SavedSharingChoiceStore(
         acceptedDisclosureVersion: String,
     ): Boolean {
         if (account.isBlank() || epoch.isBlank() || acceptedDisclosureVersion.isBlank()) return false
-        return persistence.write(
+        val written = persistence.write(
             SavedSharingChoice(
                 account = account,
                 state = SharingChoiceState.ENROLLED,
@@ -55,6 +65,28 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = acceptedDisclosureVersion,
             ),
         )
+        persistFailed = !written
+        return written
+    }
+
+    /**
+     * Record a server answer of NOT ENROLLED. Nothing the user decided at a surface produced
+     * this, but it IS the account's actual current state: an old ENROLLED record left on disk
+     * would admit captures the server has already closed (@spec 3f1e939a). No epoch or disclosure
+     * is fabricated — the record simply fails every consent read.
+     */
+    fun recordNotEnrolled(account: String): Boolean {
+        if (account.isBlank()) return false
+        val written = persistence.write(
+            SavedSharingChoice(
+                account = account,
+                state = SharingChoiceState.NOT_ENROLLED,
+                epoch = null,
+                acceptedDisclosureVersion = null,
+            ),
+        )
+        persistFailed = !written
+        return written
     }
 
     /**
@@ -64,8 +96,8 @@ class SavedSharingChoiceStore(
      */
     fun recordWithdrawn(account: String): Boolean {
         if (account.isBlank()) return false
-        val previous = persistence.read()
-        return persistence.write(
+        val previous = persistence.read(account)
+        val written = persistence.write(
             SavedSharingChoice(
                 account = account,
                 state = SharingChoiceState.WITHDRAWN,
@@ -75,6 +107,8 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = previous?.takeIf { it.account == account }?.acceptedDisclosureVersion,
             ),
         )
+        persistFailed = !written
+        return written
     }
 
     /**
@@ -83,7 +117,10 @@ class SavedSharingChoiceStore(
      */
     fun enrolledChoiceFor(account: String?): SavedSharingChoice? {
         if (account.isNullOrBlank()) return null
-        val choice = persistence.read() ?: return null
+        // A persist that failed leaves the file's meaning unknown relative to the user's latest
+        // instruction: refuse until a write succeeds.
+        if (persistFailed) return null
+        val choice = persistence.read(account) ?: return null
         if (choice.account != account) return null
         if (choice.state != SharingChoiceState.ENROLLED) return null
         if (choice.epoch.isNullOrBlank() || choice.acceptedDisclosureVersion.isNullOrBlank()) return null
@@ -99,11 +136,12 @@ data class SavedSharingChoice(
     val acceptedDisclosureVersion: String?,
 )
 
-enum class SharingChoiceState { ENROLLED, WITHDRAWN }
+enum class SharingChoiceState { ENROLLED, WITHDRAWN, NOT_ENROLLED }
 
 /** Durable single-record storage for [SavedSharingChoice]. */
 interface SharingChoicePersistence {
-    fun read(): SavedSharingChoice?
+    /** The saved record for [account], or null. Per-account: one account's record is never read for another. */
+    fun read(account: String): SavedSharingChoice?
 
     /** Returns TRUE only when the record is durably in place. */
     fun write(choice: SavedSharingChoice): Boolean
@@ -124,16 +162,25 @@ class FileSharingChoicePersistence(
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
     private val directorySync: DirectorySync = DirectorySync.PRODUCTION,
 ) : SharingChoicePersistence {
-    private val file: File
-        get() = File(context.filesDir, "voice-sharing-choice")
+    /**
+     * ONE FILE PER ACCOUNT (@spec 2e87df12, finding 3). A single global record made account A's
+     * consent depend on whatever account B did last: switching A→B→A would leave A needing another
+     * server roundtrip before ordinary collection worked again. With per-account files, A's record
+     * is untouched while B is live, and A returns to exactly the choice A itself made.
+     */
+    private fun fileFor(account: String): File = File(context.filesDir, "voice-sharing-choice-" + sha256(account))
 
-    private val tempFile: File
-        get() = File(context.filesDir, "voice-sharing-choice.tmp")
+    private fun tempFileFor(account: String): File = File(context.filesDir, "voice-sharing-choice-" + sha256(account) + ".tmp")
 
-    override fun read(): SavedSharingChoice? {
+    private fun sha256(text: String): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(text.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
+
+    override fun read(account: String): SavedSharingChoice? {
+        val file = fileFor(account)
         if (!file.exists()) return null
         return try {
-            decode(file.readText(Charsets.UTF_8))
+            decode(file.readText(Charsets.UTF_8))?.takeIf { it.account == account }
         } catch (e: Exception) {
             // Cannot read our own record: report "nothing saved" and let admission refuse.
             null
@@ -141,6 +188,8 @@ class FileSharingChoicePersistence(
     }
 
     override fun write(choice: SavedSharingChoice): Boolean {
+        val file = fileFor(choice.account)
+        val tempFile = tempFileFor(choice.account)
         val dir = file.parentFile ?: return false
         return try {
             dir.mkdirs()

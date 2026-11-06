@@ -80,8 +80,11 @@ object VoiceUploadModule {
     @Singleton
     fun provideCurrentEnrollmentEpoch(
         accountStartup: VoiceSharingAccountStartup,
+        savedSharingChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
     ): () -> String? = {
-        accountStartup.state.projection.value?.enrollmentEpoch
+        // The SAVED account-owned epoch (@spec 3f1e939a), not the in-process projection.
+        accountStartup.authoritySnapshot().accountName
+            ?.let { savedSharingChoice.enrolledChoiceFor(it)?.epoch }
     }
 
     /**
@@ -280,6 +283,7 @@ object VoiceUploadModule {
         sink: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink,
         producer: ContributionCaptureProducer,
         accountStartup: VoiceSharingAccountStartup,
+        savedSharingChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
         @UploadTriggerScope scope: CoroutineScope,
     ): RetentionPublishTrigger {
         // NOT attached here (reviewer 54635caa: a lazy @Singleton nobody requests establishes
@@ -306,7 +310,11 @@ object VoiceUploadModule {
                             RetentionPublishTrigger.LiveIdentity(
                                 account = account,
                                 session = snap.session,
-                                enrollmentEpoch = accountStartup.state.projection.value?.enrollmentEpoch,
+                                // The SAVED account-owned epoch (@spec 3f1e939a): publication identity
+                                // rests on the same record the admission decision used.
+                                enrollmentEpoch = snap.accountName?.let { account ->
+                                    savedSharingChoice.enrolledChoiceFor(account)?.epoch
+                                },
                             )
                         }
                         section(live)

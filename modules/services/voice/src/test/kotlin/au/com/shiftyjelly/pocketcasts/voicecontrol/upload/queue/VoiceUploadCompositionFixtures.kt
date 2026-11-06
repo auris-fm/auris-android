@@ -9,8 +9,16 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAc
  * parity control as well: a fixture owned privately by one test class cannot serve both, and the
  * previous `@Before` wiring left parity with no producer at all.
  */
-internal fun au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup.publishEnrolledFixture(epoch: String = "epoch-1") {
+internal fun au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup.publishEnrolledFixture(
+    epoch: String = "epoch-1",
+    choice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore? = null,
+) {
     state.publish(state.parseProjection(VoiceUploadCompositionFixtures.authenticatedProjection(epoch))!!)
+    // The SAVED choice is the consent record now: record it for the owner's account exactly as the
+    // account layer records a genuine server answer.
+    if (choice != null) {
+        authoritySnapshot().accountName?.let { choice.recordEnrolled(it, epoch, "1") }
+    }
 }
 
 internal object VoiceUploadCompositionFixtures {

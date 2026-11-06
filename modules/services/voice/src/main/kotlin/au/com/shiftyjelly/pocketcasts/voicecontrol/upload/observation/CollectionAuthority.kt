@@ -1,8 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -46,13 +44,16 @@ class CollectionAuthority @Inject constructor(
      */
     fun issueAuthorityCoherentLockedIndependent(): IssuedAuthority = collectionTx.transaction {
         val coherent = collectionTx.coherentAuthority()
-        val projection = accountStartup.state.projection.value
+        // Provenance comes from the SAVED account-owned record, not the in-process projection
+        // (@spec 3f1e939a): a capture frozen at admission must carry the same consent facts the
+        // decision read, so the whole chain rests on one durable source.
+        val saved = savedSharingChoice.enrolledChoiceFor(coherent.accountName)
         IssuedAuthority(
             accountName = coherent.accountName,
             sessionGeneration = coherent.session,
             credentialIncarnation = coherent.credential,
-            enrollmentEpoch = projection?.enrollmentEpoch,
-            acceptedDisclosureVersion = projection?.acceptedDisclosureVersion,
+            enrollmentEpoch = saved?.epoch,
+            acceptedDisclosureVersion = saved?.acceptedDisclosureVersion,
         )
     }
 
@@ -86,11 +87,12 @@ class CollectionAuthority @Inject constructor(
         live.credential == issued.credentialIncarnation
 
     private fun enrollmentMatches(issued: IssuedAuthority): Boolean {
-        val projection = accountStartup.state.projection.value ?: return false
-        return projection.enrollmentEpoch == issued.enrollmentEpoch &&
-            projection.acceptedDisclosureVersion == issued.acceptedDisclosureVersion &&
-            projection.voiceSharingEnrolled &&
-            projection.withdrawalState == WithdrawalState.ACTIVE
+        // The SAME saved record the decision and the issuer used — not the live projection
+        // (@spec 3f1e939a). A null saved choice means the handoff cannot be proven to still rest
+        // on the user's consent, so it fails closed.
+        val saved = savedSharingChoice.enrolledChoiceFor(issued.accountName) ?: return false
+        return saved.epoch == issued.enrollmentEpoch &&
+            saved.acceptedDisclosureVersion == issued.acceptedDisclosureVersion
     }
 
     /** Fence-wrapped decision for composition callers that must not hold any monitor yet. */

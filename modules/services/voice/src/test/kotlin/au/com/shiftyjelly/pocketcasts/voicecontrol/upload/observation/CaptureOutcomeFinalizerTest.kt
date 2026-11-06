@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 import androidx.test.core.app.ApplicationProvider
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.choiceStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineStageProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.QueueLimits
@@ -115,10 +116,11 @@ class CaptureOutcomeFinalizerTest {
             jitter = { 0L },
         )
         val startup = VoiceUploadCompositionFixtures.startup(context as android.app.Application)
+        val choice = choiceStore()
         val owner = startup.ownerForHandoff()
         (owner as VoiceUploadCompositionFixtures.AppContextOwner).publish("a@x", 7L, "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
-        startup.publishEnrolledFixture("epoch-1")
+        startup.publishEnrolledFixture("epoch-1", choice)
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024), nowMs = clockMs)
         val observer = SegmentObserver(
@@ -152,7 +154,13 @@ class CaptureOutcomeFinalizerTest {
             ),
         )
         val producer = VoiceUploadCompositionFixtures.producer(context, store, startup)
-        VoiceUploadModule.provideRetentionPublishTrigger(sink = sink, producer = producer, accountStartup = startup, scope = scope).attach()
+        VoiceUploadModule.provideRetentionPublishTrigger(
+            sink = sink,
+            producer = producer,
+            accountStartup = startup,
+            savedSharingChoice = choice,
+            scope = scope,
+        ).attach()
         return Harness(sink, store, ctx.captureId, clock, finalizer)
     }
 

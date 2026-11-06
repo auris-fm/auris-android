@@ -120,8 +120,9 @@ class UploadRemovalLogTest {
         assertEquals(listOf(id), removed)
 
         assertTrue(
-            "expiry must log the removal with its reason (lines=${tree.describe()})",
-            tree.has("voice-upload remove") && tree.has("capture=$id") && tree.has("reason=queue-age-expired"),
+            "expiry must log the deletion with its fixed reason (lines=${tree.describe()})",
+            tree.has("voice-upload delete") && tree.has("capture=$id") &&
+                tree.has("reason=queue-age-expired") && tree.has("outcome=removed"),
         )
     }
 
@@ -138,8 +139,9 @@ class UploadRemovalLogTest {
         resolver.resolveForAttempt(token, ContributionAckResolver.Ack.TERMINAL_DISPOSAL, httpStatus = 410)
 
         assertTrue(
-            "a terminal settlement deletes a valid recording, so it MUST log (lines=${tree.describe()})",
-            tree.has("voice-upload remove") && tree.has("capture=$id") && tree.has("reason=SERVER_TERMINAL"),
+            "a terminal settlement deletes a valid recording, so it MUST log the truthful file outcome (lines=${tree.describe()})",
+            tree.has("voice-upload delete") && tree.has("capture=$id") &&
+                tree.has("reason=SERVER_TERMINAL") && tree.has("outcome=removed"),
         )
         assertTrue(
             "the settle line must carry the disposition and the real status (lines=${tree.describe()})",

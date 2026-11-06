@@ -943,15 +943,12 @@ class ContributionStore(
             if (!attemptIdentityHoldsLocked(token.generation, token.captureId, token.attemptNumber)) {
                 null
             } else {
-                memoryEntries.remove(token.captureId)?.also { deleteLocked(it) }
+                memoryEntries.remove(token.captureId)?.also { deleteLocked(it, reason.name) }
             }
         } != null
-        if (removed) {
-            dropCounterOnly(reason)
-            // MONITORING (spec 827c5962): the removal REASON is the whole point - this is the path that
-            // deletes a valid recording, and until now it was completely silent.
-            Timber.tag(QUEUE_TAG).i("voice-upload remove: capture=%s reason=%s", token.captureId, reason.name)
-        }
+        // MONITORING (review 3c0f31d3, gap 2): the truthful file-level outcome is logged INSIDE
+        // deleteLocked with this caller's fixed reason; `removed` here is only the index transition.
+        if (removed) dropCounterOnly(reason)
         removed
     }
 
@@ -1407,7 +1404,7 @@ class ContributionStore(
                     }.isSuccess
                     if (!sidecarsOk) {
                         // Roll the claim back exactly: remove what we just wrote and re-hold nothing.
-                        deleteLocked(entry)
+                        deleteLocked(entry, "prepare-rollback")
                         memoryEntries.remove(captureId)
                         preparedIds.remove(captureId)
                         ownedCharges.remove(captureId)
@@ -1653,19 +1650,16 @@ class ContributionStore(
             // Entries whose ready marker vanished (purged elsewhere) leave the index immediately.
             for ((id, e) in memoryEntries.toMap()) {
                 if (id !in preparedIds && !File(dir, "$id$SUFFIX_READY").exists()) {
-                    deleteLocked(e)
+                    deleteLocked(e, "ready-marker-vanished")
                 }
             }
             val expiredIds = memoryEntries.values
                 .filter { (now - it.createdAtMs) / 1000L > limits.maxQueueAgeSeconds }
                 .map { it.captureId }
             for (id in expiredIds) {
-                memoryEntries[id]?.let { deleteLocked(it) }
+                memoryEntries[id]?.let { deleteLocked(it, "queue-age-expired") }
                 preparedIds.remove(id)
                 removed += id
-                // MONITORING (spec 827c5962): why a queued recording was REMOVED. Expiry is the one
-                // removal that is expected, so it must look different from a settlement deletion.
-                Timber.tag(QUEUE_TAG).i("voice-upload remove: capture=%s reason=queue-age-expired", id)
             }
         }
         // Content-free terminal counter per expired entry, durable across restart.
@@ -2238,7 +2232,7 @@ class ContributionStore(
 
     private fun dropEntryGuarded(generation: Long, captureId: String, reason: TerminalReason): Boolean {
         val removed = synchronized(lock) {
-            if (ownership.isValidUnderLock(generation)) memoryEntries.remove(captureId)?.also { deleteLocked(it) } else null
+            if (ownership.isValidUnderLock(generation)) memoryEntries.remove(captureId)?.also { deleteLocked(it, reason.name) } else null
         } != null
         if (removed) dropCounterOnly(reason)
         return removed
@@ -2993,7 +2987,14 @@ class ContributionStore(
     private fun isDisqualified(id: String): Boolean = disqualificationMarker(id).exists()
 
     // Discard an owned capture and RELEASE ITS CHARGE ONLY IF THE BYTES ARE ACTUALLY GONE.
-    private fun deleteLocked(e: Entry) {
+
+    /**
+     * MONITORING (review 3c0f31d3, gap 2): index removal is NOT proof files were deleted - the
+     * disqualification write or the file deletes themselves can fail and RETAIN the bytes. The truthful
+     * outcome is therefore logged HERE, at the only place that knows it, with the caller's FIXED reason.
+     * outcome=removed only when every file is gone; otherwise outcome=retained.
+     */
+    private fun deleteLocked(e: Entry, reason: String) {
         val id = e.captureId
         // 1) Durable intent FIRST, and destruction does NOT proceed without it. If the marker cannot be
         //    confirmed, deleting the files would destroy the only evidence that this capture was meant to
@@ -3001,6 +3002,7 @@ class ContributionStore(
         if (!writeDisqualificationLocked(id)) {
             memoryEntries.remove(id)
             chargeRetainedLocked(id, ready = false)
+            Timber.tag(QUEUE_TAG).i("voice-upload delete: capture=%s reason=%s outcome=retained", id, reason)
             return
         }
         // 2) Attempt every delete, regardless of earlier failures.
@@ -3009,6 +3011,12 @@ class ContributionStore(
             listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
         )
         memoryEntries.remove(id)
+        Timber.tag(QUEUE_TAG).i(
+            "voice-upload delete: capture=%s reason=%s outcome=%s",
+            id,
+            reason,
+            if (gone) "removed" else "retained",
+        )
         if (gone) {
             // Only now is the disposal itself complete; the marker goes last so intent survives a crash.
             disqualificationMarker(id).delete()

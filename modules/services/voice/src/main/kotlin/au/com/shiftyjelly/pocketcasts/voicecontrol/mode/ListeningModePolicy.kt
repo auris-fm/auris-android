@@ -5,7 +5,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
@@ -21,31 +20,32 @@ import kotlinx.coroutines.flow.stateIn
 /**
  * When the microphone opening earns an audible cue.
  *
- * The spec scopes [EarconId.LISTENING_START] to the microphone turning on **in the background**
- * while a wake word is required — "optional and independent of the mandatory `WAKE_WORD`
- * confirmation", and "very subtle ... should not distract" (`voice-intents.md`). Playing it on every
- * occasion the gate lets the microphone back in — another app stops playing, a route returns, the app
- * is foregrounded — turned it into a recurring beep during ordinary use, which is what was reported.
+ * [EarconId.LISTENING_START] means "the microphone is on": optional, independent of the mandatory
+ * wake-word confirmation, and "very subtle ... should not distract" (`voice-intents.md`). It plays
+ * when listening STARTS in a session that requires the wake word.
  *
- * So: only when the user cannot see that the microphone opened. It lives here rather than at the call
- * site because this file is where the listening rules are covered by unit tests, and a decision taken
- * only inside the service is one no test can pin. The listening notification stays posted in both
- * cases, so the continuous signal that listening is on does not depend on this cue.
+ * The question is why this start happened, not whether the app is visible. Two earlier versions got
+ * it wrong in opposite directions: gating on "the app is in the background" made every automatic
+ * recovery audible -- an automatic restart is always a background start -- which is the beep fight
+ * with another app the owner reported (msg 2fdcdb5b), and dropping that condition cued every
+ * recovery as well, since the foreground never told a first start from a restart.
  *
- * Requires an *explicit* background signal rather than inferring one from the rule's absence: an
- * unregistered or unknown foreground rule is not evidence that the microphone opened where the user
- * cannot see it, and guessing "background" would produce the audible noise this exists to avoid.
- * Silence is not evidence — the same rule this codebase applies to a check.
+ * So the caller passes the answer:
+ * - [ListeningMode.Continuous] is exempt: the cue marks listening that awaits a wake word.
+ * - [isAutomaticRecovery] silences the cue. Capture ended on its own and we are taking the
+ *   microphone back; whatever released it is probably still active, and that is the moment the user
+ *   experiences as us fighting for audio. The listening notification still updates, so the state is
+ *   not silent -- only the tone is.
  *
- * Coverage: the cases above are tested here. The *use* of this function is not — it is called from
- * `VoiceControlService`'s start path, which no test drives — so reverting that call site would still
- * leave the suite green. That gap is accepted rather than closed; closing it needs a service-level
- * test, and this note is the record.
+ * Coverage: the predicate is tested here. Its call site is not -- `VoiceControlService`'s start path
+ * is driven by `VoiceControlCaptureRestartTest`, which asserts the cue count across a real
+ * start/terminate/recover cycle, so a regression that re-cues inside the service is caught there
+ * rather than only here.
  */
 internal fun shouldPlayListeningStartCue(
     mode: ListeningMode,
-    rules: Map<String, VoiceControlRuleState>,
-): Boolean = mode == ListeningMode.WakeWord && rules[AppInForegroundCondition.ID] is VoiceControlRuleState.Blocked
+    isAutomaticRecovery: Boolean,
+): Boolean = mode == ListeningMode.WakeWord && !isAutomaticRecovery
 
 @Singleton
 class ListeningModePolicy @Inject constructor(

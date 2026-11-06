@@ -3,8 +3,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.mode
 import app.cash.turbine.test
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
@@ -98,44 +96,34 @@ class ListeningModePolicyTest {
     // --- Listening start cue tests ---
 
     @Test
-    fun `no cue while the user can see the app`() {
-        val rules = mapOf(AppInForegroundCondition.ID to VoiceControlRuleState.Allowed)
-
-        assertFalse(
-            "the microphone opening is visible in the app, so the cue only adds noise",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord, rules),
+    fun `a cue when the user starts listening and requires the wake word`() {
+        assertTrue(
+            "the user asked to listen, the microphone is on and awaiting a wake word",
+            shouldPlayListeningStartCue(mode = ListeningMode.WakeWord, isAutomaticRecovery = false),
         )
     }
 
     @Test
-    fun `a cue when the microphone opens in the background`() {
-        val rules = mapOf(
-            AppInForegroundCondition.ID to VoiceControlRuleState.Blocked("app_in_foreground"),
-        )
-
-        assertTrue(
-            "this is the case the spec names: the microphone turns on where the user cannot see it",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord, rules),
+    fun `no cue when capture restarts itself`() {
+        // THE OWNER-REPORTED BUG (msg 2fdcdb5b, 2fdcdb6f): with Amap or YouTube in front, capture
+        // ends, we restart, and the cue plays over the other app's audio -- twice, because we then
+        // lose the microphone again. A predicate that only looks at the mode cannot see this; the
+        // start reason is what distinguishes the first start from the restart.
+        assertFalse(
+            "an automatic recovery is us taking the microphone back, which is the moment to stay quiet",
+            shouldPlayListeningStartCue(mode = ListeningMode.WakeWord, isAutomaticRecovery = true),
         )
     }
 
     @Test
     fun `no cue for a mode that does not require a wake word`() {
-        val rules = mapOf(
-            AppInForegroundCondition.ID to VoiceControlRuleState.Blocked("app_in_foreground"),
-        )
-
         assertFalse(
             "the cue marks listening that awaits a wake word; continuous listening is not that",
-            shouldPlayListeningStartCue(ListeningMode.Continuous, rules),
+            shouldPlayListeningStartCue(mode = ListeningMode.Continuous, isAutomaticRecovery = false),
         )
-    }
-
-    @Test
-    fun `no cue when the gate says nothing about the foreground`() {
         assertFalse(
-            "an unknown foreground state is not evidence of a background start",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord, emptyMap()),
+            "a recovery inside continuous listening stays silent for the same reason",
+            shouldPlayListeningStartCue(mode = ListeningMode.Continuous, isAutomaticRecovery = true),
         )
     }
 

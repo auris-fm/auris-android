@@ -129,6 +129,19 @@ class VoiceControlService : Service() {
      * the engine from another coroutine, which could race an in-flight start.
      */
     private val captureRestartSignal = MutableStateFlow(0L)
+
+    /**
+     * Whether the next engine start is automatic rather than one the user asked for by enabling voice
+     * control. Consumed by [startEngine], which passes it to the start-cue decision.
+     *
+     * A start is AUTOMATIC unless this session's user-driven start has already happened: capture
+     * resumes on its own after a gate change, a route return or a pipeline termination, and every one
+     * of those is us reclaiming the microphone rather than the user asking to listen. Tracking
+     * "recovery" alone was not enough -- the restart that caused the owner's beep comes from the mode
+     * observer re-admitting capture after the other app released it, which never passes through
+     * [recoverCapture].
+     */
+    private var awaitingUserStart = true
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
@@ -227,6 +240,9 @@ class VoiceControlService : Service() {
             Timber.i("Voice control already started")
             return
         }
+        // The one start the user asked for: it earns the listening cue. Everything after it in this
+        // session is automatic.
+        awaitingUserStart = true
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
 
@@ -512,6 +528,10 @@ class VoiceControlService : Service() {
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private suspend fun startEngine(mode: ListeningMode): Boolean {
+        // WHY THIS START HAPPENED, frozen before the attempt can suspend. The start cue needs it: a
+        // recovery start must stay silent. Reading shared state inside onStarted instead would
+        // couple the cue to a later restart that may have overwritten the flag.
+        val isAutomaticRecovery = !awaitingUserStart
         // Captured before the attempt: validated after ensureReady() so a start that was
         // invalidated while suspended (gate loss, stop) does not commit.
         val generation = engineStart.generation()
@@ -619,10 +639,13 @@ class VoiceControlService : Service() {
             // started. They must not be able to un-set it: acquireCandidate hands the acquired
             // stream to the engine based on this result, and a false would close a live stream.
             onStarted = {
-                // Only when the microphone opens where the user cannot see it: the decision is
-                // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
-                // covered in ListeningModePolicyTest.
-                if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
+                // The decision is shouldPlayListeningStartCue in ListeningModePolicy, covered in
+                // ListeningModePolicyTest. It keys on WHY this start happened, not on the foreground:
+                // an automatic recovery (the pipeline ended on its own and recoverCapture nudged the
+                // observer) must not cue, because that is us taking the microphone back from whatever
+                // released it -- the exact moment the owner reported as a beep fight with another app.
+                awaitingUserStart = false
+                if (shouldPlayListeningStartCue(mode = mode, isAutomaticRecovery = isAutomaticRecovery)) {
                     audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
                 }
 
@@ -691,6 +714,8 @@ class VoiceControlService : Service() {
      */
     private fun recoverCapture() {
         if (!captureRestartBudget.allows()) return
+        // Consumed by the next start: this capture start is ours reclaiming the microphone after it
+        // ended on its own, not the user asking to listen.
         captureRestartSignal.value = SystemClock.elapsedRealtime()
     }
 

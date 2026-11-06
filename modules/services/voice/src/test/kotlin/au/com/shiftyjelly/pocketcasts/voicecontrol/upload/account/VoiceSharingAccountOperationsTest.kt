@@ -289,8 +289,8 @@ class VoiceSharingAccountOperationsTest {
         enqueueProjection()
         assertTrue(operations.refreshProjection())
 
-        // 2. Enrollment is the SWITCH turned on: request_id UUID + desired state + the disclosure the
-        // user accepted; the last-read revision travels as the If-Match precondition.
+        // 2. Enrollment is the SWITCH turned on: an EXACT body of the desired state plus the
+        // disclosure the user accepted; the last-read revision travels as the If-Match precondition.
         enqueueProjection(revision = "rev-2")
         assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
@@ -298,11 +298,11 @@ class VoiceSharingAccountOperationsTest {
         assertEquals("PUT", posted.method)
         assertEquals("/api/v1/account/voice-sharing", posted.path)
         assertEquals(listOf("rev-1"), posted.headers.values("If-Match"))
-        val body = posted.body.readUtf8()
-        assertTrue(body.contains("\"enrolled\":true"))
-        assertTrue(body.contains("\"disclosure_version\":\"v3\""))
-        val requestId = Regex("\"request_id\":\"([^\"]+)\"").find(body)!!.groupValues[1]
-        assertNotNull(UUID.fromString(requestId))
+        assertEquals(
+            "the PUT body is exactly the desired state — no request_id, no derived fields (spec e3cfc8ae)",
+            "{\"enrolled\":true,\"disclosure_version\":\"v3\"}",
+            posted.body.readUtf8(),
+        )
         // The enrollment response (new projection) replaced the GET projection.
         assertEquals("rev-2", state.projection.value!!.membershipRevision)
     }
@@ -510,7 +510,7 @@ class VoiceSharingAccountOperationsTest {
     }
 
     @Test
-    fun `bounded immutable retry reuses the same request_id and captured revision`() = runTest {
+    fun `bounded immutable retry resends byte-identical bytes and the same precondition`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection())
 
@@ -522,14 +522,12 @@ class VoiceSharingAccountOperationsTest {
         val attempt1 = server.takeRequest(5, TimeUnit.SECONDS)!!
         val attempt2 = server.takeRequest(5, TimeUnit.SECONDS)!!
         val body1 = attempt1.body.readUtf8()
-        val id1 = Regex("\"request_id\":\"([^\"]+)\"").find(body1)!!.groupValues[1]
         val body2 = attempt2.body.readUtf8()
-        val id2 = Regex("\"request_id\":\"([^\"]+)\"").find(body2)!!.groupValues[1]
-        assertEquals(id1, id2)
         // The precondition is a HEADER here, so a byte-identical resend also carries it identically.
         assertEquals(listOf("rev-1"), attempt1.headers.values("If-Match"))
         assertEquals(listOf("rev-1"), attempt2.headers.values("If-Match"))
-        assertEquals("the retry body must be byte-identical: same request_id, same desired state", body1, body2)
+        assertEquals("the retry body must be byte-identical: the same desired state", body1, body2)
+        assertEquals("and the exact contract body", "{\"enrolled\":true,\"disclosure_version\":\"v3\"}", body1)
     }
 
     @Test

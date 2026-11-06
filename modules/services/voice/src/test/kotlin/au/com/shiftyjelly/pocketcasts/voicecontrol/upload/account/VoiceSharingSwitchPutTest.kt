@@ -136,6 +136,11 @@ class VoiceSharingSwitchPutTest {
         assertEquals("/api/v1/account/voice-sharing", put.path)
         assertTrue("desired state must be on the wire: $body", body.contains("\"enrolled\":true"))
         assertTrue("the accepted disclosure must be recorded: $body", body.contains("voice-sharing-v1"))
+        assertEquals(
+            "the PUT body is EXACT: enrolled + disclosure_version and nothing else (spec e3cfc8ae)",
+            "{\"enrolled\":true,\"disclosure_version\":\"voice-sharing-v1\"}",
+            body,
+        )
         assertTrue("the last-read revision must be sent as If-Match: ${put.headers}", put.headers.values("If-Match").contains("rev-1"))
     }
 
@@ -156,6 +161,7 @@ class VoiceSharingSwitchPutTest {
         val body = bodies.single()
         assertTrue("desired state must be on the wire: $body", body.contains("\"enrolled\":false"))
         assertTrue("no disclosure is claimed when turning sharing off: $body", !body.contains("disclosure"))
+        assertEquals("the OFF body is exactly the desired state", "{\"enrolled\":false}", body)
         assertTrue("the last-read revision must be sent as If-Match: ${put.headers}", put.headers.values("If-Match").contains("rev-2"))
     }
 
@@ -175,11 +181,7 @@ class VoiceSharingSwitchPutTest {
         assertTrue(second is VoiceSharingMutationResult.Applied)
 
         assertEquals("both calls must reach the server", 2, requests.size)
-        assertEquals(
-            "the repeat is BYTE-IDENTICAL apart from a fresh request_id: $bodies",
-            bodies.toList()[0].replace(REQUEST_ID, ""),
-            bodies.toList()[1].replace(REQUEST_ID, ""),
-        )
+        assertEquals("the repeat is BYTE-IDENTICAL — the body carries no per-call id: $bodies", bodies.toList()[0], bodies.toList()[1])
     }
 
     @Test
@@ -195,8 +197,7 @@ class VoiceSharingSwitchPutTest {
         enqueue(okProjection(enrolled = true, revision = "rev-2"))
         val resent = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
         assertTrue("the resend of the user's choice must apply", resent is VoiceSharingMutationResult.Applied)
-        val desired = bodies.map { it.replace(REQUEST_ID, "") }
-        assertEquals("both attempts carry the SAME desired state", desired[0], desired[1])
+        assertEquals("both attempts carry the SAME desired state", bodies.toList()[0], bodies.toList()[1])
     }
 
     @Test
@@ -224,17 +225,64 @@ class VoiceSharingSwitchPutTest {
     }
 
     @Test
-    fun `no revision to match sends no If-Match rather than an empty one`() = runTest {
-        // Before the first read the client has no revision. Sending an empty If-Match would claim a
-        // revision that does not exist; omitting it states the truth (no precondition).
-        enqueue(okProjection(enrolled = true, revision = "rev-1"), okProjection(enrolled = true, revision = "rev-1"))
+    fun `with no revision held the client reads first and the PUT still carries If-Match`() = runTest {
+        // The precondition is REQUIRED (spec e3cfc8ae): the server refuses a PUT naming no revision,
+        // so the client never sends one. With nothing read yet it GETs the state, then switches.
+        assertNull("precondition: nothing has been read", state.projection.value)
+        enqueue(
+            okProjection(enrolled = false, revision = "rev-1"),
+            okProjection(enrolled = true, revision = "rev-2"),
+        )
+
         val result = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
-        assertTrue(result is VoiceSharingMutationResult.Applied)
-        val put = requests.single { it.method == "PUT" }
-        assertEquals("no If-Match header may be sent without a revision", emptyList<String>(), put.headers.values("If-Match"))
+
+        assertTrue("the switch after the read must apply", result is VoiceSharingMutationResult.Applied)
+        assertEquals("GET then PUT: exactly two requests", listOf("GET", "PUT"), requests.map { it.method })
+        val put = requests.last()
+        assertEquals(
+            "the revision just read is the precondition: ${put.headers}",
+            listOf("rev-1"),
+            put.headers.values("If-Match"),
+        )
+        assertEquals("the GET sends no body", "", bodies.first())
     }
 
-    private companion object {
-        val REQUEST_ID = Regex("\"request_id\":\"[0-9a-fA-F-]{36}\"")
+    @Test
+    fun `a failed first read refuses the switch instead of sending a PUT without a precondition`() = runTest {
+        // No revision and no way to learn one: refuse. An unconditional PUT would override whatever
+        // another device chose, which is exactly what the precondition exists to prevent.
+        // The GET itself is retried (bounded, transport/5xx only); every attempt is a read, and the
+        // switch never proceeds on a fresh read that never landed.
+        enqueue(MockResponse().setResponseCode(503), MockResponse().setResponseCode(503))
+
+        val result = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
+
+        assertEquals("no revision means no switch", VoiceSharingMutationResult.Failure, result)
+        assertTrue(
+            "a PUT must never leave without If-Match: ${requests.map { it.method }}",
+            requests.none { it.method == "PUT" },
+        )
+    }
+
+    @Test
+    fun `a switch after a later 409 keeps the exact body and never resends without a precondition`() = runTest {
+        // The 409 is terminal and its body is the plain projection (the server's new shape): the
+        // client publishes it and stops. No automatic retry means no conditional-less second PUT.
+        seedCurrent(enrolled = true, revision = "rev-1")
+        enqueue(
+            MockResponse().setResponseCode(409)
+                .setBody(projectionJson(enrolled = false, revision = "rev-9", withdrawal = "withdrawn")),
+        )
+
+        val result = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
+
+        assertTrue(result is VoiceSharingMutationResult.MembershipConflict)
+        assertEquals("exactly one attempt", listOf("PUT"), requests.map { it.method })
+        assertEquals("rev-9", state.projection.value?.membershipRevision)
+        assertEquals(
+            "the retried/resent body is the exact desired state",
+            "{\"enrolled\":true,\"disclosure_version\":\"voice-sharing-v1\"}",
+            bodies.single(),
+        )
     }
 }

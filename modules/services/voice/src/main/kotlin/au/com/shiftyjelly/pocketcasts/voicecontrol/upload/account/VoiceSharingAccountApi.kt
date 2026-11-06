@@ -174,6 +174,13 @@ class VoiceSharingAccountOperations(
      */
     suspend fun setVoiceSharing(enrolled: Boolean, acceptedDisclosureVersion: String?): VoiceSharingMutationResult {
         if (enrolled && acceptedDisclosureVersion.isNullOrBlank()) return VoiceSharingMutationResult.Failure
+        // THE PRECONDITION IS REQUIRED (spec e3cfc8ae): the server refuses a PUT that names no
+        // revision, so a client holding none READS FIRST and then sends that revision. The read is
+        // the ordinary GET, so its answer also becomes the current projection — a switch issued on a
+        // stale screen then fails its own precondition instead of overwriting a newer choice.
+        if (state.projection.value?.membershipRevision == null && !refreshProjection()) {
+            return VoiceSharingMutationResult.Failure
+        }
         val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null)
             ?: return VoiceSharingMutationResult.Failure
         return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, request.op.ifMatch, payload) }) {
@@ -425,7 +432,10 @@ class VoiceSharingAccountOperations(
         val buffer = okio.Buffer()
         val writer = JsonWriter.of(buffer)
         writer.beginObject()
-        writer.name("request_id").value(requestId)
+        // The SWITCH body is EXACT (spec e3cfc8ae): the server refuses unknown fields, and it derives
+        // idempotency from the desired state itself, so no correlation id is sent. The deletion route
+        // keeps its `request_id` — that receipt is the server's answer to one particular request.
+        if (route != Route.SWITCH) writer.name("request_id").value(requestId)
         when (route) {
             // The desired state, and nothing the server can derive itself: no epoch, no expected
             // revision in the body (that precondition IS the If-Match header).
@@ -500,7 +510,11 @@ class VoiceSharingAccountOperations(
         val bearer: String?,
         val requestBody: okhttp3.RequestBody,
         val route: Route,
-        /** The last-read `membership_revision`, sent as `If-Match`; null when nothing was read yet. */
+        /**
+         * The last-read `membership_revision`, sent as `If-Match`. Null only for the GET itself: a
+         * SWITCH never leaves without a revision, because `setVoiceSharing` reads first when it
+         * holds none (spec e3cfc8ae).
+         */
         val ifMatch: String? = null,
     )
 

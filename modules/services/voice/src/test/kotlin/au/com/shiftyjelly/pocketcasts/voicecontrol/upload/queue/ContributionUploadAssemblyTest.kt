@@ -497,16 +497,21 @@ class ContributionUploadAssemblyTest {
     }
 
     @Test
-    fun `a terminal refusal over real HTTP settles as a terminal disposal, not a retry`() {
+    fun `an invalid_request refusal over real HTTP settles UNSERVICED retained, never disposed`() {
+        // Spec 5c811f83: a REQUEST rejection says nothing about the bytes — invalid_request is
+        // UNSERVICED (durable boundary, stop serving), not a terminal disposal. This is the real-HTTP
+        // pin for that semantics on the assembled path.
         var now = 30_000_000L
         val store = newStore { now }
         val fixture = fixture(store, "assembly-terminal")
         responseStatus = 400
         responseBody = """{"schema_version":1,"code":"invalid_request"}"""
 
-        assembly(store, { now }, capturesFor(store, fixture)).poll()
+        val accepted = mutableListOf<String>()
+        assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
 
-        assertEquals("a terminal refusal is disposed", 0, store.readyEntries().count { it.captureId == fixture.id })
+        assertEquals("an invalid_request refusal is never disposed", 1, store.readyEntries().count { it.captureId == fixture.id })
+        assertEquals("a refusal is reported as nothing accepted", emptyList<String>(), accepted)
     }
 
     @Test

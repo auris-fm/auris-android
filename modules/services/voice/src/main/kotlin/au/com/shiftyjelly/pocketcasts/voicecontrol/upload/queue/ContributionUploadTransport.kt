@@ -251,11 +251,19 @@ class ContributionUploadTransport(
         onBodyProgress: (() -> Unit)? = null,
     ): Request {
         val body = requireNotNull(multipartFor(metadata, owned, isCancelled, remainingMs, onBodyProgress)) { "envelope" }
+        // EXACTLY ONE Bearer SCHEME at the transport's single request boundary (spec 85719944):
+        // the credential sources feed RAW token values (the provider's cache read and the frozen
+        // assembled override alike), and the Worker intake requires /^Bearer (.+)$/ BEFORE token
+        // verification — a raw token in this header is classified `missing_bearer` (measured,
+        // Worker 79a6c81a, 08:54–56Z bursts), indistinguishable from an absent credential from
+        // the wire's point of view. Normalizing HERE covers every credential source in one place;
+        // a value already carrying the scheme is passed through byte-exact.
+        val bearer = if (credentials.startsWith("Bearer ")) credentials else "Bearer $credentials"
         // The per-call budget is the caller's REMAINING deadline when it has one, so this can never
         // outlive the total the caller promised.
         return Request.Builder()
             .url(endpoint)
-            .header("Authorization", credentials)
+            .header("Authorization", bearer)
             .post(body)
             .build()
     }

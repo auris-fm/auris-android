@@ -113,8 +113,10 @@ class EngineProvenanceSeamControlTest {
         h.startTurn()
         val id = h.firstCaptureId()!!
         val outcome = retained(h.sink)!!.outcome
-        // The engine joins NotCollected("empty") ONLY for the genuinely blank raw result.
-        assertEquals(CollectionOutcome.NotCollected(id, "empty"), outcome)
+        // The engine joins NotCollected("empty") ONLY for the genuinely blank raw result. The
+        // backend still MEASURED a language on that result, so the observation carries it: the
+        // empty fact and the measurement are independent (reviewer 1f7fe074).
+        assertEquals(CollectionOutcome.NotCollected(id, "empty", measuredLanguage = "en"), outcome)
         // The invocation evidence was frozen before the call, independent of the empty result.
         assertEquals(Named("sense-voice", "2024-07-17"), h.sink.sealedSnapshotForTest(id)!!.asrInvocationModel)
     }

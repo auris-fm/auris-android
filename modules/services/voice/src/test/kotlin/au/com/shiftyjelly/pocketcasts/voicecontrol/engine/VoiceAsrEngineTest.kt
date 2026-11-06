@@ -35,6 +35,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
@@ -42,6 +43,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Completion
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionCeilings
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.OutcomeWaitLimits
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionCaptureProducer
@@ -3102,6 +3104,19 @@ class VoiceAsrEngineTest {
         // The owner's "Auris, <command>" shape: the detector fires on the SAME segment that carries
         // the command, so the record must still say wake_required (grace closed at onset) and must
         // carry the language the backend detected for the command text.
+        // The ORDINARY finalization path: the production finalizer arms a real deadline for the
+        // capture and seals it, so the record below is the one the pipeline actually persists rather
+        // than a shape this test assembled.
+        val finalizer = CaptureOutcomeFinalizer(
+            retentionSink,
+            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
+            this,
+            sleepMs = { kotlinx.coroutines.delay(it) },
+            // Real monotonic time: this control is about the record the pipeline persists, not about
+            // simulating the wait, so the deadline is never reached inside the test.
+            nowMs = { System.nanoTime() / 1_000_000L },
+        )
+        finalizer.start()
         val captured = captureOneSegmentForTest(
             mode = ListeningMode.WakeWord,
             transcript = "skip this ad",
@@ -3117,10 +3132,11 @@ class VoiceAsrEngineTest {
         // producer writes for this capture is true — asserted through the production builder.
         assertEquals(RecordNode.Bool(true), rootWakeRequired(captured))
 
-        // Persistence needs the production outcome-wait finalizer; when it is installed the record
-        // additionally proves the measured stage facts. Absent that, the assertion is skipped rather
-        // than faked — this test's subject is the field and the language, both asserted above/below.
-        val decoded = captured.persisted ?: return@runTest
+        // THE PERSISTED RECORD IS REQUIRED: if delivery or any of the field connections disappears,
+        // this test fails here rather than passing on the admission check alone (reviewer 1f7fe074).
+        val decoded = checkNotNull(captured.persisted) {
+            "the combined clip must reach a persisted, valid record (delivered=${captured.delivered})"
+        }
         val wake = checkNotNull(decoded).record.observations.getValue(StageName.Wake)
         assertEquals(RecordNode.Str("detected"), wake.fields["decision"])
         assertEquals(0.91, (wake.fields["score"] as RecordNode.Num).value, 1e-6)
@@ -3129,6 +3145,51 @@ class VoiceAsrEngineTest {
         val asr = decoded.record.observations.getValue(StageName.Asr)
         assertEquals(RecordNode.Str("skip this ad"), asr.fields["text"])
         assertEquals(RecordNode.Str("en-US"), asr.fields["source_language"])
+    }
+
+    /**
+     * The stage facts the engine actually observes for ONE segment, read from the live corpus rather
+     * than from a persisted record: the delivered-record path needs the production outcome-wait
+     * finalizer, but the OBSERVATIONS this engine joined are the subject here, and they are what the
+     * provenance maps to `source_language`.
+     */
+    private fun observedFor(captureId: java.util.UUID) = retentionSink.observedForTest(captureId)
+
+    @Test
+    fun `a measured language survives an ASR result whose text is empty`() = runTest {
+        // The backend came back with a language and no text at all. The empty result is what the
+        // stage records, but the language WAS measured and dies nowhere (reviewer 1f7fe074): an
+        // absence that never happened must not be reported as absent.
+        val captured = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "",
+            detectedLanguage = "yue",
+            wakeConfidence = 0.9f,
+            wakeThreshold = 0.5f,
+            dirName = "asr-empty-language",
+        )
+        val empty = observedFor(captured.admitted.captureId)
+            .filterIsInstance<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.NotCollected>()
+            .single { it.reason == "empty" }
+        assertEquals("the measured language must ride on the empty-result observation", "yue", empty.measuredLanguage)
+    }
+
+    @Test
+    fun `a measured language survives an ASR result with no usable content`() = runTest {
+        // Punctuation only: no command, so nothing is routed — but the backend still reported a
+        // language, and that observation is the client's to record (reviewer 1f7fe074).
+        val captured = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "...",
+            detectedLanguage = "zh",
+            wakeConfidence = 0.9f,
+            wakeThreshold = 0.5f,
+            dirName = "asr-non-content-language",
+        )
+        val nonContent = observedFor(captured.admitted.captureId)
+            .filterIsInstance<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.NotCollected>()
+            .single { it.reason == "non_content" }
+        assertEquals("the measured language must survive a non-content result", "zh", nonContent.measuredLanguage)
     }
 
     // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1; claim corrected per reviewer 3cc4a92f).

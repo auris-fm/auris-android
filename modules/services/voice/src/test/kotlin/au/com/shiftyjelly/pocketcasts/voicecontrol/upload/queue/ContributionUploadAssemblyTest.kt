@@ -597,4 +597,85 @@ class ContributionUploadAssemblyTest {
             body.toString(Charsets.ISO_8859_1).contains(durable.toString(Charsets.ISO_8859_1)),
         )
     }
+
+    @Test
+    fun `the WIRE line is emitted at the observation point even when the response is then discarded`() {
+        // Review 3271cf1c: the wire answer must be logged where it is OBSERVED, not in the caller, because
+        // a cancelled or revoked attempt goes straight to `catch` and a caller-side line would never run.
+        // A genuine mid-flight revocation settles as REVOKED, so the transport deliberately reports
+        // Cancelled and the HTTP answer is discarded - the honest wire line is therefore http=none, and it
+        // must still be emitted. That is exactly the case a caller-side log could not cover.
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-wire-log")
+        responseStatus = 503
+        responseBody = """{"schema_version":1,"code":"expired"}"""
+        onRequest = { store.fence.revoke() }
+
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                lines += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            assembly(store, { now }, capturesFor(store, fixture)).poll()
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+
+        val all = lines.joinToString(" | ")
+        assertTrue(
+            "the observation line must fire on the discarded-response path (lines=$all)",
+            lines.any { it.contains("voice-upload wire") && it.contains("capture=${fixture.id}") },
+        )
+        assertTrue(
+            "a revoked attempt reports no wire status, honestly, rather than inventing one (lines=$all)",
+            lines.any { it.contains("voice-upload wire") && it.contains("http=none") },
+        )
+        assertEquals(
+            "the revocation decision is unchanged: the entry is still held",
+            1,
+            store.readyEntries().count { it.captureId == fixture.id },
+        )
+        assertTrue(
+            "the observation line stays content-free (lines=$all)",
+            lines.none { it.contains("voice-upload wire") && (it.contains("schema_version") || it.contains("Bearer")) },
+        )
+    }
+
+    @Test
+    fun `a settled TERMINAL response logs its ACTUAL wire status and allowlisted code`() {
+        // The companion case: when the response IS reported, the wire line must carry the real status and
+        // the transport-allowlisted code - not http=none. Together with the revoked case above this pins
+        // both sides of the observation placement.
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-wire-terminal")
+        responseStatus = 400
+        responseBody = """{"schema_version":1,"code":"invalid_request"}"""
+
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                lines += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            assembly(store, { now }, capturesFor(store, fixture)).poll()
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+
+        val all = lines.joinToString(" | ")
+        assertTrue(
+            "a reported terminal response logs its real status and allowlisted code (lines=$all)",
+            lines.any {
+                it.contains("voice-upload wire") && it.contains("capture=${fixture.id}") &&
+                    it.contains("http=400") && it.contains("code=invalid_request")
+            },
+        )
+    }
 }

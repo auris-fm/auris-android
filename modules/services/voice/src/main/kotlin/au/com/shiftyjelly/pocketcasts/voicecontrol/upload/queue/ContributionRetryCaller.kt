@@ -53,12 +53,12 @@ class ContributionRetryCaller(
     /** The owning-table disposition of this attempt's refusal, when the server refused with a code. */
     private val dispositionFor: (generation: Long, captureId: String) -> ContributionUploadTransport.Response? = { _, _ -> null },
     /**
-     * MONITORING ONLY (review 3c0f31d3, gap 1): the status the transport actually observed for this
-     * attempt, whatever family it belonged to. Never used for validation or classification.
+     * MONITORING ONLY (review 3c0f31d3 gap 1): the status the transport observed, whatever family it
+     * belonged to. Feeds ONLY the settle line, so a terminal/retry settlement names the real wire answer
+     * instead of `http=none`. Never used for validation or classification. The WIRE line itself is
+     * emitted in ContributionUploadAssembly at the point of observation (review 3271cf1c).
      */
     private val observedStatusFor: (generation: Long, captureId: String) -> Int? = { _, _ -> null },
-    /** MONITORING ONLY: the transport-ALLOWLISTED error code, when the refusal carried one. */
-    private val observedCodeFor: (generation: Long, captureId: String) -> String? = { _, _ -> null },
 ) {
 
     data class PollResult(
@@ -156,17 +156,9 @@ class ContributionRetryCaller(
                         // Boolean transport success deletes nothing by itself.
                         // The owning response table decides: a terminal code is SERVER_TERMINAL
                         // disposal (token-scoped, epoch-gated); everything else retries or retains.
-                        // MONITORING (review 3c0f31d3, gap 1): the WIRE truth, logged BEFORE any
-                        // classification or fence. Content-free: opaque capture id, the real transport
-                        // status and the transport-allowlisted error code - never a server free-form
-                        // string. Without this line, terminal/retry responses settled with no record of
-                        // what the wire actually said.
-                        Timber.tag(UPLOAD_TAG).i(
-                            "voice-upload wire: capture=%s http=%s code=%s",
-                            captureId,
-                            observedStatusFor(generation, captureId)?.toString() ?: "none",
-                            observedCodeFor(generation, captureId) ?: "none",
-                        )
+                        // The WIRE answer itself is logged in ContributionUploadAssembly at the point of
+                        // observation (review 3271cf1c) - it must survive a cancellation throw, which a
+                        // caller-side line cannot. Only the settlement decision is logged here.
                         val ack = when (dispositionFor(generation, captureId)) {
                             is ContributionUploadTransport.Response.Terminal -> ContributionAckResolver.Ack.TERMINAL_DISPOSAL
                             else -> if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE

@@ -96,24 +96,22 @@ class ListeningModePolicyTest {
     // --- Listening start cue tests ---
 
     @Test
-    fun `a cue when listening starts and requires the wake word`() {
+    fun `a cue when the user starts listening and requires the wake word`() {
         assertTrue(
-            "the microphone is now on and awaiting a wake word; that is the moment the cue marks",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord),
+            "the user asked to listen, the microphone is on and awaiting a wake word",
+            shouldPlayListeningStartCue(mode = ListeningMode.WakeWord, isAutomaticRecovery = false),
         )
     }
 
     @Test
-    fun `the cue does not depend on whether the app is in the foreground`() {
-        // THE OWNER-REPORTED BUG (msg 2fdcdb5b/2fdcdb6f): with AppAmap or YouTube in front, the app
-        // is "in the background" on every automatic restart, so a background-only cue played each
-        // time the other app released the microphone and the two applications fought over audio.
-        // The cue marks OUR capture starting, which is exactly the moment that has to stay quiet
-        // when something else holds the microphone. The predicate therefore takes no rule map at
-        // all: there is no foreground state left to consult, so no state can reintroduce the noise.
-        assertTrue(
-            "background is the ordinary state for an automatic restart, not a licence to beep",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord),
+    fun `no cue when capture restarts itself`() {
+        // THE OWNER-REPORTED BUG (msg 2fdcdb5b, 2fdcdb6f): with Amap or YouTube in front, capture
+        // ends, we restart, and the cue plays over the other app's audio -- twice, because we then
+        // lose the microphone again. A predicate that only looks at the mode cannot see this; the
+        // start reason is what distinguishes the first start from the restart.
+        assertFalse(
+            "an automatic recovery is us taking the microphone back, which is the moment to stay quiet",
+            shouldPlayListeningStartCue(mode = ListeningMode.WakeWord, isAutomaticRecovery = true),
         )
     }
 
@@ -121,7 +119,11 @@ class ListeningModePolicyTest {
     fun `no cue for a mode that does not require a wake word`() {
         assertFalse(
             "the cue marks listening that awaits a wake word; continuous listening is not that",
-            shouldPlayListeningStartCue(ListeningMode.Continuous),
+            shouldPlayListeningStartCue(mode = ListeningMode.Continuous, isAutomaticRecovery = false),
+        )
+        assertFalse(
+            "a recovery inside continuous listening stays silent for the same reason",
+            shouldPlayListeningStartCue(mode = ListeningMode.Continuous, isAutomaticRecovery = true),
         )
     }
 

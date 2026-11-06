@@ -23,6 +23,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
@@ -408,8 +409,71 @@ class VoiceControlCaptureRestartTest {
         }
     }
 
+    /**
+     * THE OWNER-REPORTED BUG, AS A CONTROL ON THE SERVICE ITSELF (msg 2fdcdb5b, 2fdcdb6f; reviewer
+     * bc9c5e26).
+     *
+     * Reviewer's finding: a predicate test cannot see this. `onStarted` runs on every fresh engine
+     * start, `clearCaptureState()` marks the engine stopped, and `recoverCapture()` nudges the mode
+     * observer into starting it again -- so the cue decision executes a second time, and any
+     * predicate that looks only at [au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode]
+     * answers exactly as it did for the first start. The bug lives in WHICH start this is, so the
+     * control has to drive a real start, termination and recovery and count the cues.
+     *
+     * The harness is the pinned reproduction below, with one difference that matters: the renderer
+     * is a real recording stand-in rather than a mock, because the cue is the subject.
+     */
     @Test
-    fun `the observed stop-restart cycle reproduces and is pinned`() = runBlocking {
+    fun `an automatic capture recovery does not cue the start earcon again`() = runBlocking {
+        val cues = java.util.concurrent.atomic.AtomicInteger(0)
+        val recordingRenderer = mock(AudioFeedbackRenderer::class.java)
+        whenever(recordingRenderer.playEarcon(any())).thenAnswer { invocation ->
+            val id = invocation.getArgument<Any>(0)
+            if (id == EarconId.LISTENING_START) cues.incrementAndGet()
+            true
+        }
+
+        withServiceHarness(recordingRenderer) { harness ->
+            awaitState("first engine start", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) { harness.hardware.attachCount >= 1 }
+            assertEquals("the start the user asked for still cues, once", 1, cues.get())
+
+            // Capture ends on its own: the other app took the microphone. The service clears its
+            // capture state and recovers, which starts the engine a second time.
+            harness.otherAppRule.block("other_app_playing")
+            awaitState("teardown", probe = { "vadStop=${harness.hardware.vadStopCount} attach=${harness.hardware.attachCount} cues=${cues.get()}" }) { harness.hardware.vadStopCount >= 1 }
+            System.err.println("[PROBE] after teardown: mode-ish cues=" + cues.get())
+            harness.otherAppRule.allow()
+            awaitState("recovered engine start", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) { harness.hardware.attachCount >= 2 }
+
+            assertEquals("the recovery restarted capture, so the cue decision ran twice", 2, harness.hardware.attachCount)
+            assertEquals("an automatic recovery must not beep: that is the audio fight the owner reported", 1, cues.get())
+        }
+    }
+
+    /**
+     * The service, driven through its real entry point with a connected-but-unrouted headset, so a
+     * test can watch acquisition, engine starts and cue decisions happen for real.
+     *
+     * The restart cycle these tests exercise is the owner-reported background case: capture ends
+     * because another app took the microphone, the service clears capture state and recovers, and
+     * the engine starts again. Both tests here assert a different property of that one cycle -- the
+     * pinned test the hardware counts, the cue test the earcons -- so they share the wiring instead
+     * of keeping two copies of it that can drift apart.
+     */
+    private inner class ServiceHarness(
+        val service: VoiceControlService,
+        val otherAppRule: FakeRule,
+        val hardware: FakeHardware,
+        val scoPlatform: FakeScoPlatform,
+        val monitor: AndroidAudioRouteMonitor,
+        val policy: ListeningModePolicy,
+        val microphoneCapture: MicrophoneCapture,
+    )
+
+    private suspend fun withServiceHarness(
+        renderer: AudioFeedbackRenderer,
+        block: suspend (ServiceHarness) -> Unit,
+    ) {
         // Connected-but-unrouted AirPods: A2DP output enumerated, SCO input present, link off.
         shadowOf(audioManager).setOutputDevices(
             listOf(AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP).build()),
@@ -418,9 +482,6 @@ class VoiceControlCaptureRestartTest {
             listOf(AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BLUETOOTH_SCO).build()),
         )
 
-        // The REAL condition: ensureModelsReady() flips it, and the gate must see models_loading ->
-        // Allowed for the observer's composite to recompute. A mock's no-op update left the gate in
-        // Unknown forever, which is what stalled the harness -- not production.
         val modelsReady = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition(isReady = false)
         val userRule = FakeRule(EnabledByUserCondition.ID, VoiceControlRuleGroup.Setup)
         val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
@@ -509,7 +570,7 @@ class VoiceControlCaptureRestartTest {
         whenever(modelManager.ensureLfmModel()).thenReturn(Result.success(Unit))
         setField(service, "modelManager", modelManager)
         setField(service, "modelsReadyCondition", modelsReady)
-        setField(service, "audioFeedbackRenderer", mock(AudioFeedbackRenderer::class.java))
+        setField(service, "audioFeedbackRenderer", renderer)
         setField(service, "gracePeriodSignal", GracePeriodSignal())
         setField(service, "routeAcquisition", acquisition)
         setField(service, "captureStateHolder", VoiceControlCaptureStateHolder())
@@ -525,17 +586,49 @@ class VoiceControlCaptureRestartTest {
         // when Main is not a TestDispatcher -- and that executor does not run while the Robolectric
         // main thread sits inside runBlocking. With the shared scheduler, acquisition's poll-delay
         // resumes on this thread during idle().
+        val harness = ServiceHarness(service, otherAppRule, hardware, scoPlatform, monitor, policy, microphoneCapture)
         try {
-            // onStartCommand is package-private in android.app.Service; call it reflectively.
-            VoiceControlService::class.java.getDeclaredMethod(
-                "onStartCommand",
-                Intent::class.java,
-                Int::class.javaPrimitiveType,
-                Int::class.javaPrimitiveType,
-            ).apply { isAccessible = true }.invoke(service, null, 0, 1)
-            // startVoiceControl launches model prep on Dispatchers.IO and installs the observer on
-            // Main afterwards; wait for the observer job to exist.
-            awaitState("observer install") { getField(service, "modeJob") != null }
+            startHarnessedService(service)
+            block(harness)
+        } finally {
+            runCatching {
+                (getField(service, "modeJob") as? kotlinx.coroutines.Job)?.cancel()
+            }
+            runCatching { microphoneCapture.stopCapture() }
+        }
+    }
+
+    /**
+     * Drives the production entry point and waits for the observer to install.
+     *
+     * Robolectric's ShadowService accepts startForeground on an unattached-notification context, and
+     * the notification manager creates its channel. Dispatchers.Main must be a TestDispatcher for the
+     * shared scheduler: production's serviceScope uses Main.immediate, whose delay() falls back to the
+     * real DefaultExecutor when Main is not a TestDispatcher -- and that executor does not run while
+     * the Robolectric main thread sits inside runBlocking. With the shared scheduler, acquisition's
+     * poll-delay resumes on this thread during idle().
+     */
+    private suspend fun startHarnessedService(service: VoiceControlService) {
+        // onStartCommand is package-private in android.app.Service; call it reflectively.
+        VoiceControlService::class.java.getDeclaredMethod(
+            "onStartCommand",
+            Intent::class.java,
+            Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType,
+        ).apply { isAccessible = true }.invoke(service, null, 0, 1)
+        // startVoiceControl launches model prep on Dispatchers.IO and installs the observer on Main
+        // afterwards; wait for the observer job to exist.
+        awaitState("observer install") { getField(service, "modeJob") != null }
+    }
+
+    @Test
+    fun `the observed stop-restart cycle reproduces and is pinned`() = runBlocking {
+        withServiceHarness(mock(AudioFeedbackRenderer::class.java)) { harness ->
+            val otherAppRule = harness.otherAppRule
+            val hardware = harness.hardware
+            val scoPlatform = harness.scoPlatform
+            val monitor = harness.monitor
+            val policy = harness.policy
 
             // Phase 1: gate allowed + candidate present -> OFF branch acquires externally: SCO
             // opens, input stream opens+starts, confirmed selection publishes Headset, observer
@@ -544,19 +637,19 @@ class VoiceControlCaptureRestartTest {
             awaitState(
                 "first VAD attach",
                 probe = {
-                    "open=${hardware.openCount} startStream=${hardware.startStreamCount} close=${hardware.closeCount} scoStarts=${scoPlatform.scoStarts} scoOnNow=${scoPlatform.scoLinkUp} acquiring=${getField(service, "acquisitionJob") != null} route=${monitor.route.value} avail=${monitor.availability.value} mode=${policy.mode.value}"
+                    "open=${hardware.openCount} startStream=${hardware.startStreamCount} close=${hardware.closeCount} scoStarts=${scoPlatform.scoStarts} scoOnNow=${scoPlatform.scoLinkUp} route=${monitor.route.value} avail=${monitor.availability.value} mode=${policy.mode.value}"
                 },
             ) { hardware.attachCount >= 1 }
             assertEquals(AudioRoute.Headset(true), monitor.route.value)
             assertEquals(1, hardware.openCount)
             assertEquals(1, hardware.attachCount)
 
-            // Phase 2: the transient conflict — other_app_playing blocks. The observer stops the
+            // Phase 2: the transient conflict -- other_app_playing blocks. The observer stops the
             // engine (VAD teardown) and releases routing (SCO off).
             otherAppRule.block("other_app_playing")
             awaitState("first VAD teardown") { hardware.vadStopCount >= 1 }
 
-            // Phase 3: the conflict clears BEFORE anything else settles — the same churn the owner
+            // Phase 3: the conflict clears BEFORE anything else settles -- the same churn the owner
             // saw (a command response keeps music active for a moment).
             otherAppRule.allow()
 
@@ -568,30 +661,24 @@ class VoiceControlCaptureRestartTest {
                     "attach=${hardware.attachCount} vadStop=${hardware.vadStopCount} open=${hardware.openCount} close=${hardware.closeCount} scoStarts=${scoPlatform.scoStarts} route=${monitor.route.value} avail=${monitor.availability.value} mode=${policy.mode.value}"
                 },
             ) { hardware.attachCount >= 2 }
-            // Capture state at the assertion boundary for review.
             val finalAttach = hardware.attachCount
             val finalVadStop = hardware.vadStopCount
             val finalOpen = hardware.openCount
             val finalClose = hardware.closeCount
             println("[REPRO] Phase4 final: attach=$finalAttach vadStop=$finalVadStop open=$finalOpen close=$finalClose mode=${policy.mode.value}")
             assertEquals("attachCount", 2, finalAttach)
-            // The second VAD is still active at this point — only the first was torn down.
+            // The second VAD is still active at this point -- only the first was torn down.
             // vadStopCount==1 is correct: the first VAD stopped during the conflict,
             // the second VAD is still running.
             assertEquals("vadStopCount", 1, finalVadStop)
             assertEquals("openCount", 2, finalOpen)
             // Both streams were handed off to the engine via RouteAcquisition.handOffStream().
-            // After handoff, release() skips closeInputStream — the engine owns teardown
+            // After handoff, release() skips closeInputStream -- the engine owns teardown
             // (RouteAcquisition.kt:293). The first capture WAS torn down through engine stop
             // (nativeStopCaptureAndVad deletes gCapture), but that path does not call
             // closeInputCapture counted by FakeHardware. closeCount tracks explicit
             // closeInputStream calls only, not all stream teardown.
             assertEquals("closeCount (explicit close, not engine teardown)", 0, finalClose)
-        } finally {
-            runCatching {
-                (getField(service, "modeJob") as? kotlinx.coroutines.Job)?.cancel()
-            }
-            runCatching { microphoneCapture.stopCapture() }
         }
     }
 }

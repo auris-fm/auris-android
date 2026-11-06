@@ -21,25 +21,31 @@ import kotlinx.coroutines.flow.stateIn
  * When the microphone opening earns an audible cue.
  *
  * [EarconId.LISTENING_START] means "the microphone is on": optional, independent of the mandatory
- * wake-word confirmation, and "very subtle ... should not distract" (`voice-intents.md`).
+ * wake-word confirmation, and "very subtle ... should not distract" (`voice-intents.md`). It plays
+ * when listening STARTS in a session that requires the wake word.
  *
- * It plays whenever listening begins and requires the wake word. An earlier version played it only
- * when the app was in the background, to keep it out of ordinary foreground use — but "background"
- * is also every time another app briefly releases the microphone, so navigation and video apps got
- * the tone on each automatic restart and the applications ended up cycling over who holds audio.
- * The condition that read as restraint was in fact the bug: the cue marked us TAKING the microphone
- * back, which is exactly the moment that must be quiet. Ordinary foreground use plays it once, when
- * listening starts, so the noise it was meant to prevent does not return.
+ * The question is why this start happened, not whether the app is visible. Two earlier versions got
+ * it wrong in opposite directions: gating on "the app is in the background" made every automatic
+ * recovery audible -- an automatic restart is always a background start -- which is the beep fight
+ * with another app the owner reported (msg 2fdcdb5b), and dropping that condition cued every
+ * recovery as well, since the foreground never told a first start from a restart.
  *
- * Continuous listening is exempt: the cue marks listening that awaits a wake word, not the
- * follow-up window that immediate's grace period opens.
+ * So the caller passes the answer:
+ * - [ListeningMode.Continuous] is exempt: the cue marks listening that awaits a wake word.
+ * - [isAutomaticRecovery] silences the cue. Capture ended on its own and we are taking the
+ *   microphone back; whatever released it is probably still active, and that is the moment the user
+ *   experiences as us fighting for audio. The listening notification still updates, so the state is
+ *   not silent -- only the tone is.
  *
- * Coverage: the predicate is tested here. Its use is not — it is called from `VoiceControlService`'s
- * start path, which no test drives — so reverting that call site would still leave the suite green.
- * That gap is accepted rather than closed; closing it needs a service-level test, and this note is
- * the record.
+ * Coverage: the predicate is tested here. Its call site is not -- `VoiceControlService`'s start path
+ * is driven by `VoiceControlCaptureRestartTest`, which asserts the cue count across a real
+ * start/terminate/recover cycle, so a regression that re-cues inside the service is caught there
+ * rather than only here.
  */
-internal fun shouldPlayListeningStartCue(mode: ListeningMode): Boolean = mode == ListeningMode.WakeWord
+internal fun shouldPlayListeningStartCue(
+    mode: ListeningMode,
+    isAutomaticRecovery: Boolean,
+): Boolean = mode == ListeningMode.WakeWord && !isAutomaticRecovery
 
 @Singleton
 class ListeningModePolicy @Inject constructor(

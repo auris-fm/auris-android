@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import java.util.concurrent.atomic.AtomicBoolean
+import timber.log.Timber
 
 /**
  * Production retry CALLER: the composition unit between the store and the uploader (reviewer 6b236641).
@@ -123,6 +124,16 @@ class ContributionRetryCaller(
                     // The binder is the LEASE itself, constructed here where the lease lives: whoever
                     // registers a live call with it hands the lease the real abort, and
                     // revokeAndCancelLaunches then cancels that Call directly (reviewer 99b3947d).
+                    // MONITORING (spec 827c5962): upload START. Content-free: opaque capture id,
+                    // attempt number and generation only. Paired with the settle line in
+                    // ContributionAckResolver this makes "attempted but never settled" visible, which was
+                    // previously indistinguishable from "never attempted".
+                    Timber.tag(UPLOAD_TAG).i(
+                        "voice-upload start: capture=%s attempt=%d generation=%d",
+                        captureId,
+                        token.attemptNumber,
+                        generation,
+                    )
                     val accepted = attemptUpload(
                         generation,
                         captureId,
@@ -192,3 +203,5 @@ class ContributionRetryCaller(
         closed.set(true)
     }
 }
+
+private const val UPLOAD_TAG = "VoiceUploadCaller"

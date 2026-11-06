@@ -6,6 +6,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.EnumMap
+import timber.log.Timber
 
 // Bounded contribution queue (Task 5). ONE entry = WAV + canonical metadata sidecar + READY marker.
 //
@@ -945,7 +946,12 @@ class ContributionStore(
                 memoryEntries.remove(token.captureId)?.also { deleteLocked(it) }
             }
         } != null
-        if (removed) dropCounterOnly(reason)
+        if (removed) {
+            dropCounterOnly(reason)
+            // MONITORING (spec 827c5962): the removal REASON is the whole point - this is the path that
+            // deletes a valid recording, and until now it was completely silent.
+            Timber.tag(QUEUE_TAG).i("voice-upload remove: capture=%s reason=%s", token.captureId, reason.name)
+        }
         removed
     }
 
@@ -1657,6 +1663,9 @@ class ContributionStore(
                 memoryEntries[id]?.let { deleteLocked(it) }
                 preparedIds.remove(id)
                 removed += id
+                // MONITORING (spec 827c5962): why a queued recording was REMOVED. Expiry is the one
+                // removal that is expected, so it must look different from a settlement deletion.
+                Timber.tag(QUEUE_TAG).i("voice-upload remove: capture=%s reason=queue-age-expired", id)
             }
         }
         // Content-free terminal counter per expired entry, durable across restart.
@@ -2559,6 +2568,14 @@ class ContributionStore(
                     chargeRetainedLocked(id, ready = false)
                 }
                 dropCounterOnly(TerminalReason.INVALID_ON_RECOVERY)
+                // MONITORING (spec 827c5962): recovery CAN delete, so it must say so. A recording that
+                // vanishes across a relaunch is otherwise invisible; `cleaned=false` marks the survivor
+                // case, where bytes remain and are merely not served.
+                Timber.tag(QUEUE_TAG).i(
+                    "voice-upload remove: capture=%s reason=invalid-on-recovery cleaned=%s",
+                    id,
+                    cleaned,
+                )
             } else {
                 val confirmed = confirmDurableLocked(id)
                 // ONE charge for every validated entry, assigned BEFORE branching on confirmation.
@@ -3416,3 +3433,5 @@ class ContributionStore(
         private fun le32(b: ByteArray, at: Int): Long = (b[at].toLong() and 0xFF) or ((b[at + 1].toLong() and 0xFF) shl 8) or ((b[at + 2].toLong() and 0xFF) shl 16) or ((b[at + 3].toLong() and 0xFF) shl 24)
     }
 }
+
+private const val QUEUE_TAG = "VoiceUploadQueue"

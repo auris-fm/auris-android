@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import timber.log.Timber
+
 /**
  * Resolves a transport ACK into the ONE local ownership transition it authorizes (spec task73; reviewer
  * coordination 7c5b344d). The caller records the attempt, posts the capture, and hands the classified
@@ -72,6 +74,43 @@ class ContributionAckResolver(
         payload: ByteArray? = null,
         retryAfterS: Long? = null,
         httpStatus: Int? = null,
+    ): Resolution = logResolution(token, ack, httpStatus, resolveDisposition(token, ack, payload, retryAfterS, httpStatus))
+
+    /**
+     * MONITORING (spec 827c5962): ONE line per resolution, on every path. Before this the resolver was
+     * completely silent, so a device log could not distinguish a deletion from a retention.
+     * CONTENT-FREE: opaque capture id, the real HTTP status, and the FIXED protocol code only - never a
+     * server-supplied free-form string, payload, credential, transcript or audio.
+     */
+    private fun logResolution(
+        token: ContributionStore.AdmittedAttempt,
+        ack: Ack,
+        httpStatus: Int?,
+        resolution: Resolution,
+    ): Resolution {
+        val outcome = when (resolution) {
+            is Resolution.Released -> "released"
+            is Resolution.Retained -> "retained"
+            is Resolution.UnvalidatedAccept -> "retained-unvalidated"
+            is Resolution.StaleEpoch -> "stale-epoch"
+        }
+        Timber.tag(TAG).i(
+            "voice-upload settle: capture=%s attempt=%d ack=%s http=%s outcome=%s",
+            token.captureId,
+            token.attemptNumber,
+            ack.name,
+            httpStatus?.toString() ?: "none",
+            outcome,
+        )
+        return resolution
+    }
+
+    private fun resolveDisposition(
+        token: ContributionStore.AdmittedAttempt,
+        ack: Ack,
+        payload: ByteArray?,
+        retryAfterS: Long?,
+        httpStatus: Int?,
     ): Resolution = when (ack) {
         Ack.ACCEPTED ->
             if (!validator.validate(token.captureId, payload, httpStatus)) {
@@ -104,3 +143,5 @@ class ContributionAckResolver(
         return Resolution.Retained(retryAt)
     }
 }
+
+private const val TAG = "VoiceUploadSettle"

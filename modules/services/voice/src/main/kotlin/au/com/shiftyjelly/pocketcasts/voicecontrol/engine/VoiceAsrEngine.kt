@@ -803,10 +803,20 @@ class VoiceAsrEngine @Inject constructor(
                 transcript,
                 trimNote?.let { " $it" } ?: "",
             )
-            // No usable command text, but the backend DID measure a language: record that fact on a
-            // non-content observation instead of discarding it with the text (reviewer 1f7fe074).
+            // No usable command text, but the backend DID observe this transcript and DID measure a
+            // language. Both are facts: the command is discarded, the observation is not, so they
+            // travel with the non-content outcome instead of dying here (reviewer 1f7fe074,
+            // cad3379e). The text recorded is the RAW result — the observation is what ASR produced,
+            // and a trim is a pipeline behaviour, never an erasure of the output.
             request.capture?.let {
-                joinOutcome(CollectionOutcome.NotCollected(it.captureId, "non_content", asrResult.detectedLanguage))
+                joinOutcome(
+                    CollectionOutcome.NotCollected(
+                        it.captureId,
+                        "non_content",
+                        asrResult.detectedLanguage,
+                        observedText = asrResult.text,
+                    ),
+                )
             }
             return
         }

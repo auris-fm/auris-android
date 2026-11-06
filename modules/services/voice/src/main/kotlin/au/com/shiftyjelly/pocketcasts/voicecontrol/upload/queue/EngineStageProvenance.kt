@@ -93,11 +93,16 @@ object EngineStageProvenance {
             )
         }
         // ACTUAL DETECTED LANGUAGE (spec phase 2): source_language is recorded whenever ASR
-        // measured it — honest absence (null) stays absent. A language measured on a result with no
-        // usable text comes from the observation that ENDED ASR, so an empty or non-content result
-        // still carries what the backend reported (reviewer 1f7fe074). A failed or cancelled ASR
-        // measures nothing, and a stage that never invoked ASR carries no language at all.
+        // measured it — honest absence (null) stays absent. A language measured on a result the
+        // pipeline then discarded comes from the observation that ENDED ASR, so a blank or
+        // non-content result still carries what the backend reported (reviewer 1f7fe074). A failed
+        // or cancelled ASR measures nothing, and a stage that never invoked ASR carries no language
+        // at all.
+        val nonContent = history
+            .filterIsInstance<CollectionOutcome.NotCollected>()
+            .firstOrNull { it.reason == "non_content" && it.observedText != null }
         val measuredLanguage = recognized?.detectedLanguage
+            ?: nonContent?.measuredLanguage
             ?: history.filterIsInstance<CollectionOutcome.NotCollected>().firstNotNullOfOrNull { it.measuredLanguage }
         val sourceLanguage = measuredLanguage?.let { mapOf("source_language" to RecordNode.Str(it)) } ?: emptyMap()
         return listOf(
@@ -130,11 +135,17 @@ object EngineStageProvenance {
                 notCollected == "empty" && sealed.asrInvocationModel != null ->
                     StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result")) + sourceLanguage)
 
-                // A result with NO usable content (punctuation/symbols only) is the same kind of
-                // outcome: the check ran and produced nothing usable. The measured language travels
-                // with it (reviewer 1f7fe074).
-                notCollected == "non_content" && sealed.asrInvocationModel != null ->
-                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result")) + sourceLanguage)
+                // A result with NO usable CONTENT (punctuation/symbols only) was still RECOGNIZED:
+                // the pipeline discards it as a command, but the stage observation is what ASR
+                // produced, so it stays completed WITH its text. It is NOT `empty_result` — the wire
+                // contract reserves that for recognition that produced no non-whitespace text at
+                // all, and relabeling "..." as empty would erase an observation the client actually
+                // made (reviewer cad3379e).
+                notCollected == "non_content" && nonContent != null && sealed.asrInvocationModel != null ->
+                    StageEntry(
+                        StageState.Completed,
+                        mapOf("text" to RecordNode.Str(nonContent.observedText.orEmpty())) + sourceLanguage,
+                    )
 
                 // P1: known provider FAILURE joined at the transcribe call.
                 asrFailed -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("provider_error")))

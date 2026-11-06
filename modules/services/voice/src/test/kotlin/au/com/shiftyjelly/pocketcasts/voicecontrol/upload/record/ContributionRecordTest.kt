@@ -29,7 +29,7 @@ class ContributionRecordTest {
             complete(builder()).replaceStage(
                 stage,
                 StageEntry(state, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
-            ).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
+            ).wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
         }
 
         val stages = listOf(
@@ -85,7 +85,7 @@ class ContributionRecordTest {
                 StageName.Asr,
                 StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
             )
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         val asr = (record.fields.getValue("observations") as RecordNode.Obj).fields.getValue("asr") as RecordNode.Obj
         assertEquals("completed", (asr.fields.getValue("state") as RecordNode.Str).value)
         assertEquals("empty_result", (asr.fields.getValue("reason") as RecordNode.Str).value)
@@ -106,7 +106,7 @@ class ContributionRecordTest {
                         ),
                     ),
                 )
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue(
             "empty_result claims no text; carrying text contradicts the claim, got: $failure",
@@ -128,7 +128,7 @@ class ContributionRecordTest {
                         ),
                     ),
                 )
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue(
             "empty_result means no downstream input existed, got: $failure",
@@ -158,7 +158,7 @@ class ContributionRecordTest {
                 StageName.Asr,
                 StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))),
             )
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         val json = CanonicalJson.canonicalBytes(node).toString(Charsets.UTF_8)
         val decoded = RecordValidator.validate(CanonicalJson.parse(json))
         assertTrue(
@@ -171,7 +171,7 @@ class ContributionRecordTest {
         val wrongStageRefused = runCatching {
             complete(builder())
                 .replaceStage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))))
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue(
             "rejected_by_bleed on routing must be REFUSED by the builder, got: $wrongStageRefused",
@@ -184,7 +184,7 @@ class ContributionRecordTest {
             complete(builder())
                 .replaceStage(StageName.Bleed, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("overlap"))))
                 .replaceStage(StageName.Asr, StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))))
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue(
             "rejected_by_bleed beside a ran ASR must be REFUSED, got: $ranAsrRefused",
@@ -194,7 +194,7 @@ class ContributionRecordTest {
         // NEGATIVE 3: the skip WITHOUT an observed bleed decision is refused.
         val noBleed = complete(builder())
             .replaceStage(StageName.Asr, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("rejected_by_bleed"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         assertTrue(
             "rejected_by_bleed without an observed bleed decision must be REFUSED",
             RecordValidator.validate(CanonicalJson.parse(CanonicalJson.canonicalBytes(noBleed).toString(Charsets.UTF_8))) is RecordValidator.Result.Rejected,
@@ -208,7 +208,7 @@ class ContributionRecordTest {
                 StageName.Asr,
                 StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
             )
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         val bytes = CanonicalJson.canonicalBytes(node)
         val json = bytes.toString(Charsets.UTF_8)
 
@@ -240,7 +240,7 @@ class ContributionRecordTest {
                         StageName.Asr,
                         StageEntry(state, mapOf("reason" to RecordNode.Str("empty_result"))),
                     )
-                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                    .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
             }.exceptionOrNull()
             assertTrue(
                 "asr/${state.wire} + empty_result must be refused: an empty result means recognition ran, " +
@@ -262,7 +262,7 @@ class ContributionRecordTest {
                     mapOf("text" to RecordNode.Str("hey auris")),
                 ),
             )
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         val asr = (record.fields.getValue("observations") as RecordNode.Obj).fields.getValue("asr") as RecordNode.Obj
         assertEquals("completed", (asr.fields.getValue("state") as RecordNode.Str).value)
         assertEquals("hey auris", (asr.fields.getValue("text") as RecordNode.Str).value)
@@ -287,7 +287,7 @@ class ContributionRecordTest {
                     StageName.Translation,
                     StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(skip))),
                 )
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
             assertTrue(
                 "translation/not_run + '$skip' must be buildable, got empty bytes",
                 CanonicalJson.canonicalBytes(built).isNotEmpty(),
@@ -304,7 +304,7 @@ class ContributionRecordTest {
                             StageName.Translation,
                             StageEntry(state, mapOf("reason" to RecordNode.Str(skip))),
                         )
-                        .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                        .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
                 }.exceptionOrNull()
                 assertTrue(
                     "translation/${state.wire} + '$skip' must be REFUSED: a skip reason cannot describe " +
@@ -323,7 +323,7 @@ class ContributionRecordTest {
                             stage,
                             StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(skip))),
                         )
-                        .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                        .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
                 }.exceptionOrNull()
                 assertTrue(
                     "${stage.wire}/not_run + '$skip' must be REFUSED: the reason belongs to translation, " +
@@ -349,7 +349,7 @@ class ContributionRecordTest {
                         ),
                     ),
                 )
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue(
             "a completed translation carrying a skip reason must be REFUSED: the reason would dress an " +
@@ -379,7 +379,7 @@ class ContributionRecordTest {
                 StageName.Asr,
                 StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
             )
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         assertTrue(
             "asr/completed/empty_result must remain buildable, it is the sole exception",
             CanonicalJson.canonicalBytes(accepted).isNotEmpty(),
@@ -393,7 +393,7 @@ class ContributionRecordTest {
                         stage,
                         StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str(ownReason))),
                     )
-                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                    .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
             }.exceptionOrNull()
             assertTrue(
                 "$stage/completed must refuse its own non-completed reason '$ownReason': the reason " +
@@ -409,7 +409,7 @@ class ContributionRecordTest {
                     StageName.Wake,
                     StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("no_such_reason"))),
                 )
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue("a completed stage must refuse an unknown reason, got: $unknownReason", unknownReason != null)
     }
@@ -422,12 +422,36 @@ class ContributionRecordTest {
                     StageName.Translation,
                     StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
                 )
-                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
         }.exceptionOrNull()
         assertTrue(
             "empty_result belongs to ASR only, got: $failure",
             failure != null,
         )
+    }
+
+    @Test
+    fun `wake_required is REQUIRED - build without it is refused`() {
+        // Spec (voice-recording-uploads, schema v1 field list + phase 2): the server refuses a
+        // record without wake_required, so the builder must refuse it too — absence is never a
+        // legal emission.
+        val failure = runCatching {
+            complete(builder())
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue("build without wake_required must be refused, got: $failure", failure != null)
+    }
+
+    @Test
+    fun `wake_required carries the requested boolean as a JSON boolean`() {
+        for (wakeRequired in listOf(true, false)) {
+            val record = complete(builder())
+                .wakeRequired(wakeRequired)
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            val node = record.fields.getValue("wake_required")
+            assertTrue("wake_required must be a Bool node, got: $node", node is RecordNode.Bool)
+            assertEquals(wakeRequired, (node as RecordNode.Bool).value)
+        }
     }
 
     private fun audio(
@@ -491,7 +515,7 @@ class ContributionRecordTest {
             complete(builder()).replaceStage(
                 StageName.Wake,
                 StageEntry(state, mapOf("reason" to RecordNode.Str("detector_error"))),
-            ).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
+            ).wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
         }
         val accepted = record(StageState.Failed)
         assertTrue("detector_error + failed must be accepted: ${accepted.exceptionOrNull()}", accepted.isSuccess)
@@ -509,7 +533,7 @@ class ContributionRecordTest {
     fun `blank app_version and build are refused at build time`() {
         for (blank in listOf("", "   ")) {
             val badVersion = runCatching {
-                complete(builder()).build(platform = "android", appVersion = blank, build = "1", audio = audio())
+                complete(builder()).wakeRequired(true).build(platform = "android", appVersion = blank, build = "1", audio = audio())
             }
             assertTrue("app_version '$blank' must be refused", badVersion.isFailure)
             assertTrue(
@@ -517,7 +541,7 @@ class ContributionRecordTest {
                 badVersion.exceptionOrNull()?.message.orEmpty().contains("app_version"),
             )
             val badBuild = runCatching {
-                complete(builder()).build(platform = "android", appVersion = "8.20", build = blank, audio = audio())
+                complete(builder()).wakeRequired(true).build(platform = "android", appVersion = "8.20", build = blank, audio = audio())
             }
             assertTrue("build '$blank' must be refused", badBuild.isFailure)
             assertTrue(
@@ -530,17 +554,17 @@ class ContributionRecordTest {
     @Test
     fun `canonical form sorts keys and carries the pinned wire shape`() {
         val capture = UUID.randomUUID().toString()
-        val record = complete(builder(capture)).build("android", "9.9.9", "123", audio())
+        val record = complete(builder(capture)).wakeRequired(true).build("android", "9.9.9", "123", audio())
         val json = CanonicalJson.serialize(record)
         assertEquals(
-            """{"app_version":"9.9.9","audio":{"byte_count":3244,"channels":1,"conversion_version":"v1","dropped_spans":[],"encoding":"pcm_s16le","original_format":"oboe_float32","retained_samples":1600,"sample_rate_hz":16000,"sha256":"${"a".repeat(64)}","truncated":false},"build":"123","capture_id":"$capture","capture_session_id":"7","enrollment_epoch":"epoch-1","models":{"asr":null,"router":null,"translation":null,"vad":null,"wakeword":null},"observations":{"asr":{"reason":"local_only_action","state":"not_run"},"bleed":{"reason":"no_playback_reference","state":"not_run"},"execution":{"reason":"client_refused","state":"not_run"},"routing":{"reason":"no_candidates","state":"not_run"},"translation":{"reason":"no_text","state":"not_run"},"wake":{"reason":"no_wake_detected","state":"not_run"}},"platform":"android","schema_version":1}""",
+            """{"app_version":"9.9.9","audio":{"byte_count":3244,"channels":1,"conversion_version":"v1","dropped_spans":[],"encoding":"pcm_s16le","original_format":"oboe_float32","retained_samples":1600,"sample_rate_hz":16000,"sha256":"${"a".repeat(64)}","truncated":false},"build":"123","capture_id":"$capture","capture_session_id":"7","enrollment_epoch":"epoch-1","models":{"asr":null,"router":null,"translation":null,"vad":null,"wakeword":null},"observations":{"asr":{"reason":"local_only_action","state":"not_run"},"bleed":{"reason":"no_playback_reference","state":"not_run"},"execution":{"reason":"client_refused","state":"not_run"},"routing":{"reason":"no_candidates","state":"not_run"},"translation":{"reason":"no_text","state":"not_run"},"wake":{"reason":"no_wake_detected","state":"not_run"}},"platform":"android","schema_version":1,"wake_required":true}""",
             json,
         )
     }
 
     @Test
     fun `capture_session_id is an opaque wire string never a JSON number`() {
-        val json = CanonicalJson.serialize(complete(builder()).build("android", "1", "1", audio()))
+        val json = CanonicalJson.serialize(complete(builder()).wakeRequired(true).build("android", "1", "1", audio()))
         assertTrue(json.contains(""""capture_session_id":"7""""))
         // A bare number would be a durable server incompatibility (Worker expects a string).
         assertFalse(json.contains(""""capture_session_id":7"""))
@@ -556,14 +580,14 @@ class ContributionRecordTest {
                 .model("asr", ModelRef.None)
                 .model("translation", ModelRef.None)
                 .let(::allStagesNotRun)
-                .build("android", "1", "1", audio())
+                .wakeRequired(true).build("android", "1", "1", audio())
         }
         assertTrue("missing model key accepted", missingModel.isFailure)
         // Omitting a stage is equally invalid.
         val missingStage = runCatching {
             allModelsNone(builder())
                 .stage(StageName.Wake, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_wake_detected"))))
-                .build("android", "1", "1", audio())
+                .wakeRequired(true).build("android", "1", "1", audio())
         }
         assertTrue("missing stage accepted", missingStage.isFailure)
     }
@@ -598,11 +622,11 @@ class ContributionRecordTest {
     @Test
     fun `truncation includes duration only when known and spans are ordered arrays`() {
         val spans = listOf(DroppedSpan(10L, 20L), DroppedSpan(30L, 31L))
-        val record = complete(builder()).build("android", "1", "1", audio(truncated = true, spans = spans, originalMs = 5000))
+        val record = complete(builder()).wakeRequired(true).build("android", "1", "1", audio(truncated = true, spans = spans, originalMs = 5000))
         val json = CanonicalJson.serialize(record)
         assertTrue(json.contains("""original_duration_ms":5000"""))
         assertTrue(json.contains("""dropped_spans":[{"end_sample":20,"start_sample":10},{"end_sample":31,"start_sample":30}]"""))
-        val unknown = complete(builder()).build("android", "1", "1", audio(truncated = true, spans = spans, originalMs = null))
+        val unknown = complete(builder()).wakeRequired(true).build("android", "1", "1", audio(truncated = true, spans = spans, originalMs = null))
         assertFalse(CanonicalJson.serialize(unknown).contains("original_duration_ms"))
     }
 
@@ -616,9 +640,9 @@ class ContributionRecordTest {
                 .stage(StageName.Wake, StageEntry(StageState.Completed))
         }.onSuccess { throw AssertionError("duplicate stage accepted") }
         // Links vocabulary is closed too (and now includes request_id).
-        runCatching { complete(builder()).build("android", "1", "1", audio(), links = mapOf("session_secret" to RecordNode.Str("x"))) }
+        runCatching { complete(builder()).wakeRequired(true).build("android", "1", "1", audio(), links = mapOf("session_secret" to RecordNode.Str("x"))) }
             .onSuccess { throw AssertionError("unknown link accepted") }
-        complete(builder()).build("android", "1", "1", audio(), links = mapOf("request_id" to RecordNode.Str("r-1")))
+        complete(builder()).wakeRequired(true).build("android", "1", "1", audio(), links = mapOf("request_id" to RecordNode.Str("r-1")))
     }
 
     @Test
@@ -627,19 +651,19 @@ class ContributionRecordTest {
         val asrHello = StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("hello there")))
         val b1 = complete(ContributionRecordBuilder(capture, "epoch-1", "7")).override(StageName.Asr, asrHello)
         val b2 = complete(ContributionRecordBuilder(capture, "epoch-1", "7")).override(StageName.Asr, asrHello)
-        val r1 = b1.build("android", "1", "1", audio())
-        val r2 = b2.build("android", "1", "1", audio())
+        val r1 = b1.wakeRequired(true).build("android", "1", "1", audio())
+        val r2 = b2.wakeRequired(true).build("android", "1", "1", audio())
         assertEquals(recordSha256(r1), recordSha256(r2))
         // Changed text with identical audio MUST change the digest (same-ID conflict rule).
         val b3 = complete(ContributionRecordBuilder(capture, "epoch-1", "7"))
             .override(StageName.Asr, StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("hello three"))))
-        assertFalse(recordSha256(r1) == recordSha256(b3.build("android", "1", "1", audio())))
+        assertFalse(recordSha256(r1) == recordSha256(b3.wakeRequired(true).build("android", "1", "1", audio())))
     }
 
     @Test
     fun `platform is the closed wire vocabulary`() {
         runCatching { complete(builder()).build("windows", "1", "1", audio()) }
             .onSuccess { throw AssertionError("unknown platform accepted") }
-        complete(builder()).build("ios", "1", "1", audio())
+        complete(builder()).wakeRequired(true).build("ios", "1", "1", audio())
     }
 }

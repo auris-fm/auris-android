@@ -91,6 +91,7 @@ class RetainedCandidate internal constructor(
     var pcm: ShortArray? = null
     var sampleRateHz: Int = 16000
     var wakeState: SegmentObservation.WakeState = SegmentObservation.WakeState.NotDetected
+    var wakeMeasurement: SegmentObservation.WakeMeasurement? = null
     var outcome: CollectionOutcome? = null
 
     /**
@@ -516,6 +517,7 @@ open class ContributionRetentionSink(
                 pcm = owned
                 sampleRateHz = observation.sampleRateHz
                 wakeState = observation.wakeState
+                wakeMeasurement = observation.wakeMeasurement
                 bytesCharged = fullBytes
                 incrementalSamplesAccounted = fullSamples.toLong()
             }
@@ -541,6 +543,7 @@ open class ContributionRetentionSink(
             pcm = owned
             sampleRateHz = observation.sampleRateHz
             wakeState = observation.wakeState
+            wakeMeasurement = observation.wakeMeasurement
             bytesCharged = fullBytes
         }
         val completedAtMs = nowMs() // REAL completion time: frozen under this lock
@@ -660,6 +663,7 @@ open class ContributionRetentionSink(
         pcm = candidate.pcm ?: ShortArray(0),
         sampleRateHz = candidate.sampleRateHz,
         wakeState = candidate.wakeState,
+        wakeMeasurement = candidate.wakeMeasurement,
         outcome = candidate.outcome,
         stageHistory = candidate.stageOutcomes.toList(),
         translation = candidate.translation,
@@ -802,7 +806,7 @@ open class ContributionRetentionSink(
         val gen: Long
         synchronized(lock) {
             candidates += RetainedCandidate(
-                context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset"),
+                context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset", wakeRequired = true),
                 allowanceMetadataCap = allowanceMetadataCap,
             )
             gen = purgeGeneration

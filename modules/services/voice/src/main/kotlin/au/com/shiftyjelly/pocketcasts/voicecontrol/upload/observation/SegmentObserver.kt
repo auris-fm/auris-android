@@ -31,6 +31,8 @@ class SegmentObserver(
     private val handoff: CompletionHandoff = RefuseAllCompletionHandoff,
     /** Collection-fence wrapper supplied by composition; identity when uncomposed (tests). */
     private val fenceGate: FenceGate = IdentityFenceGate,
+    /** Test visibility only: observes each ADMITTED context (never used by production wiring). */
+    private val onAdmittedForTest: ((CaptureContext) -> Unit)? = null,
 ) : ObserverHandoffScope {
 
     // All fields below are guarded by [lock]; external callers and the pipeline thread contend
@@ -141,6 +143,8 @@ class SegmentObserver(
         producerSize: Int,
         asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+        /** Real grace state frozen at segment start (spec phase 2): true = wake word required. */
+        wakeRequired: Boolean = true,
     ): AdmissionHandle? = fenceGate.gate {
         // Refusals consume nothing: a refused gate must not reserve sink bytes or allocate an
         // engine buffer.
@@ -158,14 +162,24 @@ class SegmentObserver(
         // and fail closed when it was absent; that reserve-before-capture rule is removed, and the
         // daily limit is metered server-side at acceptance instead. Admission is now gated only by
         // consent/policy (above) and the compiled per-clip ceiling (below).
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel)?.let {
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, wakeRequired)?.let {
+            onAdmittedForTest?.invoke(it)
             Timber.i("voice-capture admission: accepted capture=%s", it.captureId)
             AdmissionHandle(it, admissionToken, ContributionCeilings.MAX_CLIP_BYTES, ContributionCeilings.MAX_METADATA_BYTES)
         }
     }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): CaptureContext? {
-        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel)
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, wakeRequired: Boolean): CaptureContext? {
+        val context = CaptureContext(
+            UUID.randomUUID(),
+            captureSession,
+            routeClass,
+            issued,
+            asrModel,
+            // THE REAL GRACE STATE FROZEN AT SEGMENT START (spec phase 2), supplied by the
+            // invocation call site that reads the live grace signal synchronously.
+            wakeRequired = wakeRequired,
+        )
         // INVALID SIZES refuse before any arithmetic or admission (reviewer fde5349e): a negative
         // producer size would create a negative open charge and REDUCE the sink budget reservation.
         // ZERO stays legal: the empty-prefix admission is a real, retained capture (deltas grow it).
@@ -351,6 +365,7 @@ class SegmentObserver(
         speechOnsetSample: Int,
         speechEndSample: Int,
         wakeState: SegmentObservation.WakeState,
+        wakeMeasurement: SegmentObservation.WakeMeasurement? = null,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
     ): Unit = fenceGate.gate {
         // The collection fence is held for the ENTIRE handoff including the single copy-out:
@@ -369,7 +384,7 @@ class SegmentObserver(
         // held by fenceGate above). The coordinator re-runs its own validation inside; test and
         // production paths both see exactly ONE gate consultation per handoff.
         val liveAllowed = gate.accepts(authority())
-        handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, oneShot, this, liveAllowed)
+        handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, oneShot, this, liveAllowed, wakeMeasurement)
     }
 
     /**
@@ -385,6 +400,7 @@ class SegmentObserver(
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         admit: Boolean,
         liveGateAllowed: Boolean,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
     ): Boolean = synchronized(lock) {
         val current = open ?: return false
         if (context != null && current.captureId != context.captureId) return false // late: refuse join
@@ -432,7 +448,7 @@ class SegmentObserver(
             return false
         }
         val adopted = sink.completed(
-            SegmentObservation.Completed(current, frames, rate, speechOnsetSample, speechEndSample, wakeState),
+            SegmentObservation.Completed(current, frames, rate, speechOnsetSample, speechEndSample, wakeState, wakeMeasurement),
         )
         if (adopted) totalRetainedBytes += frames.sumOf { it.size } * BYTES_PER_SAMPLE
         closeLocked()

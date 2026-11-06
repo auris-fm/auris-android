@@ -118,7 +118,7 @@ class TransportBytesParityTest {
                 ),
             )
             .stage(StageName.Execution, StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
     }
 
     private fun transport(): ContributionUploadTransport = ContributionUploadTransport(

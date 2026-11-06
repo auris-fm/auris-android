@@ -107,6 +107,7 @@ class ContributionCaptureProducerTest {
             pcm,
             models,
             stages,
+            wakeRequired = true,
         )
         assertNotNull("the store accepted the producer's capture", entry)
 
@@ -135,7 +136,7 @@ class ContributionCaptureProducerTest {
         // Far past the clip duration bound.
         val huge = listOf(ShortArray(1_000_000) { 0 } to 1_000_000)
 
-        val entry = producer(store).publish(id, "epoch-1", 16000, huge, models, stages)
+        val entry = producer(store).publish(id, "epoch-1", 16000, huge, models, stages, wakeRequired = true)
 
         assertNull("an over-budget capture is refused", entry)
         assertTrue("no record was published beside it", store.readyEntries().isEmpty())
@@ -146,7 +147,7 @@ class ContributionCaptureProducerTest {
         val root = tmp.newFolder("producer-badid")
         val store = newStore(root)
 
-        val entry = producer(store).publish("../escape", "epoch-1", 16000, pcm, models, stages)
+        val entry = producer(store).publish("../escape", "epoch-1", 16000, pcm, models, stages, wakeRequired = true)
 
         assertNull("a non-UUID id never reaches the store", entry)
         assertTrue("nothing was written", store.readyEntries().isEmpty())

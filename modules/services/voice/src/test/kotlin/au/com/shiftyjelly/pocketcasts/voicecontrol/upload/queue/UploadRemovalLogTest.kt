@@ -82,7 +82,7 @@ class UploadRemovalLogTest {
         for (stage in StageName.entries) {
             builder.stage(stage, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(stageReasonFor(stage)))))
         }
-        val record = builder.build(platform = "android", appVersion = "8.20", build = "test", audio = block)
+        val record = builder.wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "test", audio = block)
         return CanonicalJson.canonicalBytes(record)
     }
 

@@ -76,8 +76,8 @@ class ExecutionStageDecodeControlTest {
             sink,
             authority,
             issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1") },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live ->
-                scope.completeUnderOwner(context, onset, end, wake, provider)
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement ->
+                scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement)
             },
         )
         private val executor = mock<VoicePlaybackIntentExecutor>()
@@ -111,6 +111,7 @@ class ExecutionStageDecodeControlTest {
             )
             MODEL_KEYS.forEach { builder.model(it, ModelRef.None) }
             EngineStageProvenance.stagesFor(candidate).forEach { (name, entry) -> builder.stage(name, entry) }
+            builder.wakeRequired(true)
             val record = builder.build(
                 platform = "android",
                 appVersion = "1.0",

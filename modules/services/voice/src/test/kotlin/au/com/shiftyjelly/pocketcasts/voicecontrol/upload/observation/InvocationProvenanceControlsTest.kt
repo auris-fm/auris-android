@@ -34,6 +34,7 @@ class InvocationProvenanceControlsTest {
         // The SpeechStarted SELECTION: deliberately DIFFERENT from every invocation identity
         // used below, so any control that reads it instead of the invocation note fails.
         asrModel = ModelRef.Named("selected-but-never-run", "0.0"),
+        wakeRequired = true,
     )
 
     private fun retain(sink: ContributionRetentionSink, ctx: CaptureContext, samples: Int = 1600) {

@@ -32,6 +32,7 @@ class HandoffCoordinator(
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
         liveGateAllowed: Boolean,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
     ): Unit = collectionTx.transaction {
         // ONE transaction on the SHARED outermost primitive (reviewer 8273382e): validation and
         // observer/sink work run under the SAME acquisition — no two-phase boolean seam. Entering
@@ -58,6 +59,7 @@ class HandoffCoordinator(
                 framesProvider,
                 admit = false,
                 liveGateAllowed = liveAllowed,
+                wakeMeasurement = wakeMeasurement,
             )
             return@transaction
         }
@@ -72,6 +74,7 @@ class HandoffCoordinator(
             framesProvider,
             admit = true,
             liveGateAllowed = true,
+            wakeMeasurement = wakeMeasurement,
         )
     }
 
@@ -107,6 +110,7 @@ interface ObserverHandoffScope {
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         admit: Boolean = true,
         liveGateAllowed: Boolean = true,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
     ): Boolean
 }
 
@@ -128,6 +132,7 @@ fun interface CompletionHandoff {
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
         liveGateAllowed: Boolean,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
     )
 }
 
@@ -141,5 +146,6 @@ object RefuseAllCompletionHandoff : CompletionHandoff {
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
         liveGateAllowed: Boolean,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
     ) = Unit
 }

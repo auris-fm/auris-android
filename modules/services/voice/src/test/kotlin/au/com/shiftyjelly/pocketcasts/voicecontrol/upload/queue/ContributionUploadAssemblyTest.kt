@@ -126,7 +126,7 @@ class ContributionUploadAssemblyTest {
             .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
             .stage(StageName.Routing, StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str("skip_ad"))))
             .stage(StageName.Execution, StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = block)
+            .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = block)
     }
 
     /** A capture on disk plus the record that describes it, exactly as the product would supply one. */

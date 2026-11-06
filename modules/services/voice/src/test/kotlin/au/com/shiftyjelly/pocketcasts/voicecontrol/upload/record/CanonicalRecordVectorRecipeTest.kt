@@ -26,6 +26,11 @@ import org.junit.Test
  */
 class CanonicalRecordVectorRecipeTest {
 
+    /** The 2026-11-06 Phase 2 emission. A NEW directory: the 2026-10-30 vector stays untouched. */
+    private companion object {
+        const val OUT_DIR = "/tmp/p1run/upload_vector_phase2"
+    }
+
     private fun hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     /** 640 mono 16 kHz samples: 1280 payload bytes, 1324 with the 44-byte WAV header. */
@@ -85,7 +90,7 @@ class CanonicalRecordVectorRecipeTest {
         )
 
         // The whole multipart envelope, from the production transport, over a real file on disk.
-        val outDir = File("/tmp/p1run/upload_vector").apply { mkdirs() }
+        val outDir = File(OUT_DIR).apply { mkdirs() }
         val audioFile = File(outDir, "audio.wav").apply { writeBytes(audioBytes) }
         val transport = ContributionUploadTransport(
             endpoint = "http://127.0.0.1:1/v1/contributions",
@@ -120,7 +125,7 @@ class CanonicalRecordVectorRecipeTest {
             appendLine("ENVELOPE_CONTENT_TYPE $contentType")
             appendLine("ENVELOPE_VERSION 1")
         }
-        File("/tmp/p1run/upload_record_vector.txt").writeText(report)
+        File("/tmp/p1run/upload_record_vector_phase2.txt").writeText(report)
         File(outDir, "manifest.txt").writeText(report)
     }
 }

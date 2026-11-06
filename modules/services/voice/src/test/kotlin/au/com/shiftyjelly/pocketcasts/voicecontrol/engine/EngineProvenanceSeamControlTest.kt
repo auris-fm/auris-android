@@ -122,6 +122,44 @@ class EngineProvenanceSeamControlTest {
     }
 
     @Test
+    fun `the empty ASR stage carries the language the backend measured`() = runTest {
+        // The MEASUREMENT must reach the RECORD, not stop at the observation (reviewer 5a612a5b):
+        // this asserts the provenance entry the record is built from, so a missing link here fails
+        // here. The stage stays completed/empty_result — no text is invented to carry the language.
+        val h = Harness(
+            this,
+            backend = IdentifiedTextBackend("   ", detectedLanguage = "en", ref = Named("sense-voice", "2024-07-17")),
+        )
+        h.startTurn()
+        val entry = asrStage(h.sink, h.firstCaptureId()!!)
+        assertEquals("empty_result", reason(entry))
+        assertEquals(RecordNode.Str("en"), entry.fields["source_language"])
+        assertTrue("an empty result must not carry text", "text" !in entry.fields)
+    }
+
+    @Test
+    fun `a non-content ASR result records its measured language`() = runTest {
+        // Punctuation only: no command, so nothing is routed — but the language WAS measured, and the
+        // record must say so rather than reporting an absence the client never had.
+        val h = Harness(this, backend = TextBackend("...", detectedLanguage = "zh"))
+        h.startTurn()
+        val entry = asrStage(h.sink, h.firstCaptureId()!!)
+        assertEquals("a non-content result is the same completed/empty_result shape", "empty_result", reason(entry))
+        assertEquals(RecordNode.Str("zh"), entry.fields["source_language"])
+    }
+
+    @Test
+    fun `a failed ASR stage records no language even when the failure names one`() = runTest {
+        // Never invent language for a stage that did not produce a result: a failure is a failure,
+        // and the honest absence stays absent.
+        val h = Harness(this, backend = ThrowingBackend(IllegalStateException("backend exploded")))
+        h.startTurn()
+        val entry = asrStage(h.sink, h.firstCaptureId()!!)
+        assertEquals(StageState.Failed, entry.state)
+        assertTrue("a failed ASR must not claim a measured language", "source_language" !in entry.fields)
+    }
+
+    @Test
     fun `wake-only with recognized text preserves the ACTUAL transcript`() = runTest {
         val h = Harness(
             this,

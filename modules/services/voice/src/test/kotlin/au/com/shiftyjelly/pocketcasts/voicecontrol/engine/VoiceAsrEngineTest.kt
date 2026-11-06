@@ -3128,8 +3128,8 @@ class VoiceAsrEngineTest {
             wakeCompletionSample = 400,
             dirName = "wake-required-combined",
         )
-        // The admission is the observation: the engine froze the window shut, so the root field the
-        // producer writes for this capture is true — asserted through the production builder.
+        // The admission is the observation: the engine froze the window shut, so the field this
+        // capture's admitted context yields is true — asserted through the production builder.
         assertEquals(RecordNode.Bool(true), rootWakeRequired(captured))
 
         // THE PERSISTED RECORD IS REQUIRED: if delivery or any of the field connections disappears,
@@ -3137,6 +3137,15 @@ class VoiceAsrEngineTest {
         val decoded = checkNotNull(captured.persisted) {
             "the combined clip must reach a persisted, valid record (delivered=${captured.delivered})"
         }
+        // ...and the ROOT FIELD ITSELF is read from the persisted bytes, not from a record this test
+        // rebuilt out of the admitted context, so the value the trigger/producer actually wrote is
+        // what fails here if it is wrong or missing (reviewer 5a612a5b).
+        val persistedRoot = checkNotNull(captured.persistedRoot) { "the persisted root object must exist" }
+        assertEquals(
+            "the persisted record must carry the wake_required this capture actually had",
+            RecordNode.Bool(true),
+            persistedRoot.fields["wake_required"],
+        )
         val wake = checkNotNull(decoded).record.observations.getValue(StageName.Wake)
         assertEquals(RecordNode.Str("detected"), wake.fields["decision"])
         assertEquals(0.91, (wake.fields["score"] as RecordNode.Num).value, 1e-6)

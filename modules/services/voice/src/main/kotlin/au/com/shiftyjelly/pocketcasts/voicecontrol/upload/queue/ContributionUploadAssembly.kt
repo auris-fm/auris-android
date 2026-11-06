@@ -223,6 +223,7 @@ class ContributionUploadAssembly(
                 is ContributionUploadTransport.Response.Retryable -> r.statusCode
                 is ContributionUploadTransport.Response.Unauthorized -> r.statusCode
                 is ContributionUploadTransport.Response.Terminal -> r.statusCode
+                is ContributionUploadTransport.Response.Unservable -> r.statusCode
                 is ContributionUploadTransport.Response.Ambiguous -> r.statusCode
                 else -> null
             }
@@ -242,6 +243,8 @@ class ContributionUploadAssembly(
         is ContributionUploadTransport.Response.Unauthorized -> response.statusCode
 
         is ContributionUploadTransport.Response.Terminal -> response.statusCode
+
+        is ContributionUploadTransport.Response.Unservable -> response.statusCode
 
         is ContributionUploadTransport.Response.Ambiguous -> response.statusCode
 

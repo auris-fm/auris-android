@@ -31,6 +31,12 @@ class ContributionAckResolver(
 
         /** Server confirmed terminal disposal (permanent reject / account-level refusal). */
         TERMINAL_DISPOSAL,
+
+        /**
+         * Server rejected the REQUEST (400 invalid_request): nothing is known about the bytes.
+         * Retain repairable bytes and stop serving the entry; never abandon/delete (spec 5c811f83).
+         */
+        UNSERVICED,
     }
 
     sealed class Resolution {
@@ -135,7 +141,32 @@ class ContributionAckResolver(
             } else {
                 Resolution.StaleEpoch
             }
+
+        Ack.UNSERVICED -> {
+            // RETAIN + STOP SERVING via the EXISTING durable retry boundary at its saturating
+            // maximum: the never-representable boundary makes the shared eligibility predicate
+            // (listing AND atomic pickup) exclude the entry permanently, while the bytes, the
+            // charge and the entry itself stay on disk through recovery. Inside the SAME
+            // ownership transaction as every settlement. A FAILED boundary publication leaves the
+            // id in the store's UNCERTAIN set, which holds the retry path and retains the files -
+            // uncertainty is reported, never resolved by deletion (spec 5c811f83).
+            // A FAILED publication throws out of the store (its own uncertainty record stands);
+            // files are retained and the outcome is reported rather than resolved by deletion.
+            val boundary = runCatching {
+                store.scheduleRetryForAdmittedAttempt(token, retryAfterS = Long.MAX_VALUE / 1000L)
+            }.getOrElse { failure ->
+                Timber.tag(TAG).w(failure, "settle: UNSERVICED boundary publication uncertain; entry retained, unserved")
+                null
+            }
+            when (boundary) {
+                null -> if (failureLatched(token)) Resolution.StaleEpoch else Resolution.Retained(null)
+                else -> Resolution.Retained(boundary)
+            }
+        }
     }
+
+    /** Distinguishes a failed marker publication (retain, report) from a dead token (nothing changed). */
+    private fun failureLatched(token: ContributionStore.AdmittedAttempt): Boolean = runCatching { !store.attemptIdentityHolds(token.generation, token.captureId, token.attemptNumber) }.getOrDefault(false)
 
     private fun retain(captureId: String, generation: Long, retryAfterS: Long?): Resolution {
         if (!store.fence.isValid(generation)) return Resolution.StaleEpoch

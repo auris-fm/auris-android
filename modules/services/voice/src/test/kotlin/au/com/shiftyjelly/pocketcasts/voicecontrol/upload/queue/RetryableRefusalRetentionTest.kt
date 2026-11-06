@@ -286,10 +286,12 @@ class RetryableRefusalRetentionTest {
         }
 
         // And the codes we deliberately KEEP OUT must be genuinely non-retryable, so removing them
-        // from the list was a correction rather than a convenient omission.
+        // from the list was a correction rather than a convenient omission. `invalid_request` moved
+        // OUT of the terminal set per spec ruling 5c811f83: a REQUEST rejection retains the bytes
+        // and stops serving the entry (UnservableInvalidRequestControlTest), so it must NEVER be
+        // listed here as delete-on-reject.
         val terminal = listOf(
             "capture_conflict" to (409 to """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}"""),
-            "invalid_request" to (400 to """{"schema_version":1,"code":"invalid_request"}"""),
             "record_gone" to (410 to """{"schema_version":1,"code":"record_gone"}"""),
         )
         for ((code, pair) in terminal) {
@@ -300,6 +302,17 @@ class RetryableRefusalRetentionTest {
                 response is ContributionUploadTransport.Response.Terminal,
             )
         }
+
+        // THE 400 RULING PINNED AT THE SAME SEAM: exact measured body -> Unservable, never Terminal.
+        val invalidRequest = transport.classifyForTest(
+            400,
+            """{"schema_version":1,"code":"invalid_request"}""".toByteArray(),
+        )
+        assertTrue(
+            "400 invalid_request must classify Unservable (retain + stop serving, spec 5c811f83), " +
+                "not Terminal (which deletes the recording)",
+            invalidRequest is ContributionUploadTransport.Response.Unservable,
+        )
     }
 
     /** The owning status for each fixture body, per the client's own status-for-code envelope. */

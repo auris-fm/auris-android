@@ -86,6 +86,13 @@ class ContributionUploadTransport(
         /** A terminal disposition from the owning table. */
         data class Terminal(val statusCode: Int, val code: String) : Response()
 
+        /**
+         * A REQUEST rejection (400 invalid_request): the server rejected the request shape, which
+         * says nothing about the recording bytes. The bytes are retained unservable - never deleted,
+         * never retried on a loop (spec ruling 5c811f83).
+         */
+        data class Unservable(val statusCode: Int, val code: String) : Response()
+
         /** The owning table refuses this attempt locally. */
         data class PolicyRefused(val reason: String) : Response()
 
@@ -377,6 +384,8 @@ class ContributionUploadTransport(
             Disposition.POLICY -> Response.PolicyRefused(code ?: "policy")
 
             Disposition.TERMINAL -> Response.Terminal(status, code ?: "unknown")
+
+            Disposition.UNSERVICED -> Response.Unservable(status, code ?: "unknown")
         }
     }
 
@@ -415,10 +424,13 @@ class ContributionUploadTransport(
     // fallback safe to act on, since it is a credential problem.
     private fun unknownFor(status: Int): Disposition = if (status == 401) Disposition.UNAUTHORIZED else Disposition.RETRY
 
-    private enum class Disposition { RETRY, UNAUTHORIZED, POLICY, TERMINAL }
+    private enum class Disposition { RETRY, UNAUTHORIZED, POLICY, TERMINAL, UNSERVICED }
 
     private val byCode = mapOf(
-        "invalid_request" to Disposition.TERMINAL,
+        // SPEC RULING 5c811f83 (iOS measured 16x400 -> client deleted recordings): a REQUEST
+        // rejection is not proof about the bytes. The entry is RETAINED, repairable, and STOPPED
+        // from being served again - never abandoned/deleted, never retried on a loop.
+        "invalid_request" to Disposition.UNSERVICED,
         "unauthorized" to Disposition.UNAUTHORIZED,
         "not_enrolled" to Disposition.POLICY,
         "collection_disabled" to Disposition.POLICY,

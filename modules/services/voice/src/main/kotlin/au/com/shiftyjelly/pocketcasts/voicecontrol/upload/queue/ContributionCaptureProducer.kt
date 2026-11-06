@@ -92,7 +92,13 @@ class ContributionCaptureProducer(
         // reservation nor reduce queue capacity.
         val account = enrollmentAccount()
         val session = enrollmentSession()
-        if (account.isEmpty() || session <= 0) return null
+        // SIGNED-IN ORDINARY ACCOUNT OWNERSHIP, not a positive-generation readiness gate
+        // (spec ea8be666): the real owner's sessionGenerationCounter starts at ZERO and increments
+        // only on session TRANSITIONS, so an ordinary signed-in cold start legitimately reads
+        // session == 0 and generation 1's `session <= 0` would silently null the persistence after
+        // admission admitted it. The account-presence condition is the identity requirement; the
+        // EQUALITY fences downstream (record vs frozen/live generation at handoff) are untouched.
+        if (account.isEmpty() || session < 0) return null
         // The record's audio block describes EXACTLY the bytes WavWriter will produce.
         val expected = ByteArrayOutputStream()
         WavWriter.writeHeader(expected, Math.toIntExact(samples))

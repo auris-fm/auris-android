@@ -179,7 +179,9 @@ class ContributionUploadAssembly(
                     "voice-upload wire: capture=%s http=%s code=%s",
                     captureId,
                     observedStatusOf(response)?.toString() ?: "none",
-                    (response as? ContributionUploadTransport.Response.Terminal)?.code ?: "none",
+                    (response as? ContributionUploadTransport.Response.Terminal)?.code
+                        ?: (response as? ContributionUploadTransport.Response.Unservable)?.code
+                        ?: "none",
                 )
                 lastResponse[captureId] = response
                 // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.

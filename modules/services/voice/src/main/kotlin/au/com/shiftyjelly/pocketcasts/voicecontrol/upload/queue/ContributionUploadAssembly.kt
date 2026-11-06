@@ -199,6 +199,22 @@ class ContributionUploadAssembly(
         httpStatusFor = { _, captureId ->
             (lastResponse[captureId] as? ContributionUploadTransport.Response.Accepted)?.statusCode
         },
+        // MONITORING ONLY (review 3c0f31d3, gap 1): the status the transport ACTUALLY observed on any
+        // settled response, and the transport-ALLOWLISTED error code. Never feeds validation, fences or
+        // classification - receipt validation keeps pairing on `httpStatusFor` alone.
+        observedStatusFor = { _, captureId ->
+            when (val r = lastResponse[captureId]) {
+                is ContributionUploadTransport.Response.Accepted -> r.statusCode
+                is ContributionUploadTransport.Response.Retryable -> r.statusCode
+                is ContributionUploadTransport.Response.Unauthorized -> r.statusCode
+                is ContributionUploadTransport.Response.Terminal -> r.statusCode
+                is ContributionUploadTransport.Response.Ambiguous -> r.statusCode
+                else -> null
+            }
+        },
+        observedCodeFor = { _, captureId ->
+            (lastResponse[captureId] as? ContributionUploadTransport.Response.Terminal)?.code
+        },
     )
 
     /** Poll once. Present so callers do not reach past the assembly for anything. */

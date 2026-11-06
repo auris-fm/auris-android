@@ -52,6 +52,13 @@ class ContributionRetryCaller(
     private val httpStatusFor: (generation: Long, captureId: String) -> Int? = { _, _ -> null },
     /** The owning-table disposition of this attempt's refusal, when the server refused with a code. */
     private val dispositionFor: (generation: Long, captureId: String) -> ContributionUploadTransport.Response? = { _, _ -> null },
+    /**
+     * MONITORING ONLY (review 3c0f31d3, gap 1): the status the transport actually observed for this
+     * attempt, whatever family it belonged to. Never used for validation or classification.
+     */
+    private val observedStatusFor: (generation: Long, captureId: String) -> Int? = { _, _ -> null },
+    /** MONITORING ONLY: the transport-ALLOWLISTED error code, when the refusal carried one. */
+    private val observedCodeFor: (generation: Long, captureId: String) -> String? = { _, _ -> null },
 ) {
 
     data class PollResult(
@@ -149,12 +156,31 @@ class ContributionRetryCaller(
                         // Boolean transport success deletes nothing by itself.
                         // The owning response table decides: a terminal code is SERVER_TERMINAL
                         // disposal (token-scoped, epoch-gated); everything else retries or retains.
+                        // MONITORING (review 3c0f31d3, gap 1): the WIRE truth, logged BEFORE any
+                        // classification or fence. Content-free: opaque capture id, the real transport
+                        // status and the transport-allowlisted error code - never a server free-form
+                        // string. Without this line, terminal/retry responses settled with no record of
+                        // what the wire actually said.
+                        Timber.tag(UPLOAD_TAG).i(
+                            "voice-upload wire: capture=%s http=%s code=%s",
+                            captureId,
+                            observedStatusFor(generation, captureId)?.toString() ?: "none",
+                            observedCodeFor(generation, captureId) ?: "none",
+                        )
                         val ack = when (dispositionFor(generation, captureId)) {
                             is ContributionUploadTransport.Response.Terminal -> ContributionAckResolver.Ack.TERMINAL_DISPOSAL
                             else -> if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE
                         }
                         val payload = if (accepted) responseFor(generation, captureId) else null
-                        val httpStatus = if (accepted) httpStatusFor(generation, captureId) else null
+                        // Receipt-validation input is UNCHANGED for ACCEPTED (review 3c0f31d3). Other
+                        // families now carry their observed status ONLY so the settle line names the real
+                        // wire answer; validation never runs on them.
+                        val httpStatus =
+                            if (accepted) {
+                                httpStatusFor(generation, captureId)
+                            } else {
+                                observedStatusFor(generation, captureId)
+                            }
                         // The server minimum survives the resolver: it is a floor on the next attempt.
                         val retryAfterS = if (accepted) null else retryAfterFor(generation, captureId)
                         when (resolve(token, ack, payload, retryAfterS, httpStatus)) {

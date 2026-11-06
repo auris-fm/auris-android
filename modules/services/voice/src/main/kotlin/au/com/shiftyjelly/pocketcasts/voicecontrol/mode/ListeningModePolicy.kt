@@ -5,7 +5,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
@@ -21,31 +20,26 @@ import kotlinx.coroutines.flow.stateIn
 /**
  * When the microphone opening earns an audible cue.
  *
- * The spec scopes [EarconId.LISTENING_START] to the microphone turning on **in the background**
- * while a wake word is required — "optional and independent of the mandatory `WAKE_WORD`
- * confirmation", and "very subtle ... should not distract" (`voice-intents.md`). Playing it on every
- * occasion the gate lets the microphone back in — another app stops playing, a route returns, the app
- * is foregrounded — turned it into a recurring beep during ordinary use, which is what was reported.
+ * [EarconId.LISTENING_START] means "the microphone is on": optional, independent of the mandatory
+ * wake-word confirmation, and "very subtle ... should not distract" (`voice-intents.md`).
  *
- * So: only when the user cannot see that the microphone opened. It lives here rather than at the call
- * site because this file is where the listening rules are covered by unit tests, and a decision taken
- * only inside the service is one no test can pin. The listening notification stays posted in both
- * cases, so the continuous signal that listening is on does not depend on this cue.
+ * It plays whenever listening begins and requires the wake word. An earlier version played it only
+ * when the app was in the background, to keep it out of ordinary foreground use — but "background"
+ * is also every time another app briefly releases the microphone, so navigation and video apps got
+ * the tone on each automatic restart and the applications ended up cycling over who holds audio.
+ * The condition that read as restraint was in fact the bug: the cue marked us TAKING the microphone
+ * back, which is exactly the moment that must be quiet. Ordinary foreground use plays it once, when
+ * listening starts, so the noise it was meant to prevent does not return.
  *
- * Requires an *explicit* background signal rather than inferring one from the rule's absence: an
- * unregistered or unknown foreground rule is not evidence that the microphone opened where the user
- * cannot see it, and guessing "background" would produce the audible noise this exists to avoid.
- * Silence is not evidence — the same rule this codebase applies to a check.
+ * Continuous listening is exempt: the cue marks listening that awaits a wake word, not the
+ * follow-up window that immediate's grace period opens.
  *
- * Coverage: the cases above are tested here. The *use* of this function is not — it is called from
- * `VoiceControlService`'s start path, which no test drives — so reverting that call site would still
- * leave the suite green. That gap is accepted rather than closed; closing it needs a service-level
- * test, and this note is the record.
+ * Coverage: the predicate is tested here. Its use is not — it is called from `VoiceControlService`'s
+ * start path, which no test drives — so reverting that call site would still leave the suite green.
+ * That gap is accepted rather than closed; closing it needs a service-level test, and this note is
+ * the record.
  */
-internal fun shouldPlayListeningStartCue(
-    mode: ListeningMode,
-    rules: Map<String, VoiceControlRuleState>,
-): Boolean = mode == ListeningMode.WakeWord && rules[AppInForegroundCondition.ID] is VoiceControlRuleState.Blocked
+internal fun shouldPlayListeningStartCue(mode: ListeningMode): Boolean = mode == ListeningMode.WakeWord
 
 @Singleton
 class ListeningModePolicy @Inject constructor(

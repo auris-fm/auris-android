@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import java.io.File
+import timber.log.Timber
 
 /**
  * The ONE production composition of transport, caller and token-scoped resolver.
@@ -166,6 +167,20 @@ class ContributionUploadAssembly(
                         }
                     },
                 )
+                // MONITORING (review 3271cf1c, gap 1 placement): the WIRE answer is logged HERE, at the
+                // point of OBSERVATION, immediately after the transport returns and BEFORE the cancellation
+                // checks below can throw AttemptCancelled. Logging it in the caller was insufficient: a
+                // cancelled or revoked attempt goes straight to `catch`, so the one case where the wire
+                // actually answered would leave no record at all.
+                // CONTENT-FREE and FIXED: opaque capture id, the real transport status, and the
+                // transport-allowlisted error code - never a server free-form string. Observation only:
+                // no validation, cancellation or classification decision reads this line.
+                Timber.tag(UPLOAD_TAG).i(
+                    "voice-upload wire: capture=%s http=%s code=%s",
+                    captureId,
+                    observedStatusOf(response)?.toString() ?: "none",
+                    (response as? ContributionUploadTransport.Response.Terminal)?.code ?: "none",
+                )
                 lastResponse[captureId] = response
                 // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.
                 if (response is ContributionUploadTransport.Response.Cancelled) throw AttemptCancelled(captureId)
@@ -212,10 +227,28 @@ class ContributionUploadAssembly(
                 else -> null
             }
         },
-        observedCodeFor = { _, captureId ->
-            (lastResponse[captureId] as? ContributionUploadTransport.Response.Terminal)?.code
-        },
     )
+
+    /**
+     * MONITORING ONLY (review 3271cf1c): the status the transport ACTUALLY observed, for any response
+     * family. `Cancelled` and `PolicyRefused` never touched the wire, so they report no status.
+     * Nothing in validation, fencing or classification reads this.
+     */
+    private fun observedStatusOf(response: ContributionUploadTransport.Response): Int? = when (response) {
+        is ContributionUploadTransport.Response.Accepted -> response.statusCode
+
+        is ContributionUploadTransport.Response.Retryable -> response.statusCode
+
+        is ContributionUploadTransport.Response.Unauthorized -> response.statusCode
+
+        is ContributionUploadTransport.Response.Terminal -> response.statusCode
+
+        is ContributionUploadTransport.Response.Ambiguous -> response.statusCode
+
+        is ContributionUploadTransport.Response.Cancelled,
+        is ContributionUploadTransport.Response.PolicyRefused,
+        -> null
+    }
 
     /** Poll once. Present so callers do not reach past the assembly for anything. */
     fun poll(): ContributionRetryCaller.PollResult = caller.pollOnce()
@@ -244,3 +277,5 @@ class ContributionUploadAssembly(
         const val DESCRIPTOR_SETTLE_TIMEOUT_MS = 2_000L
     }
 }
+
+private const val UPLOAD_TAG = "VoiceUploadWire"

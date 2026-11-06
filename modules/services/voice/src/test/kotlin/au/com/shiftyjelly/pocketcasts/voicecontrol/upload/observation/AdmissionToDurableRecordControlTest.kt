@@ -95,6 +95,7 @@ class AdmissionToDurableRecordControlTest {
                 sink = sink,
                 producer = producer,
                 accountStartup = startup,
+                savedSharingChoice = choice,
                 scope = scope,
             ).attach()
 
@@ -159,6 +160,7 @@ class AdmissionToDurableRecordControlTest {
                 sink = sink,
                 producer = producer,
                 accountStartup = startup,
+                savedSharingChoice = choice,
                 scope = scope,
             ).attach()
             val admission = observer.speechStartedAdmitting(

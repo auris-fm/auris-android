@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Collection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.choiceStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import java.io.File
 import java.util.UUID
@@ -60,10 +61,11 @@ class AllowanceMetadataPersistenceTest {
             jitter = { 0L },
         )
         val startup = VoiceUploadCompositionFixtures.startup(context as android.app.Application)
+        val choice = choiceStore()
         val owner = startup.ownerForHandoff()
         (owner as VoiceUploadCompositionFixtures.AppContextOwner).publish("a@x", 7L, "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
-        startup.publishEnrolledFixture("epoch-1")
+        startup.publishEnrolledFixture("epoch-1", choice)
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()
@@ -107,6 +109,7 @@ class AllowanceMetadataPersistenceTest {
             sink = sink,
             producer = producer,
             accountStartup = startup,
+            savedSharingChoice = choice,
             scope = scope,
         )
         publishTrigger.attach()
@@ -173,10 +176,11 @@ class AllowanceMetadataPersistenceTest {
             jitter = { 0L },
         )
         val startup = VoiceUploadCompositionFixtures.startup(context as android.app.Application)
+        val choice = choiceStore()
         val owner = startup.ownerForHandoff()
         (owner as VoiceUploadCompositionFixtures.AppContextOwner).publish("a@x", 7L, "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
-        startup.publishEnrolledFixture("epoch-1")
+        startup.publishEnrolledFixture("epoch-1", choice)
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()
@@ -216,6 +220,7 @@ class AllowanceMetadataPersistenceTest {
             sink = sink,
             producer = producer,
             accountStartup = startup,
+            savedSharingChoice = choice,
             scope = scope,
         )
         publishTrigger.attach()

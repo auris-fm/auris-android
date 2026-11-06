@@ -232,10 +232,14 @@ class VoiceSharingAccountOperations(
             projection.withdrawalState == WithdrawalState.WITHDRAWN ->
                 store.recordWithdrawn(account)
 
-            else -> null // not_enrolled: nothing the user decided at this surface; nothing to store
+            // NOT_ENROLLED is the account's ACTUAL state: persist it, or a stale ENROLLED record
+            // would keep admitting captures the server has already closed (@spec 3f1e939a).
+            else -> store.recordNotEnrolled(account)
         }
         if (persisted == false) {
-            android.util.Log.w("VoiceSharingChoice", "voice-sharing choice persist: outcome=failed")
+            // Not just a log line: the store LATCHES the failure and refuses consent reads until a
+            // write succeeds, so a stale record cannot capture through a silent file.
+            android.util.Log.w("VoiceSharingChoice", "voice-sharing choice persist: outcome=failed latched")
         }
     }
 

@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.choiceStore
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -81,6 +82,7 @@ internal object VoiceUploadCompositionPaths {
         startup.credentials.publish("Bearer-fixture")
         val projection = startup.state.parseProjection(VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"))!!
         startup.state.publish(projection)
+        val savedChoice = choiceStore().apply { recordEnrolled("a@x", "epoch-1", "1") }
         val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val captureId = UUID.randomUUID()
@@ -122,6 +124,7 @@ internal object VoiceUploadCompositionPaths {
             sink = sink,
             producer = producer,
             accountStartup = startup,
+            savedSharingChoice = savedChoice,
             scope = scope,
         )
         publishTrigger.attach()

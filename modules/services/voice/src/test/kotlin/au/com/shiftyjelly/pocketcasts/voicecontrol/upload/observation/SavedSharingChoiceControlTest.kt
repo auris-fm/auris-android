@@ -98,7 +98,7 @@ class SavedSharingChoiceControlTest {
             decision.refusalReason,
         )
         // Provenance is RETAINED: the withdrawn record keeps the real epoch the server issued.
-        val stored = restarted.read()!!
+        val stored = restarted.read("a@x")!!
         assertEquals(SharingChoiceState.WITHDRAWN, stored.state)
         assertEquals("epoch-1", stored.epoch)
     }
@@ -118,12 +118,85 @@ class SavedSharingChoiceControlTest {
             AdmissionRefusalReason.NO_SAVED_CHOICE,
             decision.refusalReason,
         )
-        // And b enrolling writes b's own record; a's restart afterwards refuses under the replaced
-        // record, never under b's consent.
+        // And b enrolling writes b's OWN record; a's restart afterwards runs under a's OWN saved
+        // choice with a's OWN epoch - never b's consent or b's provenance (per-account files).
         val replaced = fileStore(dir).apply { recordEnrolled("b@x", "epoch-2", "2") }
+        val aDecision = authority("a@x", replaced).decide()
+        assertTrue(
+            "a's restart must still run under a's own saved opt-in",
+            aDecision.collectionPermitted,
+        )
+        assertEquals(
+            "a's provenance is a's own epoch, never b's",
+            "epoch-1",
+            authority("a@x", replaced).issueAuthority().enrollmentEpoch,
+        )
+    }
+
+    @Test
+    fun `the whole assembled chain rests on the saved record with NO live projection`() {
+        val dir = java.nio.file.Files.createTempDirectory("chain").toFile()
+        val store = fileStore(dir)
+        store.recordEnrolled("a@x", "epoch-1", "1")
+
+        val sut = authority("a@x", store)
+
+        // The FROZEN provenance comes from the saved record, not the projection.
+        val issued = sut.issueAuthority()
+        assertEquals("epoch-1", issued.enrollmentEpoch)
+        assertEquals("1", issued.acceptedDisclosureVersion)
+
+        // The handoff validates against the SAME saved record.
+        assertTrue(
+            "handoff provenance must match the saved record with no projection fetched in this process",
+            sut.validateIssuedAuthority(issued),
+        )
+
+        // A failed persist LATCHES: even with a good file on disk, consent reads refuse until a
+        // write succeeds (a stale ENROLLED record must not capture through a silent file).
+        val persistence = InMemoryChoicePersistence()
+        persistence.write(SavedSharingChoice("a@x", SharingChoiceState.ENROLLED, "epoch-1", "1"))
+        persistence.failWrites = true
+        val latched = SavedSharingChoiceStore(persistence)
+        assertFalse("the withdraw persist fails", latched.recordWithdrawn("a@x")) // fails, latches
         assertFalse(
-            "a restarted session for account a must not run under b's enrollment",
-            authority("a@x", replaced).decide().collectionPermitted,
+            "a failed withdraw persist must latch the store: no admission on the stale record",
+            authority("a@x", latched).decide().collectionPermitted,
+        )
+        persistence.failWrites = false
+        assertTrue(
+            "a subsequent SUCCESSFUL write clears the latch",
+            latched.recordNotEnrolled("a@x"),
+        )
+        assertFalse(
+            "after the latch clears, the recorded not_enrolled state still refuses",
+            authority("a@x", latched).decide().collectionPermitted,
+        )
+    }
+
+    @Test
+    fun `switching accounts A to B and back to A preserves A's own ordinary saved choice`() {
+        val dir = java.nio.file.Files.createTempDirectory("choice-ab-a").toFile()
+        val store = fileStore(dir)
+        assertTrue(store.recordEnrolled("a@x", "epoch-a", "1"))
+
+        // B enrolls (its own genuine answer) and is live for a while.
+        assertTrue(store.recordEnrolled("b@x", "epoch-b", "2"))
+        assertTrue(
+            "B's own saved choice admits B",
+            authority("b@x", store).decide().collectionPermitted,
+        )
+
+        // Back to A: A's own record must still be intact, no new server roundtrip needed.
+        val decision = authority("a@x", store).decide()
+        assertTrue(
+            "A must return to exactly the choice A itself made",
+            decision.collectionPermitted,
+        )
+        assertEquals(
+            "A's provenance is A's own, not B's",
+            "epoch-a",
+            authority("a@x", store).issueAuthority().enrollmentEpoch,
         )
     }
 

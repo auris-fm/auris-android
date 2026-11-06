@@ -780,9 +780,11 @@ class VoiceAsrEngine @Inject constructor(
                     joinOutcome(CollectionOutcome.Recognized(it.captureId, asrResult.text, asrResult.detectedLanguage))
                 }
             } else {
-                joinOutcome(
-                    CollectionOutcome.NotCollected(request.capture?.captureId ?: return, "empty"),
-                )
+                val captureId = request.capture?.captureId ?: return
+                // The backend MEASURED a language on this result even though it produced no text.
+                // The empty-result observation is what the stage records, so the measurement rides
+                // with it: a measured fact dies here otherwise (reviewer 1f7fe074).
+                joinOutcome(CollectionOutcome.NotCollected(captureId, "empty", asrResult.detectedLanguage))
             }
             return
         }
@@ -801,6 +803,11 @@ class VoiceAsrEngine @Inject constructor(
                 transcript,
                 trimNote?.let { " $it" } ?: "",
             )
+            // No usable command text, but the backend DID measure a language: record that fact on a
+            // non-content observation instead of discarding it with the text (reviewer 1f7fe074).
+            request.capture?.let {
+                joinOutcome(CollectionOutcome.NotCollected(it.captureId, "non_content", asrResult.detectedLanguage))
+            }
             return
         }
         // Recognized: the ACTUAL trimmed transcript + detected language of THIS capture.

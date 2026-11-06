@@ -102,8 +102,6 @@ class RecordValidatorNegativeTest {
     private fun baseValid(): Map<String, Any?> {
         val r = baseRecord()
         val result = validate(r)
-        println("BASELINE-DEBUG keys=" + r.keys + " node=" + toNode(r).toString().take(400))
-        println("BASELINE-DEBUG result=$result")
         assertTrue("baseline fixture must be ACCEPTED but got: $result", result is RecordValidator.Result.Ok)
         return r
     }

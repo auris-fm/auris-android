@@ -27,7 +27,14 @@ sealed interface CollectionOutcome {
     val captureId: UUID
 
     /** Ordinary pipeline kept no contribution for this capture (bleed/drop/wake-only/no text). */
-    data class NotCollected(override val captureId: UUID, val reason: String) : CollectionOutcome
+    // [measuredLanguage] is the language the backend reported on THIS result, when it reported one.
+    // It is an INDEPENDENT measured fact: it survives results whose text is unusable (blank or
+    // non-content), and it is never inferred from the reason or synthesized (reviewer 1f7fe074).
+    data class NotCollected(
+        override val captureId: UUID,
+        val reason: String,
+        val measuredLanguage: String? = null,
+    ) : CollectionOutcome
 
     /**
      * P1 (reviewer 0cd7e39d): the ASR PROVIDER FAILED for this capture — a known failure,
@@ -653,6 +660,15 @@ open class ContributionRetentionSink(
             onReadyForPublication?.invoke(fired)
         }
         return true
+    }
+
+    /**
+     * TEST SEAM: the observations this sink has joined for [captureId], as of now. Read by controls
+     * that assert on what the engine OBSERVED about a segment without installing the production
+     * outcome-wait finalizer. It is a copy taken under the sink lock, never the live candidate.
+     */
+    internal fun observedForTest(captureId: java.util.UUID): List<CollectionOutcome> = synchronized(lock) {
+        candidates.firstOrNull { it.context.captureId == captureId }?.stageOutcomes?.toList() ?: emptyList()
     }
 
     /** IMMUTABLE publication snapshot, built under the sink lock from the candidate's current

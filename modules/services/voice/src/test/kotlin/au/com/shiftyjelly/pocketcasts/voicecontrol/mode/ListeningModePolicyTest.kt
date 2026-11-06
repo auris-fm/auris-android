@@ -3,8 +3,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.mode
 import app.cash.turbine.test
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
@@ -98,44 +96,32 @@ class ListeningModePolicyTest {
     // --- Listening start cue tests ---
 
     @Test
-    fun `no cue while the user can see the app`() {
-        val rules = mapOf(AppInForegroundCondition.ID to VoiceControlRuleState.Allowed)
-
-        assertFalse(
-            "the microphone opening is visible in the app, so the cue only adds noise",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord, rules),
+    fun `a cue when listening starts and requires the wake word`() {
+        assertTrue(
+            "the microphone is now on and awaiting a wake word; that is the moment the cue marks",
+            shouldPlayListeningStartCue(ListeningMode.WakeWord),
         )
     }
 
     @Test
-    fun `a cue when the microphone opens in the background`() {
-        val rules = mapOf(
-            AppInForegroundCondition.ID to VoiceControlRuleState.Blocked("app_in_foreground"),
-        )
-
+    fun `the cue does not depend on whether the app is in the foreground`() {
+        // THE OWNER-REPORTED BUG (msg 2fdcdb5b/2fdcdb6f): with AppAmap or YouTube in front, the app
+        // is "in the background" on every automatic restart, so a background-only cue played each
+        // time the other app released the microphone and the two applications fought over audio.
+        // The cue marks OUR capture starting, which is exactly the moment that has to stay quiet
+        // when something else holds the microphone. The predicate therefore takes no rule map at
+        // all: there is no foreground state left to consult, so no state can reintroduce the noise.
         assertTrue(
-            "this is the case the spec names: the microphone turns on where the user cannot see it",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord, rules),
+            "background is the ordinary state for an automatic restart, not a licence to beep",
+            shouldPlayListeningStartCue(ListeningMode.WakeWord),
         )
     }
 
     @Test
     fun `no cue for a mode that does not require a wake word`() {
-        val rules = mapOf(
-            AppInForegroundCondition.ID to VoiceControlRuleState.Blocked("app_in_foreground"),
-        )
-
         assertFalse(
             "the cue marks listening that awaits a wake word; continuous listening is not that",
-            shouldPlayListeningStartCue(ListeningMode.Continuous, rules),
-        )
-    }
-
-    @Test
-    fun `no cue when the gate says nothing about the foreground`() {
-        assertFalse(
-            "an unknown foreground state is not evidence of a background start",
-            shouldPlayListeningStartCue(ListeningMode.WakeWord, emptyMap()),
+            shouldPlayListeningStartCue(ListeningMode.Continuous),
         )
     }
 

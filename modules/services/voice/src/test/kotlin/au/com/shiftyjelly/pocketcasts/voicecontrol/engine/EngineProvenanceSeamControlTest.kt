@@ -138,13 +138,17 @@ class EngineProvenanceSeamControlTest {
     }
 
     @Test
-    fun `a non-content ASR result records its measured language`() = runTest {
-        // Punctuation only: no command, so nothing is routed — but the language WAS measured, and the
-        // record must say so rather than reporting an absence the client never had.
+    fun `a non-content ASR result records its observed text and measured language`() = runTest {
+        // Punctuation only: no command, so nothing is routed — but ASR DID produce this text and DID
+        // measure this language, so the completed ASR observation carries both. It must NOT be
+        // relabeled `empty_result`, which the wire contract reserves for recognition that produced no
+        // non-whitespace text at all (reviewer cad3379e).
         val h = Harness(this, backend = TextBackend("...", detectedLanguage = "zh"))
         h.startTurn()
         val entry = asrStage(h.sink, h.firstCaptureId()!!)
-        assertEquals("a non-content result is the same completed/empty_result shape", "empty_result", reason(entry))
+        assertEquals(StageState.Completed, entry.state)
+        assertNull("a recognized result is not an empty_result", reason(entry))
+        assertEquals(RecordNode.Str("..."), entry.fields["text"])
         assertEquals(RecordNode.Str("zh"), entry.fields["source_language"])
     }
 

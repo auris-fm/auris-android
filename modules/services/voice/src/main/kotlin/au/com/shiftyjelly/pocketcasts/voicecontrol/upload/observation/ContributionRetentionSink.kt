@@ -34,6 +34,14 @@ sealed interface CollectionOutcome {
         override val captureId: UUID,
         val reason: String,
         val measuredLanguage: String? = null,
+        /**
+         * The text ASR actually produced when the reason is a PIPELINE decision rather than an
+         * absence. A `non_content` result was recognized ("...") and then discarded as a command;
+         * its stage observation is completed with that text, never `empty_result`, because the wire
+         * contract reserves `empty_result` for recognition that produced no non-whitespace text at
+         * all (reviewer cad3379e). Null means the backend produced nothing to carry.
+         */
+        val observedText: String? = null,
     ) : CollectionOutcome
 
     /**

@@ -3201,6 +3201,209 @@ class VoiceAsrEngineTest {
         assertEquals("the measured language must survive a non-content result", "zh", nonContent.measuredLanguage)
     }
 
+    // PERSISTED PROVENANCE FOR RESULTS THAT BECOME NO COMMAND (reviewer 1f7fe074, cad3379e).
+    //
+    // The provenance controls above stop at the stage entry. These install the real publish trigger
+    // and producer, so the assertions read the PERSISTED record for the same three facts: what ASR
+    // observed (text), what it measured (source_language), and — for a genuinely blank result only —
+    // the `empty_result` representation the wire contract reserves for it.
+    @Test
+    fun `a blank ASR result persists empty_result with the measured language and no text`() = runTest {
+        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val admittingObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retentionSink,
+            authority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
+        )
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
+        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        // GRACE CLOSED and the detector fires on this segment: a Continuous segment that needs the
+        // wake word is the ordinary shape that carries a real `wake_required` into the record.
+        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = true,
+                confidence = 0.9f,
+                completionSample = 4000,
+            ),
+        )
+
+        val captured = runSegmentToPersistedRecord(
+            dirName = "persisted-asr-empty",
+            transcript = "   ",
+            detectedLanguage = "yue",
+            admittingObserver = admittingObserver,
+        )
+        val asr = captured.record().observations.getValue(StageName.Asr)
+        assertEquals(StageState.Completed, asr.state)
+        assertEquals("a genuinely blank result is the empty_result representation", "empty_result", (asr.fields["reason"] as? RecordNode.Str)?.value)
+        assertTrue("empty_result carries no text", "text" !in asr.fields)
+        assertEquals("the language the backend measured must be in the persisted record", RecordNode.Str("yue"), asr.fields["source_language"])
+    }
+
+    @Test
+    fun `a non-content ASR result persists its observed text and language, not empty_result`() = runTest {
+        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val admittingObserver = SegmentObserver(
+            CollectionGate { _ -> true },
+            retentionSink,
+            authority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
+        )
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
+        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val captured = runSegmentToPersistedRecord(
+            dirName = "persisted-asr-non-content",
+            transcript = "...",
+            detectedLanguage = "zh",
+            admittingObserver = admittingObserver,
+        )
+        val asr = captured.record().observations.getValue(StageName.Asr)
+        assertEquals(StageState.Completed, asr.state)
+        // The pipeline dropped this as a COMMAND; it was still a recognition, so the persisted
+        // observation keeps what ASR produced instead of claiming it produced nothing.
+        assertEquals(RecordNode.Str("..."), asr.fields["text"])
+        assertEquals(
+            "a recognized result is not an empty_result",
+            null,
+            (asr.fields["reason"] as? RecordNode.Str)?.value,
+        )
+        assertEquals(RecordNode.Str("zh"), asr.fields["source_language"])
+    }
+
+    /** A delivered record, decoded, plus its persisted root — the two shapes the controls read. */
+    private class DeliveredRecord(
+        private val ok: RecordValidator.Result.Ok,
+    ) {
+        fun record(): RecordValidator.Valid = ok.record
+    }
+
+    /**
+     * Run one segment through the REAL publish trigger, producer and store, then require the
+     * delivered record. The record's provenance therefore comes from `EngineStageProvenance` over
+     * the sealed capture, not from a shape this test assembled.
+     */
+    private suspend fun kotlinx.coroutines.test.TestScope.runSegmentToPersistedRecord(
+        dirName: String,
+        transcript: String,
+        detectedLanguage: String?,
+        admittingObserver: SegmentObserver,
+    ): DeliveredRecord {
+        val storeRoot = java.nio.file.Files.createTempDirectory(dirName).toFile()
+        val store = ContributionStore(
+            storeRoot,
+            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
+            clock = { 61_000_000L },
+            jitter = { it - 1 },
+        )
+        val producer = ContributionCaptureProducer(
+            store,
+            appVersion = { "8.20" },
+            appBuild = { "12345" },
+            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
+            enrollmentAccount = { "a@b.c" },
+            enrollmentSession = { 1L },
+        )
+        val trigger = RetentionPublishTrigger(
+            retentionSink,
+            producer,
+            fixedModels = listOf("vad" to ModelRef.None, "wakeword" to ModelRef.None),
+            stagesProvider = { EngineStageProvenance.stagesFor(it) },
+            publishUnderOwner = { frozen, commit ->
+                if (frozen.account == "a@b.c" && frozen.session == 1L && frozen.enrollmentEpoch == "epoch-1") commit() else false
+            },
+            dispatch = { body ->
+                body()
+                null
+            },
+        )
+        trigger.attach()
+        // THE ORDINARY FINALIZATION PATH: an empty or non-content result is NOT a publishable
+        // terminal, so the production bounded wait is what seals it. Two independent evidence
+        // sources install it defensively (the sink holds a single hook, so this is
+        // last-wins idempotent), and both are the production classes with the tests' clock.
+        val finalizer = CaptureOutcomeFinalizer(
+            retentionSink,
+            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
+            this,
+            sleepMs = { kotlinx.coroutines.delay(it) },
+            nowMs = { System.nanoTime() / 1_000_000L },
+        )
+        finalizer.start()
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = intentRecognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
+            segmentObserver = admittingObserver,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend(transcript, detectedLanguage = detectedLanguage),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+        advanceUntilIdle()
+        engine.stop()
+        // The wait sealed and dispatched the capture; close the timer owner before reading.
+        finalizer.dispose()
+
+        val ready = store.readyEntries()
+        assertEquals("the capture must be DELIVERED by the trigger, not staged by the test", 1, ready.size)
+        val durable = checkNotNull(store.durableCapture(ready.single().captureId)) { "the delivered capture must be durable" }
+        val decoded = RecordValidator.validate(durable.record)
+        assertTrue(
+            "the delivered record must validate: $decoded",
+            decoded is RecordValidator.Result.Ok,
+        )
+        return DeliveredRecord(decoded as RecordValidator.Result.Ok)
+    }
+
     // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1; claim corrected per reviewer 3cc4a92f).
     //
     // WHAT THIS PROVES: the engine's handling of an INJECTED filter refusal. The segment flows

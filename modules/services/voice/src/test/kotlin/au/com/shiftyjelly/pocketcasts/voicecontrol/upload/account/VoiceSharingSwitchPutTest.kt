@@ -30,6 +30,7 @@ import org.robolectric.RobolectricTestRunner
 class VoiceSharingSwitchPutTest {
 
     private lateinit var server: MockWebServer
+    private lateinit var api: VoiceSharingAccountApi
     private lateinit var state: VoiceSharingAccountState
     private lateinit var owner: TestOwner
     private lateinit var operations: VoiceSharingAccountOperations
@@ -49,7 +50,7 @@ class VoiceSharingSwitchPutTest {
         queue.clear()
         server = MockWebServer()
         server.start()
-        val api = VoiceSharingAccountApi.create(
+        api = VoiceSharingAccountApi.create(
             retrofit2.Retrofit.Builder().baseUrl(server.url("/")),
             okhttp3.OkHttpClient(),
         )
@@ -262,6 +263,57 @@ class VoiceSharingSwitchPutTest {
             "a PUT must never leave without If-Match: ${requests.map { it.method }}",
             requests.none { it.method == "PUT" },
         )
+    }
+
+    @Test
+    fun `an account switch after the read applied refuses the switch instead of issuing it`() = runTest {
+        // The read-first step SUSPENDS, and the owner can change while it runs (reviewer 54627e05):
+        // A's GET lands and applies, then B signs in. A's choice must not be sent under B — whose
+        // projection may legitimately carry a revision — so the switch is refused and NO PUT leaves.
+        assertNull("precondition: nothing has been read", state.projection.value)
+        state.onRefreshObserved = { diagnostic ->
+            if (diagnostic.kind == VoiceSharingRefreshDiagnostic.Kind.APPLIED) {
+                // Deterministically AFTER the GET applied, BEFORE the switch is issued.
+                owner.switchAccount(to = "other@example.com", token = "fixture-bearer")
+            }
+        }
+        enqueue(okProjection(enrolled = false, revision = "rev-1"))
+
+        val result = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
+
+        assertEquals("the superseded intent must not be issued", VoiceSharingMutationResult.Failure, result)
+        assertEquals("the read happened, the credit is not transferred by a PUT", listOf("GET"), requests.map { it.method })
+    }
+
+    @Test
+    fun `a projection cleared during bearer acquisition refuses the switch instead of an unconditional PUT`() = runTest {
+        // The revision can disappear between the read and the freeze: a lifecycle clear empties the
+        // projection while the bearer is being acquired. frozen() must refuse rather than emit a
+        // SWITCH with no If-Match (reviewer 54627e05).
+        seedCurrent(enrolled = false, revision = "rev-1")
+        // The bearer is acquired inside the owner transaction that freezes the request, and it
+        // suspends: this stands in for a lifecycle clear landing in that window.
+        val clearingBearer = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+            override suspend fun currentToken(): String? {
+                state.clear()
+                return "fixture-bearer"
+            }
+
+            override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block("fixture-bearer")
+        }
+        val guarded = VoiceSharingAccountOperations(
+            api = api,
+            state = state,
+            ownership = owner,
+            aurisToken = clearingBearer,
+            onCredentialInvalid = { },
+            onAurisCredentialRefused = { },
+        )
+
+        val result = guarded.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
+
+        assertEquals("no revision at freeze time means no request", VoiceSharingMutationResult.Failure, result)
+        assertEquals("no PUT may leave without a precondition", emptyList<String>(), requests.map { it.method })
     }
 
     @Test

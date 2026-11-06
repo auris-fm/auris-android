@@ -174,14 +174,25 @@ class VoiceSharingAccountOperations(
      */
     suspend fun setVoiceSharing(enrolled: Boolean, acceptedDisclosureVersion: String?): VoiceSharingMutationResult {
         if (enrolled && acceptedDisclosureVersion.isNullOrBlank()) return VoiceSharingMutationResult.Failure
+        // ONE INTENT, ONE OWNER (reviewer 54627e05): the user's choice is expressed under the account
+        // that is signed in NOW, and the read-first step below suspends — a switch to another account
+        // can land while it runs. Capturing the owner here means B can never receive a choice A
+        // expressed: the switch is refused instead of being issued under the new session.
+        val (ownerAccount, ownerSession) = ownerNow()
         // THE PRECONDITION IS REQUIRED (spec e3cfc8ae): the server refuses a PUT that names no
         // revision, so a client holding none READS FIRST and then sends that revision. The read is
         // the ordinary GET, so its answer also becomes the current projection — a switch issued on a
-        // stale screen then fails its own precondition instead of overwriting a newer choice.
-        if (state.projection.value?.membershipRevision == null && !refreshProjection()) {
-            return VoiceSharingMutationResult.Failure
+        // stale screen then fails its own precondition instead of overwriting a newer choice. The
+        // read of the projection happens INSIDE that owner check, so a read that lands for a
+        // superseded account cannot be borrowed by the new one.
+        if (state.projection.value?.membershipRevision == null) {
+            if (!refreshProjection()) return VoiceSharingMutationResult.Failure
+            // A read that landed for a SUPERSEDED account must not be borrowed: the choice was
+            // expressed under [ownerAccount], so the session must still be that one here.
+            val (accountNow, sessionNow) = ownerNow()
+            if (accountNow != ownerAccount || sessionNow != ownerSession) return VoiceSharingMutationResult.Failure
         }
-        val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null)
+        val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null, ownerAccount, ownerSession)
             ?: return VoiceSharingMutationResult.Failure
         return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, request.op.ifMatch, payload) }) {
             is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
@@ -304,11 +315,26 @@ class VoiceSharingAccountOperations(
      */
     private suspend fun issue(route: Route, disclosureVersion: String?): IssuedRequest? {
         val (accountName, session) = ownerNow()
+        return issue(route, disclosureVersion, accountName, session)
+    }
+
+    /**
+     * [issue] for a request whose intent was expressed under an ALREADY CAPTURED owner (the switch's
+     * read-first step). The captured owner must still be the live one, both before the bearer is
+     * acquired and after it, or the request is refused rather than relabelled onto a new session.
+     */
+    private suspend fun issue(route: Route, disclosureVersion: String?, accountName: String?, session: Long): IssuedRequest? {
+        val (liveAccount, liveSession) = ownerNow()
+        if (liveAccount != accountName || liveSession != session) return null
         val bearer = aurisBearer() ?: return null
         return ownership.transaction {
             val snapshot = ownership.authoritySnapshot()
             if (snapshot.accountName != accountName || snapshot.session != session) return@transaction null
-            IssuedRequest(frozen(bearer, route, disclosureVersion), Issued(accountName, session, state.publicationCount()))
+            // The precondition is READ inside this same transaction: frozen() refuses a SWITCH without
+            // one, and a projection cleared during bearer acquisition must not degrade into an
+            // unconditional PUT.
+            val op = frozen(bearer, route, disclosureVersion) ?: return@transaction null
+            IssuedRequest(op, Issued(accountName, session, state.publicationCount()))
         }
     }
 
@@ -335,7 +361,7 @@ class VoiceSharingAccountOperations(
         data class Unavailable(val status: Int?, override val requestIds: List<String> = emptyList()) : Outcome
     }
 
-    private fun frozen(aurisBearer: String, route: Route, disclosureVersion: String?, projection: VoiceSharingAccountProjection? = state.projection.value): FrozenOperation {
+    private fun frozen(aurisBearer: String, route: Route, disclosureVersion: String?, projection: VoiceSharingAccountProjection? = state.projection.value): FrozenOperation? {
         val bearer = "Bearer " + aurisBearer
         // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else: it answers whether
         // THIS app's token names a signing key staging publishes (cloud 84a4d25e). Only the JOSE
@@ -348,7 +374,14 @@ class VoiceSharingAccountOperations(
             // names none. Both are the same request shape.
             else -> writeBody(enrolled = disclosureVersion != null, projection = projection, route = route, disclosureVersion = disclosureVersion)
         }
-        return FrozenOperation(bearer, body, route, projection?.membershipRevision)
+        val ifMatch = projection?.membershipRevision?.takeIf { it.isNotBlank() }
+        // A SWITCH NEVER LEAVES WITHOUT ITS PRECONDITION (spec e3cfc8ae, reviewer 54627e05): the
+        // revision can disappear between the read-first step and this construction — a lifecycle
+        // clear empties the projection — and sending the PUT anyway would override another device's
+        // newer choice. The refusal happens HERE, at request construction, so no caller can forget
+        // the check.
+        if (route == Route.SWITCH && ifMatch == null) return null
+        return FrozenOperation(bearer, body, route, ifMatch)
     }
 
     /** Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint status. */

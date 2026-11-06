@@ -54,7 +54,7 @@ import retrofit2.Retrofit
  * immutable snapshot, conditional refresh, owner-transaction 401, narrow binding) so the
  * focused controls run against the ACTUAL shape of the production boundary.
  */
-private class TestOwner(
+internal class TestOwner(
     @Volatile var accountName: String? = "user@example.com",
 ) : CredentialOwnershipOwner {
     override val collectionSharedLock = Any()
@@ -268,9 +268,7 @@ class VoiceSharingAccountOperationsTest {
 
         override suspend fun getVoiceSharing(bearer: String?): Response<ResponseBody> = fail()
 
-        override suspend fun postEnrollment(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
-
-        override suspend fun postWithdrawal(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+        override suspend fun putVoiceSharing(bearer: String?, ifMatch: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
 
         override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
     }
@@ -291,16 +289,18 @@ class VoiceSharingAccountOperationsTest {
         enqueueProjection()
         assertTrue(operations.refreshProjection())
 
-        // 2. Enrollment: request_id UUID, expected_revision = current, disclosure version.
+        // 2. Enrollment is the SWITCH turned on: request_id UUID + desired state + the disclosure the
+        // user accepted; the last-read revision travels as the If-Match precondition.
         enqueueProjection(revision = "rev-2")
         assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("POST", posted.method)
-        assertTrue(posted.path!!.startsWith("/api/v1/account/voice-sharing/enrollment"))
+        assertEquals("PUT", posted.method)
+        assertEquals("/api/v1/account/voice-sharing", posted.path)
+        assertEquals(listOf("rev-1"), posted.headers.values("If-Match"))
         val body = posted.body.readUtf8()
-        assertTrue(body.contains("\"accepted_disclosure_version\":\"v3\""))
-        assertTrue(body.contains("\"expected_membership_revision\":\"rev-1\""))
+        assertTrue(body.contains("\"enrolled\":true"))
+        assertTrue(body.contains("\"disclosure_version\":\"v3\""))
         val requestId = Regex("\"request_id\":\"([^\"]+)\"").find(body)!!.groupValues[1]
         assertNotNull(UUID.fromString(requestId))
         // The enrollment response (new projection) replaced the GET projection.
@@ -325,11 +325,13 @@ class VoiceSharingAccountOperationsTest {
         assertApplied(operations.withdraw())
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
-        assertEquals("POST", posted.method)
-        assertTrue(posted.path!!.startsWith("/api/v1/account/voice-sharing/withdrawal"))
+        // Withdrawal is the SAME switch turned off: no disclosure claimed, revision as precondition.
+        assertEquals("PUT", posted.method)
+        assertEquals("/api/v1/account/voice-sharing", posted.path)
+        assertEquals(listOf("rev-1"), posted.headers.values("If-Match"))
         val body = posted.body.readUtf8()
-        assertTrue(body.contains("\"expected_membership_revision\":\"rev-1\""))
-        assertTrue(body.contains("\"enrollment_epoch\":\"epoch-9\""))
+        assertTrue(body.contains("\"enrolled\":false"))
+        assertTrue("no disclosure is claimed when turning sharing off: $body", !body.contains("disclosure"))
         // Withdrawal applies a membership projection; it never deletes data.
         assertEquals(WithdrawalState.WITHDRAWN, state.projection.value!!.withdrawalState)
     }
@@ -519,11 +521,15 @@ class VoiceSharingAccountOperationsTest {
         server.takeRequest(5, TimeUnit.SECONDS)!! // the GET
         val attempt1 = server.takeRequest(5, TimeUnit.SECONDS)!!
         val attempt2 = server.takeRequest(5, TimeUnit.SECONDS)!!
-        val id1 = Regex("\"request_id\":\"([^\"]+)\"").find(attempt1.body.readUtf8())!!.groupValues[1]
+        val body1 = attempt1.body.readUtf8()
+        val id1 = Regex("\"request_id\":\"([^\"]+)\"").find(body1)!!.groupValues[1]
         val body2 = attempt2.body.readUtf8()
         val id2 = Regex("\"request_id\":\"([^\"]+)\"").find(body2)!!.groupValues[1]
         assertEquals(id1, id2)
-        assertTrue(body2.contains("\"expected_membership_revision\":\"rev-1\""))
+        // The precondition is a HEADER here, so a byte-identical resend also carries it identically.
+        assertEquals(listOf("rev-1"), attempt1.headers.values("If-Match"))
+        assertEquals(listOf("rev-1"), attempt2.headers.values("If-Match"))
+        assertEquals("the retry body must be byte-identical: same request_id, same desired state", body1, body2)
     }
 
     @Test

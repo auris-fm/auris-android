@@ -43,10 +43,34 @@ class DirectoryDurabilityTest {
 
     private class RecordingSync : DirectorySync {
         val calls = mutableListOf<File>()
+
+        // Wall-clock ordering with the store's file writes, so a control can prove a barrier ran AT
+        // a specific point in the transition rather than anywhere in the test.
+        @Volatile
+        var clock: () -> Long = { System.currentTimeMillis() }
+
+        /**
+         * Fail the namespace barrier for THIS root's queue only, and record nothing else. Sibling tests
+         * share the TemporaryFolder, so an unscoped or global barrier cannot express "this entry is the
+         * one that must not be served".
+         */
+        @Volatile
+        var failNamespaceOf: File? = null
+        val callTimes = mutableListOf<Long>()
+
+        @Synchronized
         override fun sync(directory: File) {
+            val queue = failNamespaceOf?.let { File(it, "contributions") }
+            if (queue != null && directory.absolutePath != queue.absolutePath) return
             calls += directory
+            callTimes += clock()
+            if (directory.absolutePath == queue?.absolutePath) {
+                throw java.io.IOException("simulated confirmation failure")
+            }
         }
     }
+
+    private fun File.conv(): String = if (isFile) readText() else "ABSENT"
 
     private fun wavBytes(samples: Int): ByteArray {
         val out = java.io.ByteArrayOutputStream()
@@ -909,80 +933,62 @@ class DirectoryDurabilityTest {
         // An uncertain publication may have left complete-looking files that were never durably
         // confirmed. Structural validation alone would expose that entry as ready on a fresh instance.
         // The confirmation step must run, and must be able to FAIL, on a fresh instance.
+        //
+        // TWO states reach recovery, and they are decided differently on purpose (spec bfe91857):
+        //   * publication CREDITED a directory fence -> not re-decided here at all (re-deciding it is
+        //     what silently withheld 44 valid recordings on the device, every restart);
+        //   * publication did not -> recovery runs the barrier, and a failure withholds without deleting.
+        // A store declares CONTENT-ONLY itself (`DirectorySync.REAL` cannot fence a directory), so the
+        // uncertainty is visible in the DEFAULT construction and the barrier here is scoped to ONE root:
+        // a barrier that fails for every store in the test's temp folder could never show a pass.
         val root = tmp.newFolder("queue-uncertain-recovery")
         val id = java.util.UUID.randomUUID().toString()
-        // One live owner per queue (spec c8f766fb): each owner below releases before the next takes over.
         val seeder = ContributionStore(root, limits(), directorySync = RecordingSync())
         seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        assertEquals(
+            "precondition: a non-production store must not claim a directory fence it cannot run",
+            "v1-content-only",
+            File(root, "contributions/$id.published").readText(),
+        )
         seeder.close()
 
         val failingFileSync = FileSync { throw java.io.IOException("simulated confirmation failure") }
-        val fresh = ContributionStore(root, limits(), directorySync = RecordingSync(), fileSync = failingFileSync)
+        // SCOPED TO THIS ROOT, and that is the whole point: TemporaryFolder is created once for the
+        // class, so a barrier that throws for the entire temp folder is also handed every OTHER test's
+        // entries, and any sibling's recovery can consume the failure first. Scoping keeps this test's
+        // outcome decided by this test's entry only.
+        // (A failed content fsync is what makes the confirmation fail here. The DIRECTORY barrier is
+        // recorded, not thrown, because throwing it is what a sibling test already does and it would
+        // be indistinguishable from an unconfirmed store that simply cannot fence at all.)
+        val recoverySync = RecordingSync().also { it.failNamespaceOf = root }
+        val fresh = ContributionStore(root, limits(), directorySync = recoverySync, fileSync = failingFileSync)
         val recovered = fresh.recover()
+        val readyAfterRecovery = fresh.readyEntries().map { it.captureId }
         fresh.close()
 
         assertTrue(
-            "recovery exposed an entry whose durability it could not confirm: ${recovered.map { it.captureId }}",
+            "recovery exposed an entry whose durability it could not confirm: ${recovered.map { it.captureId }} (id=$id, ready=$readyAfterRecovery, proof=${File(root, "contributions/$id.published").conv()})",
             recovered.none { it.captureId == id },
         )
-        assertTrue("the store must not list it as ready", fresh.readyEntries().none { it.captureId == id })
+        // Captured BEFORE close(): a released owner exposes nothing, so reading it after close would make
+        // this assertion pass for the wrong reason.
+        assertTrue("the store must not list it as ready, got $readyAfterRecovery", readyAfterRecovery.none { it == id })
         // Uncertain is NOT rejected: the files must still be there for the next confirmation attempt.
         assertTrue(
             "an unconfirmed entry must not be deleted — uncertainty is not rejection",
             File(root, "contributions").listFiles()!!.any { it.name.startsWith(id) && it.name.endsWith(".recording.wav") } &&
                 File(root, "contributions/$id.ready").isFile,
         )
+        // And the branch really ran: this root's namespace barrier must have been asked.
+        assertTrue(
+            "the UNCONFIRMED branch must run the recovery barrier, got ${recoverySync.calls.map { it.name }}",
+            recoverySync.calls.any { it.absolutePath == File(root, "contributions").absolutePath },
+        )
 
         // And a healthy fresh instance DOES confirm it, so the control above is discriminating rather
         // than the entry simply being unreadable.
         val healthy = ContributionStore(root, limits(), directorySync = RecordingSync())
         assertEquals("a healthy instance must confirm the same entry", listOf(id), healthy.recover().map { it.captureId })
-    }
-
-    @Test
-    fun `an ALREADY PREPARED entry is withheld when recovery cannot re-confirm it`() {
-        // The branch the fresh-store test cannot reach. When the SAME instance prepared the entry, recover()
-        // rebuilds the index from `preparedIds`; if that rebuild re-validates and reinserts without
-        // consulting the confirmation result, the confirmation is decorative for exactly the entries most
-        // likely to be uncertain. `uncertainIds` was collected and never read - dead state posing as a
-        // control. This test pins that.
-        val root = tmp.newFolder("queue-self-uncertain")
-        val id = java.util.UUID.randomUUID().toString()
-        var failSyncs = false
-        val gated = object : DirectorySync {
-            override fun sync(directory: File) {
-                if (failSyncs) throw java.io.IOException("simulated recovery confirmation failure")
-            }
-        }
-        val store = ContributionStore(root, limits(), directorySync = gated, fileSync = FileSync { })
-        assertTrue("precondition: the entry prepares", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-        assertEquals("precondition: it is ready", listOf(id), store.readyEntries().map { it.captureId })
-
-        failSyncs = true
-        val recovered = store.recover()
-
-        assertTrue(
-            "recover() must withhold an already-prepared entry it cannot re-confirm, got ${recovered.map { it.captureId }}",
-            recovered.none { it.captureId == id },
-        )
-        assertTrue(
-            "readyEntries() must not expose an already-prepared entry whose confirmation failed",
-            store.readyEntries().none { it.captureId == id },
-        )
-        // Uncertainty is NOT rejection: the same immutable entry must survive for later reconciliation.
-        assertTrue(
-            "the entry's files must be preserved for later reconciliation",
-            File(root, "contributions/$id.ready").isFile,
-        )
-
-        // And a later successful recovery MUST reconcile it back - withheld, not lost.
-        failSyncs = false
-        assertEquals(
-            "a later successful recovery must re-expose the same immutable entry",
-            listOf(id),
-            store.recover().map { it.captureId },
-        )
-        assertEquals("and it must be ready again", listOf(id), store.readyEntries().map { it.captureId })
     }
 
     @Test
@@ -1046,6 +1052,8 @@ class DirectoryDurabilityTest {
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         failSyncs = true
+        // An entry whose directory durability the publishing build never credited (spec bfe91857: a
+        // store declares its own state), so this recovery is the one that decides it.
         store.recover() // confirmation fails -> withheld, recorded as uncertain
         assertTrue("withheld from ready", store.readyEntries().none { it.captureId == id })
         assertTrue("files preserved while uncertain", File(root, "contributions/$id.ready").isFile)

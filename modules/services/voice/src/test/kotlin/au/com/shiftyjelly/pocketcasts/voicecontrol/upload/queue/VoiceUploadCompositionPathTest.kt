@@ -527,6 +527,9 @@ class VoiceUploadCompositionPathTest {
             val store1 = priorProcessStore()
             val id = prepareVerifiedCapture(store1)
             val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
+            // The production owner credited its directory fence (spec bfe91857). Robolectric cannot run
+            // `android.system.Os`, so the record that the device build writes is written here instead.
+            java.io.File(appQueue, "$id.published").writeText("v1")
             store1.close()
 
             // A FRESH provider creation over the same directory = the restart. Recovery runs HERE,
@@ -608,6 +611,9 @@ class VoiceUploadCompositionPathTest {
             val store1 = priorProcessStore()
             val id = prepareVerifiedCapture(store1)
             val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
+            // The production owner credited its directory fence (spec bfe91857). Robolectric cannot run
+            // `android.system.Os`, so the record that device publication writes is written here instead.
+            java.io.File(appQueue, "$id.published").writeText("v1")
             store1.close()
 
             val startup = moduleStartup()
@@ -893,6 +899,79 @@ class VoiceUploadCompositionPathTest {
                 0L,
                 store.totalQueuedBytes(),
             )
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    /**
+     * UNCERTAINTY MUST NOT REQUIRE THE PLATFORM BARRIER ON ALREADY-PUBLISHED AUDIO (device incident
+     * 2026-11-07, spec bfe91857): restarting a process must serve the clips a PREVIOUS process
+     * durably published. Recovery re-ran the FULL publication barrier - file fsyncs plus the
+     * directory and parent-directory barriers - over every validated entry, so any runtime whose
+     * directory barrier cannot run (os error, unsupported platform, full disk at that instant)
+     * turned every valid, already-durable clip into "uncertain" and served NONE of them, silently
+     * and permanently: nothing was deleted, nothing was counted, and each restart repeated it.
+     *
+     * Also the standing rule that the deferred drain WARNS instead of retrying indefinitely.
+     */
+    @Test
+    fun `a restart serves entries published by a previous process even when the publication barrier now fails`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            // The PREVIOUS process is the REAL production owner: it fenced its publications with the
+            // platform directory barrier, so its completion proof says so (spec bfe91857). Robolectric
+            // cannot run `android.system.Os`, so the fence is recorded by the implementation that faced
+            // the device, and THIS process below is what cannot re-run it.
+            val store1 = ContributionStore(
+                java.io.File(appContext.filesDir, "voice-contributions"),
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+                directorySync = DirectorySync.REAL,
+                intentDirectorySyncOverride = DirectorySync.REAL,
+            ).also { stores += it }
+            val id = prepareVerifiedCapture(store1)
+            val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
+            // The PRODUCTION owner credited its directory fence (spec bfe91857). Robolectric cannot run
+            // `android.system.Os`, so the record that device publication writes is written here: the
+            // entry a later process must serve is one whose directory durability was already established.
+            java.io.File(appQueue, "$id.published").writeText("v1")
+            store1.close()
+
+            // THIS process's directory barrier CANNOT RUN (the device-side failure mode).
+            val failing = DirectorySync { throw java.io.IOException("directory open failed (errno=5)") }
+            // Why store1.recover() (below) is NOT the control here: it is the SAME owner that just
+            // prepared this entry, and recovering in-process deliberately re-runs publication's own
+            // barriers for entries this owner prepared. That is a different question from "does a
+            // RESTARTED process serve what a previous process already fenced".
+
+            val store2 = ContributionStore(
+                java.io.File(appContext.filesDir, "voice-contributions"),
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+                directorySync = failing,
+                intentDirectorySyncOverride = failing,
+            ).also { stores += it }
+            assertEquals(
+                "a previously-published durable entry must be served even when THIS process cannot re-run the barrier",
+                setOf(id),
+                store2.recover().map { it.captureId }.toSet(),
+            )
+
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val drain = moduleDrain(store2, startup, aurisLive, server)
+            status = 201
+            body = receiptBody(id, sha256Hex(metaBytes))
+            runDrain(drain)
+            assertEquals("the recovered entry must reach the transport exactly once", 1, hits.get())
         } finally {
             aurisLive.shutdown()
             server.stop(0)

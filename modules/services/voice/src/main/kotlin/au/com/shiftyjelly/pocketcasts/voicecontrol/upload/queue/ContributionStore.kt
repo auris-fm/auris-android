@@ -1441,6 +1441,28 @@ class ContributionStore(
                             )
                         }
                         committed = true
+                        // PUBLICATION-COMPLETION PROOF, written LAST (device incident 2026-11-07, spec
+                        // bfe91857): every content fsync and both directory barriers have now succeeded,
+                        // so a later process must NOT have to re-run them to serve this entry. Best
+                        // effort on purpose - losing only the proof withholds the entry on the next
+                        // restart (uncertain, never deleted), while failing the whole preparation here
+                        // would discard a clip the user already recorded.
+                        // The completion proof records WHICH barrier this process could run, and it is
+                        // written before that barrier. Recovery must never re-decide an entry an earlier
+                        // process published (spec bfe91857: a runtime that cannot open the queue directory
+                        // read 44 perfectly valid recordings as "uncertain" on every restart and served
+                        // none of them). Two states exist:
+                        //   PROVENANCE_DIR_FENCED - this build ran the real directory barrier; any later
+                        //     failure to run one says something about the CURRENT runtime, not about the
+                        //     bytes, so the entry stays servable.
+                        //   PROVENANCE_CONTENT_ONLY - this build's DirectorySync is a content-only fence
+                        //     (`DirectorySync.REAL`, non-Android), so directory durability was never
+                        //     claimed here; recovery keeps deciding such entries by the barrier it can run.
+                        runCatching {
+                            val provenance = File(dir, "$captureId$SUFFIX_PROVENANCE")
+                            provenance.writeText(provenanceState())
+                            fileSync.sync(provenance)
+                        }
                         memoryEntries[captureId] = entry
                         preparedIds.add(captureId)
                         // Flip the EXISTING owner charge; never add a second one.
@@ -1705,7 +1727,14 @@ class ContributionStore(
         fileSync.sync(tmp)
         if (!tmp.renameTo(record) || !record.exists()) throw java.io.IOException("rename failed")
         fileSync.sync(record)
-        syncDirectoryOrFail(dir)
+        // NAMING DURABILITY IS AN OPTIMIZATION FOR EXISTING ENTRIES, NOT A PRECONDITION (device incident
+        // 2026-11-07, spec bfe91857). Re-running the directory barrier over a record this process just
+        // replaced hardens a crash, and when it fails the record's CONTENT is still durable and visible -
+        // so the caller must not lose the attempt it just made. Discarding it here meant a runtime whose
+        // directory barrier could not run (unsupported platform, a failing open, a transient disk fault)
+        // could never advance ANY attempt count: every upload, every retry boundary and therefore every
+        // settle path aborted with "attempts sidecar write failed".
+        runCatching { syncDirectoryOrFail(dir) }
         tmp.delete()
         true
     } catch (failure: Throwable) {
@@ -2363,7 +2392,7 @@ class ContributionStore(
                 }
                 val gone = deleteAll(
                     id,
-                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
+                    ENTRY_SUFFIXES,
                 )
                 if (!gone) residueIds += id
             }
@@ -2523,7 +2552,9 @@ class ContributionStore(
             }
         }
         val readyIds = readyIdsBefore.toList()
+
         val keep = mutableListOf<Entry>()
+
         // Entries whose publication could not be confirmed durable. Kept out of the ready set, but NOT
         // deleted: uncertain is not rejected.
         val uncertainIds = mutableListOf<String>()
@@ -2555,18 +2586,8 @@ class ContributionStore(
                 // ALL sidecars go with the entry (spec 05ff27d0 residue ruling): a deleted entry
                 // leaves no `.created`/`.owner`/`.retry` residue - the 2026-11-07 install left 44
                 // three-file residues because this list missed them.
-                val cleaned = listOf(
-                    wav,
-                    meta,
-                    attemptsFile,
-                    File(dir, "$id$SUFFIX_READY"),
-                    File(dir, "$id$SUFFIX_DIGEST"),
-                    File(dir, "$id$SUFFIX_CREATED"),
-                    File(dir, "$id$SUFFIX_RETRY"),
-                    File(dir, "$id$SUFFIX_OWNER"),
-                    File(dir, "$id$SUFFIX_ATTEMPTS.tmp"),
-                    File(dir, "$id$SUFFIX_RETRY.tmp"),
-                ).all { !it.exists() || it.delete() || !it.exists() }
+                val cleaned = ENTRY_SUFFIXES.map { File(dir, "$id$it") }
+                    .all { !it.exists() || it.delete() || !it.exists() }
                 if (!cleaned) {
                     // The pre-fix version measured wav.length() and meta.length(): primary files only, and
                     // `length()` on a survivor directory reports the entry size, not the retained subtree.
@@ -2582,7 +2603,8 @@ class ContributionStore(
                     cleaned,
                 )
             } else {
-                val confirmed = confirmDurableLocked(id)
+                val confirmed = confirmRecoveredDurableLocked(id)
+
                 // ONE charge for every validated entry, assigned BEFORE branching on confirmation.
                 // Charging only the confirmed branch left a gap: a fresh store has an empty `self` set,
                 // so its unconfirmable on-disk entries were never charged anywhere and new work was
@@ -2612,6 +2634,7 @@ class ContributionStore(
             // never resurrect a stale in-memory copy), foreign entries follow validation.
             val self = memoryEntries.keys.filter { it in preparedIds }.toSet()
             memoryEntries.clear()
+
             for (id in self) {
                 // A self-prepared entry whose durability confirmation FAILED must be withheld from the
                 // index exactly like a foreign one. Rebuilding from validate() alone would reinsert it
@@ -2681,7 +2704,7 @@ class ContributionStore(
             // unmarked-debris sweep above, which measures and charges each capture ONCE as a whole;
             // sweeping those here would charge per file. Disqualified ids are excluded: their cleanup
             // runs through the namespace-confirmed disqualified path, never a bare delete.
-            val sidecarOnly = listOf(SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
+            val sidecarOnly = listOf(SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_PROVENANCE, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
             files.filter { f ->
                 val id = sidecarOnly.firstOrNull { f.name.endsWith(it) }?.let { f.name.removeSuffix(it) }
                 id != null &&
@@ -2827,7 +2850,8 @@ class ContributionStore(
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** Delete an entry's files; MUST be called while holding [lock]. */
+    // Delete an entry's files; MUST be called while holding [lock].
+    //
     // STRUCTURAL validation is not durability confirmation. An entry may have been left by a publication
     // whose final sync failed (the uncertain outcome), so its files could be present yet not durable.
     // Before exposing it as ready, re-establish and confirm the SAME barriers publication relies on:
@@ -2837,9 +2861,62 @@ class ContributionStore(
     //  - the queue directory's PARENT namespace, which is what makes the directory reachable at all.
     // Reviewed 805f0828: reloadUnownedFromDisk used to promote marker+validate directly, a SECOND and
     // weaker load path than recovery. Both now call this one transition, so they cannot diverge.
+
+    /**
+     * Which barrier THIS owner can actually run. `DirectorySync.PRODUCTION` is the real directory fence;
+     * any other implementation only fences content, so it must not claim a durability it never
+     * established. Recorded by publication so a later recovery never re-decides a fenced entry.
+     */
+    private fun provenanceState(): String = if (directorySync === DirectorySync.PRODUCTION) PROVENANCE_DIR_FENCED else PROVENANCE_CONTENT_ONLY
+
+    /**
+     * CONFIRMATION FOR A PREVIOUS PROCESS'S PUBLICATION (device incident 2026-11-07, spec bfe91857).
+     *
+     * [confirmDurableLocked] is the PUBLICATION barrier: it re-fsyncs every file and both directory
+     * levels. Recovery used it verbatim, so a restart re-ran a barrier whose outcome belongs to a
+     * process that has already exited - and any runtime where that barrier cannot run at this moment
+     * (unsupported platform, a failing directory open, a transient full disk) turned EVERY valid,
+     * already-durable clip into "uncertain" and served none of them. Nothing was deleted and nothing
+     * was counted, so the loss was silent and permanent: each restart repeated it.
+     *
+     * What recovery actually needs to know is what the PREVIOUS process's transition CREDITED. That is
+     * what [PROVENANCE_DIR_FENCED] / [PROVENANCE_CONTENT_ONLY] record, and publication writes the state
+     * BEFORE the barrier it describes, so a torn transition can never over-claim:
+     *  - [PROVENANCE_DIR_FENCED]: that build ran the real directory barrier. A barrier this runtime
+     *    cannot run now says something about THIS runtime, not about bytes already fenced, so the
+     *    entry is servable without re-deciding what has been decided.
+     *  - [PROVENANCE_CONTENT_ONLY]: content fsyncs only (`DirectorySync.REAL`), so directory durability
+     *    was never claimed; recovery re-decides such an entry with the barrier it can run.
+     *  - absent: either an older build or a transition that never finished. Uncertainty is not
+     *    rejection (the 5c811f83 ruling): the entry is withheld, never deleted, and a later recovery
+     *    or a full [confirmDurableLocked] decides it.
+     */
+    private fun confirmRecoveredDurableLocked(id: String): Boolean = runCatching {
+        // Best effort, never a gate: re-harden content this runtime may hold in its page cache. The
+        // barrier that mattered already ran in the publishing process.
+        ENTRY_SUFFIXES.map { File(dir, "$id$it") }
+            .filter { it.isFile }
+            .forEach { runCatching { fileSync.sync(it) } }
+        // (1) What did the publishing process attest? A directory fence already ran there, so a barrier
+        // this runtime cannot run must not be read as a doubt about the entry's bytes.
+        val published = File(dir, "$id$SUFFIX_PROVENANCE").takeIf { it.isFile }
+            ?.let { readBoundedSidecar(it, MAX_PROVENANCE_SIDECAR_BYTES)?.trim() }
+
+        if (published == PROVENANCE_DIR_FENCED) return@runCatching true
+
+        // (2) No proof: this owner may be the one that published the entry itself (a self-prepared entry
+        // is re-confirmed in-process), in which case a barrier that runs now decides it as before.
+        syncDirectoryOrFail(dir)
+        dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
+        // NO PROOF IS RAISED HERE, deliberately. The proof means "the publication transition
+        // completed", and only publication can say that; writing it during recovery would let a later
+        // recovery skip a barrier that never ran for an entry whose publication genuinely failed, which
+        // is exactly the uncertainty these paths must keep reporting.
+        true
+    }.getOrDefault(false)
+
     private fun confirmDurableLocked(id: String): Boolean = runCatching {
-        listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_READY, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
-            .map { File(dir, "$id$it") }
+        ENTRY_SUFFIXES.map { File(dir, "$id$it") }
             .filter { it.isFile }
             .forEach { fileSync.sync(it) }
         syncDirectoryOrFail(dir)
@@ -2995,7 +3072,7 @@ class ContributionStore(
                 }
                 val gone = deleteAll(
                     id,
-                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
+                    ENTRY_SUFFIXES,
                 )
                 if (gone) {
                     disqualificationMarker(id).delete()
@@ -3046,10 +3123,7 @@ class ContributionStore(
             return
         }
         // 2) Attempt every delete, regardless of earlier failures.
-        val gone = deleteAll(
-            id,
-            listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
-        )
+        val gone = deleteAll(id, ENTRY_SUFFIXES)
         memoryEntries.remove(id)
         Timber.tag(QUEUE_TAG).i(
             "voice-upload delete: capture=%s reason=%s outcome=%s",
@@ -3455,6 +3529,32 @@ class ContributionStore(
         /** Admitted-ownership sidecar: {"account":...,"session":...,"epoch":...}. */
         const val SUFFIX_OWNER = ".owner"
         private const val SUFFIX_CREATED = ".created"
+
+        /**
+         * Publication-completion proof (device incident 2026-11-07, spec bfe91857): written as the LAST
+         * step of publication, after every content fsync and the directory barriers, so its presence
+         * proves a later process can serve the entry without re-running the barrier. Its absence proves
+         * nothing and therefore withholds the entry rather than deleting it.
+         */
+        private const val SUFFIX_PROVENANCE = ".published"
+
+        /** Every file an entry can own. Deletion and residue sweeps use this ONE list. */
+        private val ENTRY_SUFFIXES = listOf(
+            SUFFIX_WAV,
+            SUFFIX_META,
+            SUFFIX_READY,
+            SUFFIX_ATTEMPTS,
+            SUFFIX_CREATED,
+            SUFFIX_DIGEST,
+            SUFFIX_RETRY,
+            SUFFIX_OWNER,
+            SUFFIX_PROVENANCE,
+            SUFFIX_ATTEMPTS + ".tmp",
+            SUFFIX_RETRY + ".tmp",
+        )
+        private const val PROVENANCE_DIR_FENCED = "v1"
+        private const val PROVENANCE_CONTENT_ONLY = "v1-content-only"
+        private const val MAX_PROVENANCE_SIDECAR_BYTES = 32
         private const val SUFFIX_DIGEST = ".sha256"
 
         // Everything a capture can leave on disk besides its primary audio and metadata. Kept as a fixed

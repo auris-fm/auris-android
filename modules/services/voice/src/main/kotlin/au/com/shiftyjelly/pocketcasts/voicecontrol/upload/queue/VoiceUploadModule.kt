@@ -232,6 +232,7 @@ object VoiceUploadModule {
     @Provides
     @Singleton
     fun provideVoiceUploadDrain(
+        store: ContributionStore,
         assembly: ContributionUploadAssembly,
         aurisToken: AurisTokenProvider,
     ): VoiceUploadDrain = VoiceUploadDrain {
@@ -242,6 +243,13 @@ object VoiceUploadModule {
         // creation (see provideContributionStore), before any capture preparation could begin.
         // Re-running recover() here would let its debris sweep unlink a live `.part` write from a
         // preparation in flight (reviewer 032a8639 HOLD).
+        //
+        // SEVEN-DAY EXPIRY IN THE DRAIN (reviewer 991931a6 HOLD on spec 05ff27d0): a recording not
+        // accepted within maxQueueAgeSeconds of capture must be DELETED, not withheld until a
+        // restart. expireOlderThan() is the scoped expiry path: ownership-leased, it touches only
+        // indexed committed entries past the age bound through the full deleteLocked machinery -
+        // never staging bytes, never a debris sweep - so it cannot race a live preparation.
+        store.expireOlderThan()
         assembly.poll()
     }
 

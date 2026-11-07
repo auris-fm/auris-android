@@ -416,7 +416,7 @@ class VoiceUploadCompositionPathTest {
                 aurisToken = aurisLive.provider,
             )
             // THE MODULE DRAIN BINDING — the exact provider Hilt consumes.
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(assembly, aurisLive.provider)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(store, assembly, aurisLive.provider)
             val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
             val worker = androidx.work.testing.TestListenableWorkerBuilder<VoiceUploadDrainWorker>(context)
                 .setWorkerFactory(object : androidx.work.WorkerFactory() {
@@ -498,6 +498,7 @@ class VoiceUploadCompositionPathTest {
         aurisLive: VoiceUploadCompositionFixtures.LiveAuris,
         server: HttpServer,
     ): VoiceUploadDrain = VoiceUploadModule.provideVoiceUploadDrain(
+        store,
         VoiceUploadModule.provideUploadAssembly(
             store = store,
             transport = ContributionUploadTransport(
@@ -708,6 +709,8 @@ class VoiceUploadCompositionPathTest {
 
     private fun sidecarFilesOf(id: String): List<java.io.File> = appQueue.listFiles()?.filter { it.name.startsWith(id) } ?: emptyList()
 
+    private fun sidecarFilesOf(root: java.io.File, id: String): List<java.io.File> = java.io.File(root, "contributions").listFiles()?.filter { it.name.startsWith(id) } ?: emptyList()
+
     @Test
     fun `an entry that exhausted the old 8-attempt cap still uploads after its backoff elapses`() {
         val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
@@ -836,6 +839,59 @@ class VoiceUploadCompositionPathTest {
                 "a deleted entry leaves NO residue - created/owner/retry go too",
                 0,
                 sidecarFilesOf(id).size,
+            )
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `an entry reaching 7 days in a LIVE process is deleted by the drain - its neighbour is untouched`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        var now = System.currentTimeMillis()
+        try {
+            // Same store instance throughout: NO reconstruction between the clock crossing the
+            // seven-day bound and the drain (reviewer 991931a6).
+            val root = tmp.newFolder("drain-expiry-live")
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = { now },
+                jitter = { 0L },
+            ).also { stores += it }
+            store.recover()
+            val idExpired = prepareVerifiedCapture(store)
+            now += 8L * 24 * 3600 * 1000 // the first recording is now past the 7-day bound
+            val idKeep = prepareVerifiedCapture(store) // the neighbour is brand new
+            val keepMeta = java.io.File(java.io.File(root, "contributions"), "$idKeep.metadata.json").readBytes()
+
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val drain = moduleDrain(store, startup, aurisLive, server)
+            status = 201
+            body = receiptBody(idKeep, sha256Hex(keepMeta))
+            runDrain(drain)
+
+            assertEquals(
+                "only the neighbour may reach the transport - the expired entry must be deleted first",
+                1,
+                hits.get(),
+            )
+            assertEquals(
+                "the expired entry's files must ALL be gone after a same-process drain",
+                0,
+                sidecarFilesOf(root, idExpired).size,
+            )
+            org.junit.Assert.assertNull("the neighbour uploads and settles normally", store.durableCapture(idKeep))
+            assertEquals(
+                "the expired entry's queue charge must be released",
+                0L,
+                store.totalQueuedBytes(),
             )
         } finally {
             aurisLive.shutdown()

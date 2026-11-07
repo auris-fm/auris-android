@@ -61,6 +61,7 @@ class ContributionRetryCallerTest {
         )
         return CanonicalJson.canonicalBytes(
             ContributionRecordBuilder(captureId, "epoch-1", "42")
+                .wakeRequired(true)
                 .model("vad", ModelRef.Named("silero-vad", "4.0"))
                 .model("wakeword", ModelRef.Named("auris-wake", "1.2"))
                 .model("asr", ModelRef.Named("whisper-small", "2024-11"))

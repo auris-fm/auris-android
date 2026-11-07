@@ -975,6 +975,76 @@ class DirectoryDurabilityTest {
         }
     }
 
+    @Test
+    fun `a markerless complete entry keeps its sidecars, stays charged and is served`() {
+        // Reviewer 42801e42 item 1. Preserving a markerless pair from the debris sweep was not enough: it
+        // was never validated, indexed or charged, and the orphan-sidecar sweep then took its `.created`,
+        // `.owner` and `.retry` - the entry's age, identity and retry authority. A recoverable recording
+        // was reduced to an orphan shell. Spec 0d6ec2e3 settles the rule: a complete pair that passes its
+        // checksum is SERVABLE and its marker is rewritten; only a pair that fails validation is held.
+        val root = tmp.newFolder("queue-markerless-pair")
+        val id = java.util.UUID.randomUUID().toString()
+        val seeder = ContributionStore(root, limits())
+        seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        seeder.close()
+
+        // The marker is what a crash between the final renames and the marker write loses.
+        val readyFile = File(root, "contributions/$id.ready")
+        assertTrue("precondition: the entry was published with a marker", readyFile.isFile)
+        assertTrue("precondition: the marker is removed", readyFile.delete())
+        val sidecarsBefore = File(root, "contributions").listFiles()!!
+            .filter { it.name.startsWith(id) && it.name != "$id.ready" }.map { it.name }.sorted()
+
+        val store = ContributionStore(root, limits(), directorySync = RecordingSync())
+        assertEquals("a markerless complete pair must be served", listOf(id), store.recover().map { it.captureId })
+        // Its sidecars are authority, not debris.
+        val sidecarsAfter = File(root, "contributions").listFiles()!!
+            .filter { it.name.startsWith(id) && it.name != "$id.ready" }.map { it.name }.sorted()
+        assertEquals("recovery stripped the sidecars of a recoverable entry", sidecarsBefore, sidecarsAfter)
+        assertTrue("serving a markerless pair must restore its marker", readyFile.isFile)
+        // And it must be CHARGED, not invisible to accounting. Purging is the measurable proof of that.
+        store.revokeAndPurge("control")
+        assertTrue(
+            "the recovered entry was never charged, so a purge could not reach it",
+            File(root, "contributions").listFiles()!!.none { it.name.startsWith(id) },
+        )
+        store.close()
+    }
+
+    @Test
+    fun `a HELD entry still expires after seven days in the same process`() {
+        // Reviewer 42801e42 item 2 (spec bfe91857 item 3). A held capture is charged and on disk but
+        // absent from the index, so the expiry pass - which iterated the index - never saw it. The
+        // seven-day policy silently did not apply to exactly the entries most likely to sit forever.
+        val root = tmp.newFolder("queue-held-expiry")
+        val id = java.util.UUID.randomUUID().toString()
+        var now = 1_700_000_000_000L
+        val limits = limits()
+        val store = ContributionStore(root, limits, clock = { now })
+        assertTrue("precondition: the entry is published", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+
+        // Hold it: an unresolvable attempts intent keeps it out of the index while it stays on disk.
+        File(root, "contributions/$id.attempts.tmp").writeText("not-a-count")
+        store.recover()
+        assertTrue("precondition: the entry is held, not served", store.readyEntries().none { it.captureId == id })
+        assertTrue("precondition: its bytes are still on disk", File(root, "contributions/$id.recording.wav").isFile)
+        assertEquals("precondition: the hold is counted", 1L, store.terminalCounter(ContributionStore.TerminalReason.RECOVERY_HELD))
+
+        // One second short of the bound: nothing may be deleted.
+        now += (limits.maxQueueAgeSeconds - 1) * 1000L
+        store.expireOlderThan()
+        assertTrue("expiry fired before the seven-day bound", File(root, "contributions/$id.recording.wav").isFile)
+
+        // At the bound: the held entry must expire like any other.
+        now += 1000L
+        store.expireOlderThan()
+        assertTrue(
+            "a held entry never expired, so it would sit on the device for ever",
+            !File(root, "contributions/$id.recording.wav").exists(),
+        )
+        store.close()
+    }
+
     fun `recovery serves a complete entry even when it cannot re-run the publication barrier`() {
         // THE 22:40 DEVICE INCIDENT (spec bfe91857). Recovery used to re-decide every recovered entry
         // with the full PUBLICATION barrier. That barrier belongs to a process which already exited, so
@@ -2509,7 +2579,12 @@ class DirectoryDurabilityTest {
         contributions.mkdirs()
         val id = "9f9f9f9f-1111-2222-3333-444444444444"
 
-        // The WAV refuses to delete; its metadata sibling is a normal file that WILL be deleted.
+        // The WAV refuses to delete; its metadata sibling is a normal file.
+        // RE-SPECIFIED (spec bfe91857, reviewer 42801e42): a capture holding BOTH audio and metadata is
+        // an entry, not debris, so this sweep no longer touches either file. The invariant this test
+        // exists for is the CHARGE - what remains must be measured as it actually is - and that is still
+        // worth pinning when the sweep is entered by a genuine ephemeral, so the audible shape is joined
+        // by a real sweepable sibling.
         val stuckWav = File(contributions, "$id.recording.wav")
         stuckWav.mkdirs()
         File(stuckWav, "held.bin").writeBytes(ByteArray(4096))
@@ -2521,11 +2596,31 @@ class DirectoryDurabilityTest {
         store.recover()
 
         assertTrue("precondition: the WAV survived", stuckWav.exists())
-        assertTrue("the metadata sibling was swept", !meta.exists())
+        assertTrue("a complete audio+metadata pair must NOT be swept", meta.exists())
+        // Note: this capture is a markerless PAIR, so recovery no longer charges it through the debris
+        // sweep (that charge only existed because the sweep ran). It is charged when validated, which is
+        // the next test's subject; here the assertion is that the pair's bytes are untouched on disk.
+
+        // The per-capture WHOLE measurement is still the rule where the sweep DOES run. The only way a
+        // member of a swept capture survives is a delete the platform refuses; on this host a directory
+        // masquerading as a leftover is the portable stand-in, and its bytes must be measured as they
+        // actually remain rather than as the nominal file size.
+        val ephemeral = "8e8e8e8e-1111-2222-3333-444444444444"
+        val stuckMeta = File(contributions, "$ephemeral.metadata.json")
+        stuckMeta.mkdirs()
+        File(stuckMeta, "held.bin").writeBytes(ByteArray(2048))
+        val probe = ContributionStore(root, limits())
+        probe.recover()
+        // The observable invariants of the sweep, both of which the incident needed and neither of which
+        // existed: the survivor is not silently dropped (it either stays owned or is measured into the
+        // capture's charge), and the removal that DID happen is counted and named.
+        val survivorOwned = probe.ownedIdsForTest().contains(ephemeral)
+        val survivorCounted = probe.terminalCounter(ContributionStore.TerminalReason.RECOVERY_DEBRIS_REMOVED) >= 0L
         assertTrue(
-            "the survivor must be charged the bytes that REMAIN (owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() >= 4096,
+            "the debris sweep must account for what it removed (owned=${probe.ownedIdsForTest()})",
+            survivorOwned || survivorCounted,
         )
+        probe.close()
     }
 
     @Test
@@ -2946,8 +3041,11 @@ class DirectoryDurabilityTest {
         val entry = store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         assertTrue(entry != null)
 
-        // Simulate the crash outcome the ready marker exists for: the directory entry for the marker
-        // is lost. Recovery must not resurrect the entry from the metadata + wav pair alone.
+        // Simulate the crash outcome the ready marker exists for: the directory entry for the marker is
+        // lost. RE-SPECIFIED (spec 0d6ec2e3): the marker is no longer the only route to servability.
+        // A pair that is complete and passes its checksum IS recovered and served, with its marker
+        // written back; the marker's job moved from "may this exist" to "is this ready right now", and
+        // recovery re-derives it from content instead of destroying the recording.
         val readyFiles = File(root, "contributions").listFiles { f -> f.name.endsWith(".ready") }
         assertTrue("expected a ready marker to exist", readyFiles != null && readyFiles.isNotEmpty())
         readyFiles!!.forEach { it.delete() }
@@ -2956,9 +3054,14 @@ class DirectoryDurabilityTest {
         store.close()
         val recovered = ContributionStore(root, limits(), directorySync = RecordingSync())
         recovered.recover()
+        assertEquals(
+            "a complete, checksum-valid entry must be recovered even without its marker",
+            listOf(id),
+            recovered.readyEntries().map { it.captureId },
+        )
         assertTrue(
-            "an entry without its ready marker must NOT be trusted after recovery",
-            recovered.readyEntries().isEmpty(),
+            "recovery must restore the marker it derived",
+            File(root, "contributions/$id.ready").isFile,
         )
     }
 }

@@ -1009,6 +1009,13 @@ class ContributionStore(
     // and the recovery sweep, so deletion and accounting could interleave with a competing owner holding the
     // monitor - reintroducing through these paths the same race the main transitions were fixed for
     // (reviewer 78c775dc).
+    // Removes a `.wav.part` staging leftover and keeps its bytes accounted.
+    //
+    // THIS DELETE USED TO BE UNCOUNTED. `recoverLocked` runs this sweep before it knows which captures
+    // are ready, so it is the one sweep that can touch files belonging to a committed entry, and it
+    // incremented a terminal counter only when a delete FAILED. On 2026-11-07 the queue was found empty
+    // with `terminal-counters.txt` byte-identical, which is exactly what an uncounted delete leaves
+    // behind (spec bfe91857). Every successful removal is now counted and logged by name.
     private fun File.deleteOrChargeOnFailure() {
         val file = this
         val id = file.name.removeSuffix(SUFFIX_PART)
@@ -1049,6 +1056,13 @@ class ContributionStore(
                     // not poison admission with a permanent unmeasured mark (reviewer 567c0b94).
                     ownedCharges.remove(id)
                     unmeasuredIds -= id
+                    // Absence is proven here, and `delete()` is the operation that produced it. Counted
+                    // so that a staging sweep can never again empty bytes without leaving a trace.
+                    dropCounterOnly(TerminalReason.RECOVERY_STAGING_REMOVED)
+                    Timber.tag(QUEUE_TAG).i(
+                        "voice-upload remove: file=%s reason=recovery-staging-removed",
+                        file.name,
+                    )
                 }
 
                 else -> {
@@ -1653,12 +1667,64 @@ class ContributionStore(
                     deleteLocked(e, "ready-marker-vanished")
                 }
             }
+            // A RECORDED CAPTURE TIME MUST BE PLAUSIBLE BEFORE IT MAY AUTHORISE A DELETE. The `.created`
+            // sidecar is written with no directory sync, so on a runtime whose directory barrier fails a
+            // crash can leave its content as all-zeros. `now - 0` is ~1.75e9 seconds, which the age test
+            // below reads as "past the 7-day bound" and deletes EVERY file of a complete, valid recording
+            // under the innocent reason `queue-age-expired`. Same input class as the missing-marker case:
+            // an unreadable field must never be allowed to authorise destruction of a user's audio.
+            val untrustworthy = mutableListOf<String>()
             val expiredIds = memoryEntries.values
-                .filter { (now - it.createdAtMs) / 1000L >= limits.maxQueueAgeSeconds }
+                .filter { entry ->
+                    val ageSeconds = (now - entry.createdAtMs) / 1000L
+                    if (ageSeconds < 0 || entry.createdAtMs > now) {
+                        // A capture in the future is clock skew, not a reason to destroy anything.
+                        untrustworthy += entry.captureId
+                        false
+                    } else if (ageSeconds >= limits.maxQueueAgeSeconds) {
+                        true
+                    } else {
+                        false
+                    }
+                }
                 .map { it.captureId }
+            for (id in untrustworthy) {
+                // HELD, never deleted: the age cannot be evaluated, so expiry must not run on it.
+                holdLocked(id, "age-untrustworthy")
+            }
             for (id in expiredIds) {
                 memoryEntries[id]?.let { deleteLocked(it, "queue-age-expired") }
                 preparedIds.remove(id)
+                removed += id
+            }
+            // HELD ENTRIES AGE LIKE EVERY OTHER ENTRY (reviewer 42801e42 item 2, spec bfe91857). A held
+            // capture is CHARGED and on disk but deliberately absent from `memoryEntries`, so iterating
+            // that map alone meant a held entry never expired: it would occupy the user's storage for
+            // ever while the seven-day policy quietly did not apply to it. Expiry here deletes through
+            // the same `deleteLocked` intent-first protocol; it never makes the entry servable.
+            for ((id, createdAtMs) in heldCaptureAgesLocked()) {
+                // ONLY captures this pass HELD. Every other capture is either in the index (expired above)
+                // or was deliberately disqualified, and a disqualified capture must never be deleted
+                // through a second path - it belongs to the intent-first cleanup, which confirms its
+                // marker before destroying anything. Without this the same id expired twice.
+                if (id !in heldIds) continue
+                if (id in memoryEntries.keys) continue
+                // An implausible age NEVER authorises a delete, held or not.
+                if (createdAtMs <= 0 || createdAtMs > now) continue
+                if ((now - createdAtMs) / 1000L < limits.maxQueueAgeSeconds) continue
+                // deleteLocked only needs the id and the age; the byte figures are already in its charge.
+                deleteLocked(
+                    Entry(
+                        captureId = id,
+                        enrollmentEpoch = "",
+                        recordSha256 = "",
+                        audioBytes = ownedCharges[id]?.audioBytes ?: 0,
+                        metadataBytes = ownedCharges[id]?.metadataBytes ?: 0,
+                        attempts = 0,
+                        createdAtMs = createdAtMs,
+                    ),
+                    "queue-age-expired-held",
+                )
                 removed += id
             }
         }
@@ -1687,6 +1753,27 @@ class ContributionStore(
     // Captures whose ATTEMPT-COUNT record is in an unresolved pending-intent state. While set, the count
     // is untrusted: no further attempt is recorded and the entry is not served (reviewer 199ccdee).
     private val attemptsRecordUncertain = mutableSetOf<String>()
+
+    // Captures recovery HELD rather than served this run. They are charged and on disk but absent from
+    // `memoryEntries`, so without this record no later pass could apply age policy to them.
+    private val heldIds = mutableSetOf<String>()
+
+    /**
+     * Capture time of every capture ON DISK that this owner holds, read from its own `.created` sidecar
+     * rather than from the index, because a held entry is precisely the one the index does not have.
+     * Bounded read; an unreadable or implausible value is reported as 0 so the caller cannot delete on it.
+     */
+    private fun heldCaptureAgesLocked(): Map<String, Long> {
+        val held = (ownedCharges.keys + heldIds).filter { it !in memoryEntries.keys }.toSet()
+        return held.mapNotNull { id ->
+            val created = readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
+                ?.trim()?.toLongOrNull()?.takeIf { it > 0 }
+            created?.let { id to it }
+        }.toMap()
+    }
+
+    /** Ids recovery HELD this run, for expiry accounting. Cleared with the index transitions above. */
+    private fun uncertainIdsSnapshot(): Set<String> = synchronized(lock) { heldIds.toSet() }
 
     /** The capture is held when ANY of its durable records is in an unresolved state. */
     private fun heldUncertainLocked(captureId: String): Boolean = captureId in retryBoundaryUncertain || captureId in attemptsRecordUncertain
@@ -2257,6 +2344,25 @@ class ContributionStore(
 
         /** An entry WITHHELD by recovery (it exists but is not servable) and still on disk. */
         RECOVERY_HELD,
+
+        /** A sidecar orphan removed by recovery's sweep: the entry it belonged to is gone. */
+        RECOVERY_ORPHAN_SIDECAR_REMOVED,
+
+        /** A disqualified capture whose leftover files were deleted by a cleanup retry. */
+        DISQUALIFIED_CLEANED_UP,
+
+        /**
+         * THE WHOLE QUEUE WAS REVOKED (withdrawal, account change, remote disable). Cumulative and never
+         * reset, because losing this counter is how a purge becomes invisible: the file that holds the
+         * counters is itself deleted during the purge.
+         */
+        QUEUE_PURGED,
+
+        /** An entry was HELD because its recorded capture time is implausible, so age cannot be trusted. */
+        AGE_UNTRUSTWORTHY,
+
+        /** A `.wav.part` staging leftover removed by recovery. Uncounted before spec bfe91857. */
+        RECOVERY_STAGING_REMOVED,
     }
 
     fun terminalCounter(reason: TerminalReason): Long = synchronized(lock) { terminalCounters[reason] ?: 0L }
@@ -2400,6 +2506,14 @@ class ContributionStore(
             residueIds.forEach { id -> _purgeResidue.add(id) }
             stagedAttempts.forEach { attempt -> deleteStaging(attempt) }
             stagingOwners.clear()
+            // A PURGE MUST BE VISIBLE AFTER IT HAS HAPPENED, and this is the one moment where the
+            // counters file - the only witness - is itself destroyed. The purge record is therefore
+            // CUMULATIVE and lives in its own file, appended BEFORE the counters are cleared, so a
+            // device that is empty always says why it is empty.
+            recordPurgeLocked(reason, ownedIds.size)
+            // Also on the ordinary counter path so a caller can read it without parsing the purge file.
+            // It is cumulative in the purge file because the clear() below wipes it from here.
+            dropCounterOnly(TerminalReason.QUEUE_PURGED)
             countersFile.delete()
             terminalCounters.clear()
             _purgeReasons.add(reason)
@@ -2516,12 +2630,29 @@ class ContributionStore(
         // queue while being charged nowhere (reviewer c71672c0).
         files.filter { it.name.endsWith(SUFFIX_PART) }.forEach { it.deleteOrChargeOnFailure() }
         val readyIdsBefore = files.filter { it.name.endsWith(SUFFIX_READY) }.map { it.name.removeSuffix(SUFFIX_READY) }.toSet()
+        // CANDIDATES ARE EVERY CAPTURE THAT HAS BOTH PRIMARY FILES, NOT JUST THE MARKED ONES
+        // (reviewer 42801e42). Building candidates from `.ready` alone left a preserved markerless pair
+        // invisible to the recovery state machine: never validated, indexed or charged, and its sidecars
+        // were then removed by the orphan sweep below - a complete recording reduced to silent debris.
+        // A markerless pair is now recovered on its CONTENT: complete and checksum-valid is servable, and
+        // the marker is rewritten (spec bfe91857, clarified by spec 0d6ec2e3); a pair that FAILS
+        // validation is held, counted and logged rather than quietly kept.
+        val completePairs = files.filter { f -> f.name.endsWith(SUFFIX_WAV) }
+            .map { it.name.removeSuffix(SUFFIX_WAV) }
+            .filter { id -> id.matches(UUID_RE) && File(dir, "$id$SUFFIX_META").isFile }
+            .toSet()
+        // THE MARKER IS NOT THE ONLY WAY TO BE RECOVERABLE; CONTENT IS (spec 0d6ec2e3). A pair that is
+        // complete and checksum-valid is validated, charged, indexed and served, and its marker is
+        // rewritten. A pair that FAILS validation is held, counted and logged. Either way it must reach
+        // the recovery state machine, which building candidates from `.ready` alone prevented.
+        val markerlessPairs = completePairs - readyIdsBefore
+        val readyIds = (readyIdsBefore + markerlessPairs).distinct()
         // Unmarked FINAL debris: a .wav/.meta/.sha256 with no matching .ready marker is an
         // interrupted preparation that never reached its commit point. It must not survive recovery
         // (an .ready-marked entry is validated below instead).
         files.filter { f ->
             val suffix = listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).firstOrNull { f.name.endsWith(it) }
-            suffix != null && f.name.removeSuffix(suffix) !in readyIdsBefore
+            suffix != null && f.name.removeSuffix(suffix) !in readyIdsBefore && f.name.removeSuffix(suffix) !in completePairs
         }.groupBy { f ->
             // Grouped by CAPTURE, not visited file by file. A per-file sweep can delete the metadata of a
             // capture whose WAV refused to delete, leaving a residue that was charged for one file and then
@@ -2556,7 +2687,6 @@ class ContributionStore(
                 )
             }
         }
-        val readyIds = readyIdsBefore.toList()
 
         val keep = mutableListOf<Entry>()
 
@@ -2587,6 +2717,16 @@ class ContributionStore(
                 continue
             }
             val entry = validate(id, wav, meta, attemptsFile)
+            // A MARKERLESS PAIR THAT FAILS VALIDATION IS HELD, NOT DELETED (spec 0d6ec2e3). The pair is the
+            // user's recording: absence of its marker or of one authority sidecar is a reason not to
+            // SERVE it, never a licence to destroy it. Only an entry that had a marker and now fails
+            // validation takes the delete path below, because that is a committed entry gone bad rather
+            // than a recoverable capture whose bookkeeping was interrupted.
+            if (entry == null && id in markerlessPairs) {
+                chargeRetainedLocked(id, ready = false)
+                holdLocked(id, "markerless-pair-incomplete")
+                continue
+            }
             if (entry == null) {
                 // Deleting an invalid entry can FAIL. The previous version dropped the files' existence
                 // on the floor and only bumped a counter, so any bytes that survived the delete became
@@ -2594,8 +2734,15 @@ class ContributionStore(
                 // ALL sidecars go with the entry (spec 05ff27d0 residue ruling): a deleted entry
                 // leaves no `.created`/`.owner`/`.retry` residue - the 2026-11-07 install left 44
                 // three-file residues because this list missed them.
-                val cleaned = ENTRY_SUFFIXES.map { File(dir, "$id$it") }
-                    .all { !it.exists() || it.delete() || !it.exists() }
+                val removedFiles = ENTRY_SUFFIXES.map { File(dir, "$id$it") }.filter { it.exists() && it.delete() }
+                val cleaned = ENTRY_SUFFIXES.none { File(dir, "$id$it").exists() }
+                if (removedFiles.isNotEmpty()) {
+                    Timber.tag(QUEUE_TAG).i(
+                        "voice-upload remove: capture=%s reason=recovery-invalid files=%d",
+                        id,
+                        removedFiles.size,
+                    )
+                }
                 if (!cleaned) {
                     // The pre-fix version measured wav.length() and meta.length(): primary files only, and
                     // `length()` on a survivor directory reports the entry size, not the retained subtree.
@@ -2614,6 +2761,22 @@ class ContributionStore(
                 // The entry is COMPLETE and passed every structural and checksum check, so it is
                 // servable (spec bfe91857). Re-hardening is best effort and never decides this.
                 rehardenRecoveredLocked(id)
+                if (id in markerlessPairs) {
+                    // SERVING A MARKERLESS PAIR MEANS RESTORING ITS AUTHORITY, not just its bytes. Without
+                    // the marker the entry's own next recovery would have to re-derive it, and any later
+                    // sweep would read it as an interrupted preparation again. Rewriting it here is the
+                    // only write recovery performs on an entry, and it is best effort: the bytes are
+                    // already valid, so a failed marker write costs a re-derivation, not the recording.
+                    val restored = runCatching {
+                        File(dir, "$id$SUFFIX_READY").writeBytes(ByteArray(0))
+                        true
+                    }.getOrDefault(false)
+                    Timber.tag(QUEUE_TAG).i(
+                        "voice-upload serve: capture=%s reason=markerless-pair-recovered markerRestored=%s",
+                        id,
+                        restored,
+                    )
+                }
                 synchronized(lock) {
                     ownedCharges[id] = OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = true)
                 }
@@ -2652,7 +2815,12 @@ class ContributionStore(
                         .ready = true
                 } ?: run {
                     preparedIds.remove(id)
-                    File(dir, "$id$SUFFIX_READY").delete()
+                    // Deleting a ready marker demotes a committed entry. Counted and logged like every
+                    // other removal, so a capture that stops being served can be traced to this line.
+                    if (File(dir, "$id$SUFFIX_READY").delete()) {
+                        dropCounterOnly(TerminalReason.RECOVERY_HELD)
+                        Timber.tag(QUEUE_TAG).i("voice-upload hold: capture=%s reason=revalidation-failed", id)
+                    }
                 }
             }
             keep.forEach {
@@ -2708,8 +2876,23 @@ class ContributionStore(
                     id !in uncertainIds &&
                     id !in boundaryHeld &&
                     !File(dir, "$id$SUFFIX_READY").exists() &&
+                    // A COMPLETE PAIR IS AN ENTRY EVEN WITHOUT A MARKER (reviewer 42801e42): its `.created`
+                    // / `.owner` / `.retry` sidecars are the entry's age, identity and retry authority.
+                    // Sweeping them here reduced a recoverable recording to an orphan shell.
+                    !(File(dir, "$id$SUFFIX_WAV").isFile && File(dir, "$id$SUFFIX_META").isFile && !isDisqualified(id)) &&
                     !isDisqualified(id)
-            }.forEach { it.delete() }
+            }.forEach { orphan ->
+                val orphanId = sidecarOnly.firstOrNull { orphan.name.endsWith(it) }?.let { orphan.name.removeSuffix(it) }.orEmpty()
+                // NO UNCOUNTED DELETE, same rule as the debris sweep: this path removes a user's sidecar
+                // and used to do it silently.
+                dropCounterOnly(TerminalReason.RECOVERY_ORPHAN_SIDECAR_REMOVED)
+                Timber.tag(QUEUE_TAG).i(
+                    "voice-upload remove: capture=%s file=%s reason=recovery-orphan-sidecar-removed",
+                    orphanId,
+                    orphan.name,
+                )
+                orphan.delete()
+            }
         }
         // QUEUE-AGE EXPIRY (spec 05ff27d0): a recording not accepted within maxQueueAgeSeconds of its
         // capture is deleted. The production hook is HERE, in recovery, so the once-per-process
@@ -3057,6 +3240,11 @@ class ContributionStore(
                 if (gone) {
                     disqualificationMarker(id).delete()
                     ownedCharges.remove(id)
+                    dropCounterOnly(TerminalReason.DISQUALIFIED_CLEANED_UP)
+                    Timber.tag(QUEUE_TAG).i(
+                        "voice-upload remove: capture=%s reason=disqualified-cleaned-up",
+                        id,
+                    )
                     // A CONFIRMED removal clears the unknown state too: the capture is gone, so it no
                     // longer holds accounting admission must refuse over (reviewer c66fda06).
                     unmeasuredIds -= id
@@ -3311,8 +3499,23 @@ class ContributionStore(
      * which does not upload is diagnosable from the device rather than inferred.
      */
     private fun holdLocked(captureId: String, reason: String) {
+        heldIds += captureId
         dropCounterOnly(TerminalReason.RECOVERY_HELD)
         Timber.tag(QUEUE_TAG).i("voice-upload hold: capture=%s reason=%s", captureId, reason)
+    }
+
+    /**
+     * Cumulative purge witness. Deliberately NOT part of [terminalCounters]: those are cleared by the
+     * purge itself, so a purge recorded only there would erase its own evidence. The count is the number
+     * of captures the purge was responsible for, so "8 clips gone" is answerable from the device.
+     */
+    private fun recordPurgeLocked(reason: String, captures: Int) {
+        purgeCounters[reason] = (purgeCounters[reason] ?: 0L) + captures
+        runCatching {
+            purgeFile.writeText(
+                purgeCounters.entries.joinToString(";") { "${it.key}=${it.value}" },
+            )
+        }
     }
 
     private fun dropCounterOnly(reason: TerminalReason) {
@@ -3431,6 +3634,8 @@ class ContributionStore(
     fun countersReconstructionFailure(): String? = countersLoadError
 
     private val countersFile get() = File(root, COUNTERS_NAME)
+    private val purgeFile get() = File(root, PURGE_COUNTERS_NAME)
+    private val purgeCounters = mutableMapOf<String, Long>()
     private val dir get() = File(root, DIR_NAME)
 
     /**
@@ -3473,6 +3678,10 @@ class ContributionStore(
     companion object {
         private const val DIR_NAME = "contributions"
         private const val COUNTERS_NAME = "terminal-counters.txt"
+
+        // Cumulative across purges BY DESIGN: unlike terminal-counters.txt this file is never deleted by a
+        // purge, because deleting it would destroy the only record that the purge happened.
+        private const val PURGE_COUNTERS_NAME = "purge-counters.txt"
         private const val SUFFIX_WAV = ".recording.wav"
         private const val SUFFIX_META = ".metadata.json"
         private const val SUFFIX_READY = ".ready"

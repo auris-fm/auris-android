@@ -644,8 +644,8 @@ class LoopbackHostDriverTest {
 
         // Client-side observable of the same event: retained, nothing validated.
         val retainedProbe = store.durableCapture(id)
+        retainedProbe?.owned?.settle(500L)
         assertTrue("still retained after the lost response", retainedProbe != null)
-        retainedProbe!!.owned?.settle(500L)
         assertEquals("the lost response validated nothing", 0, accepted.get())
 
         // Retry: server answers 200 duplicate with the SAME receipt (same-receipt is asserted

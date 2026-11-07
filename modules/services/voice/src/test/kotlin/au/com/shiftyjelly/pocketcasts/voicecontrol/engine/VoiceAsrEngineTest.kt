@@ -3410,9 +3410,11 @@ class VoiceAsrEngineTest {
         val ready = store.readyEntries()
         assertEquals("the capture must be DELIVERED by the trigger, not staged by the test", 1, ready.size)
         val durable = checkNotNull(store.durableCapture(ready.single().captureId)) { "the delivered capture must be durable" }
-        val decoded = RecordValidator.validate(durable.record)
-        // The descriptor holds a PROCESS-WIDE source slot; settle it now that the record is read.
+        val recordToValidate = durable.record
+        // The descriptor holds a PROCESS-WIDE source slot; settle it BEFORE any throwing assert so
+        // the slot returns even when validation fails (reviewer 586e0209).
         durable.owned?.settle(1_000L)
+        val decoded = RecordValidator.validate(recordToValidate)
         assertTrue(
             "the delivered record must validate: $decoded",
             decoded is RecordValidator.Result.Ok,
@@ -3563,11 +3565,12 @@ class VoiceAsrEngineTest {
         assertEquals(0, retentionSink.retainedCount())
         assertEquals(0L, retentionSink.retainedBytes())
         val durableProbe = checkNotNull(store.durableCapture(ready.single().captureId))
-        val decoded = when (val v = RecordValidator.validate(durableProbe.record)) {
+        val recordToValidate = durableProbe.record
+        durableProbe.owned?.settle(1_000L)
+        val decoded = when (val v = RecordValidator.validate(recordToValidate)) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
-        durableProbe.owned?.settle(1_000L)
         val bleed = decoded.observations.getValue(StageName.Bleed)
         assertEquals("the PERSISTED bleed state must be a completed check", StageState.Completed, bleed.state)
         assertEquals("overlap", (bleed.fields.getValue("decision") as RecordNode.Str).value)

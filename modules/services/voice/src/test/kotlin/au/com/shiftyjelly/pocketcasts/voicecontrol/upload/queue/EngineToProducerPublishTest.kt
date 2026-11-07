@@ -542,8 +542,8 @@ class EngineToProducerPublishTest {
             wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a bleed-rejected capture", stored != null)
-        val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
-        val decodedRecord = when (val v = RecordValidator.validate(decoded.record)) {
+        val decoded = servingRecord(store, ctx.captureId.toString())
+        val decodedRecord = when (val v = RecordValidator.validate(decoded)) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
@@ -593,8 +593,8 @@ class EngineToProducerPublishTest {
             wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a failed invocation", stored != null)
-        val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
-        val record = when (val v = RecordValidator.validate(decoded.record)) {
+        val decoded = servingRecord(store, ctx.captureId.toString())
+        val record = when (val v = RecordValidator.validate(decoded)) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
@@ -642,10 +642,10 @@ class EngineToProducerPublishTest {
             wakeRequired = true,
         )
         assertTrue("the producer must publish a record for a wake-only capture with text", stored != null)
-        val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
+        val decoded = servingRecord(store, ctx.captureId.toString())
         val json = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
-            .canonicalBytes(decoded.record).toString(Charsets.UTF_8)
-        val record = when (val v = RecordValidator.validate(decoded.record)) {
+            .canonicalBytes(decoded).toString(Charsets.UTF_8)
+        val record = when (val v = RecordValidator.validate(decoded)) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
@@ -695,7 +695,7 @@ class EngineToProducerPublishTest {
         trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
-        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
+        val decoded = when (val v = RecordValidator.validate(servingRecord(store, ctx.captureId.toString()))) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
@@ -745,6 +745,19 @@ class EngineToProducerPublishTest {
         )
     }
 
+    /**
+     * Opens the durable capture, hands its RECORD to the caller, and settles the descriptor before
+     * returning — the process-wide source slot returns unconditionally, before any throwing
+     * assertion runs (reviewer 586e0209). Nothing between open and settle can throw: `.record` is a
+     * field read.
+     */
+    private fun servingRecord(store: ContributionStore, captureId: String): RecordNode.Obj {
+        val d = checkNotNull(store.durableCapture(captureId))
+        val record = d.record
+        d.owned?.settle(1_000L)
+        return record
+    }
+
     private fun assertDurableExecution(
         dir: String,
         reported: ExecutionOutcome,
@@ -761,9 +774,16 @@ class EngineToProducerPublishTest {
         trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
-        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
-            is RecordValidator.Result.Ok -> v.record
-            else -> error("the persisted record must decode, got $v")
+        // ONE open serves the validation and (for refused) the parity export. The descriptor
+        // settles in finally, so the slot returns even when an assertion throws (reviewer 586e0209).
+        val durable = checkNotNull(store.durableCapture(ctx.captureId.toString()))
+        val decoded = try {
+            when (val v = RecordValidator.validate(durable.record)) {
+                is RecordValidator.Result.Ok -> v.record
+                else -> error("the persisted record must decode, got $v")
+            }
+        } finally {
+            if (dir != "exec-refused") durable.owned?.settle(1_000L)
         }
         val execution = decoded.observations.getValue(StageName.Execution)
         assertEquals("state for $expectedOutcome", expectedState, execution.state)
@@ -779,7 +799,11 @@ class EngineToProducerPublishTest {
         )
 
         if (dir == "exec-refused") {
-            emitRefusedParityArtifact(durable = checkNotNull(store.durableCapture(ctx.captureId.toString())))
+            try {
+                emitRefusedParityArtifact(durable)
+            } finally {
+                durable.owned?.settle(1_000L)
+            }
         }
     }
 
@@ -829,7 +853,7 @@ class EngineToProducerPublishTest {
         trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
-        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
+        val decoded = when (val v = RecordValidator.validate(servingRecord(store, ctx.captureId.toString()))) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
@@ -870,8 +894,7 @@ class EngineToProducerPublishTest {
         store: ContributionStore,
         captureId: UUID,
     ): StageProvenanceExecution {
-        val stored = checkNotNull(store.durableCapture(captureId.toString())) { "the capture must be published" }
-        val decoded = when (val v = RecordValidator.validate(stored.record)) {
+        val decoded = when (val v = RecordValidator.validate(servingRecord(store, captureId.toString()))) {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
@@ -948,8 +971,7 @@ class EngineToProducerPublishTest {
         assertTrue("the producer must publish a record for a failed-detector capture", stored != null)
         // ...and survive a round trip through the RECOVERY authority, which is where the pairing rule
         // is enforced for records coming back in.
-        val served = checkNotNull(store.durableCapture(ctx.captureId.toString()))
-        val decoded = RecordValidator.validate(served.record)
+        val decoded = RecordValidator.validate(servingRecord(store, ctx.captureId.toString()))
         assertTrue(
             "the persisted record must be ACCEPTED by the recovery validator, got: $decoded",
             decoded is RecordValidator.Result.Ok,

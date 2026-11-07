@@ -481,9 +481,10 @@ class CaptureOutcomeFinalizerTest {
         h.clock.pump()
         assertEquals("the expired capture is published exactly once", 1, h.readyFor().size)
         val durableProbe = h.store.durableCapture(h.captureId.toString())!!
-        val canonical = CanonicalJson.canonicalBytes(durableProbe.record).toString(Charsets.UTF_8)
-        // The probe's descriptor held a PROCESS-WIDE source slot; settle it so the slot returns.
+        val record = durableProbe.record
+        // Settle BEFORE the (throwing-capable) serialization so the slot returns regardless.
         durableProbe.owned?.settle(1_000L)
+        val canonical = CanonicalJson.canonicalBytes(record).toString(Charsets.UTF_8)
         assertTrue("the persisted record must be typed outcome_wait_expired", canonical.contains("outcome_wait_expired"))
         assertNull("retention ended by expiry", h.sink.retainedCandidateForTest(h.captureId))
         assertEquals(0L, h.sink.retainedBytes())

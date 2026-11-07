@@ -1045,6 +1045,7 @@ class DirectoryDurabilityTest {
         store.close()
     }
 
+    @Test
     fun `recovery serves a complete entry even when it cannot re-run the publication barrier`() {
         // THE 22:40 DEVICE INCIDENT (spec bfe91857). Recovery used to re-decide every recovered entry
         // with the full PUBLICATION barrier. That barrier belongs to a process which already exited, so
@@ -2571,56 +2572,152 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `a capture whose WAV refuses to delete charges what actually SURVIVED`() {
-        // Visiting files one by one could delete a capture's metadata after its WAV refused, so the charge
-        // described a shape the residue no longer had. The sweep now handles each capture as a whole.
-        val root = tmp.newFolder("queue-capture-delete-failure")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val id = "9f9f9f9f-1111-2222-3333-444444444444"
+    fun `the purge witness accumulates across processes instead of being overwritten`() {
+        // Reviewer 5507715b item 3. The witness of a purge - the only surface that survives one - was kept
+        // in memory only, so the NEXT process started from an empty map and rewrote the file. Each purge
+        // therefore destroyed the evidence of the previous one, which is exactly what a purge record exists
+        // to prevent.
+        val root = tmp.newFolder("queue-purge-cumulative")
+        val witness = File(root, "purge-counters.txt")
 
-        // The WAV refuses to delete; its metadata sibling is a normal file.
-        // RE-SPECIFIED (spec bfe91857, reviewer 42801e42): a capture holding BOTH audio and metadata is
-        // an entry, not debris, so this sweep no longer touches either file. The invariant this test
-        // exists for is the CHARGE - what remains must be measured as it actually is - and that is still
-        // worth pinning when the sweep is entered by a genuine ephemeral, so the audible shape is joined
-        // by a real sweepable sibling.
-        val stuckWav = File(contributions, "$id.recording.wav")
-        stuckWav.mkdirs()
-        File(stuckWav, "held.bin").writeBytes(ByteArray(4096))
-        val meta = File(contributions, "$id.metadata.json")
-        meta.writeBytes(ByteArray(777))
-        // No .ready sibling, so both are unmarked debris.
+        fun purgeOnce(reason: String) {
+            val store = ContributionStore(root, limits())
+            store.recover()
+            store.revokeAndPurge(reason)
+            store.close()
+        }
+
+        // Each purge records its REASON KEY; the count is how many captures that reason purged, which is
+        // zero for an empty queue. Key presence across restarts is what proves the record accumulates.
+        purgeOnce("first")
+        assertTrue("the first purge must write a witness", witness.isFile)
+        assertTrue("precondition: the first purge is recorded", witness.readText().contains("first="))
+
+        purgeOnce("second")
+        val afterSecond = witness.readText()
+        assertTrue("the second purge ERASED the first purge's record: $afterSecond", afterSecond.contains("first="))
+        assertTrue("the second purge was not recorded: $afterSecond", afterSecond.contains("second="))
+    }
+
+    @Test
+    fun `a purge whose witness cannot be written reports the failure instead of swallowing it`() {
+        // The witness is the ONLY surviving record of a purge. A silent write failure would leave the device
+        // claiming nothing was purged, so the store must expose that it could not record.
+        val root = tmp.newFolder("queue-purge-witness-failure")
+        // A DIRECTORY where the witness file must go makes every write fail, portably.
+        File(root, "purge-counters.txt").mkdirs()
+        val store = ContributionStore(root, limits())
+        store.recover()
+        store.revokeAndPurge("unwritable")
+        assertTrue(
+            "a purge that could not be recorded must be reported, not swallowed",
+            store.purgeWitnessFailureCount >= 1,
+        )
+        store.close()
+    }
+
+    @Test
+    fun `a failed marker restore RETAINS the recording instead of deleting it`() {
+        // Reviewer 5507715b item 1. Restoring a markerless pair's `.ready` is best effort, but the entry
+        // still entered the index - and the expiry pass deletes any indexed entry whose marker is absent
+        // as `ready-marker-vanished`. A failed write therefore turned the entry into a deletion during the
+        // SAME recovery. A best-effort write must never be able to lose a recording.
+        val root = tmp.newFolder("queue-marker-restore-failure")
+        val id = java.util.UUID.randomUUID().toString()
+        val seeder = ContributionStore(root, limits())
+        seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        seeder.close()
+
+        val readyFile = File(root, "contributions/$id.ready")
+        assertTrue("precondition: the marker is removed", readyFile.delete())
+
+        val store = ContributionStore(
+            root,
+            limits(),
+            directorySync = RecordingSync(),
+            hooks = StoreHooks(onReadyMarkerRestore = { throw java.io.IOException("simulated marker write failure") }),
+        )
+        // NOT SERVED: without a marker the entry cannot be offered, and pretending otherwise would describe
+        // a state that is not on disk.
+        assertEquals("a capture whose marker could not be written must not be served", emptyList<String>(), store.recover())
+
+        // BUT NOT DELETED EITHER. Every file survives, and the capture stays charged.
+        val remaining = File(root, "contributions").listFiles()!!.filter { it.name.startsWith(id) }
+        assertTrue("the recording's audio was deleted after a failed marker write", remaining.any { it.name == "$id.recording.wav" })
+        assertTrue("the recording's metadata was deleted after a failed marker write", remaining.any { it.name == "$id.metadata.json" })
+        assertTrue("the withheld capture was not charged, so it is invisible to accounting", store.ownedBytesForTest() > 0L)
+        store.close()
+    }
+
+    @Test
+    fun `an entry with a zero or future capture time is RESET to now, then served and expired`() {
+        // Spec 3e33e306. `.created` is written with no directory sync, so a crash can leave it empty; a
+        // future value is clock skew. Neither says anything about whether the audio is valid, so neither
+        // may destroy or permanently strand a complete recording. The age is reset to now, rewritten,
+        // counted, and the seven-day clock runs from the reset.
+        for (bad in listOf("0", (System.currentTimeMillis() + 3_600_000L).toString())) {
+            val root = tmp.newFolder("queue-age-reset-${bad.take(4)}")
+            val id = java.util.UUID.randomUUID().toString()
+            val seeder = ContributionStore(root, limits())
+            seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+            seeder.close()
+
+            val createdFile = File(root, "contributions/$id.created")
+            assertTrue("precondition", createdFile.isFile)
+            createdFile.writeText(bad)
+
+            var now = System.currentTimeMillis()
+            val store = ContributionStore(root, limits(), clock = { now })
+            // SERVED, exactly like any other complete recording.
+            assertEquals("a $bad capture time must not stop the recording being served", listOf(id), store.recover().map { it.captureId })
+            assertTrue("the reset must be counted", store.terminalCounter(ContributionStore.TerminalReason.AGE_RESET) >= 1L)
+            val rewritten = createdFile.readText().trim().toLong()
+            assertTrue("the age must be rewritten from the reset, not left at $bad", rewritten in now..(now + 5_000L))
+
+            // AND THE CLOCK RUNS FROM THE RESET: alive just before seven days, gone at it.
+            now += 7L * 24 * 60 * 60 * 1000 - 1
+            store.expireOlderThan()
+            assertTrue("the reset entry must survive until seven days after the reset", File(root, "contributions/$id.recording.wav").isFile)
+            now += 2
+            store.expireOlderThan()
+            assertTrue(
+                "the entry must expire seven days after the reset",
+                File(root, "contributions").listFiles()!!.none { it.name.startsWith(id) },
+            )
+            store.close()
+        }
+    }
+
+    @Test
+    fun `a capture whose files refuse to delete charges what actually SURVIVED`() {
+        // RE-SPECIFIED so it pins a real invariant rather than a vacuous one (reviewer 5507715b item 4).
+        // The previous assertion was `terminalCounter(...) >= 0`, true for every value.
+        //
+        // What must hold: whatever survives the grouped debris sweep stays CHARGED, and the charge is the
+        // survivors MEASURED WHERE THEY ARE. The per-file sweep it replaced could delete a capture's
+        // metadata after its audio refused, leaving a charge that described a shape the residue no longer
+        // had; the grouped sweep measures after the attempt, so the two never disagree.
+        //
+        // An empty directory can be unlinked with plain delete(), so a NON-EMPTY one is the portable way
+        // to make the removal genuinely fail on this host.
+        val root = tmp.newFolder("queue-capture-delete-failure")
+        val contributions = File(root, "contributions").apply { mkdirs() }
+        val id = "9f9f9f9f-1111-2222-3333-444444444444"
+        val stuckDir = File(contributions, "$id.sha256").apply { mkdirs() }
+        val payload = File(stuckDir, "held.bin").apply { writeBytes(ByteArray(4096)) }
 
         val store = ContributionStore(root, limits())
         store.recover()
 
-        assertTrue("precondition: the WAV survived", stuckWav.exists())
-        assertTrue("a complete audio+metadata pair must NOT be swept", meta.exists())
-        // Note: this capture is a markerless PAIR, so recovery no longer charges it through the debris
-        // sweep (that charge only existed because the sweep ran). It is charged when validated, which is
-        // the next test's subject; here the assertion is that the pair's bytes are untouched on disk.
-
-        // The per-capture WHOLE measurement is still the rule where the sweep DOES run. The only way a
-        // member of a swept capture survives is a delete the platform refuses; on this host a directory
-        // masquerading as a leftover is the portable stand-in, and its bytes must be measured as they
-        // actually remain rather than as the nominal file size.
-        val ephemeral = "8e8e8e8e-1111-2222-3333-444444444444"
-        val stuckMeta = File(contributions, "$ephemeral.metadata.json")
-        stuckMeta.mkdirs()
-        File(stuckMeta, "held.bin").writeBytes(ByteArray(2048))
-        val probe = ContributionStore(root, limits())
-        probe.recover()
-        // The observable invariants of the sweep, both of which the incident needed and neither of which
-        // existed: the survivor is not silently dropped (it either stays owned or is measured into the
-        // capture's charge), and the removal that DID happen is counted and named.
-        val survivorOwned = probe.ownedIdsForTest().contains(ephemeral)
-        val survivorCounted = probe.terminalCounter(ContributionStore.TerminalReason.RECOVERY_DEBRIS_REMOVED) >= 0L
-        assertTrue(
-            "the debris sweep must account for what it removed (owned=${probe.ownedIdsForTest()})",
-            survivorOwned || survivorCounted,
+        assertTrue("precondition: the non-empty directory survived", payload.isFile)
+        // The survivors are charged for the bytes that actually remain, and charged ONCE: `>=` alone
+        // would hide a double count, which is how two overlapping measurements go wrong.
+        assertEquals(
+            "the survivors must be charged exactly their bytes",
+            payload.length(),
+            store.ownedBytesForTest(),
         )
-        probe.close()
+        store.close()
     }
 
     @Test

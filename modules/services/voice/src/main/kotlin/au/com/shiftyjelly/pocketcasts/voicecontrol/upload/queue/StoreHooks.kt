@@ -62,6 +62,13 @@ class StoreHooks(
      * a successor took the directory. Production wiring passes [NONE].
      */
     val onPurgeOrRecoverMutation: ((String) -> Unit)? = null,
+
+    /**
+     * Invoked immediately before recovery restores a missing `.ready` marker for a complete, valid pair,
+     * with the capture id. Throwing simulates the marker write failing (reviewer 5507715b item 1): the
+     * recording must then be RETAINED and HELD, never deleted by the expiry pass's disappeared-marker rule.
+     */
+    val onReadyMarkerRestore: ((String) -> Unit)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

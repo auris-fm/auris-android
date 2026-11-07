@@ -1667,31 +1667,16 @@ class ContributionStore(
                     deleteLocked(e, "ready-marker-vanished")
                 }
             }
-            // A RECORDED CAPTURE TIME MUST BE PLAUSIBLE BEFORE IT MAY AUTHORISE A DELETE. The `.created`
-            // sidecar is written with no directory sync, so on a runtime whose directory barrier fails a
-            // crash can leave its content as all-zeros. `now - 0` is ~1.75e9 seconds, which the age test
-            // below reads as "past the 7-day bound" and deletes EVERY file of a complete, valid recording
-            // under the innocent reason `queue-age-expired`. Same input class as the missing-marker case:
-            // an unreadable field must never be allowed to authorise destruction of a user's audio.
-            val untrustworthy = mutableListOf<String>()
+            // A CAPTURE TIME THAT CANNOT BE EVALUATED NEVER AUTHORISES A DELETION. Untrusted ages are
+            // already replaced at recovery (spec 3e33e306, [resetUntrustedAgeLocked]), so what can still
+            // arrive here is a value that went bad after the reset. Such an entry is skipped - neither
+            // expired nor served off a clock we cannot trust - and is NOT held: holding it would mark a
+            // charged entry unready under a reason that says nothing about the recording. Zero/absent is
+            // the only such case, because a future time yields a negative age.
             val expiredIds = memoryEntries.values
-                .filter { entry ->
-                    val ageSeconds = (now - entry.createdAtMs) / 1000L
-                    if (ageSeconds < 0 || entry.createdAtMs > now) {
-                        // A capture in the future is clock skew, not a reason to destroy anything.
-                        untrustworthy += entry.captureId
-                        false
-                    } else if (ageSeconds >= limits.maxQueueAgeSeconds) {
-                        true
-                    } else {
-                        false
-                    }
-                }
+                .filter { entry -> entry.createdAtMs > 0 && entry.createdAtMs <= now }
+                .filter { entry -> (now - entry.createdAtMs) / 1000L >= limits.maxQueueAgeSeconds }
                 .map { it.captureId }
-            for (id in untrustworthy) {
-                // HELD, never deleted: the age cannot be evaluated, so expiry must not run on it.
-                holdLocked(id, "age-untrustworthy")
-            }
             for (id in expiredIds) {
                 memoryEntries[id]?.let { deleteLocked(it, "queue-age-expired") }
                 preparedIds.remove(id)
@@ -1757,6 +1742,31 @@ class ContributionStore(
     // Captures recovery HELD rather than served this run. They are charged and on disk but absent from
     // `memoryEntries`, so without this record no later pass could apply age policy to them.
     private val heldIds = mutableSetOf<String>()
+
+    /**
+     * Rewrite `.created` when its recorded value cannot be trusted, and return whether it did.
+     *
+     * Untrusted means absent/zero/malformed (an unsynced write lost on crash) or in the future (clock
+     * skew). Both are properties of the BOOKKEEPING, not of the recording, so the recording is kept and
+     * its age authority restarted rather than used as grounds for refusal. The rewrite is best effort: a
+     * failed write leaves the old value, which the next recovery resets again - never a delete.
+     */
+    private fun resetUntrustedAgeLocked(id: String): Boolean {
+        val file = File(dir, "$id$SUFFIX_CREATED")
+        val now = clock()
+        val recorded = readBoundedSidecar(file, MAX_CREATED_SIDECAR_BYTES)?.trim()?.toLongOrNull()
+        val trusted = recorded != null && recorded > 0 && recorded <= now
+        if (trusted) return false
+        val written = runCatching { file.writeText(now.toString()) }.isSuccess
+        dropCounterOnly(TerminalReason.AGE_RESET)
+        Timber.tag(QUEUE_TAG).i(
+            "voice-upload serve: capture=%s reason=age-reset recorded=%s rewritten=%s",
+            id,
+            recorded,
+            written,
+        )
+        return written
+    }
 
     /**
      * Capture time of every capture ON DISK that this owner holds, read from its own `.created` sidecar
@@ -2358,8 +2368,8 @@ class ContributionStore(
          */
         QUEUE_PURGED,
 
-        /** An entry was HELD because its recorded capture time is implausible, so age cannot be trusted. */
-        AGE_UNTRUSTWORTHY,
+        /** An entry's `.created` was untrustworthy (absent/zero/future) and was reset to now. */
+        AGE_RESET,
 
         /** A `.wav.part` staging leftover removed by recovery. Uncounted before spec bfe91857. */
         RECOVERY_STAGING_REMOVED,
@@ -2671,9 +2681,30 @@ class ContributionStore(
             val removed = captureFiles.count { file -> file.delete() || !file.exists() }
             val survivors = captureFiles.filter { it.exists() }
             if (survivors.isNotEmpty()) {
-                // Measure the WHOLE capture AFTER the attempted deletes, so the charge matches what
-                // actually survived rather than what was there before the sweep touched it.
-                chargeRetainedLocked(id, ready = false)
+                // CHARGE WHAT ACTUALLY SURVIVED, MEASURED WHERE IT IS (reviewer 5507715b item 4).
+                // [chargeRetainedLocked] measures the capture's CANONICAL names only, so when the survivor
+                // is a leftover whose exact name the capture does not own it measured zero and the bytes
+                // stayed on disk charged to nobody. The survivor walk is therefore the footprint: it is
+                // taken from the paths that exist AFTER the attempted deletes, and it SETS the charge.
+                //
+                // It must not be ADDED to the canonical measurement (that charged 4096 bytes as 8192), and
+                // it cannot go through [claimOwnedLocked], which deliberately keeps the LARGER of two
+                // possibly-overlapping observations - here the two describe the same bytes.
+                val survivorMeasure = try {
+                    survivors.sumOf { measuredPathBytes(it, MeasurementBudget(MEASURE_MAX_ENTRIES)) } to 0
+                } catch (failure: MeasurementError) {
+                    // UNMEASURABLE IS NOT ZERO: refuse admission over it rather than booking the residue
+                    // as free space (the placeholder marks the capture unknown, not small).
+                    measurementFailures++
+                    unmeasuredIds += id
+                    null
+                }
+                if (survivorMeasure == null) {
+                    chargeRetainedLocked(id, ready = false)
+                } else {
+                    unmeasuredIds -= id
+                    claimOwnedLocked(id, survivorMeasure.first, survivorMeasure.second, ready = false)
+                }
             }
             if (removed > 0) {
                 // NO UNCOUNTED DELETE. This path can remove bytes a user recorded, so it must be
@@ -2716,6 +2747,12 @@ class ContributionStore(
                 holdLocked(id, "attempts-intent-unresolved")
                 continue
             }
+            // AN UNTRUSTWORTHY AGE IS NOT AN INVALID RECORDING (spec 3e33e306). `.created` is written
+            // without a directory sync, so a crash on a runtime whose barrier fails can leave it empty or
+            // containing a future timestamp. Neither says anything about whether the audio is valid, so
+            // validating on it deleted complete recordings as INVALID_ON_RECOVERY. The age is RESET to now,
+            // rewritten, counted and logged; the seven-day clock then runs from the reset.
+            val ageReset = resetUntrustedAgeLocked(id)
             val entry = validate(id, wav, meta, attemptsFile)
             // A MARKERLESS PAIR THAT FAILS VALIDATION IS HELD, NOT DELETED (spec 0d6ec2e3). The pair is the
             // user's recording: absence of its marker or of one authority sidecar is a reason not to
@@ -2764,17 +2801,26 @@ class ContributionStore(
                 if (id in markerlessPairs) {
                     // SERVING A MARKERLESS PAIR MEANS RESTORING ITS AUTHORITY, not just its bytes. Without
                     // the marker the entry's own next recovery would have to re-derive it, and any later
-                    // sweep would read it as an interrupted preparation again. Rewriting it here is the
-                    // only write recovery performs on an entry, and it is best effort: the bytes are
-                    // already valid, so a failed marker write costs a re-derivation, not the recording.
+                    // sweep would read it as an interrupted preparation again.
+                    //
+                    // A FAILED RESTORE MUST NOT BECOME A DELETION (reviewer 5507715b item 1). The entry
+                    // would enter the index with no marker on disk, and the expiry pass's
+                    // `ready-marker-vanished` branch deletes exactly that: a best-effort write turning
+                    // into the permanent loss of a recording. So a failed restore withholds the entry
+                    // instead - retained, charged, counted, never served - and returns nothing.
                     val restored = runCatching {
+                        hooks.onReadyMarkerRestore?.invoke(id)
                         File(dir, "$id$SUFFIX_READY").writeBytes(ByteArray(0))
-                        true
+                        File(dir, "$id$SUFFIX_READY").isFile
                     }.getOrDefault(false)
+                    if (!restored) {
+                        chargeRetainedLocked(id, ready = false)
+                        holdLocked(id, "marker-restore-failed")
+                        continue
+                    }
                     Timber.tag(QUEUE_TAG).i(
-                        "voice-upload serve: capture=%s reason=markerless-pair-recovered markerRestored=%s",
+                        "voice-upload serve: capture=%s reason=markerless-pair-recovered markerRestored=true",
                         id,
-                        restored,
                     )
                 }
                 synchronized(lock) {
@@ -3510,13 +3556,49 @@ class ContributionStore(
      * of captures the purge was responsible for, so "8 clips gone" is answerable from the device.
      */
     private fun recordPurgeLocked(reason: String, captures: Int) {
+        // CUMULATIVE ACROSS PROCESSES (reviewer 5507715b item 3). The previous version kept the totals
+        // only in memory, so the next process started from an empty map and OVERWROTE the file - the
+        // witness of an earlier purge was destroyed by the next one, which defeats the entire point.
+        loadPurgeCountersLocked()
         purgeCounters[reason] = (purgeCounters[reason] ?: 0L) + captures
-        runCatching {
-            purgeFile.writeText(
+        // A WRITE FAILURE IS REPORTED, NEVER SWALLOWED. This file is the only surface that survives a
+        // purge; a silent failure would leave the device claiming nothing happened.
+        val written = runCatching {
+            purgeFile.writeText(purgeCounters.entries.joinToString(";") { "${it.key}=${it.value}" })
+            purgeFile.isFile
+        }.getOrElse { false }
+        if (!written) {
+            purgeWitnessFailures++
+            Timber.tag(QUEUE_TAG).e(
+                "voice-upload purge-witness: reason=%s captures=%d outcome=unwritten totals=%s",
+                reason,
+                captures,
+                purgeCounters.entries.joinToString(";") { "${it.key}=${it.value}" },
+            )
+        } else {
+            Timber.tag(QUEUE_TAG).i(
+                "voice-upload purge: reason=%s captures=%d totals=%s",
+                reason,
+                captures,
                 purgeCounters.entries.joinToString(";") { "${it.key}=${it.value}" },
             )
         }
     }
+
+    /** Prior totals from disk, so a later process APPENDS to the record instead of replacing it. */
+    private fun loadPurgeCountersLocked() {
+        if (purgeCountersLoaded) return
+        purgeCountersLoaded = true
+        val text = runCatching { purgeFile.takeIf { it.isFile }?.readText() }.getOrNull() ?: return
+        for (pair in text.split(";")) {
+            val key = pair.substringBefore("=", "")
+            val value = pair.substringAfter("=", "").toLongOrNull()
+            if (key.isNotEmpty() && value != null) purgeCounters[key] = value
+        }
+    }
+
+    /** How many purge records could not be written. Exposed so a lost witness is never invisible. */
+    val purgeWitnessFailureCount: Int get() = synchronized(lock) { purgeWitnessFailures }
 
     private fun dropCounterOnly(reason: TerminalReason) {
         val snapshot = synchronized(lock) {
@@ -3636,6 +3718,8 @@ class ContributionStore(
     private val countersFile get() = File(root, COUNTERS_NAME)
     private val purgeFile get() = File(root, PURGE_COUNTERS_NAME)
     private val purgeCounters = mutableMapOf<String, Long>()
+    private var purgeCountersLoaded = false
+    private var purgeWitnessFailures = 0
     private val dir get() = File(root, DIR_NAME)
 
     /**

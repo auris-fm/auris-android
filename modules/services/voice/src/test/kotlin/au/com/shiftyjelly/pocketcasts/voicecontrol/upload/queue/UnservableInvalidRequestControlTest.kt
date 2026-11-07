@@ -20,18 +20,24 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 /**
- * 400 invalid_request RETAINS AND STOPS SERVING (spec ruling 5c811f83).
+ * 400 invalid_request DELETES THE ENTRY AT ONCE (spec 1a0d3ffb, amending the 5c811f83 retention
+ * ruling). The old build retained refused recordings forever; sixteen of them filled the owner's
+ * queue and the new server refuses each permanently (missing `wake_required`), so a full queue
+ * could never drain and new recordings were refused. Under the amended spec the queue "always
+ * drains": a server-permanent refusal removes the entry immediately, through the store's
+ * reconciled purge, never an ad-hoc unlink.
  *
- * iOS measured sixteen upload attempts each answered `400 invalid_request`, after which the app
- * DELETED the queued recordings. Spec's ruling: a REQUEST rejection says nothing about the bytes,
- * so the client must RETAIN the repairable private recording and STOP SERVING the entry - no
- * retry loop, no abandon/delete. These controls pin that on the client seam, reusing the
- * retention harness semantics of RetryableRefusalRetentionTest (fresh-owner recovery = in-process
- * restart, response supplied at the transport seam).
+ * iOS-review lessons pinned here as controls:
+ * - deletion goes ONLY through `releaseForAdmittedAttempt` on the real queue: the attempt-identity
+ *   proof is the proven absence of an active upload (a stale token deletes nothing);
+ * - a durable-intent publication failure retains and reports - uncertainty is never resolved by
+ *   deleting (the 5c811f83 principle survives for the uncertain case);
+ * - the client's own record check rejecting an entry already deletes it at once on recovery
+ *   (`INVALID_ON_RECOVERY`, with the cleaned/retained-charge controls in ContributionStore).
  *
- * NOT claimed: that the installed app process was killed, or that a real HTTP client produced the
- * bytes; the restart is the same in-process fresh-owner recreation the store's own recovery tests
- * use, and the exact Cloud body is injected at the classified-response seam.
+ * Harness semantics unchanged from the retention era: fresh-owner recovery = in-process restart,
+ * the exact Cloud body injected at the classified-response seam. NOT claimed: that the installed
+ * app process was killed, or that a real HTTP client produced the bytes.
  */
 class UnservableInvalidRequestControlTest {
 
@@ -95,8 +101,8 @@ class UnservableInvalidRequestControlTest {
     }.single()
 
     @Test
-    fun `exact 400 invalid_request retains identical wav and metadata and never serves the entry again`() {
-        var now = 30_000_000L
+    fun `exact 400 invalid_request deletes the entry at once and never serves it again`() {
+        var now = 31_000_000L
         val root = tmp.newFolder("unserviced")
         val store = newStore(root) { now }
         val id = UUID.randomUUID().toString()
@@ -107,10 +113,9 @@ class UnservableInvalidRequestControlTest {
         assertNotNull(
             store.prepareAt(generation, admission, id, "epoch-1", chunks(samples), metaBytes, "a@x", 7L),
         )
-        val audioBefore = sha256(audioFile(root).readBytes())
-        val metaBefore = sha256(root.walkTopDown().first { it.isFile && it.name.endsWith(".metadata.json") }.readBytes())
+        assertNotNull("the entry must be on disk before the refusal", audioFile(root))
 
-        // FIRST ATTEMPT: the server answers the EXACT measured body, classified Unservable.
+        // The server answers the EXACT measured body, classified Unservable.
         val caller = ContributionRetryCaller(
             store,
             clock = { now },
@@ -123,40 +128,28 @@ class UnservableInvalidRequestControlTest {
         )
         caller.pollOnce()
 
-        // Retained on disk under the LIVE owner: bytes untouched.
-        assertEquals("audio must be byte-identical after the 400", audioBefore, sha256(audioFile(root).readBytes()))
-        assertEquals(
-            "metadata must be byte-identical after the 400",
-            metaBefore,
-            sha256(root.walkTopDown().first { it.isFile && it.name.endsWith(".metadata.json") }.readBytes()),
+        // DELETED AT ONCE (spec 1a0d3ffb): no wav, no metadata, no ready marker - the queue drained.
+        val remaining = root.walkTopDown().filter { it.isFile && (it.name.endsWith(".recording.wav") || it.name.endsWith(".metadata.json") || it.name.endsWith(".ready")) }.toList()
+        assertTrue(
+            "the refused entry must be deleted from the queue at once; remaining: " +
+                remaining.joinToString(", ") { it.path.removePrefix(root.path) },
+            remaining.isEmpty(),
         )
+        assertEquals(
+            "the permanent refusal must be counted truthfully",
+            1,
+            store.terminalCounter(ContributionStore.TerminalReason.PERMANENT_REFUSAL),
+        )
+        assertEquals("the deleted entry must never be served", 0, store.retryEligible(now).size)
 
-        // THE RESTART: a fresh owner over the SAME directory retains the recording.
+        // THE RESTART: a fresh owner over the SAME directory must not resurrect anything.
         store.close()
         val fresh = newStore(root) { now }
         fresh.recover()
-        assertEquals(
-            "the retained recording must survive a fresh owner unchanged",
-            audioBefore,
-            sha256(audioFile(root).readBytes()),
-        )
-        assertEquals(
-            "the retained metadata must survive a fresh owner unchanged",
-            metaBefore,
-            sha256(root.walkTopDown().first { it.isFile && it.name.endsWith(".metadata.json") }.readBytes()),
-        )
-
-        // STOPPED SERVING: never eligible now, at any representable time - the durable boundary
-        // sits at its never-representable maximum, so a restart cannot reroll it.
-        val boundary = fresh.retryBoundariesForTest()[id]
-        assertNotNull("the unservable stop must be durable, not an in-memory skip", boundary)
-        assertEquals(
-            "the boundary must be the never-representable maximum, not a finite retry delay",
-            Long.MAX_VALUE,
-            boundary,
-        )
-        assertEquals("the entry must never be served again", 0, fresh.retryEligible(now).size)
-        assertEquals("not even at the far future", 0, fresh.retryEligible(Long.MAX_VALUE / 2).size)
+        val afterRestart = root.walkTopDown().filter { it.isFile && (it.name.endsWith(".recording.wav") || it.name.endsWith(".metadata.json")) }.toList()
+        assertTrue("a deleted entry must stay deleted across recovery", afterRestart.isEmpty())
+        assertEquals("the deleted entry must never be served again", 0, fresh.retryEligible(now).size)
+        assertEquals("the deleted entry must never be served at the far future", 0, fresh.retryEligible(Long.MAX_VALUE / 2).size)
 
         // And no further attempt is launched against it.
         val secondAttempts = mutableListOf<String>()
@@ -175,6 +168,47 @@ class UnservableInvalidRequestControlTest {
         )
         laterCaller.pollOnce()
         assertEquals("no retry loop may form behind a 400 invalid_request", 0, secondAttempts.size)
+        fresh.close()
+    }
+
+    @Test
+    fun `a refusal whose durable intent cannot be published retains and reports instead of deleting`() {
+        var now = 31_000_000L
+        val root = tmp.newFolder("unserviced-uncertain")
+        val store = newStore(root) { now }
+        val id = UUID.randomUUID().toString()
+        val samples = 1600
+        val metaBytes = canonicalMeta(id)
+        val admission = store.admitForTest(samples.toLong(), metaBytes.size)
+        val generation = store.fence.currentGeneration()
+        assertNotNull(
+            store.prepareAt(generation, admission, id, "epoch-1", chunks(samples), metaBytes, "a@x", 7L),
+        )
+        // BLOCK the reconciled purge's FIRST step (the durable disqualification marker): a directory
+        // sitting at the marker path makes the intent write fail, so deleteLocked must retain the
+        // entry and report - never delete the files without recorded intent.
+        val markerDir = File(File(root, "disqualified"), id)
+        assertTrue("test setup: the marker must be replaceable by a directory", markerDir.mkdirs() || markerDir.isDirectory)
+
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            networkAvailable = { true },
+            attemptUpload = { _, _, _, _ -> false },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            dispositionFor = { _, _ -> ContributionUploadTransport.Response.Unservable(400, "invalid_request") },
+            observedStatusFor = { _, _ -> 400 },
+            responseFor = { _, _ -> null },
+        )
+        caller.pollOnce()
+
+        // RETAINED: the bytes stay, charged as not-ready (so a later cleanup retries them), and
+        // are not served. The PERMANENT_REFUSAL counter records the settlement decision (the
+        // index release), the store's existing convention - the truthful FILE-level outcome lives
+        // in deleteLocked's log and the retained charge, which is what these asserts pin.
+        assertNotNull("without recorded intent the entry must be retained", audioFile(root))
+        assertEquals("the retained entry must not be served while its disposal is uncertain", 0, store.retryEligible(now).size)
+        store.close()
     }
 
     @Test

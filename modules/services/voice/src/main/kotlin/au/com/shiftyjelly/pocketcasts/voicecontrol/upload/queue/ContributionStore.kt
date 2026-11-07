@@ -2241,7 +2241,7 @@ class ContributionStore(
     /** Convenience for the current owner generation; prefer the fenced overload in callback paths. */
     fun dropEntry(captureId: String, reason: TerminalReason): Boolean = dropEntry(fence.currentGeneration(), captureId, reason)
 
-    enum class TerminalReason { ATTEMPTS_EXHAUSTED, QUEUE_AGE_EXPIRED, SERVER_TERMINAL, INVALID_ON_RECOVERY, UPLOAD_ACCEPTED }
+    enum class TerminalReason { ATTEMPTS_EXHAUSTED, QUEUE_AGE_EXPIRED, SERVER_TERMINAL, INVALID_ON_RECOVERY, UPLOAD_ACCEPTED, PERMANENT_REFUSAL }
 
     fun terminalCounter(reason: TerminalReason): Long = synchronized(lock) { terminalCounters[reason] ?: 0L }
 

@@ -440,7 +440,13 @@ class LoopbackHostDriverTest {
         // (enrollment traffic above already completed and must not be mislabeled).
         lastWireResponse = null
 
-        pollUntil(assembly) { store.durableCapture(id) == null }
+        // The probe opens a descriptor per poll iteration; settle it so the PROCESS-WIDE source
+        // slot returns before the next iteration (leaked slots starve later full-suite neighbours).
+        pollUntil(assembly) {
+            val d = store.durableCapture(id)
+            d?.owned?.settle(500L)
+            d == null
+        }
 
         // DIAGNOSTIC-ONLY (spec 2edb3d95): name the protocol verdict in the failure itself. The
         // captured wire response is reduced to its HTTP status and the transport's OWN structured
@@ -637,12 +643,18 @@ class LoopbackHostDriverTest {
         assertTrue("the client-facing response must be dropped after the commit", committed.responseDropped)
 
         // Client-side observable of the same event: retained, nothing validated.
-        assertTrue("still retained after the lost response", store.durableCapture(id) != null)
+        val retainedProbe = store.durableCapture(id)
+        assertTrue("still retained after the lost response", retainedProbe != null)
+        retainedProbe!!.owned?.settle(500L)
         assertEquals("the lost response validated nothing", 0, accepted.get())
 
         // Retry: server answers 200 duplicate with the SAME receipt (same-receipt is asserted
         // server-side by the Cloud recipe; the client-side observable is release).
-        pollUntil(assembly) { store.durableCapture(id) == null }
+        pollUntil(assembly) {
+            val d = store.durableCapture(id)
+            d?.owned?.settle(500L)
+            d == null
+        }
         assertEquals("exactly one validated acceptance, on the retry", 1, accepted.get())
     }
 

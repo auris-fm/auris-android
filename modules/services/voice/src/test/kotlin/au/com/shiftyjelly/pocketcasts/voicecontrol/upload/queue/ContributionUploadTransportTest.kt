@@ -479,6 +479,120 @@ class ContributionUploadTransportTest {
     }
 
     @Test
+    fun `a SENSITIVE exception message is never copied into the reason line`() {
+        // Reviewer 459074a8: the cause must be the exception CLASS plus a fixed allowlisted CATEGORY, never
+        // the exception's own message - which can carry a URL, a host address, a bearer value or
+        // server-supplied body text. This plants exactly such a message on the path and asserts none of it
+        // survives into the log.
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (tag == "VoiceUploadTransport") lines += message
+            }
+        }
+        val secretHost = "10.11.12.13"
+        val secretBearer = "eyJhbGciOiJIUzI1NiJ9.leaked-credential-value"
+        val secretBody = "server-said-something-private"
+        timber.log.Timber.plant(tree)
+        try {
+            val id = UUID.randomUUID().toString()
+            // The HTTP client is a real OkHttp pointed at an unroutable address, with an interceptor that
+            // throws an exception whose MESSAGE embeds all three secrets.
+            val leaky = okhttp3.OkHttpClient.Builder()
+                .addInterceptor { throw java.io.IOException("connect failed to http://$secretHost/api Bearer $secretBearer $secretBody") }
+                .build()
+            ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:1/v1/contributions",
+                authorization = { "Bearer t" },
+                client = leaky,
+                callTimeoutMs = 5_000,
+            ).upload(id, record(id), ownedOf(wavFile(id)))
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+
+        assertTrue("a failing exchange must log a reason line, got ${lines.toList()}", lines.isNotEmpty())
+        for (line in lines) {
+            assertFalse("the reason line must not carry a host address: $line", line.contains(secretHost))
+            assertFalse("the reason line must not carry a credential: $line", line.contains(secretBearer))
+            assertFalse("the reason line must not carry server text: $line", line.contains(secretBody))
+        }
+        // And it still names something useful.
+        assertTrue("the reason line still names the class and a category: ${lines.last()}", lines.last().contains("cause="))
+    }
+
+    @Test
+    fun `the OUTER exit reports its own cause, not a stale one from another attempt`() {
+        // Reviewer 6a82003a: the inner catch at the call.execute() boundary and the outer catch are
+        // DIFFERENT exits, and a shared slot meant the outer one could report an earlier failure. Each exit
+        // now logs its own phase and cause, so this asserts the OUTER path specifically: a failure raised
+        // while building the request (before any call is registered) must still name itself.
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (tag == "VoiceUploadTransport") lines += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            val id = UUID.randomUUID().toString()
+            // A descriptor that is already CLOSED makes the multipart envelope unavailable, so the failure
+            // happens inside the outer try before any call is registered - the OUTER exit, not the
+            // execute() one. This pins that the outer exit reports its own phase and cause.
+            val closed = OwnedAudio(
+                java.io.FileInputStream(wavFile(id)).also { it.close() },
+                16,
+                "0".repeat(64),
+            )
+            transport().upload(id, record(id), closed)
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+        assertTrue("the outer exit must log a reason line too, got ${lines.toList()}", lines.isNotEmpty())
+        val line = lines.last()
+        assertTrue("the outer reason line must name a phase: $line", line.contains("phase="))
+        assertTrue("the outer reason line must name a cause: $line", line.contains("cause="))
+    }
+
+    @Test
+    fun `a transport exit with no status NAMES its phase and cause in the log`() {
+        // Reviewer 6a82003a and spec 7e5bbf53 point 2. An installed build sat refusing to upload with only
+        // `http=none code=none` in the log, which reads identically for "never sent", "sent, outcome
+        // unknown" and "cancelled". The two exits that produce no status are DIFFERENT code paths - the
+        // inner catch around call.execute() and the outer catch - and the inner one used to discard its
+        // throwable entirely, so the only recorded cause could come from a path that never ran. Both now
+        // report their own phase and a content-free cause.
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (tag == "VoiceUploadTransport") lines += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            val id = UUID.randomUUID().toString()
+            val file = wavFile(id)
+            val dead = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:1/v1/contributions",
+                authorization = { "Bearer t" },
+                callTimeoutMs = 5_000,
+            )
+            dead.upload(id, record(id), ownedOf(file))
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+
+        assertTrue("a statusless exit must log a reason line, got ${lines.toList()}", lines.isNotEmpty())
+        val line = lines.last()
+        // The CAUSE is named: an exception class, and a normalized detail - not a bare "none".
+        assertTrue("the reason line must name the exception class: $line", line.contains("cause=") && !line.endsWith("cause=other:other"))
+        assertTrue("the reason line must name a phase: $line", line.contains("phase=") && !line.contains("phase=preparing"))
+        // And it must stay CONTENT-FREE: no URL, no bearer, no body.
+        assertFalse("a reason line must never carry the endpoint: $line", line.contains("127.0.0.1"))
+        assertFalse("a reason line must never carry a credential: $line", line.contains("Bearer t"))
+    }
+
+    @Test
     fun `a 200 with an ERROR body is Ambiguous because validation rejects it`() {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)

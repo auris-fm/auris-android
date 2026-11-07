@@ -14,6 +14,7 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okio.Buffer
 import okio.BufferedSink
+import timber.log.Timber
 
 /**
  * The upload transport, on OkHttp's call/write cancellation rather than on socket reflection.
@@ -135,6 +136,11 @@ class ContributionUploadTransport(
          */
         validateAtLaunch: (() -> Boolean)? = null,
     ): Response {
+        // The exchange's PROGRESS for the reason line: a local per-attempt holder, written and read on this
+        // thread only, so a transport exit can say WHERE it stopped instead of only that it produced no
+        // status. "executing" is the case that matters - there the bytes may have reached the server, so the
+        // outcome is unknown rather than refused.
+        val phase = Phase()
         // BEFORE THE FIRST BYTE. Admission and this call are not atomic, so a withdrawal that landed
         // between them must not put a request on the network.
         if (isCancelled()) return Response.Cancelled
@@ -151,7 +157,22 @@ class ContributionUploadTransport(
             // The per-call budget is the caller's REMAINING deadline when it has one, so this exchange can
             // never outlive the total the caller promised.
             val budget = (remainingMs ?: callTimeoutMs).coerceAtMost(callTimeoutMs).coerceAtLeast(1)
-            val callClient = client.newBuilder().callTimeout(budget, TimeUnit.MILLISECONDS).build()
+            val callClient = client.newBuilder()
+                .callTimeout(budget, TimeUnit.MILLISECONDS)
+                .eventListener(object : okhttp3.EventListener() {
+                    override fun connectStart(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy) = phase.record("connect")
+                    override fun requestHeadersStart(call: Call) = phase.record("request-headers")
+                    override fun requestBodyStart(call: Call) = phase.record("request-body")
+                    override fun responseHeadersStart(call: Call) = phase.record("response-headers")
+                    override fun responseBodyStart(call: Call) = phase.record("response-body")
+                    override fun connectEnd(call: Call, inetSocketAddress: java.net.InetSocketAddress, proxy: java.net.Proxy, protocol: okhttp3.Protocol?) = phase.record("connected")
+                    override fun requestHeadersEnd(call: Call, request: Request) = phase.record("request-headers-sent")
+                    override fun requestBodyEnd(call: Call, byteCount: Long) = phase.record("request-body-sent")
+                    override fun responseHeadersEnd(call: Call, response: okhttp3.Response) = phase.record("response-headers-received")
+                    override fun responseBodyEnd(call: Call, byteCount: Long) = phase.record("response-body-received")
+                })
+                .build()
+            phase.record("request-built")
             val call = callClient.newCall(buildRequest(credentials, metadata, owned, isCancelled, remainingMs, onBodyProgressForTest))
             // The admission-to-send window: everything up to here has already decided to upload, and the
             // request below is the first thing that touches the network. A withdrawal landing here must
@@ -173,6 +194,11 @@ class ContributionUploadTransport(
                     call.cancel()
                     return Response.Cancelled
                 }
+                // THE LAST OBSERVED PHASE, from OkHttp's own per-call events, not from an inference about
+                // where a timeout "must" have happened (reviewer 459074a8). `executing` alone could not tell
+                // a connect stall from a request-body write stall from a response-read stall - which is
+                // exactly the phase distinction the diagnosis needs. The listener records only the LAST
+                // event seen; if none fires, the exit reports `request-built`.
                 return call.execute().use { response ->
                     // The withdrawal is authoritative over whatever arrived.
                     if (isCancelled()) return Response.Cancelled
@@ -185,6 +211,18 @@ class ContributionUploadTransport(
                 // OkHttp reports BOTH a withdrawal and a spent callTimeout as a cancelled call, so the
                 // withdrawal signal is the only thing that may turn this into [Cancelled]. A timeout is an
                 // unknown outcome: the upload may have landed, so ownership is retained.
+                //
+                // THIS EXIT REPORTS ITS OWN CAUSE (reviewer 6a82003a). It is the path a real network
+                // failure takes, and it used to discard the exception entirely, so the diagnosis could only
+                // ever come from the OUTER catch - which this path never reaches. Instrumented separately,
+                // and the throwable is kept so the two exits never share one stale slot.
+                unexpectedExitForTest = io
+                Timber.tag(DIAGNOSTIC_TAG).i(
+                    "voice-upload transport: outcome=%s phase=%s cause=%s",
+                    if (isCancelled()) "cancelled" else "ambiguous",
+                    phase.status,
+                    contentFreeCauseOf(io),
+                )
                 return if (isCancelled()) Response.Cancelled else Response.Ambiguous(null)
             } finally {
                 release(handle)
@@ -194,6 +232,17 @@ class ContributionUploadTransport(
             // full-suite-only failure undiagnosable -- the evidence was discarded exactly where it
             // was produced. The reason is retained read-only; policy is unchanged (still Ambiguous).
             unexpectedExitForTest = io
+            // EVERY REFUSAL BEFORE TRANSMISSION NEEDS A REASON LINE (spec 7e5bbf53 point 2). A transport
+            // exit that produced NO HTTP status used to leave only `http=none code=none` in the log, which
+            // is indistinguishable between "never sent", "sent and the outcome is unknown", and "cancelled".
+            // That ambiguity is why an installed build could sit for twenty minutes refusing to upload with
+            // nothing on the device naming the cause. The line below names the PHASE and a CONTENT-FREE cause
+            // derived from the throwable's type and message class only - never a body, header or credential.
+            Timber.tag(DIAGNOSTIC_TAG).i(
+                "voice-upload transport: outcome=none phase=%s cause=%s",
+                phase.status,
+                contentFreeCauseOf(io),
+            )
             return Response.Ambiguous(null)
         } finally {
             inFlight.release()
@@ -476,6 +525,45 @@ class ContributionUploadTransport(
         "storage_unavailable" to 503,
     )
 
+    /**
+     * THE LAST PHASE OBSERVED FOR ONE ATTEMPT, for the reason line. Fed by OkHttp's own per-call lifecycle
+     * events, so the value is what actually happened rather than what a timeout was guessed to be waiting on
+     * (reviewer 459074a8). It records the most recent event ONLY - it is a position marker, not a history -
+     * and is written and read on the attempting thread.
+     */
+    class Phase {
+        @Volatile
+        var last: String = "preparing"
+
+        fun record(step: String) {
+            last = step
+        }
+    }
+
+    /**
+     * A CONTENT-FREE cause: the throwable's CLASS plus one fixed allowlisted CATEGORY, and nothing else
+     * (reviewer 459074a8). The exception's own message is deliberately never included - it can carry a URL,
+     * a host address, a header value or server-supplied body text. Diagnostics must never become a leak
+     * surface, so the mapping is closed: an unrecognised throwable reports `Throwable:other`.
+     */
+    private fun contentFreeCauseOf(error: Throwable): String {
+        val kind = error::class.java.simpleName.ifEmpty { "Throwable" }
+        val category = when {
+            error is java.net.SocketTimeoutException -> "timeout"
+            error is java.net.UnknownHostException -> "dns"
+            error is java.net.ConnectException -> "connect-refused"
+            error is javax.net.ssl.SSLException -> "tls"
+            error is java.io.InterruptedIOException -> "io-interrupted"
+            error is java.io.IOException -> "io"
+            error is IllegalStateException -> "illegal-state"
+            else -> "other"
+        }
+        return "$kind:$category"
+    }
+
+    /** Position a reason line reports when no lifecycle event was observed: the attempt never got a call. */
+    private val Phase.status: String get() = last
+
     /** Test seam: how many calls this transport currently has outstanding. */
     fun inFlightForTest(): Int = inFlight.used()
 
@@ -600,3 +688,6 @@ internal object ErrorBody {
         }
     }
 }
+
+/** Diagnostic tag: content-free cause and phase for any exit that produced no HTTP status. */
+private const val DIAGNOSTIC_TAG = "VoiceUploadTransport"

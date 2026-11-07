@@ -69,6 +69,13 @@ class StoreHooks(
      * recording must then be RETAINED and HELD, never deleted by the expiry pass's disappeared-marker rule.
      */
     val onReadyMarkerRestore: ((String) -> Unit)? = null,
+
+    /**
+     * Invoked immediately before recovery rewrites an untrustworthy `.created` age, with the capture id.
+     * Throwing simulates that write failing (reviewer b796c5e9): the recording must still be served with an
+     * in-memory age, retain every file and its charge, and have the rewrite retried at the next recovery.
+     */
+    val onCreatedAgeWrite: ((String) -> Unit)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

@@ -2572,6 +2572,67 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a failed age rewrite still SERVES the recording and retries the reset next recovery`() {
+        // Reviewer b796c5e9. `resetUntrustedAgeLocked` returned a boolean that recovery ignored, so a marked
+        // recording with an unresettable age went straight into `validate`, which reported null and sent it
+        // down INVALID_ON_RECOVERY - deletion of a complete, valid recording. A failed write about AGE must
+        // never become a verdict about the RECORDING.
+        val root = tmp.newFolder("queue-age-reset-write-failure")
+        val id = java.util.UUID.randomUUID().toString()
+        val seeder = ContributionStore(root, limits())
+        seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        seeder.close()
+
+        val createdFile = File(root, "contributions/$id.created")
+        assertTrue("precondition: the age sidecar exists", createdFile.isFile)
+        createdFile.writeText("0")
+        val filesBefore = File(root, "contributions").listFiles()!!.filter { it.name.startsWith(id) }.map { it.name }.sorted()
+
+        val faulted = ContributionStore(
+            root,
+            limits(),
+            hooks = StoreHooks(onCreatedAgeWrite = { throw java.io.IOException("simulated age write failure") }),
+        )
+        // SERVED despite the failed rewrite: the age is untrustworthy, not the audio.
+        val recovered = faulted.recover().map { it.captureId }
+        // Every file and sidecar survives, and the capture keeps its charge.
+        val filesAfter = File(root, "contributions").listFiles()!!.filter { it.name.startsWith(id) }.map { it.name }.sorted()
+        // FILES FIRST: under the pre-fix path every one of these is gone, because validation reported null
+        // and the invalid-record branch deleted the lot. Asserting this before the serve check means the
+        // failure message names the data loss rather than just a missing entry.
+        assertTrue(
+            "a complete recording was DELETED because its age could not be rewritten; surviving: $filesAfter",
+            filesAfter.contains("$id.recording.wav") && filesAfter.size == filesBefore.size,
+        )
+        assertEquals("an unresettable age must not stop the recording being served", listOf(id), recovered)
+        assertTrue("the served capture must be charged", faulted.ownedBytesForTest() > 0L)
+        assertTrue(
+            "a failed reset must be counted, not silently retried",
+            faulted.terminalCounter(ContributionStore.TerminalReason.AGE_RESET_FAILED) >= 1L,
+        )
+        // The failed rewrite left the sidecar alone: nothing was persisted for this process's age.
+        assertEquals("a failed reset must not pretend to have persisted", "0", createdFile.readText().trim())
+        faulted.close()
+
+        // AFTER THE FAULT LIFTS the next recovery persists the reset, and the recording is still servable.
+        var now = System.currentTimeMillis()
+        val healthy = ContributionStore(root, limits(), clock = { now })
+        assertEquals("the recording must survive into the next recovery", listOf(id), healthy.recover().map { it.captureId })
+        val rewritten = createdFile.readText().trim().toLong()
+        assertTrue("the next recovery must persist a reset age, not leave 0", rewritten in now..(now + 5_000L))
+        assertEquals(
+            "the persisted reset must be counted",
+            1L,
+            healthy.terminalCounter(ContributionStore.TerminalReason.AGE_RESET),
+        )
+        // And the seven-day clock runs from the persisted reset.
+        now += 7L * 24 * 60 * 60 * 1000 - 1
+        healthy.expireOlderThan()
+        assertTrue("the reset recording must survive until seven days after it", File(root, "contributions/$id.recording.wav").isFile)
+        healthy.close()
+    }
+
+    @Test
     fun `the purge witness accumulates across processes instead of being overwritten`() {
         // Reviewer 5507715b item 3. The witness of a purge - the only surface that survives one - was kept
         // in memory only, so the NEXT process started from an empty map and rewrote the file. Each purge

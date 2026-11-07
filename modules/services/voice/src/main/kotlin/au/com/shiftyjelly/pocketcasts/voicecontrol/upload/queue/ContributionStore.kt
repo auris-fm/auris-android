@@ -1751,21 +1751,29 @@ class ContributionStore(
      * its age authority restarted rather than used as grounds for refusal. The rewrite is best effort: a
      * failed write leaves the old value, which the next recovery resets again - never a delete.
      */
-    private fun resetUntrustedAgeLocked(id: String): Boolean {
+    private fun resetUntrustedAgeLocked(id: String): AgeReset {
         val file = File(dir, "$id$SUFFIX_CREATED")
         val now = clock()
         val recorded = readBoundedSidecar(file, MAX_CREATED_SIDECAR_BYTES)?.trim()?.toLongOrNull()
-        val trusted = recorded != null && recorded > 0 && recorded <= now
-        if (trusted) return false
-        val written = runCatching { file.writeText(now.toString()) }.isSuccess
-        dropCounterOnly(TerminalReason.AGE_RESET)
+        if (recorded != null && recorded > 0 && recorded <= now) return AgeReset.TRUSTED
+        val written = runCatching {
+            hooks.onCreatedAgeWrite?.invoke(id)
+            file.writeText(now.toString())
+            file.readText().trim().toLongOrNull() == now
+        }.getOrDefault(false)
+        // A FAILED WRITE IS ITS OWN OUTCOME, NOT A REASON TO JUDGE THE RECORDING (reviewer b796c5e9).
+        // Returning a boolean that recovery ignored left the caller to run validation on the unresettable
+        // age, and validation reporting null sent a complete recording into INVALID_ON_RECOVERY - the
+        // deletion this helper exists to prevent.
+        val outcome = if (written) AgeReset.RESET else AgeReset.FAILED
+        dropCounterOnly(outcome.counter)
         Timber.tag(QUEUE_TAG).i(
-            "voice-upload serve: capture=%s reason=age-reset recorded=%s rewritten=%s",
+            "voice-upload serve: capture=%s reason=%s recorded=%s",
             id,
+            outcome.reason,
             recorded,
-            written,
         )
-        return written
+        return outcome
     }
 
     /**
@@ -2371,6 +2379,9 @@ class ContributionStore(
         /** An entry's `.created` was untrustworthy (absent/zero/future) and was reset to now. */
         AGE_RESET,
 
+        /** The reset could not be written. The recording is served using `now` for this process only. */
+        AGE_RESET_FAILED,
+
         /** A `.wav.part` staging leftover removed by recovery. Uncounted before spec bfe91857. */
         RECOVERY_STAGING_REMOVED,
     }
@@ -2753,7 +2764,9 @@ class ContributionStore(
             // validating on it deleted complete recordings as INVALID_ON_RECOVERY. The age is RESET to now,
             // rewritten, counted and logged; the seven-day clock then runs from the reset.
             val ageReset = resetUntrustedAgeLocked(id)
-            val entry = validate(id, wav, meta, attemptsFile)
+            // An age whose rewrite FAILED carries no authority to judge the recording: recovery uses `now`
+            // for this process only, serves it, and retries the rewrite at the next recovery (spec 82b379a6).
+            val entry = validate(id, wav, meta, attemptsFile, ageOverrideMs = ageReset.overrideMs)
             // A MARKERLESS PAIR THAT FAILS VALIDATION IS HELD, NOT DELETED (spec 0d6ec2e3). The pair is the
             // user's recording: absence of its marker or of one authority sidecar is a reason not to
             // SERVE it, never a licence to destroy it. Only an entry that had a marker and now fails
@@ -2954,7 +2967,7 @@ class ContributionStore(
         return keep.sortedBy { it.createdAtMs }
     }
 
-    private fun validate(id: String, wav: File, meta: File, attemptsFile: File): Entry? {
+    private fun validate(id: String, wav: File, meta: File, attemptsFile: File, ageOverrideMs: Long? = null): Entry? {
         if (!id.matches(UUID_RE)) return null
         if (!wav.isFile || !meta.isFile) return null
         val declared = wav.length()
@@ -2969,8 +2982,16 @@ class ContributionStore(
             // closed - never a silent default (reviewers e4820963, 7433e6a9).
             val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
                 ?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
-            val created = readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
-                ?.trim()?.toLongOrNull()?.takeIf { it > 0 } ?: return null
+            // AGE IS NOT PART OF RECORD VALIDITY when recovery could not persist a reset (reviewer
+            // b796c5e9): a non-null override replaces the sidecar for THIS process only, so an unwritable
+            // `.created` cannot route a complete recording into invalid-record deletion. Every other
+            // caller passes null and the strict read below applies unchanged.
+            val created = if (ageOverrideMs != null) {
+                ageOverrideMs
+            } else {
+                readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
+                    ?.trim()?.toLongOrNull()?.takeIf { it > 0 } ?: return null
+            }
             // --- Mandatory digest identity: this on-disk format is unreleased, so there is NO legacy
             // fallback. An absent, malformed or mismatched .sha256 refuses the entry. ---
             val recordedDigest = readBoundedSidecar(File(dir, "$id$SUFFIX_DIGEST"), MAX_DIGEST_SIDECAR_BYTES)
@@ -3537,6 +3558,24 @@ class ContributionStore(
         // An unmeasured capture is retained, never served: readiness is only ever set from a measurement
         // that succeeded.
         claimOwnedLocked(id, measurement.first, measurement.second, ready && id !in unmeasuredIds)
+    }
+
+    /**
+     * Outcome of [resetUntrustedAgeLocked]: whether the recorded capture time could be trusted, whether it
+     * was successfully rewritten, or whether the rewrite failed and only an in-memory age is available.
+     */
+    private enum class AgeReset(val reason: String, val counter: TerminalReason, val overrideMs: Long?) {
+        /** The sidecar already held a plausible time; nothing to do. */
+        TRUSTED("age-trusted", TerminalReason.AGE_RESET, null),
+
+        /** The time was rewritten; the seven-day clock now runs from the written value. */
+        RESET("age-reset", TerminalReason.AGE_RESET, null),
+
+        /**
+         * The rewrite failed, so there is no durable age. The recording is NOT judged on that: the caller
+         * supplies `now` as this process's age and the next recovery retries the write.
+         */
+        FAILED("age-reset-failed", TerminalReason.AGE_RESET_FAILED, -1L),
     }
 
     /**

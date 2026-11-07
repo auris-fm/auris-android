@@ -1755,7 +1755,7 @@ class ContributionStore(
         val file = File(dir, "$id$SUFFIX_CREATED")
         val now = clock()
         val recorded = readBoundedSidecar(file, MAX_CREATED_SIDECAR_BYTES)?.trim()?.toLongOrNull()
-        if (recorded != null && recorded > 0 && recorded <= now) return AgeReset.TRUSTED
+        if (recorded != null && recorded > 0 && recorded <= now) return AgeReset.Trusted
         val written = runCatching {
             hooks.onCreatedAgeWrite?.invoke(id)
             file.writeText(now.toString())
@@ -1765,7 +1765,9 @@ class ContributionStore(
         // Returning a boolean that recovery ignored left the caller to run validation on the unresettable
         // age, and validation reporting null sent a complete recording into INVALID_ON_RECOVERY - the
         // deletion this helper exists to prevent.
-        val outcome = if (written) AgeReset.RESET else AgeReset.FAILED
+        // THE FAILED AGE IS THE ACTUAL CLOCK READING, not a placeholder: it becomes the entry's
+        // `createdAtMs` for this process, so it must be a real, plausible capture time.
+        val outcome = if (written) AgeReset.Reset else AgeReset.Failed(now)
         dropCounterOnly(outcome.counter)
         Timber.tag(QUEUE_TAG).i(
             "voice-upload serve: capture=%s reason=%s recorded=%s",
@@ -3561,21 +3563,37 @@ class ContributionStore(
     }
 
     /**
-     * Outcome of [resetUntrustedAgeLocked]: whether the recorded capture time could be trusted, whether it
-     * was successfully rewritten, or whether the rewrite failed and only an in-memory age is available.
+     * Outcome of [resetUntrustedAgeLocked]. The age to use for THIS process is a value, never a sentinel:
+     * an earlier version signalled "failed" with `-1L`, which `validate` stored as the entry's
+     * `createdAtMs`, making the recording look older than the seven-day bound and stranding it - expiry
+     * skips non-positive ages, so it could never even be reclaimed (reviewer 03aa9542).
      */
-    private enum class AgeReset(val reason: String, val counter: TerminalReason, val overrideMs: Long?) {
-        /** The sidecar already held a plausible time; nothing to do. */
-        TRUSTED("age-trusted", TerminalReason.AGE_RESET, null),
+    private sealed interface AgeReset {
+        // The sidecar already held a plausible time; use it.
+        data object Trusted : AgeReset
 
-        /** The time was rewritten; the seven-day clock now runs from the written value. */
-        RESET("age-reset", TerminalReason.AGE_RESET, null),
+        // The time was rewritten; the seven-day clock now runs from the written value.
+        data object Reset : AgeReset
 
-        /**
-         * The rewrite failed, so there is no durable age. The recording is NOT judged on that: the caller
-         * supplies `now` as this process's age and the next recovery retries the write.
-         */
-        FAILED("age-reset-failed", TerminalReason.AGE_RESET_FAILED, -1L),
+        // The rewrite failed; `nowMs` is this process's age and the next recovery retries the write.
+        data class Failed(val nowMs: Long) : AgeReset
+
+        val reason: String
+            get() = when (this) {
+                Trusted -> "age-trusted"
+                Reset -> "age-reset"
+                is Failed -> "age-reset-failed"
+            }
+
+        val counter: TerminalReason
+            get() = when (this) {
+                is Failed -> TerminalReason.AGE_RESET_FAILED
+                else -> TerminalReason.AGE_RESET
+            }
+
+        // Age to use for this process, or null when the durable sidecar governs.
+        val overrideMs: Long?
+            get() = (this as? Failed)?.nowMs
     }
 
     /**

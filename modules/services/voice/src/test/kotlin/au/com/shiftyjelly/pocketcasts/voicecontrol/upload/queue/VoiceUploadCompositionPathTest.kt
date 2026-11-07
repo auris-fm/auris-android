@@ -218,6 +218,115 @@ class VoiceUploadCompositionPathTest {
         }
     }
 
+    /**
+     * A FAILED AGE REWRITE MUST STILL UPLOAD (reviewer 03aa9542). Recovery-list membership is not proof
+     * that a recording leaves the device: eligibility is judged against `createdAtMs`, and an earlier
+     * version signalled "reset failed" with `-1L`, so the entry looked ancient and `retryEligibleLocked`
+     * refused to upload it while expiry - which skips non-positive ages - could never reclaim it either.
+     * The recording was stranded. This drives the MODULE's own assembly through a real loopback while the
+     * age write is still faulted, and requires a receipt to settle it.
+     */
+    @Test
+    fun `a recording whose age rewrite failed still uploads through the module assembly`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            val root = tmp.newFolder("module-built-age-write-failure")
+            val id = java.util.UUID.randomUUID().toString()
+            // Seed a complete, valid capture, then damage ONLY its age.
+            val seeder = ContributionStore(root, QueueLimits.defaults())
+            try {
+                val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
+                val expected = java.io.ByteArrayOutputStream()
+                WavWriter.writeHeader(expected, 1600)
+                for ((chunk, valid) in pcm) WavWriter.writePcm(expected, chunk, valid)
+                val audio = expected.toByteArray()
+                val sha = java.security.MessageDigest.getInstance("SHA-256").digest(audio).joinToString("") { "%02x".format(it) }
+                val block = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock(
+                    sha256 = sha,
+                    byteCount = audio.size.toLong(),
+                    retainedSamples = 1600,
+                    originalFormat = "pcm_s16le",
+                    conversionVersion = "v1",
+                    truncated = false,
+                    droppedSpans = emptyList(),
+                )
+                val metadata = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.canonicalBytes(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder(id, "epoch-1", "42")
+                        .model("vad", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("silero-vad", "4.0"))
+                        .model("wakeword", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("auris-wake", "1.2"))
+                        .model("asr", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("whisper-small", "2024-11"))
+                        .model("translation", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None)
+                        .model("router", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("lfm-intent", "0.3"))
+                        .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Wake, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.Completed, mapOf("decision" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str("detected"))))
+                        .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Bleed, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.Completed, mapOf("decision" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str("no_overlap"))))
+                        .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Asr, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.Completed, mapOf("text" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str("skip this ad"))))
+                        .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Translation, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.NotRun, mapOf("reason" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str("no_text"))))
+                        .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Routing, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.NotRun, mapOf("reason" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str("no_candidates"))))
+                        .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Execution, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.NotRun, mapOf("reason" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str("outcome_wait_expired"))))
+                        .wakeRequired(true).build(platform = "android", appVersion = "8.20", build = "12345", audio = block),
+                )
+                val admission = seeder.admitForTest(1600, metadata.size)
+                val generation = seeder.fence.currentGeneration()
+                org.junit.Assert.assertNotNull(seeder.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, "a@x", 7L))
+            } finally {
+                seeder.close()
+            }
+            java.io.File(root, "contributions/$id.created").writeText("0")
+
+            // Recovery under the fault: the age is reset IN MEMORY to the real clock reading.
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+                hooks = StoreHooks(onCreatedAgeWrite = { throw java.io.IOException("simulated age write failure") }),
+            ).also { stores += it }
+            val recovered = store.recover()
+            org.junit.Assert.assertEquals("the faulted-age capture must be served", listOf(id), recovered.map { it.captureId })
+            // THE AGE IS A REAL TIME, NOT A SENTINEL: an age of -1 would look older than the 7-day bound.
+            org.junit.Assert.assertTrue(
+                "the in-memory age must be a plausible capture time, was ${recovered.single().createdAtMs}",
+                recovered.single().createdAtMs > 0L,
+            )
+
+            val startup = moduleStartup()
+            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
+            owner.publish("a@x", 7L, "Bearer-fixture")
+            startup.credentials.publish("Bearer-fixture")
+            val projection = startup.state.parseProjection(VoiceUploadCompositionFixtures.authenticatedProjection("epoch-1"))!!
+            startup.state.publish(projection)
+
+            val assembly = VoiceUploadModule.provideUploadAssembly(
+                store = store,
+                transport = ContributionUploadTransport(
+                    endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+                    authorization = { "Bearer-fixture" },
+                ),
+                accountStartup = startup,
+                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                aurisToken = aurisLive.provider,
+            )
+            status = 201
+            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"${store.recordedDigest(id)}\"," +
+                "\"status\":\"accepted\",\"receipt_id\":\"rcpt-age\",\"accepted_at\":\"2026-10-23T00:00:00Z\"," +
+                "\"retention_expires_at\":\"2026-11-22T00:00:00Z\"}"
+            assembly.poll()
+            // THE POINT OF THE CONTROL: the faulted-age recording actually LEFT the device.
+            org.junit.Assert.assertTrue("the faulted-age recording never reached the transport", hits.get() >= 1)
+            org.junit.Assert.assertNull(
+                "the faulted-age recording did not settle through the module assembly",
+                store.durableCapture(id),
+            )
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
     //
     // THE JOINED PATH (spec follow-up to 89b4760b item 1): engine observation events feed the REAL
     // sink, the module's REAL RetentionPublishTrigger (real owner transaction, real producer)

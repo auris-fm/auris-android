@@ -165,7 +165,12 @@ class SignedInInitialGenerationAdmissionTest {
                 "the generation-0 admitted capture must reach a DURABLE store entry",
                 store.readyEntries().any { it.captureId == captureId },
             )
-            assertNotNull(store.durableCapture(captureId))
+            // The probe opens a descriptor and takes a PROCESS-WIDE source slot; dropping it leaks
+            // the slot for the rest of the JVM and starves later full-suite neighbours (this was the
+            // VoiceUploadCompositionPathTest refusal cause). Settle immediately.
+            val probe = store.durableCapture(captureId)
+            assertNotNull("the durable capture is servable", probe)
+            probe!!.owned?.settle(1_000L)
         } finally {
             scope.cancel()
         }

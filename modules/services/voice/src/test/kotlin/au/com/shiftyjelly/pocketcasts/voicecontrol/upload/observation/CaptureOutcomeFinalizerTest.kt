@@ -480,7 +480,10 @@ class CaptureOutcomeFinalizerTest {
         assertNotNull(h.clock.drainDeadline())
         h.clock.pump()
         assertEquals("the expired capture is published exactly once", 1, h.readyFor().size)
-        val canonical = CanonicalJson.canonicalBytes(h.store.durableCapture(h.captureId.toString())!!.record).toString(Charsets.UTF_8)
+        val durableProbe = h.store.durableCapture(h.captureId.toString())!!
+        val canonical = CanonicalJson.canonicalBytes(durableProbe.record).toString(Charsets.UTF_8)
+        // The probe's descriptor held a PROCESS-WIDE source slot; settle it so the slot returns.
+        durableProbe.owned?.settle(1_000L)
         assertTrue("the persisted record must be typed outcome_wait_expired", canonical.contains("outcome_wait_expired"))
         assertNull("retention ended by expiry", h.sink.retainedCandidateForTest(h.captureId))
         assertEquals(0L, h.sink.retainedBytes())
@@ -497,7 +500,10 @@ class CaptureOutcomeFinalizerTest {
         assertTrue(h.sink.joinOutcome(CollectionOutcome.Executed(h.captureId, dispatchedWithoutThrowing = true)))
         h.clock.assertNothingParked()
         assertEquals(1, h.readyFor().size)
-        val canonical = CanonicalJson.canonicalBytes(h.store.durableCapture(h.captureId.toString())!!.record).toString(Charsets.UTF_8)
+        val durableProbe = h.store.durableCapture(h.captureId.toString())!!
+        val canonical = CanonicalJson.canonicalBytes(durableProbe.record).toString(Charsets.UTF_8)
+        // The probe's descriptor held a PROCESS-WIDE source slot; settle it so the slot returns.
+        durableProbe.owned?.settle(1_000L)
         assertTrue("a healthy capture is NOT typed outcome_wait_expired", !canonical.contains("outcome_wait_expired"))
     }
 

@@ -299,7 +299,16 @@ class VoiceLifecycleWiringTest {
                 service.voiceAsrEngine = dagger.Lazy { engine }
                 service.asrBackendSelector = selector
                 service.playbackBufferRecorder = mock()
-                service.modelManager = mock()
+                // ensureModelsReady reads digest-VERIFIED readiness; an unstubbed verified
+                // check returns a null Boolean and the unboxing NPE kills the IO start job, so
+                // the observer never installs and capture never starts.
+                service.modelManager = mock {
+                    on { isModelReady(any()) }.thenReturn(true)
+                    on { isModelReadyVerified(any()) }.thenReturn(true)
+                    on { isLfmModelReady() }.thenReturn(true)
+                    on { ensureModel(any()) }.thenReturn(Result.success(Unit))
+                    on { ensureLfmModel() }.thenReturn(Result.success(Unit))
+                }
                 service.modelsReadyCondition = ready
                 service.voiceControlServiceController = mock()
                 service.audioFeedbackRenderer = mock()

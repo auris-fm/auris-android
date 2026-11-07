@@ -4704,15 +4704,14 @@ class CloudRouteSinkTest {
         // cancellation catch must release the transferred hold before rethrowing.
         val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
         graceSignal.onWakeWordDetected()
-        val executor = org.mockito.Mockito.mock(VoicePlaybackIntentExecutor::class.java)
-        org.mockito.kotlin.whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
-            .thenAnswer {
-                // Simulate the sink's completed transfer, then the caller withdrawing.
-                val intent = it.getArgument<VoiceIntent.CloudRoute>(0)
-                val hold = graceSignal.holdCloudTurn(owner = 3L)!!
-                graceSignal.transferHoldToOutput(intent.logicalRequestId ?: testWireId, hold)
-                throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
-            }
+        var answerRan = false
+        val executor = au.com.shiftyjelly.pocketcasts.voicecontrol.service.StubVoiceExecutor { intent, _, _ ->
+            answerRan = true
+            // Simulate the sink's completed transfer, then the caller withdrawing.
+            val hold = graceSignal.holdCloudTurn(owner = 3L)!!
+            graceSignal.transferHoldToOutput(testWireId, hold)
+            throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
+        }
         val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
             voicePlaybackIntentExecutor = executor
             audioFeedbackRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
@@ -4723,14 +4722,21 @@ class CloudRouteSinkTest {
             gracePeriodSignal = graceSignal
         }
         var releasedThenRethrown = false
+        var threwOther: String? = null
         try {
             service.renderWithFailureHandling(
                 VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Premium, logicalRequestId = testWireId),
             )
         } catch (expected: kotlinx.coroutines.CancellationException) {
             releasedThenRethrown = !graceSignal.hasOutputHold(testWireId)
+        } catch (other: Throwable) {
+            threwOther = other::class.simpleName
         }
-        assertTrue("cancellation must rethrow after releasing the transferred hold", releasedThenRethrown)
+        assertTrue(
+            "answerRan=" + answerRan + " rethrown=" + releasedThenRethrown +
+                " holdPresent=" + graceSignal.hasOutputHold(testWireId) + " other=" + threwOther,
+            releasedThenRethrown,
+        )
     }
 
     @Test

@@ -303,6 +303,9 @@ class VoiceAsrCloudLanguageTest {
             audioFeedbackRenderer = mock(),
             translationStage = translator,
             currentLocale = { java.util.Locale.JAPANESE },
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -314,7 +317,7 @@ class VoiceAsrCloudLanguageTest {
             ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { dispatched ->
+            onIntent = { dispatched, _ ->
                 intents += dispatched
                 launch {
                     try {

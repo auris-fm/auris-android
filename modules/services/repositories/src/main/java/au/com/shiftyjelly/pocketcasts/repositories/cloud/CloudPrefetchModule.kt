@@ -18,6 +18,11 @@ import javax.inject.Singleton
 internal abstract class CloudPrefetchModule {
 
     @Binds
+    abstract fun bindAurisScopedTokenProviding(
+        impl: AurisTokenProvider,
+    ): AurisScopedTokenProviding
+
+    @Binds
     abstract fun bindPrefetchFlag(impl: CloudPrefetchSettings): CloudPrefetchFlag
 
     @Binds
@@ -26,6 +31,28 @@ internal abstract class CloudPrefetchModule {
     ): AurisAccountCredentialProviding
 
     companion object {
+        /**
+         * THE Auris token provider as a SINGLE shared instance.
+         *
+         * Sharing matters and is not a convenience: the refresh chain is instance state, so two
+         * instances would each rotate the refresh token and revoke the other's chain
+         * (`refresh_reused`). Callers that must never fall back to the legacy static identity --
+         * the Voice Sharing account/allowance/upload path (@spec `5d5b0d7a`) -- inject THIS type
+         * rather than the routing interface, so no cutover flag can silently swap the bearer they
+         * present for a `user_<uuid>` the Auris-only routes cannot verify.
+         */
+        @Provides
+        @Singleton
+        fun provideAurisTokenProvider(
+            cloudConfig: CloudConfig,
+            credentialProvider: AurisAccountCredentialProviding,
+        ): AurisTokenProvider = AurisTokenProvider(
+            clientProvider = {
+                cloudConfig.baseUrl().takeIf { it.isNotBlank() }?.let(::AurisAuthClient)
+            },
+            credentialProvider = credentialProvider,
+        )
+
         /**
          * The credential every cloud call presents.
          *
@@ -39,15 +66,10 @@ internal abstract class CloudPrefetchModule {
         fun provideCloudTokenProviding(
             cloudConfig: CloudConfig,
             staticIdentity: CloudStaticIdentityTokenProvider,
-            credentialProvider: AurisAccountCredentialProviding,
+            aurisTokenProvider: AurisTokenProvider,
         ): CloudTokenProviding = RoutingCloudTokenProviding(
             isAurisActive = { cloudConfig.baseUrl().isNotBlank() },
-            auris = AurisTokenProvider(
-                clientProvider = {
-                    cloudConfig.baseUrl().takeIf { it.isNotBlank() }?.let(::AurisAuthClient)
-                },
-                credentialProvider = credentialProvider,
-            ),
+            auris = aurisTokenProvider,
             legacy = staticIdentity,
         )
 

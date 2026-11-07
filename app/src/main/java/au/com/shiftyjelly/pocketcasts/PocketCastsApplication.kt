@@ -114,6 +114,16 @@ class PocketCastsApplication :
 
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
 
+    @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+
+    @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
+
+    @Inject lateinit var voiceUploadTrigger: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadTrigger
+
+    @Inject lateinit var voiceUploadScheduler: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadScheduler
+
+    @Inject lateinit var voiceUploadSchedulerBinding: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadSchedulerBinding
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -239,6 +249,14 @@ class PocketCastsApplication :
         applicationScope.launch {
             try {
                 defaultPlaylistsInitializer.initialize()
+                voiceSharingAccountStartup.initializeOnAppStart()
+                // Loss subscriptions (accounts/enrollment) + sink wiring.
+                voiceCollectionStartup.initializeOnAppStart()
+                // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
+                // starting it puts nothing on the network until every eligibility gate opens.
+                voiceUploadTrigger.start()
+                // Platform deferred-transfer scheduling: ONE unique periodic drain, ANY network.
+                voiceUploadSchedulerBinding.start()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

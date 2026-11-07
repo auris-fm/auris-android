@@ -27,9 +27,13 @@ import org.junit.Test
 class CanonicalRecordVectorRecipeTest {
 
     /**
-     * The 2026-11-07 Phase 2 emission carrying the spec-21b5d822 execution `outcome` field
-     * (failed/refused/cancelled now record `outcome` beside their `reason`). A NEW directory every
-     * emission: a re-run must never overwrite evidence an earlier review was based on.
+     * The 2026-11-07 Phase 2 emission. A NEW directory every emission: a re-run must never overwrite
+     * evidence an earlier review was based on.
+     *
+     * SCOPE (reviewer eeb5345e): this vector has NO observed execution stage, so it does not carry
+     * `observations.execution.outcome` and must not be read as exercising it. The execution field is
+     * covered by `ExecutionStageDecodeControlTest` and carried as a wire example by
+     * `/tmp/p1run/parity_execution_outcome/record.json`.
      */
     private companion object {
         const val OUT_DIR = "/tmp/p1run/upload_vector_phase2_execution_outcome"

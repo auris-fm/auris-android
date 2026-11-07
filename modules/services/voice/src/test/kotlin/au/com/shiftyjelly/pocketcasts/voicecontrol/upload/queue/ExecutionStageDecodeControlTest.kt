@@ -72,7 +72,13 @@ class ExecutionStageDecodeControlTest {
      *
      * Before this, only `success` was recorded as `outcome`; the other three were recorded as
      * `reason` alone, so a consumer reading `outcome` saw nothing for a failed, refused or cancelled
-     * action. These read the BUILT record, through the real dispatcher mapping.
+     * action.
+     *
+     * SCOPE (reviewer eeb5345e): these read an IN-MEMORY canonical build. The candidate is retained
+     * through a test seam and the invocation is test-opened; nothing is published and no durable
+     * entry is read. What IS real is the dispatcher's own mapping and the engine's settlement. The
+     * DURABLE shape is asserted separately in `EngineToProducerPublishTest`, which goes through the
+     * trigger, producer and store to the on-disk metadata file.
      */
     @Test
     fun `a failed execution records outcome failure and keeps its reason`() {
@@ -103,6 +109,49 @@ class ExecutionStageDecodeControlTest {
         assertTrue("unknown must omit outcome, was ${execution["outcome"]}", execution["outcome"] == null)
     }
 
+    /**
+     * CANCELLED has no dispatcher mapping — [VoiceActionOutcome] has no cancelled variant — but the
+     * engine accepts any `ExecutionOutcome` from its executor at [reportExecutionResult], so the
+     * cancelled wire value is REACHABLE and must not go unrecorded. This drives that real engine
+     * entry point rather than only the dispatcher, which is why it is a separate harness call.
+     */
+    @Test
+    fun `a cancelled execution records outcome cancelled and keeps its reason`() {
+        val harness = Harness()
+        runBlocking { harness.dispatchCancelledTurn() }
+        val execution = harness.builtExecutionStage()
+        assertTrue("was ${execution["state"]}", execution["state"] == RecordNode.Str("cancelled"))
+        assertTrue("outcome must be cancelled, was ${execution["outcome"]}", execution["outcome"] == RecordNode.Str("cancelled"))
+        assertTrue("reason must be kept, was ${execution["reason"]}", execution["reason"] == RecordNode.Str("cancelled_by_user"))
+    }
+
+    /**
+     * PARITY FIXTURE EMITTER (spec 2d5f764a). The canonical vector from `CanonicalRecordVectorRecipeTest`
+     * carries no execution stage, so Cloud's parity check cannot see `observations.execution.outcome`
+     * in it. This writes a record that DOES carry one, produced by the real dispatcher mapping from a
+     * refused action, so the parity check sees `outcome:"refused"` beside `reason:"client_refused"`.
+     *
+     * It asserts the emitted bytes contain that shape before writing, so a fixture cannot be produced
+     * that silently lacks the field it exists to demonstrate.
+     */
+    @Test
+    fun `emit the parity record carrying a refused execution`() {
+        val harness = Harness()
+        runBlocking { harness.dispatchCloudTurn(VoiceActionOutcome.Refused(reason = "nope")) }
+        val json = harness.builtRecordJson()
+        assertTrue("the emitted record must carry outcome refused", json.contains("\"outcome\":\"refused\""))
+        assertTrue("the emitted record must keep reason client_refused", json.contains("\"reason\":\"client_refused\""))
+
+        val dir = java.io.File("/tmp/p1run/parity_execution_outcome")
+        dir.mkdirs()
+        java.io.File(dir, "record.json").writeText(json)
+        java.io.File(dir, "sha256.txt").writeText(
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(json.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) },
+        )
+    }
+
     /** The built record is the assertion target: nothing here reads the pre-build stage list. */
     private class Harness {
         private val authority = {
@@ -120,6 +169,22 @@ class ExecutionStageDecodeControlTest {
         )
         private val executor = mock<VoicePlaybackIntentExecutor>()
 
+        /**
+         * CANCELLED comes from no [VoiceActionOutcome]; it is reported through the same real engine
+         * entry point the dispatcher uses, which accepts any `ExecutionOutcome`.
+         */
+        suspend fun dispatchCancelledTurn() {
+            val captureId = UUID.randomUUID()
+            sink.retainCandidateForTest(captureId)
+            val engine = newEngine(authority, sink, observer)
+            val token = engine.openInvocationForTest(captureId, id = 100L)
+            engine.reportExecutionResult(
+                token,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome.Cancelled,
+            )
+            engine.settleInvocation(token)
+        }
+
         suspend fun dispatchCloudTurn(vararg facts: VoiceActionOutcome): String {
             val captureId = UUID.randomUUID()
             sink.retainCandidateForTest(captureId)
@@ -135,9 +200,22 @@ class ExecutionStageDecodeControlTest {
             return captureId.toString()
         }
 
-        /** Decoded from the SERIALIZED record: the bytes that would be published. */
-        // The Execution stage's own recorded fields, read out of the canonicalised record.
+        // The whole canonical record, serialized: the bytes Cloud's intake would receive.
+        fun builtRecordJson(): String {
+            val record = buildRecord()
+            return CanonicalJson.serialize(record)
+        }
+
+        // The Execution stage's own fields, decoded from the SERIALIZED record: the bytes that
+        // would be published, not the in-memory entry the builder was handed.
         fun builtExecutionStage(): Map<String, RecordNode> {
+            val parsed = CanonicalJson.parse(CanonicalJson.serialize(buildRecord()))
+            val observations = (parsed as RecordNode.Obj).fields["observations"] as RecordNode.Obj
+            val execution = observations.fields["execution"] as RecordNode.Obj
+            return execution.fields
+        }
+
+        private fun buildRecord(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode {
             val live = sink.retainedSnapshot().single()
             // BATCH B: the provenance mapper now reads the immutable SealedCapture; a live
             // candidate is snapshotted with the early-completion cause (pre-Batch-B typing).
@@ -156,14 +234,7 @@ class ExecutionStageDecodeControlTest {
                 build = "1",
                 audio = audioBlockFor(live),
             )
-            // Round-trip through canonical JSON so the assertion reads the recorded bytes, not the
-            // in-memory entry the builder was handed.
-            val parsed = CanonicalJson.parse(CanonicalJson.serialize(record))
-            // The record stores stages under "observations", one object per stage name, with the
-            // state and the stage's own fields flat inside it.
-            val observations = (parsed as RecordNode.Obj).fields["observations"] as RecordNode.Obj
-            val execution = observations.fields["execution"] as RecordNode.Obj
-            return execution.fields
+            return record
         }
     }
 }

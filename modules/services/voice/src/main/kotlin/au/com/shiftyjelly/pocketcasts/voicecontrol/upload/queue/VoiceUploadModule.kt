@@ -41,17 +41,39 @@ object VoiceUploadModule {
     @Singleton
     fun provideContributionStore(
         @ApplicationContext context: Context,
+    ): ContributionStore = contributionStoreFor(File(context.filesDir, CAPTURES_ROOT), directorySyncOverride = null)
+
+    /**
+     * The store construction core, split from the provider so composition tests can run the REAL
+     * provider path (including the creation-time recovery below) on the JVM: Robolectric cannot
+     * execute the android.system.Os barrier, so tests inject [DirectorySync.REAL] for BOTH barriers.
+     * Production always passes null and binds PRODUCTION for both - the test override can never
+     * change what ships.
+     */
+    internal fun contributionStoreFor(
+        root: File,
+        directorySyncOverride: DirectorySync?,
     ): ContributionStore = ContributionStore(
-        File(context.filesDir, CAPTURES_ROOT),
+        root,
         QueueLimits.defaults(),
         // Spec 64ce2de6: the android.system.Os platform adapter is bound HERE, at the Android
         // construction boundary, so every durable publication in production uses the documented
         // open(O_DIRECTORY)/fsync/close surface. Unit tests construct the store directly with the
         // JVM-runnable default or their own injected barrier. There is NO unsupported-runtime
         // success fallback: an unsupported platform propagates a failure, never a claimed sync.
-        directorySync = DirectorySync.PRODUCTION,
-        intentDirectorySyncOverride = DirectorySync.PRODUCTION,
-    )
+        directorySync = directorySyncOverride ?: DirectorySync.PRODUCTION,
+        intentDirectorySyncOverride = directorySyncOverride ?: DirectorySync.PRODUCTION,
+    ).also { store ->
+        // DURABLE RESUME, ONCE PER PROCESS (on-device finding 2026-11-07, spec decision after
+        // reviewer 032a8639): recovery happens HERE, at singleton creation, BEFORE any capture
+        // preparation can begin in this process. recover() re-enumerates the durable queue from
+        // VALIDATED disk state (the 44 old-schema entries the pre-wiring build stranded will be
+        // record-check-deleted on this first recovery) - and because it precedes every preparation,
+        // its destructive debris sweep can never race a live `.part` write. Recovering per drain
+        // instead would sweep staging files out from under an admitted preparation paused between
+        // its part write and publication.
+        store.recover()
+    }
 
     @Provides
     @Singleton
@@ -210,22 +232,16 @@ object VoiceUploadModule {
     @Provides
     @Singleton
     fun provideVoiceUploadDrain(
-        store: ContributionStore,
         assembly: ContributionUploadAssembly,
         aurisToken: AurisTokenProvider,
     ): VoiceUploadDrain = VoiceUploadDrain {
         // ACQUIRE before the synchronous poll (reviewer b702cd53): the upload path's fail-closed
         // cache read must find a token that was acquired for THIS pass, not assumed from earlier.
         aurisToken.currentToken()
-        // DURABLE RESUME (on-device finding 2026-11-07, spec decision c1e7fbe2): the queue lives on
-        // disk, so the store must re-enumerate it before every poll. Without this, entries recorded
-        // before a process restart were invisible forever - the drain had an empty index while the
-        // files sat stranded (measured: 44 on the Pixel, unchanged across a drain pass). recover()
-        // holds the ownership lease, rebuilds the index from VALIDATED disk state only (self-
-        // prepared entries are re-stamped from their own sidecars - no double-serving), runs the
-        // record check that deletes old-schema entries at once (INVALID_ON_RECOVERY), and treats an
-        // older enrollment epoch as provenance, never a deletion reason (4afc6e43).
-        store.recover()
+        // The durable queue needs NO per-drain recovery: it was re-enumerated once, at store
+        // creation (see provideContributionStore), before any capture preparation could begin.
+        // Re-running recover() here would let its debris sweep unlink a live `.part` write from a
+        // preparation in flight (reviewer 032a8639 HOLD).
         assembly.poll()
     }
 

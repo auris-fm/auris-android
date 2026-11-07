@@ -10,7 +10,6 @@ data class QueueLimits(
     val maxClipBytes: Long, // includes WAV header
     val maxMetadataBytes: Int,
     val maxQueueAgeSeconds: Long,
-    val maxUploadAttempts: Int,
     // Spec voice-recording-uploads.md: finite resource defaults for the retry policy, validated against
     // compiled ceilings like every other limit.
     val retryInitialS: Long,
@@ -23,7 +22,6 @@ data class QueueLimits(
         require(maxClipBytes in WavWriter.HEADER_BYTES + 1..MAX_CLIP_BYTES_CEILING) { "max_clip_bytes outside ceiling" }
         require(maxMetadataBytes in 1..MAX_METADATA_BYTES_CEILING) { "max_metadata_bytes outside ceiling" }
         require(maxQueueAgeSeconds >= 1) { "max_queue_age_s must be positive" }
-        require(maxUploadAttempts >= 1) { "max_upload_attempts must be positive" }
         require(retryInitialS in 1..MAX_RETRY_INITIAL_S_CEILING) { "retry_initial_s outside ceiling" }
         require(retryMaxS in 1..MAX_RETRY_MAX_S_CEILING) { "retry_max_s outside ceiling" }
     }
@@ -48,7 +46,6 @@ data class QueueLimits(
             maxClipBytes = 2L * 1024 * 1024,
             maxMetadataBytes = 64 * 1024,
             maxQueueAgeSeconds = 7 * 24 * 3600L,
-            maxUploadAttempts = 8,
             retryInitialS = 2,
             retryMaxS = 3_600,
         )

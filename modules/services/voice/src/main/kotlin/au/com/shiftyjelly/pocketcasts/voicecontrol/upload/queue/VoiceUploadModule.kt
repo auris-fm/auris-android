@@ -210,12 +210,22 @@ object VoiceUploadModule {
     @Provides
     @Singleton
     fun provideVoiceUploadDrain(
+        store: ContributionStore,
         assembly: ContributionUploadAssembly,
         aurisToken: AurisTokenProvider,
     ): VoiceUploadDrain = VoiceUploadDrain {
         // ACQUIRE before the synchronous poll (reviewer b702cd53): the upload path's fail-closed
         // cache read must find a token that was acquired for THIS pass, not assumed from earlier.
         aurisToken.currentToken()
+        // DURABLE RESUME (on-device finding 2026-11-07, spec decision c1e7fbe2): the queue lives on
+        // disk, so the store must re-enumerate it before every poll. Without this, entries recorded
+        // before a process restart were invisible forever - the drain had an empty index while the
+        // files sat stranded (measured: 44 on the Pixel, unchanged across a drain pass). recover()
+        // holds the ownership lease, rebuilds the index from VALIDATED disk state only (self-
+        // prepared entries are re-stamped from their own sidecars - no double-serving), runs the
+        // record check that deletes old-schema entries at once (INVALID_ON_RECOVERY), and treats an
+        // older enrollment epoch as provenance, never a deletion reason (4afc6e43).
+        store.recover()
         assembly.poll()
     }
 

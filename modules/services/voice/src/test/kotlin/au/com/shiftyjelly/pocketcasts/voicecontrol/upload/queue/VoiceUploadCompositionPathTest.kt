@@ -416,7 +416,7 @@ class VoiceUploadCompositionPathTest {
                 aurisToken = aurisLive.provider,
             )
             // THE MODULE DRAIN BINDING — the exact provider Hilt consumes.
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(assembly, aurisLive.provider)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(store, assembly, aurisLive.provider)
             val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
             val worker = androidx.work.testing.TestListenableWorkerBuilder<VoiceUploadDrainWorker>(context)
                 .setWorkerFactory(object : androidx.work.WorkerFactory() {
@@ -436,6 +436,169 @@ class VoiceUploadCompositionPathTest {
             assertEquals("the persisted worker drained successfully", androidx.work.ListenableWorker.Result.success(), result)
             assertTrue("the worker's drain reached the transport", hits.get() >= 1)
             org.junit.Assert.assertNull("the worker's drain settled the durable entry", store.durableCapture(id))
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    // ---- DURABLE RESUME (on-device gap, spec decision c1e7fbe2): the module drain must recover
+    // ---- the durable queue before polling. Controls through the REAL store + module providers.
+
+    private fun newStoreAt(root: java.io.File): ContributionStore = ContributionStore(
+        root,
+        QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+        clock = System::currentTimeMillis,
+        jitter = { 0L },
+    ).also { stores += it }
+
+    private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun receiptBody(id: String, recordSha: String): String = (
+        "{\"schema_version\":1,\"capture_id\":\"" + id + "\",\"record_sha256\":\"" + recordSha +
+            "\",\"status\":\"accepted\",\"receipt_id\":\"rcpt-r\",\"accepted_at\":\"2026-11-07T00:00:00Z\"," +
+            "\"retention_expires_at\":\"2027-11-07T00:00:00Z\"}"
+        )
+
+    /** The projection/owner/credential fixture wiring shared by the three resume controls. */
+    private fun publishIdentity(startup: VoiceSharingAccountStartup, enrolledEpoch: String) {
+        val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
+        owner.publish("a@x", 7L, "Bearer-fixture")
+        startup.credentials.publish("Bearer-fixture")
+        startup.publishEnrolledFixture(enrolledEpoch)
+    }
+
+    private fun moduleAssembly(
+        store: ContributionStore,
+        startup: VoiceSharingAccountStartup,
+        aurisLive: VoiceUploadCompositionFixtures.LiveAuris,
+        server: HttpServer,
+    ): ContributionUploadAssembly = VoiceUploadModule.provideUploadAssembly(
+        store = store,
+        transport = ContributionUploadTransport(
+            endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+            authorization = { "Bearer-fixture" },
+        ),
+        accountStartup = startup,
+        context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+        aurisToken = aurisLive.provider,
+    )
+
+    @Test
+    fun `an entry recorded before a process restart is served by the module drain`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            val root = tmp.newFolder("resume-served")
+            val store1 = newStoreAt(root)
+            val id = prepareVerifiedCapture(store1)
+            val metaBytes = java.io.File(java.io.File(root, "contributions"), "$id.metadata.json").readBytes()
+            store1.close()
+
+            // A BRAND-NEW store over the SAME directory: the restart the old wiring never survived.
+            val store2 = newStoreAt(root)
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val assembly = moduleAssembly(store2, startup, aurisLive, server)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(store2, assembly, aurisLive.provider)
+            status = 201
+            body = receiptBody(id, sha256Hex(metaBytes))
+            kotlinx.coroutines.runBlocking { drain.drainOnce() }
+
+            assertTrue(
+                "the durable entry recorded before the restart must be uploaded by the module drain",
+                hits.get() >= 1,
+            )
+            org.junit.Assert.assertNull("the served entry must settle off the queue", store2.durableCapture(id))
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `an old-schema durable entry is deleted by the recovery record check, not uploaded`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        val (server, hits) = loopback { 201 to "{}" }
+        try {
+            val root = tmp.newFolder("resume-old-schema")
+            val store1 = newStoreAt(root)
+            val id = prepareVerifiedCapture(store1)
+            val dir = java.io.File(root, "contributions")
+            val metaFile = java.io.File(dir, "$id.metadata.json")
+            // Rewrite the record WITHOUT wake_required: exactly what the pre-Phase-2 build wrote.
+            val oldSchemaText = metaFile.readText()
+                .replace("\"wake_required\":true,", "")
+                .replace(",\"wake_required\":true", "")
+            org.junit.Assert.assertFalse(
+                "test setup: the rewrite must actually remove wake_required",
+                oldSchemaText.contains("wake_required"),
+            )
+            val oldSchemaBytes = oldSchemaText.toByteArray()
+            metaFile.writeBytes(oldSchemaBytes)
+            java.io.File(dir, "$id.sha256").writeText(sha256Hex(oldSchemaBytes))
+            store1.close()
+
+            val store2 = newStoreAt(root)
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val assembly = moduleAssembly(store2, startup, aurisLive, server)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(store2, assembly, aurisLive.provider)
+            kotlinx.coroutines.runBlocking { drain.drainOnce() }
+
+            assertEquals(
+                "an old-schema entry must never reach the transport",
+                0,
+                hits.get(),
+            )
+            assertTrue(
+                "the record check must delete the old-schema entry at once",
+                store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY) >= 1,
+            )
+            org.junit.Assert.assertFalse(
+                "the deleted entry's files must be gone",
+                java.io.File(dir, "$id.metadata.json").exists() || java.io.File(dir, "$id.recording.wav").exists(),
+            )
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `a valid same-owner entry from an older enrollment epoch still uploads after recovery`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            val root = tmp.newFolder("resume-older-epoch")
+            val store1 = newStoreAt(root)
+            val id = prepareVerifiedCapture(store1)
+            val metaBytes = java.io.File(java.io.File(root, "contributions"), "$id.metadata.json").readBytes()
+            store1.close()
+
+            val store2 = newStoreAt(root)
+            val startup = moduleStartup()
+            // The account has re-enrolled SINCE the recording: the projection carries a NEWER epoch.
+            // An older epoch alone is PROVENANCE (4afc6e43) - never a deletion or refusal reason.
+            publishIdentity(startup, "epoch-2")
+            val assembly = moduleAssembly(store2, startup, aurisLive, server)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(store2, assembly, aurisLive.provider)
+            status = 201
+            body = receiptBody(id, sha256Hex(metaBytes))
+            kotlinx.coroutines.runBlocking { drain.drainOnce() }
+
+            assertTrue(
+                "an older-epoch recording must still upload after recovery",
+                hits.get() >= 1,
+            )
+            org.junit.Assert.assertNull(store2.durableCapture(id))
         } finally {
             aurisLive.shutdown()
             server.stop(0)

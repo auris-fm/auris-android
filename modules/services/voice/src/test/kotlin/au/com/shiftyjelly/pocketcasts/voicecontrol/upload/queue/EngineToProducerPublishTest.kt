@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -775,6 +776,46 @@ class EngineToProducerPublishTest {
             "reason must be kept beside the outcome for $expectedOutcome",
             expectedReason,
             (execution.fields["reason"] as? RecordNode.Str)?.value,
+        )
+
+        if (dir == "exec-refused") {
+            emitRefusedParityArtifact(durable = checkNotNull(store.durableCapture(ctx.captureId.toString())))
+        }
+    }
+
+    /**
+     * PARITY ARTIFACT, FROM THE DURABLE CAPTURE (reviewer a7a997e9). The earlier body-only artifact
+     * had an all-zero audio digest and 44 bytes, so it could not be paired with any real WAV. This
+     * copies the WAV the store actually holds, so the record's `audio` block and the emitted file
+     * describe the same bytes, and writes the digests of both.
+     *
+     * SCOPE, stated so it cannot be read as more: the RECORD here is a real durable record, and the
+     * AUDIO is that record's own WAV. What is synthetic is the invocation upstream — the outcome was
+     * noted on the retention sink rather than produced by a live dispatcher.
+     */
+    private fun emitRefusedParityArtifact(durable: ContributionStore.DurableCapture) {
+        val record = durable.record
+        val dir = java.io.File("/tmp/p1run/parity_execution_outcome_v2")
+        dir.mkdirs()
+        val wav = java.io.File(dir, "audio.wav")
+        durable.audio.copyTo(wav, overwrite = true)
+        java.io.File(dir, "record.json").writeText(CanonicalJson.serialize(record))
+
+        val audio = (record.fields.getValue("audio") as RecordNode.Obj).fields
+        val declared = (audio.getValue("sha256") as RecordNode.Str).value
+        val actual = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(wav.readBytes()).joinToString("") { "%02x".format(it) }
+        assertEquals("the record's audio digest must describe the emitted WAV", actual, declared)
+        assertEquals("byte_count must describe the emitted WAV", wav.length(), (audio.getValue("byte_count") as RecordNode.Num).value.toLong())
+        assertTrue("a real WAV is not an empty stub", wav.length() > 44L)
+        assertNotEquals("the digest must not be a placeholder", "0".repeat(64), declared)
+
+        val sha = { f: java.io.File -> java.security.MessageDigest.getInstance("SHA-256").digest(f.readBytes()).joinToString("") { "%02x".format(it) } }
+        java.io.File(dir, "manifest.txt").writeText(
+            buildString {
+                appendLine("audio.wav  ${sha(wav)}  ${wav.length()} B")
+                appendLine("record.json  ${sha(java.io.File(dir, "record.json"))}  ${java.io.File(dir, "record.json").length()} B")
+            },
         )
     }
 

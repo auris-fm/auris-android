@@ -92,6 +92,7 @@ class ContributionStoreTest {
         // A record that satisfies the pinned WIRE contract: all five model keys and all six
         // stages present, declared absences explicit.
         val builder = ContributionRecordBuilder(captureId, epoch, "7")
+            .wakeRequired(true)
             .model("vad", ModelRef.None)
             .model("wakeword", ModelRef.None)
             .model("asr", ModelRef.None)
@@ -1272,6 +1273,7 @@ class ContributionStoreTest {
         // and audio identity). This asserts the VALIDATOR alone, on a record built legally then
         // given one unknown stage field, so only the allowlist can refuse it.
         val builder = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-1", "7")
+            .wakeRequired(true)
             .model("vad", ModelRef.None)
             .model("wakeword", ModelRef.None)
             .model("asr", ModelRef.None)

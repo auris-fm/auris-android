@@ -243,13 +243,13 @@ class ContributionRetryCallerTest {
     }
 
     @Test
-    fun `SEQUENTIAL retryable failures exhaust maxUploadAttempts and then refuse pickup`() {
+    fun `SEQUENTIAL retryable failures keep retrying with backoff - no attempt cap`() {
         var now = 13_400_000L
         val root = tmp.newFolder("caller-exhaustion")
         val id = UUID.randomUUID().toString()
         val store = ContributionStore(
             root,
-            QueueLimits.defaults().copy(maxQueueRecords = 8, maxUploadAttempts = 2, retryInitialS = 4, retryMaxS = 8),
+            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
             clock = { now },
             jitter = { bound -> bound - 1 },
         )
@@ -267,19 +267,20 @@ class ContributionRetryCallerTest {
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             responseFor = { _, _ -> wireReceipt(id) },
         )
-        // Backoff is re-armed after each failure; every elapsed boundary allows exactly one more
-        // recorded attempt, until maxUploadAttempts is exhausted.
+        // NO ATTEMPT CAP (spec 05ff27d0): a retryable failure backs off exponentially (bounded at
+        // retryMaxS) and the entry stays eligible forever - the old maxUploadAttempts=8 cap stranded
+        // recordings whose backoff outlived a server outage. Each elapsed boundary allows one more
+        // recorded attempt; the run below crosses MANY attempts without one ever being refused.
         var polls = 0
-        while (attempts < 2 && polls < 10) {
+        while (attempts < 6 && polls < 30) {
             caller.pollOnce()
             polls++
-            now += 10_000L // past every backoff this test can arm (initial=4s, doubling)
+            now += 10_000L // past every backoff this test can arm (initial=4s, doubling to 8s)
         }
-        assertEquals("attempts stop at the budget (maxUploadAttempts=2)", 2, attempts)
-        assertEquals(2, store.stateAttemptsForTest(id))
+        assertEquals("every elapsed boundary admits another attempt - no cap stops it", 6, attempts)
+        assertEquals(6, store.stateAttemptsForTest(id))
         val final = caller.pollOnce()
-        assertEquals("exhausted entry is no longer attempted", 0, final.attempted)
-        assertEquals("exhaustion is enforced at the store: pickup refuses directly", null, store.pickupAttempt(store.fence.currentGeneration(), id))
+        assertEquals("the entry is still eligible after 6 failures", 1, final.attempted)
     }
 
     @Test

@@ -696,4 +696,150 @@ class VoiceUploadCompositionPathTest {
             server.stop(0)
         }
     }
+
+    // ---- RETRY POLICY, RESIDUE AND EXPIRY (spec 05ff27d0 + residue ruling): no attempt cap; 7-day
+    // ---- deletion hooked into creation recovery; deleted entries leave NO sidecars; recovery sweeps
+    // ---- orphan sidecars. Controls through the real provider path.
+
+    /** Rewrites a bounded plain sidecar (attempts / created / retry: bare numbers). */
+    private fun writeSidecar(id: String, suffix: String, value: String) {
+        java.io.File(appQueue, "$id$suffix").writeText(value)
+    }
+
+    private fun sidecarFilesOf(id: String): List<java.io.File> = appQueue.listFiles()?.filter { it.name.startsWith(id) } ?: emptyList()
+
+    @Test
+    fun `an entry that exhausted the old 8-attempt cap still uploads after its backoff elapses`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            val store1 = priorProcessStore()
+            val id = prepareVerifiedCapture(store1)
+            // The recording failed 8 times during a server outage; its backoff has elapsed.
+            writeSidecar(id, ".attempts", "8")
+            writeSidecar(id, ".retry", (System.currentTimeMillis() - 60_000L).toString())
+            val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
+            store1.close()
+
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
+            status = 201
+            body = receiptBody(id, sha256Hex(metaBytes))
+            runDrain(drain)
+
+            assertTrue(
+                "an over-cap entry must still upload - the attempt cap is gone (spec 05ff27d0)",
+                hits.get() >= 1,
+            )
+            org.junit.Assert.assertNull(store2.durableCapture(id))
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `a recording not accepted within 7 days of capture is deleted by recovery`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        val (server, hits) = loopback { 201 to "{}" }
+        try {
+            val store1 = priorProcessStore()
+            val id = prepareVerifiedCapture(store1)
+            // Recorded 8 days ago, never accepted.
+            writeSidecar(id, ".created", (System.currentTimeMillis() - 8L * 24 * 3600 * 1000).toString())
+            store1.close()
+
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
+            runDrain(drain)
+
+            assertEquals("an expired recording must never reach the transport", 0, hits.get())
+            assertTrue(
+                "recovery must delete the over-age recording (QUEUE_AGE_EXPIRED)",
+                store2.terminalCounter(ContributionStore.TerminalReason.QUEUE_AGE_EXPIRED) >= 1,
+            )
+            assertEquals(
+                "a deleted entry leaves NO files - all sidecars go with it",
+                0,
+                sidecarFilesOf(id).size,
+            )
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `recovery sweeps orphan sidecars whose entry is gone`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        val (server, hits) = loopback { 201 to "{}" }
+        try {
+            // Sidecars of an entry that is gone (no .ready, no wav, no meta).
+            appQueue.mkdirs()
+            val orphan = "00000000-0000-4000-8000-00000000dead"
+            for (suffix in listOf(".created", ".owner", ".retry")) {
+                java.io.File(appQueue, "$orphan$suffix").writeText("1")
+            }
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
+            runDrain(drain)
+
+            assertEquals(
+                "recovery must sweep orphan sidecars whose entry is gone",
+                0,
+                sidecarFilesOf(orphan).size,
+            )
+            assertEquals(0, hits.get())
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `an old-schema deletion removes ALL sidecars - no residue`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        val (server, hits) = loopback { 201 to "{}" }
+        try {
+            val store1 = priorProcessStore()
+            val id = prepareVerifiedCapture(store1)
+            val metaFile = java.io.File(appQueue, "$id.metadata.json")
+            val oldSchemaBytes = metaFile.readText()
+                .replace("\"wake_required\":true,", "")
+                .replace(",\"wake_required\":true", "")
+                .toByteArray()
+            metaFile.writeBytes(oldSchemaBytes)
+            java.io.File(appQueue, "$id.sha256").writeText(sha256Hex(oldSchemaBytes))
+            store1.close()
+
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
+            runDrain(drain)
+
+            assertTrue(store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY) >= 1)
+            assertEquals(0, hits.get())
+            assertEquals(
+                "a deleted entry leaves NO residue - created/owner/retry go too",
+                0,
+                sidecarFilesOf(id).size,
+            )
+        } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
 }

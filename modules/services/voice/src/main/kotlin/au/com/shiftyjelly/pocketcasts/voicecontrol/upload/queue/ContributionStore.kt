@@ -1923,7 +1923,10 @@ class ContributionStore(
     private fun retryEligibleLocked(id: String, entry: Entry, nowMs: Long): Boolean {
         val charge = ownedCharges[id]
         if (charge?.ready != true) return false
-        if (entry.attempts >= limits.maxUploadAttempts) return false
+        // NO ATTEMPT CAP (spec 05ff27d0): a retryable failure backs off exponentially to the 1-hour
+        // bound and keeps retrying until acceptance or queue-age expiry. The old 8-attempt cap
+        // permanently stranded recordings whose backoff outlived a server outage.
+        if ((clock() - entry.createdAtMs) / 1000L > limits.maxQueueAgeSeconds) return false
         // Absent means genuinely unscheduled: recovery loaded every durable boundary, and a publication
         // failure puts the id in the UNCERTAIN set instead of defaulting.
         if (heldUncertainLocked(id)) return false
@@ -2549,12 +2552,20 @@ class ContributionStore(
                 // Deleting an invalid entry can FAIL. The previous version dropped the files' existence
                 // on the floor and only bumped a counter, so any bytes that survived the delete became
                 // unowned: still on disk, still occupying the user's storage, counted by nothing.
+                // ALL sidecars go with the entry (spec 05ff27d0 residue ruling): a deleted entry
+                // leaves no `.created`/`.owner`/`.retry` residue - the 2026-11-07 install left 44
+                // three-file residues because this list missed them.
                 val cleaned = listOf(
                     wav,
                     meta,
                     attemptsFile,
                     File(dir, "$id$SUFFIX_READY"),
                     File(dir, "$id$SUFFIX_DIGEST"),
+                    File(dir, "$id$SUFFIX_CREATED"),
+                    File(dir, "$id$SUFFIX_RETRY"),
+                    File(dir, "$id$SUFFIX_OWNER"),
+                    File(dir, "$id$SUFFIX_ATTEMPTS.tmp"),
+                    File(dir, "$id$SUFFIX_RETRY.tmp"),
                 ).all { !it.exists() || it.delete() || !it.exists() }
                 if (!cleaned) {
                     // The pre-fix version measured wav.length() and meta.length(): primary files only, and
@@ -2593,6 +2604,8 @@ class ContributionStore(
                 }
             }
         }
+        // Boundary-held ids survive past the rebuild block: the orphan-sidecar sweep must exclude them.
+        val boundaryHeld = mutableListOf<String>()
         synchronized(lock) {
             // Rebuild the index from VALIDATED disk state only: self-prepared entries are
             // re-stamped from their current sidecars (a mutable clock or post-purge debris can
@@ -2625,7 +2638,6 @@ class ContributionStore(
                     File(dir, "$id$SUFFIX_READY").delete()
                 }
             }
-            val boundaryHeld = mutableListOf<String>()
             keep.forEach {
                 // Readiness on the SINGLE existing charge; a missing charge is created once, never added to.
                 val charge = ownedCharges.getOrPut(it.captureId) {
@@ -2660,6 +2672,34 @@ class ContributionStore(
         // what recovery found BEFORE the reconcile deletes what it can - a sweep finding that later
         // reconciles away still records its measurement failure. Failure inside leaves the hold set.
         retryDisqualifiedCleanupLocked()
+        // ORPHAN SIDECAR SWEEP (spec 05ff27d0, decision on the 2026-11-07 residues): sidecars whose
+        // entry is gone are debris. Any known-suffix file whose id is neither indexed, self-prepared,
+        // nor explicitly withheld this run belongs to no live entry and is swept. Uncertain and
+        // boundary-held ids are EXCLUDED: uncertainty is never rejection.
+        synchronized(lock) {
+            // ONLY sidecar orphans here: wav/meta/digest debris (no .ready) is owned by the grouped
+            // unmarked-debris sweep above, which measures and charges each capture ONCE as a whole;
+            // sweeping those here would charge per file. Disqualified ids are excluded: their cleanup
+            // runs through the namespace-confirmed disqualified path, never a bare delete.
+            val sidecarOnly = listOf(SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
+            files.filter { f ->
+                val id = sidecarOnly.firstOrNull { f.name.endsWith(it) }?.let { f.name.removeSuffix(it) }
+                id != null &&
+                    id.matches(UUID_RE) &&
+                    id !in memoryEntries.keys &&
+                    id !in preparedIds &&
+                    id !in uncertainIds &&
+                    id !in boundaryHeld &&
+                    !File(dir, "$id$SUFFIX_READY").exists() &&
+                    !isDisqualified(id)
+            }.forEach { it.delete() }
+        }
+        // QUEUE-AGE EXPIRY (spec 05ff27d0): a recording not accepted within maxQueueAgeSeconds of its
+        // capture is deleted. The production hook is HERE, in recovery, so the once-per-process
+        // invariant (reviewer 032a8639) holds and expiry can never race a live preparation; the
+        // eligibility path additionally withholds over-age entries mid-process.
+        val expiredNow = expireOlderThanGuarded()
+        keep.removeAll { it.captureId in expiredNow.toSet() }
         coverageEstablished = true
         // If marker discovery failed, the hold is set: recovery must not hand its caller ready entries
         // either - readyEntries() withholding them is not enough when the caller consumes this list

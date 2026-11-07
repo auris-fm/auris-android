@@ -197,19 +197,23 @@ class ContributionStoreTest {
         assertNotNull(store.prepare(idA, "epoch-1", chunks(8), meta(idA), "a@x", 7L))
         now += 150_000 // A (created at t=1_000_000) is now 150s old > max_queue_age_s=100
         assertNotNull(store.prepare(idB, "epoch-1", chunks(8), meta(idB), "a@x", 7L))
-        store.recordAttempt(store.fence.currentGeneration(), idA)
+        store.recordAttempt(store.fence.currentGeneration(), idB)
         // RESTART: fresh store recovers durable state including attempt counts.
         // A restart implies the previous owner released the directory (spec c8f766fb).
         store.close()
         val store2 = ContributionStore(root, limits, clock = { now }).also { storesForTeardown += it }
+        // Recovery itself is the production expiry hook (spec 05ff27d0): A is over age, so recovery
+        // deletes it; B survives with its recorded attempt count intact across the restart.
         val recovered = store2.recover()
-        assertEquals(2, recovered.size)
-        assertEquals(1, recovered.first { it.captureId == idA }.attempts)
+        assertEquals(1, recovered.size)
+        assertEquals(idB, recovered.single().captureId)
+        assertEquals(1, recovered.single().attempts)
+        assertEquals(1L, store2.terminalCounter(ContributionStore.TerminalReason.QUEUE_AGE_EXPIRED))
+        // The public expiry API stays SCOPED: nothing beyond the already-expired entry is old enough.
         val expired = store2.expireOlderThan()
-        assertEquals(listOf(idA), expired)
+        assertEquals(emptyList<String>(), expired)
         assertEquals(1, store2.readyEntries().size)
         assertEquals(idB, store2.readyEntries().single().captureId)
-        assertEquals(1L, store2.terminalCounter(ContributionStore.TerminalReason.QUEUE_AGE_EXPIRED))
     }
 
     @Test

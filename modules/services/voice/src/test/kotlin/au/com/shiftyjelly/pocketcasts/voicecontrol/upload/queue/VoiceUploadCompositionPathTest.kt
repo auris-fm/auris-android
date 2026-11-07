@@ -416,7 +416,7 @@ class VoiceUploadCompositionPathTest {
                 aurisToken = aurisLive.provider,
             )
             // THE MODULE DRAIN BINDING — the exact provider Hilt consumes.
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(store, assembly, aurisLive.provider)
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(assembly, aurisLive.provider)
             val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
             val worker = androidx.work.testing.TestListenableWorkerBuilder<VoiceUploadDrainWorker>(context)
                 .setWorkerFactory(object : androidx.work.WorkerFactory() {
@@ -442,14 +442,38 @@ class VoiceUploadCompositionPathTest {
         }
     }
 
-    // ---- DURABLE RESUME (on-device gap, spec decision c1e7fbe2): the module drain must recover
-    // ---- the durable queue before polling. Controls through the REAL store + module providers.
+    // ---- DURABLE RESUME (on-device gap 2026-11-07; recovery now happens ONCE per process, in the
+    // ---- module's store provider, BEFORE any capture preparation can begin - reviewer 032a8639).
+    // ---- Controls through the REAL provider-created store and the module's own drain binding.
 
-    private fun newStoreAt(root: java.io.File): ContributionStore = ContributionStore(
-        root,
+    private val appContext: android.content.Context
+        get() = androidx.test.core.app.ApplicationProvider.getApplicationContext()
+
+    /** The queue directory the production provider owns (voice-contributions/contributions). */
+    private val appQueue: java.io.File
+        get() = java.io.File(java.io.File(appContext.filesDir, "voice-contributions"), "contributions")
+
+    /**
+     * The PRE-EXISTING process: a store built with the JVM-runnable sync default (Robolectric
+     * cannot run the production android.system.Os barrier), over the SAME directory the production
+     * provider owns. Its preparations stage the durable files a later process must recover.
+     */
+    private fun priorProcessStore(): ContributionStore = ContributionStore(
+        java.io.File(appContext.filesDir, "voice-contributions"),
         QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
         clock = System::currentTimeMillis,
         jitter = { 0L },
+    ).also { stores += it }
+
+    /**
+     * THE REAL PROVIDER PATH: contributionStoreFor is the body provideContributionStore runs; each
+     * call models a fresh process (Hilt singletons do not survive one) and CREATION runs recovery.
+     * The sync override only swaps the platform barrier for the JVM-runnable REAL surface the tests
+     * already use elsewhere; Robolectric cannot execute android.system.Os.
+     */
+    private fun providerStore(): ContributionStore = VoiceUploadModule.contributionStoreFor(
+        java.io.File(appContext.filesDir, "voice-contributions"),
+        directorySyncOverride = DirectorySync.REAL,
     ).also { stores += it }
 
     private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
@@ -460,7 +484,7 @@ class VoiceUploadCompositionPathTest {
             "\"retention_expires_at\":\"2027-11-07T00:00:00Z\"}"
         )
 
-    /** The projection/owner/credential fixture wiring shared by the three resume controls. */
+    /** The projection/owner/credential fixture wiring shared by the resume controls. */
     private fun publishIdentity(startup: VoiceSharingAccountStartup, enrolledEpoch: String) {
         val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
         owner.publish("a@x", 7L, "Bearer-fixture")
@@ -468,48 +492,54 @@ class VoiceUploadCompositionPathTest {
         startup.publishEnrolledFixture(enrolledEpoch)
     }
 
-    private fun moduleAssembly(
+    private fun moduleDrain(
         store: ContributionStore,
         startup: VoiceSharingAccountStartup,
         aurisLive: VoiceUploadCompositionFixtures.LiveAuris,
         server: HttpServer,
-    ): ContributionUploadAssembly = VoiceUploadModule.provideUploadAssembly(
-        store = store,
-        transport = ContributionUploadTransport(
-            endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
-            authorization = { "Bearer-fixture" },
+    ): VoiceUploadDrain = VoiceUploadModule.provideVoiceUploadDrain(
+        VoiceUploadModule.provideUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+                authorization = { "Bearer-fixture" },
+            ),
+            accountStartup = startup,
+            context = appContext,
+            aurisToken = aurisLive.provider,
         ),
-        accountStartup = startup,
-        context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
-        aurisToken = aurisLive.provider,
+        aurisLive.provider,
     )
 
+    private fun runDrain(drain: VoiceUploadDrain) {
+        kotlinx.coroutines.runBlocking { drain.drainOnce() }
+    }
+
     @Test
-    fun `an entry recorded before a process restart is served by the module drain`() {
+    fun `an entry recorded before a process restart is served after the provider recovers at creation`() {
         val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
         aurisLive.acquire()
         var status = 500
         var body = ""
         val (server, hits) = loopback { status to body }
         try {
-            val root = tmp.newFolder("resume-served")
-            val store1 = newStoreAt(root)
+            val store1 = priorProcessStore()
             val id = prepareVerifiedCapture(store1)
-            val metaBytes = java.io.File(java.io.File(root, "contributions"), "$id.metadata.json").readBytes()
+            val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
             store1.close()
 
-            // A BRAND-NEW store over the SAME directory: the restart the old wiring never survived.
-            val store2 = newStoreAt(root)
+            // A FRESH provider creation over the same directory = the restart. Recovery runs HERE,
+            // at creation, before this test can prepare anything else.
             val startup = moduleStartup()
             publishIdentity(startup, "epoch-1")
-            val assembly = moduleAssembly(store2, startup, aurisLive, server)
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(store2, assembly, aurisLive.provider)
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
             status = 201
             body = receiptBody(id, sha256Hex(metaBytes))
-            kotlinx.coroutines.runBlocking { drain.drainOnce() }
+            runDrain(drain)
 
             assertTrue(
-                "the durable entry recorded before the restart must be uploaded by the module drain",
+                "the durable entry recorded before the restart must be uploaded",
                 hits.get() >= 1,
             )
             org.junit.Assert.assertNull("the served entry must settle off the queue", store2.durableCapture(id))
@@ -520,16 +550,14 @@ class VoiceUploadCompositionPathTest {
     }
 
     @Test
-    fun `an old-schema durable entry is deleted by the recovery record check, not uploaded`() {
+    fun `an old-schema durable entry is deleted by the creation recovery record check, not uploaded`() {
         val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
         aurisLive.acquire()
         val (server, hits) = loopback { 201 to "{}" }
         try {
-            val root = tmp.newFolder("resume-old-schema")
-            val store1 = newStoreAt(root)
+            val store1 = priorProcessStore()
             val id = prepareVerifiedCapture(store1)
-            val dir = java.io.File(root, "contributions")
-            val metaFile = java.io.File(dir, "$id.metadata.json")
+            val metaFile = java.io.File(appQueue, "$id.metadata.json")
             // Rewrite the record WITHOUT wake_required: exactly what the pre-Phase-2 build wrote.
             val oldSchemaText = metaFile.readText()
                 .replace("\"wake_required\":true,", "")
@@ -540,15 +568,14 @@ class VoiceUploadCompositionPathTest {
             )
             val oldSchemaBytes = oldSchemaText.toByteArray()
             metaFile.writeBytes(oldSchemaBytes)
-            java.io.File(dir, "$id.sha256").writeText(sha256Hex(oldSchemaBytes))
+            java.io.File(appQueue, "$id.sha256").writeText(sha256Hex(oldSchemaBytes))
             store1.close()
 
-            val store2 = newStoreAt(root)
             val startup = moduleStartup()
             publishIdentity(startup, "epoch-1")
-            val assembly = moduleAssembly(store2, startup, aurisLive, server)
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(store2, assembly, aurisLive.provider)
-            kotlinx.coroutines.runBlocking { drain.drainOnce() }
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
+            runDrain(drain)
 
             assertEquals(
                 "an old-schema entry must never reach the transport",
@@ -556,12 +583,12 @@ class VoiceUploadCompositionPathTest {
                 hits.get(),
             )
             assertTrue(
-                "the record check must delete the old-schema entry at once",
+                "the creation recovery's record check must delete the old-schema entry at once",
                 store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY) >= 1,
             )
             org.junit.Assert.assertFalse(
                 "the deleted entry's files must be gone",
-                java.io.File(dir, "$id.metadata.json").exists() || java.io.File(dir, "$id.recording.wav").exists(),
+                metaFile.exists() || java.io.File(appQueue, "$id.recording.wav").exists(),
             )
         } finally {
             aurisLive.shutdown()
@@ -577,22 +604,20 @@ class VoiceUploadCompositionPathTest {
         var body = ""
         val (server, hits) = loopback { status to body }
         try {
-            val root = tmp.newFolder("resume-older-epoch")
-            val store1 = newStoreAt(root)
+            val store1 = priorProcessStore()
             val id = prepareVerifiedCapture(store1)
-            val metaBytes = java.io.File(java.io.File(root, "contributions"), "$id.metadata.json").readBytes()
+            val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
             store1.close()
 
-            val store2 = newStoreAt(root)
             val startup = moduleStartup()
             // The account has re-enrolled SINCE the recording: the projection carries a NEWER epoch.
             // An older epoch alone is PROVENANCE (4afc6e43) - never a deletion or refusal reason.
             publishIdentity(startup, "epoch-2")
-            val assembly = moduleAssembly(store2, startup, aurisLive, server)
-            val drain = VoiceUploadModule.provideVoiceUploadDrain(store2, assembly, aurisLive.provider)
+            val store2 = providerStore()
+            val drain = moduleDrain(store2, startup, aurisLive, server)
             status = 201
             body = receiptBody(id, sha256Hex(metaBytes))
-            kotlinx.coroutines.runBlocking { drain.drainOnce() }
+            runDrain(drain)
 
             assertTrue(
                 "an older-epoch recording must still upload after recovery",
@@ -600,6 +625,73 @@ class VoiceUploadCompositionPathTest {
             )
             org.junit.Assert.assertNull(store2.durableCapture(id))
         } finally {
+            aurisLive.shutdown()
+            server.stop(0)
+        }
+    }
+
+    /**
+     * RECOVERY-VS-PREPARATION OVERLAP (reviewer 032a8639 HOLD): a drain while an admitted
+     * preparation is paused between its `.part` write and publication must NOT disturb it - the
+     * capture commits afterwards and uploads EXACTLY ONCE. Because recovery runs only at store
+     * creation (before any preparation), the drain has no destructive sweep to race.
+     */
+    @Test
+    fun `a drain during a paused preparation leaves it intact - the capture commits and uploads exactly once`() {
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        try {
+            // Recovery-at-creation, THEN the pausable preparation. The hook seam is the store's
+            // documented test injection point (StoreHooks); pause AFTER the part write, exactly the
+            // window the reviewer flagged.
+            val root = tmp.newFolder("overlap-drain-vs-prepare")
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+                hooks = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.StoreHooks(
+                    onWavPartWrite = {
+                        entered.countDown()
+                        release.await()
+                    },
+                ),
+            ).also { stores += it }
+            store.recover()
+
+            var preparedId: String? = null
+            val preparation = Thread { preparedId = prepareVerifiedCapture(store) }
+            preparation.start()
+            org.junit.Assert.assertTrue("test setup: the preparation must reach the part write", entered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+            // The drain fires WHILE the preparation is paused mid-write.
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+            val drain = moduleDrain(store, startup, aurisLive, server)
+            runDrain(drain)
+            assertEquals("the paused preparation must not be served mid-write", 0, hits.get())
+
+            release.countDown()
+            preparation.join(30_000)
+            val committedId = preparedId
+                ?: error("the capture must still commit despite the concurrent drain")
+            org.junit.Assert.assertTrue(
+                "the capture must still commit despite the concurrent drain",
+                java.io.File(java.io.File(root, "contributions"), "$committedId.recording.wav").exists(),
+            )
+
+            status = 201
+            body = receiptBody(committedId, sha256Hex(java.io.File(java.io.File(root, "contributions"), "$committedId.metadata.json").readBytes()))
+            runDrain(drain)
+            assertEquals("the committed capture must upload EXACTLY once across both drains", 1, hits.get())
+            org.junit.Assert.assertNull(store.durableCapture(committedId))
+        } finally {
+            release.countDown()
             aurisLive.shutdown()
             server.stop(0)
         }

@@ -1654,7 +1654,7 @@ class ContributionStore(
                 }
             }
             val expiredIds = memoryEntries.values
-                .filter { (now - it.createdAtMs) / 1000L > limits.maxQueueAgeSeconds }
+                .filter { (now - it.createdAtMs) / 1000L >= limits.maxQueueAgeSeconds }
                 .map { it.captureId }
             for (id in expiredIds) {
                 memoryEntries[id]?.let { deleteLocked(it, "queue-age-expired") }
@@ -1926,7 +1926,7 @@ class ContributionStore(
         // NO ATTEMPT CAP (spec 05ff27d0): a retryable failure backs off exponentially to the 1-hour
         // bound and keeps retrying until acceptance or queue-age expiry. The old 8-attempt cap
         // permanently stranded recordings whose backoff outlived a server outage.
-        if ((clock() - entry.createdAtMs) / 1000L > limits.maxQueueAgeSeconds) return false
+        if ((clock() - entry.createdAtMs) / 1000L >= limits.maxQueueAgeSeconds) return false
         // Absent means genuinely unscheduled: recovery loaded every durable boundary, and a publication
         // failure puts the id in the UNCERTAIN set instead of defaulting.
         if (heldUncertainLocked(id)) return false

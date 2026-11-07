@@ -217,8 +217,13 @@ class ContributionUploadTransport(
                 // ever come from the OUTER catch - which this path never reaches. Instrumented separately,
                 // and the throwable is kept so the two exits never share one stale slot.
                 unexpectedExitForTest = io
+                // THE CAPTURE ID IS WHAT JOINS THIS LINE TO THE SERVER'S OWN PER-CLIP TIMELINE
+                // (reviewer 5c5bf89c item 2). Without it, concurrent attempts interleave and neither side's
+                // rows can be matched to the other's. It is the OPAQUE id already carried by every other
+                // upload log line - never a filename, path or content.
                 Timber.tag(DIAGNOSTIC_TAG).i(
-                    "voice-upload transport: outcome=%s phase=%s cause=%s",
+                    "voice-upload transport: capture=%s outcome=%s phase=%s cause=%s",
+                    captureId,
                     if (isCancelled()) "cancelled" else "ambiguous",
                     phase.status,
                     contentFreeCauseOf(io),
@@ -238,8 +243,12 @@ class ContributionUploadTransport(
             // That ambiguity is why an installed build could sit for twenty minutes refusing to upload with
             // nothing on the device naming the cause. The line below names the PHASE and a CONTENT-FREE cause
             // derived from the throwable's type and message class only - never a body, header or credential.
+            // The outcome REPORTS THE RESPONSE THIS EXIT RETURNS: `ambiguous`, not a bare `none`
+            // (reviewer 5c5bf89c item 2). A line claiming `none` describes the absence of a status, not the
+            // verdict, and reads as if nothing was decided.
             Timber.tag(DIAGNOSTIC_TAG).i(
-                "voice-upload transport: outcome=none phase=%s cause=%s",
+                "voice-upload transport: capture=%s outcome=ambiguous phase=%s cause=%s",
+                captureId,
                 phase.status,
                 contentFreeCauseOf(io),
             )

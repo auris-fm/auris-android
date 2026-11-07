@@ -523,10 +523,13 @@ class ContributionUploadTransportTest {
 
     @Test
     fun `the OUTER exit reports its own cause, not a stale one from another attempt`() {
-        // Reviewer 6a82003a: the inner catch at the call.execute() boundary and the outer catch are
-        // DIFFERENT exits, and a shared slot meant the outer one could report an earlier failure. Each exit
-        // now logs its own phase and cause, so this asserts the OUTER path specifically: a failure raised
-        // while building the request (before any call is registered) must still name itself.
+        // Reviewer 6a82003a and 5c5bf89c item 1. The two no-status exits are DIFFERENT code paths, and a
+        // shared slot meant the outer one could report an earlier failure. The first version of this control
+        // was INERT: closing the descriptor does not fail request construction, because multipartFor only
+        // borrows inside RequestBody.writeTo, which runs under call.execute() and the INNER catch. The loose
+        // assertions accepted the inner line. This forces a construction-time failure instead: an endpoint
+        // OkHttp refuses to parse, which throws while building the Request, so the outer catch is the only
+        // exit that can run.
         val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
         val tree = object : timber.log.Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
@@ -534,24 +537,31 @@ class ContributionUploadTransportTest {
             }
         }
         timber.log.Timber.plant(tree)
+        val id = UUID.randomUUID().toString()
         try {
-            val id = UUID.randomUUID().toString()
-            // A descriptor that is already CLOSED makes the multipart envelope unavailable, so the failure
-            // happens inside the outer try before any call is registered - the OUTER exit, not the
-            // execute() one. This pins that the outer exit reports its own phase and cause.
-            val closed = OwnedAudio(
-                java.io.FileInputStream(wavFile(id)).also { it.close() },
-                16,
-                "0".repeat(64),
-            )
-            transport().upload(id, record(id), closed)
+            ContributionUploadTransport(
+                endpoint = "http://[::malformed-endpoint",
+                authorization = { "Bearer t" },
+                callTimeoutMs = 5_000,
+            ).upload(id, record(id), ownedOf(wavFile(id)))
         } finally {
             timber.log.Timber.uproot(tree)
         }
-        assertTrue("the outer exit must log a reason line too, got ${lines.toList()}", lines.isNotEmpty())
-        val line = lines.last()
-        assertTrue("the outer reason line must name a phase: $line", line.contains("phase="))
-        assertTrue("the outer reason line must name a cause: $line", line.contains("cause="))
+
+        assertEquals("exactly one exit must report: ${lines.toList()}", 1, lines.size)
+        val line = lines.single()
+        // The OUTER exit's own shape: it never reached a call, so no lifecycle event fired and the phase is
+        // still the preparation marker. An inner-exit line would carry an observed transport phase instead.
+        // NOT an observed transport phase: the request was never handed to a call, so OkHttp's listener
+        // never fired. `request-built` is the marker set just before construction, which is exactly where
+        // this exit caught the failure - an INNER-exit line would carry an observed phase such as
+        // `connect`, `request-body` or `response-headers-received` instead.
+        assertTrue("the outer exit must report the construction phase: $line", line.contains("phase=request-built"))
+        assertTrue("the outer exit must name a cause: $line", line.contains("cause="))
+        // The outcome must MATCH the response it returns (reviewer 5c5bf89c item 2).
+        assertTrue("the outer line must report ambiguous, matching its response: $line", line.contains("outcome=ambiguous"))
+        // Opaque capture ID, so a concurrent attempt can be joined to its own timeline.
+        assertTrue("the reason line must carry the capture id: $line", line.contains(id))
     }
 
     @Test

@@ -774,37 +774,61 @@ class EngineToProducerPublishTest {
         trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
 
-        // ONE open serves the validation and (for refused) the parity export. The descriptor
-        // settles in finally, so the slot returns even when an assertion throws (reviewer 586e0209).
+        // ONE open serves the validation, the assertions and (for refused) the parity export, all
+        // inside ONE outer try/finally whose settlement is UNCONDITIONAL (reviewer 586e0209
+        // follow-up): any failure in the refused case — validation, assertion or export — still
+        // returns the process-wide source slot. Never branch the settlement on the path taken.
         val durable = checkNotNull(store.durableCapture(ctx.captureId.toString()))
-        val decoded = try {
-            when (val v = RecordValidator.validate(durable.record)) {
+        try {
+            val decoded = when (val v = RecordValidator.validate(durable.record)) {
                 is RecordValidator.Result.Ok -> v.record
                 else -> error("the persisted record must decode, got $v")
             }
-        } finally {
-            if (dir != "exec-refused") durable.owned?.settle(1_000L)
-        }
-        val execution = decoded.observations.getValue(StageName.Execution)
-        assertEquals("state for $expectedOutcome", expectedState, execution.state)
-        assertEquals(
-            "outcome must be recorded on the durable record for $expectedOutcome",
-            expectedOutcome,
-            (execution.fields["outcome"] as? RecordNode.Str)?.value,
-        )
-        assertEquals(
-            "reason must be kept beside the outcome for $expectedOutcome",
-            expectedReason,
-            (execution.fields["reason"] as? RecordNode.Str)?.value,
-        )
-
-        if (dir == "exec-refused") {
-            try {
+            val execution = decoded.observations.getValue(StageName.Execution)
+            assertEquals("state for $expectedOutcome", expectedState, execution.state)
+            assertEquals(
+                "outcome must be recorded on the durable record for $expectedOutcome",
+                expectedOutcome,
+                (execution.fields["outcome"] as? RecordNode.Str)?.value,
+            )
+            assertEquals(
+                "reason must be kept beside the outcome for $expectedOutcome",
+                expectedReason,
+                (execution.fields["reason"] as? RecordNode.Str)?.value,
+            )
+            if (dir == "exec-refused") {
                 emitRefusedParityArtifact(durable)
-            } finally {
-                durable.owned?.settle(1_000L)
             }
+        } finally {
+            durable.owned?.settle(1_000L)
         }
+    }
+
+    /**
+     * FAILURE-PATH CONTROL for the settlement boundary above (reviewer 586e0209 follow-up): when a
+     * refused-capture assertion throws inside [assertDurableExecution], the descriptor's settle must
+     * still happen in the outer finally, so the process-wide source slot is back to its baseline.
+     * Without this control the leak path is never exercised — the green tests all pass their
+     * assertions and settle either way.
+     */
+    @Test
+    fun `a throwing refused assertion still returns the source slot`() {
+        val before = ContributionStore.processOpenSourceSlotsForTest()
+        val err = kotlin.runCatching {
+            assertDurableExecution(
+                dir = "exec-refused-slot-probe",
+                reported = ExecutionOutcome.Refused,
+                expectedState = StageState.Failed,
+                expectedOutcome = "deliberately-wrong", // forces the outcome assertion to throw
+                expectedReason = "client_refused",
+            )
+        }.exceptionOrNull()
+        org.junit.Assert.assertNotNull("the forced wrong expectation must fail the control", err)
+        assertEquals(
+            "the refused path must settle owned even when its assertion throws",
+            before,
+            ContributionStore.processOpenSourceSlotsForTest(),
+        )
     }
 
     /**

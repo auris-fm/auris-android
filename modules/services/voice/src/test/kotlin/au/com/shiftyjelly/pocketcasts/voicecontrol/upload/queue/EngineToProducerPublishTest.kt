@@ -703,6 +703,81 @@ class EngineToProducerPublishTest {
         assertEquals("success", (execution.fields.getValue("outcome") as RecordNode.Str).value)
     }
 
+    /**
+     * SPEC 21b5d822 + reviewer eeb5345e: the DURABLE record, not an in-memory build. Every observed
+     * execution must carry `outcome` from the wire vocabulary, failed/cancelled keep their `reason`,
+     * and an unobserved execution omits `outcome` entirely (covered by the test below).
+     *
+     * Real path: sink ownership rule -> trigger -> producer -> store -> the single on-disk metadata
+     * file, decoded and validated. No engine, no dispatcher: the outcome is noted on the sink.
+     */
+    @Test
+    fun `a reported failure is persisted with outcome failure and its reason`() {
+        assertDurableExecution(
+            dir = "exec-failure",
+            reported = ExecutionOutcome.Failure,
+            expectedState = StageState.Failed,
+            expectedOutcome = "failure",
+            expectedReason = "action_failed",
+        )
+    }
+
+    @Test
+    fun `a reported refusal is persisted with outcome refused and its reason`() {
+        assertDurableExecution(
+            dir = "exec-refused",
+            reported = ExecutionOutcome.Refused,
+            expectedState = StageState.Failed,
+            expectedOutcome = "refused",
+            expectedReason = "client_refused",
+        )
+    }
+
+    @Test
+    fun `a reported cancellation is persisted with outcome cancelled and its reason`() {
+        assertDurableExecution(
+            dir = "exec-cancelled",
+            reported = ExecutionOutcome.Cancelled,
+            expectedState = StageState.Cancelled,
+            expectedOutcome = "cancelled",
+            expectedReason = "cancelled_by_user",
+        )
+    }
+
+    private fun assertDurableExecution(
+        dir: String,
+        reported: ExecutionOutcome,
+        expectedState: StageState,
+        expectedOutcome: String,
+        expectedReason: String,
+    ) {
+        val root = tmp.newFolder(dir)
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+        assertTrue(sink.noteExecutionOutcome(ctx.captureId, reported))
+        trigger(sink, store, stagesForTest = { sealed -> EngineStageProvenance.stagesFor(sealed) }).attach()
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
+
+        val decoded = when (val v = RecordValidator.validate(checkNotNull(store.durableCapture(ctx.captureId.toString())).record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val execution = decoded.observations.getValue(StageName.Execution)
+        assertEquals("state for $expectedOutcome", expectedState, execution.state)
+        assertEquals(
+            "outcome must be recorded on the durable record for $expectedOutcome",
+            expectedOutcome,
+            (execution.fields["outcome"] as? RecordNode.Str)?.value,
+        )
+        assertEquals(
+            "reason must be kept beside the outcome for $expectedOutcome",
+            expectedReason,
+            (execution.fields["reason"] as? RecordNode.Str)?.value,
+        )
+    }
+
     @Test
     fun `a dispatch with no reported execution result stays unknown`() {
         val root = tmp.newFolder("exec-unobserved")

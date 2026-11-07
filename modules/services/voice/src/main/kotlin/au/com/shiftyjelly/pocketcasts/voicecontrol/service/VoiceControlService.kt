@@ -805,11 +805,10 @@ class VoiceControlService : Service() {
             // started. They must not be able to un-set it: acquireCandidate hands the acquired
             // stream to the engine based on this result, and a false would close a live stream.
             onStarted = {
-                // The decision is shouldPlayListeningStartCue in ListeningModePolicy, covered in
-                // ListeningModePolicyTest. It no longer looks at the foreground: that condition made
-                // every AUTOMATIC restart (another app releasing the microphone) audible, which is the
-                // background audio fight the owner reported.
-                if (shouldPlayListeningStartCue(mode)) {
+                // Only when the microphone opens where the user cannot see it: the decision is
+                // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
+                // covered in ListeningModePolicyTest.
+                if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
                     audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
                 }
 

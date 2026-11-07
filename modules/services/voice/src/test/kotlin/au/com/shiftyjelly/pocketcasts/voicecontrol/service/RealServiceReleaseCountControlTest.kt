@@ -58,6 +58,8 @@ class RealServiceReleaseCountControlTest {
     // Proves the component really is Hilt-built: this arrives through generated injection.
     @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
 
+    @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+
     private lateinit var controller: ServiceController<VoiceControlService>
 
     @Before
@@ -74,6 +76,9 @@ class RealServiceReleaseCountControlTest {
 
     @After
     fun dispose() {
+        // Cancel any pending debounced route read BEFORE destroy so it cannot fire detached after
+        // this class ends (see RealServiceLifecycleControlTest for the same guard).
+        routeMonitor.cancelDebouncedRouteReadForTest()
         // Destroy STARTS teardown; the deferred can still be running. Leaving it running is what
         // the reviewer flagged: an asynchronous teardown from this test could land in the next
         // test's assertions. Await it here, pumping the Main looper (the releases run there), with

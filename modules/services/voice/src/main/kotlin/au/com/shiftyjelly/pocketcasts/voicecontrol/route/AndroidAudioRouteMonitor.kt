@@ -115,6 +115,15 @@ class AndroidAudioRouteMonitor @Inject constructor(
      */
     internal fun onDevicesChanged() = scheduleRouteUpdate()
 
+    /**
+     * TEST SEAM (same convention as the queue's ForTest seams): cancel a pending debounced route
+     * read so it cannot fire detached after a test class has ended. Production never calls this;
+     * a device event still schedules a fresh read afterwards.
+     */
+    fun cancelDebouncedRouteReadForTest() {
+        debounceJob?.cancel()
+    }
+
     private fun scheduleRouteUpdate() {
         // The event is the fact; the route read is the derived value. Bluetooth devices enumerate
         // incrementally, so reading immediately can catch a transient Headset(noMic) — that is what the

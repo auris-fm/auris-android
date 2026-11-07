@@ -53,6 +53,8 @@ class RealServiceLifecycleControlTest {
     // Proves the component really is Hilt-built: this arrives through generated injection.
     @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
 
+    @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+
     /**
      * Supply the device id the PLATFORM would provide.
      *
@@ -75,6 +77,11 @@ class RealServiceLifecycleControlTest {
 
     @After
     fun disposeEveryController() {
+        // A device event during the test schedules a 500ms debounced read on Dispatchers.Default.
+        // Cancel it BEFORE destroy so the read cannot fire detached after this class ends and land
+        // in the next runTest's UncaughtExceptionsBeforeTest (the VoiceControlServiceAcquisitionTest
+        // flake). The injected monitor is the graph singleton the service uses.
+        routeMonitor.cancelDebouncedRouteReadForTest()
         controllers.forEach { controller ->
             // destroy() STARTS teardown; AWAIT IT (reviewer 57bf1be9): an asynchronous teardown
             // left running from this test could land in the next test's assertions. The bound is

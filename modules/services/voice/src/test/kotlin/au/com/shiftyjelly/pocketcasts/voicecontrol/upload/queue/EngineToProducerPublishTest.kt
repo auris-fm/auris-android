@@ -815,8 +815,11 @@ class EngineToProducerPublishTest {
     fun `a throwing refused assertion still returns the source slot`() {
         val before = ContributionStore.processOpenSourceSlotsForTest()
         val err = kotlin.runCatching {
+            // dir MUST be the real "exec-refused": the reviewed-against defect skipped settlement
+            // only for exactly that name, so a probe alias would have passed the OLD implementation
+            // and the control would pin nothing (reviewer 3846330d).
             assertDurableExecution(
-                dir = "exec-refused-slot-probe",
+                dir = "exec-refused",
                 reported = ExecutionOutcome.Refused,
                 expectedState = StageState.Failed,
                 expectedOutcome = "deliberately-wrong", // forces the outcome assertion to throw

@@ -917,17 +917,19 @@ class VoiceUploadCompositionPathTest {
      * Also the standing rule that the deferred drain WARNS instead of retrying indefinitely.
      */
     @Test
-    fun `a restart serves entries published by a previous process even when the publication barrier now fails`() {
+    fun `an OLD-SCHEMA complete entry with no proof file still uploads after a restart even when the barrier fails`() {
+        // THE 22:40 DEVICE INCIDENT, reproduced (spec bfe91857). An entry published by an OLDER build has
+        // no completion-proof sidecar at all, and this process's directory barrier cannot run. Under the
+        // first fix that entry stayed withheld for ever; under the pre-fix code its audio and metadata
+        // were DELETED by recovery's unmarked-debris sweep. Neither is acceptable: a complete recording
+        // whose files are all present and whose checksums pass is servable, whatever the barrier says.
         val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
         aurisLive.acquire()
         var status = 500
         var body = ""
         val (server, hits) = loopback { status to body }
         try {
-            // The PREVIOUS process is the REAL production owner: it fenced its publications with the
-            // platform directory barrier, so its completion proof says so (spec bfe91857). Robolectric
-            // cannot run `android.system.Os`, so the fence is recorded by the implementation that faced
-            // the device, and THIS process below is what cannot re-run it.
+            // The PREVIOUS process: an older build, so it writes no proof sidecar of any kind.
             val store1 = ContributionStore(
                 java.io.File(appContext.filesDir, "voice-contributions"),
                 QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
@@ -938,19 +940,14 @@ class VoiceUploadCompositionPathTest {
             ).also { stores += it }
             val id = prepareVerifiedCapture(store1)
             val metaBytes = java.io.File(appQueue, "$id.metadata.json").readBytes()
-            // The PRODUCTION owner credited its directory fence (spec bfe91857). Robolectric cannot run
-            // `android.system.Os`, so the record that device publication writes is written here: the
-            // entry a later process must serve is one whose directory durability was already established.
-            java.io.File(appQueue, "$id.published").writeText("v1")
+            assertTrue(
+                "precondition: an old-schema entry carries no proof sidecar at all",
+                java.io.File(appQueue, "$id.published").let { !it.exists() },
+            )
             store1.close()
 
-            // THIS process's directory barrier CANNOT RUN (the device-side failure mode).
+            // THIS process: its directory barrier CANNOT RUN. That is what the device hit.
             val failing = DirectorySync { throw java.io.IOException("directory open failed (errno=5)") }
-            // Why store1.recover() (below) is NOT the control here: it is the SAME owner that just
-            // prepared this entry, and recovering in-process deliberately re-runs publication's own
-            // barriers for entries this owner prepared. That is a different question from "does a
-            // RESTARTED process serve what a previous process already fenced".
-
             val store2 = ContributionStore(
                 java.io.File(appContext.filesDir, "voice-contributions"),
                 QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
@@ -959,15 +956,44 @@ class VoiceUploadCompositionPathTest {
                 directorySync = failing,
                 intentDirectorySyncOverride = failing,
             ).also { stores += it }
+
             assertEquals(
-                "a previously-published durable entry must be served even when THIS process cannot re-run the barrier",
+                "an old-schema complete entry must be served even when THIS process cannot run the barrier",
                 setOf(id),
                 store2.recover().map { it.captureId }.toSet(),
             )
+            // THE INCIDENT'S OTHER HALF: nothing may be deleted. Every file of the entry must survive.
+            val survivors = (appQueue.listFiles() ?: emptyArray<java.io.File>()).filter { it.name.startsWith(id) }
+            // Seven files, not eight: an old-schema entry has no proof sidecar, which is the point.
+            assertEquals(
+                "recovery must not delete the files of a complete entry, found only ${survivors.map { it.name }}",
+                7,
+                survivors.size,
+            )
+            assertTrue("the audio must still be on disk", java.io.File(appQueue, "$id.recording.wav").isFile)
+            assertTrue("the metadata must still be on disk", java.io.File(appQueue, "$id.metadata.json").isFile)
+            assertTrue("the ready marker must still be on disk", java.io.File(appQueue, "$id.ready").isFile)
 
+            // And it must actually reach the transport: served is not the same as uploaded.
+            //
+            // The drain gets a store whose namespace barrier WORKS, deliberately. This control is about
+            // the RECOVERY decision (was the entry served, were its files kept), not about uploading on a
+            // device that cannot fsync a directory - attempt settlement still requires that barrier
+            // (reviewer 7e3e0619), and letting it fail here would fail the drain for that other reason
+            // and prove nothing about recovery.
+            store2.close()
+            val store3 = ContributionStore(
+                java.io.File(appContext.filesDir, "voice-contributions"),
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+                directorySync = DirectorySync.REAL,
+                intentDirectorySyncOverride = DirectorySync.REAL,
+            ).also { stores += it }
+            assertEquals("a healthy owner must serve the same entry", setOf(id), store3.recover().map { it.captureId }.toSet())
             val startup = moduleStartup()
             publishIdentity(startup, "epoch-1")
-            val drain = moduleDrain(store2, startup, aurisLive, server)
+            val drain = moduleDrain(store3, startup, aurisLive, server)
             status = 201
             body = receiptBody(id, sha256Hex(metaBytes))
             runDrain(drain)

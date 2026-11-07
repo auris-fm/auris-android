@@ -1441,28 +1441,6 @@ class ContributionStore(
                             )
                         }
                         committed = true
-                        // PUBLICATION-COMPLETION PROOF, written LAST (device incident 2026-11-07, spec
-                        // bfe91857): every content fsync and both directory barriers have now succeeded,
-                        // so a later process must NOT have to re-run them to serve this entry. Best
-                        // effort on purpose - losing only the proof withholds the entry on the next
-                        // restart (uncertain, never deleted), while failing the whole preparation here
-                        // would discard a clip the user already recorded.
-                        // The completion proof records WHICH barrier this process could run, and it is
-                        // written before that barrier. Recovery must never re-decide an entry an earlier
-                        // process published (spec bfe91857: a runtime that cannot open the queue directory
-                        // read 44 perfectly valid recordings as "uncertain" on every restart and served
-                        // none of them). Two states exist:
-                        //   PROVENANCE_DIR_FENCED - this build ran the real directory barrier; any later
-                        //     failure to run one says something about the CURRENT runtime, not about the
-                        //     bytes, so the entry stays servable.
-                        //   PROVENANCE_CONTENT_ONLY - this build's DirectorySync is a content-only fence
-                        //     (`DirectorySync.REAL`, non-Android), so directory durability was never
-                        //     claimed here; recovery keeps deciding such entries by the barrier it can run.
-                        runCatching {
-                            val provenance = File(dir, "$captureId$SUFFIX_PROVENANCE")
-                            provenance.writeText(provenanceState())
-                            fileSync.sync(provenance)
-                        }
                         memoryEntries[captureId] = entry
                         preparedIds.add(captureId)
                         // Flip the EXISTING owner charge; never add a second one.
@@ -1727,14 +1705,7 @@ class ContributionStore(
         fileSync.sync(tmp)
         if (!tmp.renameTo(record) || !record.exists()) throw java.io.IOException("rename failed")
         fileSync.sync(record)
-        // NAMING DURABILITY IS AN OPTIMIZATION FOR EXISTING ENTRIES, NOT A PRECONDITION (device incident
-        // 2026-11-07, spec bfe91857). Re-running the directory barrier over a record this process just
-        // replaced hardens a crash, and when it fails the record's CONTENT is still durable and visible -
-        // so the caller must not lose the attempt it just made. Discarding it here meant a runtime whose
-        // directory barrier could not run (unsupported platform, a failing open, a transient disk fault)
-        // could never advance ANY attempt count: every upload, every retry boundary and therefore every
-        // settle path aborted with "attempts sidecar write failed".
-        runCatching { syncDirectoryOrFail(dir) }
+        syncDirectoryOrFail(dir)
         tmp.delete()
         true
     } catch (failure: Throwable) {
@@ -2273,7 +2244,20 @@ class ContributionStore(
     /** Convenience for the current owner generation; prefer the fenced overload in callback paths. */
     fun dropEntry(captureId: String, reason: TerminalReason): Boolean = dropEntry(fence.currentGeneration(), captureId, reason)
 
-    enum class TerminalReason { ATTEMPTS_EXHAUSTED, QUEUE_AGE_EXPIRED, SERVER_TERMINAL, INVALID_ON_RECOVERY, UPLOAD_ACCEPTED, PERMANENT_REFUSAL }
+    enum class TerminalReason {
+        ATTEMPTS_EXHAUSTED,
+        QUEUE_AGE_EXPIRED,
+        SERVER_TERMINAL,
+        INVALID_ON_RECOVERY,
+        UPLOAD_ACCEPTED,
+        PERMANENT_REFUSAL,
+
+        /** An entry DELETED by recovery's unmarked-debris sweep because it had no ready marker. */
+        RECOVERY_DEBRIS_REMOVED,
+
+        /** An entry WITHHELD by recovery (it exists but is not servable) and still on disk. */
+        RECOVERY_HELD,
+    }
 
     fun terminalCounter(reason: TerminalReason): Long = synchronized(lock) { terminalCounters[reason] ?: 0L }
 
@@ -2544,25 +2528,48 @@ class ContributionStore(
             // silently changed shape underneath the charge. Each capture is handled once, as a whole.
             f.name.removeSuffix(listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).first { sfx -> f.name.endsWith(sfx) })
         }.forEach { (id, captureFiles) ->
-            val survivors = captureFiles.filter { file -> !file.delete() && file.exists() }
+            // A CAPTURE WITH COMPLETE AUDIO AND METADATA IS AN ENTRY, NOT DEBRIS - read the presence
+            // check as "no ready marker" and a failed barrier becomes a deletion. This sweep used to be
+            // exactly how the 2026-11-07 install lost entries whose marker was never written: the entry
+            // was withheld, so no marker existed on disk, so the sweep classed it as an interrupted
+            // preparation and deleted its audio and metadata, uncounted. Presence of BOTH primary files
+            // is the bar for a live entry; only unpaired leftovers are debris.
+            val audio = File(dir, "$id$SUFFIX_WAV")
+            val metadata = File(dir, "$id$SUFFIX_META")
+            if (audio.isFile && metadata.isFile) return@forEach
+            val removed = captureFiles.count { file -> file.delete() || !file.exists() }
+            val survivors = captureFiles.filter { it.exists() }
             if (survivors.isNotEmpty()) {
                 // Measure the WHOLE capture AFTER the attempted deletes, so the charge matches what
                 // actually survived rather than what was there before the sweep touched it.
                 chargeRetainedLocked(id, ready = false)
+            }
+            if (removed > 0) {
+                // NO UNCOUNTED DELETE. This path can remove bytes a user recorded, so it must be
+                // visible in the counters and in the log, with the reason, for ever the first question.
+                repeat(removed) { dropCounterOnly(TerminalReason.RECOVERY_DEBRIS_REMOVED) }
+                Timber.tag(QUEUE_TAG).i(
+                    "voice-upload remove: capture=%s reason=recovery-debris-removed files=%d survivors=%d",
+                    id,
+                    removed,
+                    survivors.size,
+                )
             }
         }
         val readyIds = readyIdsBefore.toList()
 
         val keep = mutableListOf<Entry>()
 
-        // Entries whose publication could not be confirmed durable. Kept out of the ready set, but NOT
-        // deleted: uncertain is not rejected.
+        // Entries recovery HELD rather than served. Kept out of the ready set, but NOT deleted: a held
+        // entry is still the user's recording. Every hold is counted and logged with its reason, so a
+        // recording that never uploads is always explainable from the device (spec bfe91857 item 3).
         val uncertainIds = mutableListOf<String>()
         for (id in readyIds) {
             // A capture disqualified by a previous failed deletion is NEVER served again, whatever
             // survives on disk: the marker is durable, so intent outlives the process that formed it.
             if (isDisqualified(id)) {
                 chargeRetainedLocked(id, ready = false)
+                holdLocked(id, "disqualified-by-previous-failed-deletion")
                 continue
             }
             val wav = File(dir, "$id$SUFFIX_WAV")
@@ -2573,9 +2580,10 @@ class ContributionStore(
             try {
                 reconcileAttemptsIntentLocked(id)
             } catch (uncertain: IllegalStateException) {
-                // Unresolved count record: withheld this run exactly like an unconfirmed publication.
+                // Unresolved count record: held this run. The intent file resolves it next time.
                 uncertainIds += id
                 chargeRetainedLocked(id, ready = false)
+                holdLocked(id, "attempts-intent-unresolved")
                 continue
             }
             val entry = validate(id, wav, meta, attemptsFile)
@@ -2603,27 +2611,13 @@ class ContributionStore(
                     cleaned,
                 )
             } else {
-                val confirmed = confirmRecoveredDurableLocked(id)
-
-                // ONE charge for every validated entry, assigned BEFORE branching on confirmation.
-                // Charging only the confirmed branch left a gap: a fresh store has an empty `self` set,
-                // so its unconfirmable on-disk entries were never charged anywhere and new work was
-                // admitted over them. Ownership does not depend on being able to hand the entry back.
+                // The entry is COMPLETE and passed every structural and checksum check, so it is
+                // servable (spec bfe91857). Re-hardening is best effort and never decides this.
+                rehardenRecoveredLocked(id)
                 synchronized(lock) {
-                    ownedCharges[id] = OwnedCharge(
-                        entry.audioBytes,
-                        entry.metadataBytes,
-                        ready = confirmed,
-                    )
+                    ownedCharges[id] = OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = true)
                 }
-                if (confirmed) {
-                    keep += entry
-                } else {
-                    // Not exposed this run. The files are LEFT IN PLACE rather than deleted: the entry is
-                    // an uncertain publication, and the spec forbids assuming cleanup succeeded or
-                    // treating uncertainty as rejection. The next confirmation attempt decides.
-                    uncertainIds += id
-                }
+                keep += entry
             }
         }
         // Boundary-held ids survive past the rebuild block: the orphan-sidecar sweep must exclude them.
@@ -2643,7 +2637,7 @@ class ContributionStore(
                 val wavEntry = File(dir, "$id$SUFFIX_WAV")
                 val metaEntry = File(dir, "$id$SUFFIX_META")
                 if (id in uncertainIds) {
-                    // Already charged once above; keep it uncertain. Nothing is added here.
+                    // Already charged once above; keep it held. Nothing is added here.
                     ownedCharges[id]?.ready = false
                     continue
                 }
@@ -2704,7 +2698,7 @@ class ContributionStore(
             // unmarked-debris sweep above, which measures and charges each capture ONCE as a whole;
             // sweeping those here would charge per file. Disqualified ids are excluded: their cleanup
             // runs through the namespace-confirmed disqualified path, never a bare delete.
-            val sidecarOnly = listOf(SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_PROVENANCE, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
+            val sidecarOnly = listOf(SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
             files.filter { f ->
                 val id = sidecarOnly.firstOrNull { f.name.endsWith(it) }?.let { f.name.removeSuffix(it) }
                 id != null &&
@@ -2863,57 +2857,43 @@ class ContributionStore(
     // weaker load path than recovery. Both now call this one transition, so they cannot diverge.
 
     /**
-     * Which barrier THIS owner can actually run. `DirectorySync.PRODUCTION` is the real directory fence;
-     * any other implementation only fences content, so it must not claim a durability it never
-     * established. Recorded by publication so a later recovery never re-decides a fenced entry.
-     */
-    private fun provenanceState(): String = if (directorySync === DirectorySync.PRODUCTION) PROVENANCE_DIR_FENCED else PROVENANCE_CONTENT_ONLY
-
-    /**
-     * CONFIRMATION FOR A PREVIOUS PROCESS'S PUBLICATION (device incident 2026-11-07, spec bfe91857).
+     * RE-HARDENING, NOT A GATE (device incident 2026-11-07, spec bfe91857).
      *
-     * [confirmDurableLocked] is the PUBLICATION barrier: it re-fsyncs every file and both directory
-     * levels. Recovery used it verbatim, so a restart re-ran a barrier whose outcome belongs to a
-     * process that has already exited - and any runtime where that barrier cannot run at this moment
-     * (unsupported platform, a failing directory open, a transient full disk) turned EVERY valid,
-     * already-durable clip into "uncertain" and served none of them. Nothing was deleted and nothing
-     * was counted, so the loss was silent and permanent: each restart repeated it.
+     * Recovery used to confirm every recovered entry with [confirmDurableLocked], the full PUBLICATION
+     * barrier: re-fsync each file, then the queue directory and its parent. That barrier's outcome
+     * belongs to a process which has already exited, so on any runtime where it cannot run at this
+     * moment EVERY valid, already-published clip was reported as "uncertain" and served to nobody - and
+     * because a withheld entry never has a ready marker on disk, the unmarked-debris sweep then DELETED
+     * its audio and metadata on that same restart. Silent, uncounted, and repeated forever.
      *
-     * What recovery actually needs to know is what the PREVIOUS process's transition CREDITED. That is
-     * what [PROVENANCE_DIR_FENCED] / [PROVENANCE_CONTENT_ONLY] record, and publication writes the state
-     * BEFORE the barrier it describes, so a torn transition can never over-claim:
-     *  - [PROVENANCE_DIR_FENCED]: that build ran the real directory barrier. A barrier this runtime
-     *    cannot run now says something about THIS runtime, not about bytes already fenced, so the
-     *    entry is servable without re-deciding what has been decided.
-     *  - [PROVENANCE_CONTENT_ONLY]: content fsyncs only (`DirectorySync.REAL`), so directory durability
-     *    was never claimed; recovery re-decides such an entry with the barrier it can run.
-     *  - absent: either an older build or a transition that never finished. Uncertainty is not
-     *    rejection (the 5c811f83 ruling): the entry is withheld, never deleted, and a later recovery
-     *    or a full [confirmDurableLocked] decides it.
+     * So recovery asks only what it can actually know now: are the files here, complete, and do they
+     * pass their checksum ([validate] already decides that)? If so the entry is servable. The fsyncs are
+     * re-run ONCE as hardening - a failure is logged and nothing else, because the bytes are already on
+     * disk, and a file system that must be fsynced again to be believed was never what made the original
+     * publication correct.
+     *
+     * Only an entry that is genuinely INCOMPLETE is withheld, and withholding is neither silent nor a
+     * death sentence: the caller counts it ([TerminalReason.RECOVERY_HELD]) and logs its reason, and
+     * queue-age expiry still applies to it.
      */
-    private fun confirmRecoveredDurableLocked(id: String): Boolean = runCatching {
-        // Best effort, never a gate: re-harden content this runtime may hold in its page cache. The
-        // barrier that mattered already ran in the publishing process.
-        ENTRY_SUFFIXES.map { File(dir, "$id$it") }
-            .filter { it.isFile }
-            .forEach { runCatching { fileSync.sync(it) } }
-        // (1) What did the publishing process attest? A directory fence already ran there, so a barrier
-        // this runtime cannot run must not be read as a doubt about the entry's bytes.
-        val published = File(dir, "$id$SUFFIX_PROVENANCE").takeIf { it.isFile }
-            ?.let { readBoundedSidecar(it, MAX_PROVENANCE_SIDECAR_BYTES)?.trim() }
-
-        if (published == PROVENANCE_DIR_FENCED) return@runCatching true
-
-        // (2) No proof: this owner may be the one that published the entry itself (a self-prepared entry
-        // is re-confirmed in-process), in which case a barrier that runs now decides it as before.
-        syncDirectoryOrFail(dir)
-        dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
-        // NO PROOF IS RAISED HERE, deliberately. The proof means "the publication transition
-        // completed", and only publication can say that; writing it during recovery would let a later
-        // recovery skip a barrier that never ran for an entry whose publication genuinely failed, which
-        // is exactly the uncertainty these paths must keep reporting.
-        true
-    }.getOrDefault(false)
+    private fun rehardenRecoveredLocked(id: String) {
+        val failures = ENTRY_SUFFIXES.map { File(dir, "$id$it") }.filter { it.isFile }.mapNotNull { file ->
+            runCatching { fileSync.sync(file) }.exceptionOrNull()
+        } + listOfNotNull(
+            runCatching { syncDirectoryOrFail(dir) }.exceptionOrNull(),
+            dir.parentFile?.let { parent -> runCatching { syncDirectoryOrFail(parent) }.exceptionOrNull() },
+        )
+        if (failures.isNotEmpty()) {
+            // Not a withholding decision: the entry is served either way. Recorded so a device that
+            // can never re-harden is visible instead of inferable.
+            Timber.tag(QUEUE_TAG).w(
+                "voice-upload reharden: capture=%s failures=%d first=%s",
+                id,
+                failures.size,
+                failures.first().toString(),
+            )
+        }
+    }
 
     private fun confirmDurableLocked(id: String): Boolean = runCatching {
         ENTRY_SUFFIXES.map { File(dir, "$id$it") }
@@ -3325,6 +3305,16 @@ class ContributionStore(
         claimOwnedLocked(id, measurement.first, measurement.second, ready && id !in unmeasuredIds)
     }
 
+    /**
+     * Record that recovery is HOLDING an entry instead of serving it. Never a delete: the entry stays on
+     * disk, keeps its charge, and queue-age expiry still reaches it. Counted and logged so that an entry
+     * which does not upload is diagnosable from the device rather than inferred.
+     */
+    private fun holdLocked(captureId: String, reason: String) {
+        dropCounterOnly(TerminalReason.RECOVERY_HELD)
+        Timber.tag(QUEUE_TAG).i("voice-upload hold: capture=%s reason=%s", captureId, reason)
+    }
+
     private fun dropCounterOnly(reason: TerminalReason) {
         val snapshot = synchronized(lock) {
             terminalCounters[reason] = (terminalCounters[reason] ?: 0L) + 1L
@@ -3530,14 +3520,6 @@ class ContributionStore(
         const val SUFFIX_OWNER = ".owner"
         private const val SUFFIX_CREATED = ".created"
 
-        /**
-         * Publication-completion proof (device incident 2026-11-07, spec bfe91857): written as the LAST
-         * step of publication, after every content fsync and the directory barriers, so its presence
-         * proves a later process can serve the entry without re-running the barrier. Its absence proves
-         * nothing and therefore withholds the entry rather than deleting it.
-         */
-        private const val SUFFIX_PROVENANCE = ".published"
-
         /** Every file an entry can own. Deletion and residue sweeps use this ONE list. */
         private val ENTRY_SUFFIXES = listOf(
             SUFFIX_WAV,
@@ -3548,13 +3530,9 @@ class ContributionStore(
             SUFFIX_DIGEST,
             SUFFIX_RETRY,
             SUFFIX_OWNER,
-            SUFFIX_PROVENANCE,
             SUFFIX_ATTEMPTS + ".tmp",
             SUFFIX_RETRY + ".tmp",
         )
-        private const val PROVENANCE_DIR_FENCED = "v1"
-        private const val PROVENANCE_CONTENT_ONLY = "v1-content-only"
-        private const val MAX_PROVENANCE_SIDECAR_BYTES = 32
         private const val SUFFIX_DIGEST = ".sha256"
 
         // Everything a capture can leave on disk besides its primary audio and metadata. Kept as a fixed

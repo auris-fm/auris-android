@@ -1118,18 +1118,34 @@ class ContributionStoreTest {
     }
 
     @Test
-    fun `unmarked final debris is swept when it has no ready marker`() {
+    fun `unmarked debris is swept, but a complete audio plus metadata pair is NOT debris`() {
+        // RE-SPECIFIED (spec bfe91857). This test used to assert that ANY .wav/.meta without a ready
+        // marker is swept - including a COMPLETE pair. On the device that rule deleted eight valid
+        // recordings: a publication that failed before its marker left exactly that shape, and the sweep
+        // removed the user's audio. The pair is now the test for "is this a recording": a capture with
+        // BOTH primary files survives recovery; only unpaired leftovers are debris.
         val root = tempRoot()
         val dir = File(root, "contributions").apply { mkdirs() }
-        val orphanWav = UUID.randomUUID().toString()
-        File(dir, "$orphanWav.recording.wav").writeBytes(ByteArray(64))
-        File(dir, "$orphanWav.metadata.json").writeBytes(meta(orphanWav))
+        val complete = UUID.randomUUID().toString()
+        File(dir, "$complete.recording.wav").writeBytes(ByteArray(64))
+        File(dir, "$complete.metadata.json").writeBytes(meta(complete))
+        val orphanMeta = UUID.randomUUID().toString()
+        File(dir, "$orphanMeta.metadata.json").writeBytes(meta(orphanMeta))
         val foreign = "garbage-name.recording.wav"
         File(dir, foreign).writeBytes(ByteArray(8))
-        assertTrue(ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
-        assertFalse("unmarked final wav survived recovery", File(dir, "$orphanWav.recording.wav").exists())
-        assertFalse("unmarked final meta survived recovery", File(dir, "$orphanWav.metadata.json").exists())
+        val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
+        store.recover()
+        assertTrue("a complete pair must not be swept", File(dir, "$complete.recording.wav").exists())
+        assertTrue("a complete pair must not be swept", File(dir, "$complete.metadata.json").exists())
+        assertFalse("an interrupted preparation must still be swept", File(dir, "$orphanMeta.metadata.json").exists())
+        // A foreign-named .wav has no capture id, so it belongs to no entry and is swept.
         assertFalse("foreign-named debris survived recovery", File(dir, foreign).exists())
+        // Both removals must be COUNTED: this path deletes user-visible bytes, so it is never silent.
+        assertEquals(
+            "every removal in this sweep must be counted",
+            2L,
+            store.terminalCounter(ContributionStore.TerminalReason.RECOVERY_DEBRIS_REMOVED),
+        )
     }
 
     // --- Reviewer round: mandatory digest identity, bounded sidecars, canonical record/WAV authority ---

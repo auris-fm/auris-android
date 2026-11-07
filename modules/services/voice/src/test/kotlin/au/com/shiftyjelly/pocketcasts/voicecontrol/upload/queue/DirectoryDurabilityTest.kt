@@ -929,66 +929,96 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `uncertain recovery does not expose an entry it cannot re-confirm as durable`() {
-        // An uncertain publication may have left complete-looking files that were never durably
-        // confirmed. Structural validation alone would expose that entry as ready on a fresh instance.
-        // The confirmation step must run, and must be able to FAIL, on a fresh instance.
+    fun `recovery never deletes the audio and metadata of a capture that simply has no ready marker`() {
+        // THE DELETION ITSELF, isolated from the servability question. Recovery classifies a .wav/.meta
+        // with no matching .ready as an INTERRUPTED PREPARATION and deletes it. That classification is
+        // only sound when the capture is incomplete: a capture whose audio AND metadata are both present
+        // is somebody's recording, and deleting it because a marker is missing is how the device lost
+        // eight clips. This test would pass with the old code only if the sweep never ran, so it exists to
+        // pin the guard, not the servability rule above.
+        val root = tmp.newFolder("queue-debris-not-a-recording")
+        val dir = File(root, "contributions").apply { mkdirs() }
+        // Complete audio + metadata, NO ready marker: exactly the shape recovery leaves when a
+        // publication fails between syncing its content and committing the marker.
+        val complete = java.util.UUID.randomUUID().toString()
+        File(dir, "$complete.recording.wav").writeBytes(ByteArray(1600))
+        File(dir, "$complete.metadata.json").writeText("{}")
+        File(dir, "$complete.sha256").writeText(
+            java.security.MessageDigest.getInstance("SHA-256").digest("{}".toByteArray()).joinToString("") { "%02x".format(it) },
+        )
+        // A genuinely interrupted preparation: metadata that never got its audio. This one IS debris.
+        val partial = java.util.UUID.randomUUID().toString()
+        File(dir, "$partial.metadata.json").writeText("{}")
+
+        val store = ContributionStore(root, limits())
+        try {
+            store.recover()
+            assertTrue(
+                "recovery deleted the audio of a capture that has both audio and metadata",
+                File(dir, "$complete.recording.wav").isFile,
+            )
+            assertTrue(
+                "recovery deleted the metadata of a capture that has both audio and metadata",
+                File(dir, "$complete.metadata.json").isFile,
+            )
+            assertTrue(
+                "a genuinely interrupted preparation must still be swept",
+                !File(dir, "$partial.metadata.json").exists(),
+            )
+            assertEquals(
+                "one file really was removed, so exactly one removal must be counted",
+                1L,
+                store.terminalCounter(ContributionStore.TerminalReason.RECOVERY_DEBRIS_REMOVED),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    fun `recovery serves a complete entry even when it cannot re-run the publication barrier`() {
+        // THE 22:40 DEVICE INCIDENT (spec bfe91857). Recovery used to re-decide every recovered entry
+        // with the full PUBLICATION barrier. That barrier belongs to a process which already exited, so
+        // any runtime that cannot run it at this moment withheld EVERY valid clip - the device lost eight
+        // that way, and because a held entry never has a ready marker on disk, the unmarked-debris sweep
+        // deleted their audio on the same restart. The rule now: complete files that pass their checksum
+        // are servable; the fsyncs are re-run once as hardening and their failure decides nothing.
         //
-        // TWO states reach recovery, and they are decided differently on purpose (spec bfe91857):
-        //   * publication CREDITED a directory fence -> not re-decided here at all (re-deciding it is
-        //     what silently withheld 44 valid recordings on the device, every restart);
-        //   * publication did not -> recovery runs the barrier, and a failure withholds without deleting.
-        // A store declares CONTENT-ONLY itself (`DirectorySync.REAL` cannot fence a directory), so the
-        // uncertainty is visible in the DEFAULT construction and the barrier here is scoped to ONE root:
-        // a barrier that fails for every store in the test's temp folder could never show a pass.
-        val root = tmp.newFolder("queue-uncertain-recovery")
+        // SCOPED TO THIS ROOT: TemporaryFolder is created once for the class, so a failure injected for
+        // the whole temp folder is handed every sibling test's entries too.
+        val root = tmp.newFolder("queue-recovery-servable")
         val id = java.util.UUID.randomUUID().toString()
         val seeder = ContributionStore(root, limits(), directorySync = RecordingSync())
         seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
-        assertEquals(
-            "precondition: a non-production store must not claim a directory fence it cannot run",
-            "v1-content-only",
-            File(root, "contributions/$id.published").readText(),
-        )
         seeder.close()
 
-        val failingFileSync = FileSync { throw java.io.IOException("simulated confirmation failure") }
-        // SCOPED TO THIS ROOT, and that is the whole point: TemporaryFolder is created once for the
-        // class, so a barrier that throws for the entire temp folder is also handed every OTHER test's
-        // entries, and any sibling's recovery can consume the failure first. Scoping keeps this test's
-        // outcome decided by this test's entry only.
-        // (A failed content fsync is what makes the confirmation fail here. The DIRECTORY barrier is
-        // recorded, not thrown, because throwing it is what a sibling test already does and it would
-        // be indistinguishable from an unconfirmed store that simply cannot fence at all.)
+        val failingFileSync = FileSync { throw java.io.IOException("simulated barrier failure") }
         val recoverySync = RecordingSync().also { it.failNamespaceOf = root }
         val fresh = ContributionStore(root, limits(), directorySync = recoverySync, fileSync = failingFileSync)
-        val recovered = fresh.recover()
-        val readyAfterRecovery = fresh.readyEntries().map { it.captureId }
-        fresh.close()
-
-        assertTrue(
-            "recovery exposed an entry whose durability it could not confirm: ${recovered.map { it.captureId }} (id=$id, ready=$readyAfterRecovery, proof=${File(root, "contributions/$id.published").conv()})",
-            recovered.none { it.captureId == id },
-        )
-        // Captured BEFORE close(): a released owner exposes nothing, so reading it after close would make
-        // this assertion pass for the wrong reason.
-        assertTrue("the store must not list it as ready, got $readyAfterRecovery", readyAfterRecovery.none { it == id })
-        // Uncertain is NOT rejected: the files must still be there for the next confirmation attempt.
-        assertTrue(
-            "an unconfirmed entry must not be deleted — uncertainty is not rejection",
-            File(root, "contributions").listFiles()!!.any { it.name.startsWith(id) && it.name.endsWith(".recording.wav") } &&
-                File(root, "contributions/$id.ready").isFile,
-        )
-        // And the branch really ran: this root's namespace barrier must have been asked.
-        assertTrue(
-            "the UNCONFIRMED branch must run the recovery barrier, got ${recoverySync.calls.map { it.name }}",
-            recoverySync.calls.any { it.absolutePath == File(root, "contributions").absolutePath },
-        )
-
-        // And a healthy fresh instance DOES confirm it, so the control above is discriminating rather
-        // than the entry simply being unreadable.
-        val healthy = ContributionStore(root, limits(), directorySync = RecordingSync())
-        assertEquals("a healthy instance must confirm the same entry", listOf(id), healthy.recover().map { it.captureId })
+        try {
+            assertEquals(
+                "a complete entry must be served even when the barrier cannot be re-run",
+                listOf(id),
+                fresh.recover().map { it.captureId },
+            )
+            assertEquals("and it must be ready", listOf(id), fresh.readyEntries().map { it.captureId })
+            assertEquals("serving is not holding: nothing may be counted as held", 0L, fresh.terminalCounter(ContributionStore.TerminalReason.RECOVERY_HELD))
+            // The bytes are the user's recording: recovery must not remove them, and must not have
+            // counted a removal either.
+            assertTrue("the audio must survive", File(root, "contributions/$id.recording.wav").isFile)
+            assertTrue("the metadata must survive", File(root, "contributions/$id.metadata.json").isFile)
+            assertEquals(
+                "recovery deleted nothing, so it must count nothing",
+                0L,
+                fresh.terminalCounter(ContributionStore.TerminalReason.RECOVERY_DEBRIS_REMOVED),
+            )
+            // The hardening attempt really ran, so the control above is discriminating.
+            assertTrue(
+                "recovery must still attempt the re-hardening, got ${recoverySync.calls.map { it.name }}",
+                recoverySync.calls.any { it.absolutePath == File(root, "contributions").absolutePath },
+            )
+        } finally {
+            fresh.close()
+        }
     }
 
     @Test
@@ -1034,29 +1064,33 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `an uncertain entry is still OWNED and is purged on revocation`() {
+    fun `a HELD entry is still OWNED and is purged on revocation`() {
         // Ownership is about "this owner created these files", not "this owner can read them back".
-        // Withholding an uncertain entry from readiness by removing it from the index silently removed it
-        // from the purge accounting too, and revokeAndPurge cleared the uncertain set BEFORE collecting
-        // the ids it would delete. Result: a user asking for everything to be removed kept their audio,
-        // and a later healthy store recovered it. This pins the whole sequence.
-        val root = tmp.newFolder("queue-uncertain-purge")
+        // A held entry was removed from the index so it could not be served, and that silently removed it
+        // from the purge accounting too, while revokeAndPurge cleared the held set BEFORE collecting the
+        // ids it would delete. Result: a user asking for everything to be removed kept their audio. The
+        // hold that remains since spec bfe91857 is an UNRESOLVED ATTEMPTS INTENT (an incomplete entry is
+        // the only other one), so that is the state this pins - and it is a real hold, not a synthetic one.
+        val root = tmp.newFolder("queue-held-purge")
         val id = java.util.UUID.randomUUID().toString()
-        var failSyncs = false
-        val gated = object : DirectorySync {
-            override fun sync(directory: File) {
-                if (failSyncs) throw java.io.IOException("simulated confirmation failure")
-            }
-        }
-        val store = ContributionStore(root, limits(), directorySync = gated)
+        val store = ContributionStore(root, limits())
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
-        failSyncs = true
-        // An entry whose directory durability the publishing build never credited (spec bfe91857: a
-        // store declares its own state), so this recovery is the one that decides it.
-        store.recover() // confirmation fails -> withheld, recorded as uncertain
-        assertTrue("withheld from ready", store.readyEntries().none { it.captureId == id })
-        assertTrue("files preserved while uncertain", File(root, "contributions/$id.ready").isFile)
+        // An unresolved count record: the entry cannot be served until a later recovery reconciles it.
+        // MALFORMED content is how a reconcile can genuinely fail, and the record is left in place for
+        // the next attempt.
+        File(root, "contributions/$id.attempts.tmp").writeText("not-a-count")
+        assertTrue(
+            "precondition: the attempt record is unresolved, so the entry must be held",
+            store.recover().none { it.captureId == id },
+        )
+        assertTrue("held, not ready", store.readyEntries().none { it.captureId == id })
+        assertTrue("files preserved while held", File(root, "contributions/$id.recording.wav").isFile)
+        assertEquals(
+            "every hold must be counted, never silent",
+            1L,
+            store.terminalCounter(ContributionStore.TerminalReason.RECOVERY_HELD),
+        )
 
         store.revokeAndPurge("account_changed")
 
@@ -1065,8 +1099,6 @@ class DirectoryDurabilityTest {
         assertTrue("purge left owned files behind: ${survivors.map { it.name }}", survivors.isEmpty())
 
         // And no resurrection: a fresh healthy store must not bring it back.
-        failSyncs = false
-        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
         store.close()
         val fresh = ContributionStore(root, limits())
         assertEquals("a fresh store resurrected a purged entry", emptyList<String>(), fresh.recover().map { it.captureId })

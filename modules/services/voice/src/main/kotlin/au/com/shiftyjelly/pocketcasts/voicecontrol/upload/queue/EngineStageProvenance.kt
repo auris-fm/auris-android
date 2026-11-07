@@ -207,12 +207,25 @@ object EngineStageProvenance {
 
                 ExecutionOutcome.Success -> StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success")))
 
-                // Schema vocabulary (StageReasons.Execution): action_failed / client_refused.
-                ExecutionOutcome.Failure -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("action_failed")))
+                // SPEC 21b5d822 (option b): EVERY observed execution carries `outcome` from the wire
+                // vocabulary, and failed/cancelled stages ALSO keep their `reason`. Recording only
+                // `reason` left `outcome` absent for three of the four vocabulary values, so a
+                // consumer reading `outcome` saw nothing for a failed, refused or cancelled action.
+                // Vocabulary for `reason` is StageReasons.Execution; for `outcome`, EXECUTION_OUTCOMES.
+                ExecutionOutcome.Failure -> StageEntry(
+                    StageState.Failed,
+                    mapOf("outcome" to RecordNode.Str("failure"), "reason" to RecordNode.Str("action_failed")),
+                )
 
-                ExecutionOutcome.Refused -> StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("client_refused")))
+                ExecutionOutcome.Refused -> StageEntry(
+                    StageState.Failed,
+                    mapOf("outcome" to RecordNode.Str("refused"), "reason" to RecordNode.Str("client_refused")),
+                )
 
-                ExecutionOutcome.Cancelled -> StageEntry(StageState.Cancelled, mapOf("reason" to RecordNode.Str("cancelled_by_user")))
+                ExecutionOutcome.Cancelled -> StageEntry(
+                    StageState.Cancelled,
+                    mapOf("outcome" to RecordNode.Str("cancelled"), "reason" to RecordNode.Str("cancelled_by_user")),
+                )
             },
         )
     }

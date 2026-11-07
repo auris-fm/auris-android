@@ -26,9 +26,13 @@ import org.junit.Test
  */
 class CanonicalRecordVectorRecipeTest {
 
-    /** The 2026-11-06 Phase 2 emission. A NEW directory: the 2026-10-30 vector stays untouched. */
+    /**
+     * The 2026-11-07 Phase 2 emission carrying the spec-21b5d822 execution `outcome` field
+     * (failed/refused/cancelled now record `outcome` beside their `reason`). A NEW directory every
+     * emission: a re-run must never overwrite evidence an earlier review was based on.
+     */
     private companion object {
-        const val OUT_DIR = "/tmp/p1run/upload_vector_phase2"
+        const val OUT_DIR = "/tmp/p1run/upload_vector_phase2_execution_outcome"
     }
 
     private fun hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

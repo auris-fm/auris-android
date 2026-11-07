@@ -65,6 +65,44 @@ class ExecutionStageDecodeControlTest {
         assertTrue("was ${execution["outcome"]}", execution["outcome"] == RecordNode.Str("success"))
     }
 
+    /**
+     * SPEC 21b5d822, option (b): EVERY observed execution carries `outcome` from the wire vocabulary
+     * `success`/`failure`/`refused`/`cancelled`; failed and cancelled stages KEEP their `reason`, and
+     * an unobserved execution still omits `outcome` entirely.
+     *
+     * Before this, only `success` was recorded as `outcome`; the other three were recorded as
+     * `reason` alone, so a consumer reading `outcome` saw nothing for a failed, refused or cancelled
+     * action. These read the BUILT record, through the real dispatcher mapping.
+     */
+    @Test
+    fun `a failed execution records outcome failure and keeps its reason`() {
+        val harness = Harness()
+        runBlocking { harness.dispatchCloudTurn(VoiceActionOutcome.Failed(reason = "boom")) }
+        val execution = harness.builtExecutionStage()
+        assertTrue("was ${execution["state"]}", execution["state"] == RecordNode.Str("failed"))
+        assertTrue("outcome must be failure, was ${execution["outcome"]}", execution["outcome"] == RecordNode.Str("failure"))
+        assertTrue("reason must be kept, was ${execution["reason"]}", execution["reason"] == RecordNode.Str("action_failed"))
+    }
+
+    @Test
+    fun `a refused execution records outcome refused and keeps its reason`() {
+        val harness = Harness()
+        runBlocking { harness.dispatchCloudTurn(VoiceActionOutcome.Refused(reason = "nope")) }
+        val execution = harness.builtExecutionStage()
+        assertTrue("was ${execution["state"]}", execution["state"] == RecordNode.Str("failed"))
+        assertTrue("outcome must be refused, was ${execution["outcome"]}", execution["outcome"] == RecordNode.Str("refused"))
+        assertTrue("reason must be kept, was ${execution["reason"]}", execution["reason"] == RecordNode.Str("client_refused"))
+    }
+
+    @Test
+    fun `an unobserved execution still omits outcome`() {
+        val harness = Harness()
+        runBlocking { harness.dispatchCloudTurn(VoiceActionOutcome.NotObserved) }
+        val execution = harness.builtExecutionStage()
+        assertTrue("was ${execution["state"]}", execution["state"] == RecordNode.Str("unknown"))
+        assertTrue("unknown must omit outcome, was ${execution["outcome"]}", execution["outcome"] == null)
+    }
+
     /** The built record is the assertion target: nothing here reads the pre-build stage list. */
     private class Harness {
         private val authority = {

@@ -497,10 +497,10 @@ class ContributionUploadAssemblyTest {
     }
 
     @Test
-    fun `an invalid_request refusal over real HTTP settles UNSERVICED retained, never disposed`() {
-        // Spec 5c811f83: a REQUEST rejection says nothing about the bytes — invalid_request is
-        // UNSERVICED (durable boundary, stop serving), not a terminal disposal. This is the real-HTTP
-        // pin for that semantics on the assembled path.
+    fun `an invalid_request refusal over real HTTP deletes the entry at once`() {
+        // Spec 1a0d3ffb (amending 5c811f83): a REQUEST rejection can never be served, so the entry
+        // is deleted at once through the store's reconciled purge - the queue must always drain.
+        // This is the real-HTTP pin for that semantics on the assembled path.
         var now = 30_000_000L
         val store = newStore { now }
         val fixture = fixture(store, "assembly-terminal")
@@ -510,8 +510,19 @@ class ContributionUploadAssemblyTest {
         val accepted = mutableListOf<String>()
         assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
 
-        assertEquals("an invalid_request refusal is never disposed", 1, store.readyEntries().count { it.captureId == fixture.id })
-        assertEquals("a refusal is reported as nothing accepted", emptyList<String>(), accepted)
+        assertEquals(
+            "a permanently refused recording is deleted from the queue at once",
+            0,
+            store.readyEntries().count { it.captureId == fixture.id },
+        )
+        assertEquals(
+            "the permanent refusal must be counted",
+            1,
+            store.terminalCounter(ContributionStore.TerminalReason.PERMANENT_REFUSAL),
+        )
+        // onAccepted is the caller's RELEASE hook (see LoopbackRefusalSettlementTest), not an
+        // acceptance-specific signal: it now also fires for a permanent-refusal disposal.
+        assertEquals("the refusal still disposed the entry", listOf(fixture.id), accepted)
     }
 
     @Test

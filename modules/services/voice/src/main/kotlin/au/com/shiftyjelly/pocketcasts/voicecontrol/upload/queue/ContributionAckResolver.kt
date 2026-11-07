@@ -143,24 +143,25 @@ class ContributionAckResolver(
             }
 
         Ack.UNSERVICED -> {
-            // RETAIN + STOP SERVING via the EXISTING durable retry boundary at its saturating
-            // maximum: the never-representable boundary makes the shared eligibility predicate
-            // (listing AND atomic pickup) exclude the entry permanently, while the bytes, the
-            // charge and the entry itself stay on disk through recovery. Inside the SAME
-            // ownership transaction as every settlement. A FAILED boundary publication leaves the
-            // id in the store's UNCERTAIN set, which holds the retry path and retains the files -
-            // uncertainty is reported, never resolved by deletion (spec 5c811f83).
-            // A FAILED publication throws out of the store (its own uncertainty record stands);
-            // files are retained and the outcome is reported rather than resolved by deletion.
-            val boundary = runCatching {
-                store.scheduleRetryForAdmittedAttempt(token, retryAfterS = Long.MAX_VALUE / 1000L)
-            }.getOrElse { failure ->
-                Timber.tag(TAG).w(failure, "settle: UNSERVICED boundary publication uncertain; entry retained, unserved")
-                null
-            }
-            when (boundary) {
-                null -> if (failureLatched(token)) Resolution.StaleEpoch else Resolution.Retained(null)
-                else -> Resolution.Retained(boundary)
+            // DELETE AT ONCE (spec 1a0d3ffb, amending the 5c811f83 retention ruling): a server
+            // PERMANENT refusal (400 invalid_request and its class) means the recording can never
+            // be served, so a retained entry only fills the queue until it cannot drain - the
+            // measured 44-entry full-queue outage. Deletion goes through the store's reconciled
+            // purge with every control intact:
+            // - identity proof: releaseForAdmittedAttempt deletes only while THIS attempt still
+            //   owns the entry (a stale token deletes nothing -> StaleEpoch) - the proven absence
+            //   of an active upload;
+            // - durability: deleteLocked writes the durable disqualification intent FIRST and a
+            //   failed intent write retains + reports (uncertainty is never resolved by deletion -
+            //   the 5c811f83 principle survives for the uncertain case);
+            // - failure controls: partial file deletions keep the residual bytes owned and charged
+            //   for a later cleanup, and the truthful file-level outcome is logged inside
+            //   deleteLocked. The client's own record check rejecting an entry already deletes it
+            //   at once on recovery (INVALID_ON_RECOVERY).
+            if (store.releaseForAdmittedAttempt(token, ContributionStore.TerminalReason.PERMANENT_REFUSAL)) {
+                Resolution.Released
+            } else {
+                Resolution.StaleEpoch
             }
         }
     }

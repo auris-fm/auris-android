@@ -162,7 +162,8 @@ class ContributionRetryCaller(
                         val ack = when (val disposition = dispositionFor(generation, captureId)) {
                             is ContributionUploadTransport.Response.Terminal -> ContributionAckResolver.Ack.TERMINAL_DISPOSAL
 
-                            // 400 invalid_request: retain, stop serving, never delete (5c811f83).
+                            // 400 invalid_request: delete at once through the reconciled purge
+                            // (spec 1a0d3ffb, amending 5c811f83's retention ruling).
                             is ContributionUploadTransport.Response.Unservable -> ContributionAckResolver.Ack.UNSERVICED
 
                             else -> if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE

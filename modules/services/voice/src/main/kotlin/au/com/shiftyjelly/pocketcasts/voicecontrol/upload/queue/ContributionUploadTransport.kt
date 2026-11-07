@@ -88,8 +88,9 @@ class ContributionUploadTransport(
 
         /**
          * A REQUEST rejection (400 invalid_request): the server rejected the request shape, which
-         * says nothing about the recording bytes. The bytes are retained unservable - never deleted,
-         * never retried on a loop (spec ruling 5c811f83).
+         * says nothing about the recording bytes. The entry is deleted at once through the store's
+         * reconciled purge (spec 1a0d3ffb, amending the 5c811f83 retention ruling), and is never
+         * retried on a loop.
          */
         data class Unservable(val statusCode: Int, val code: String) : Response()
 

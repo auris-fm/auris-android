@@ -188,6 +188,63 @@ class ContributionUploadAssemblyTest {
     }
 
     @Test
+    fun `a digest-mismatched record REACHES the server and its final refusal DELETES it`() {
+        // REVIEWER ba9777b2, and the correction is theirs: my previous control copied ids out of
+        // readyEntries() into a list and called nothing. Making the record VISIBLE to the queue does not
+        // give it an upload SOURCE - production goes through durableCapture(), which still returned null on
+        // a digest mismatch, and the descriptor validation refused audio integrity too. So the record would
+        // have been served and then never sent, which is the same hold one layer lower.
+        //
+        // This drives the whole real path: the production store -> durableCapture -> the assembly's own
+        // multipart POST to a local HTTP server -> a terminal refusal (422 integrity_mismatch, which the
+        // transport classifies as TERMINAL) -> and asserts the files are actually GONE.
+        var now = 40_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-invalid-refused")
+        val dir = store.dirForTest()
+
+        // A record whose metadata digest does not match what is recorded: locally invalid, physically
+        // sendable, and therefore the server's to refuse.
+        val digestFile = dir.walkTopDown().firstOrNull { it.isFile && it.name == "${fixture.id}.sha256" }
+            ?: error("the store published no digest sidecar for ${fixture.id}")
+        assertTrue("PREMISE: the digest sidecar exists", digestFile.isFile)
+        digestFile.writeText("0".repeat(64))
+
+        responseStatus = 422
+        responseBody = """{"schema_version":1,"code":"integrity_mismatch"}"""
+
+        val capture = store.durableCapture(fixture.id)
+        val owned = requireNotNull(capture?.owned) {
+            "SPEC 1e47eba8: a locally-invalid record must still yield an upload SOURCE, " +
+                "or it is served and never sent"
+        }
+        val handed = mutableMapOf(
+            fixture.id to ContributionUploadAssembly.Capture(
+                capture.record,
+                capture.audio,
+                capture.enrollmentEpoch,
+                capture.enrollmentAccount,
+                capture.enrollmentSession,
+                owned,
+            ),
+        )
+        val accepted = mutableListOf<String>()
+        assembly(store, { now }, handed, accepted).poll()
+
+        assertTrue(
+            "the server must have RECEIVED the record - its refusal is the only verdict that matters",
+            requests.get() >= 1,
+        )
+        // The assembly's `onAccepted` hook is `ContributionRetryCaller.onSuccess`, which fires on any
+        // RELEASE - a terminal refusal releases too. It is the release ledger, not an acceptance ledger, so
+        // the assertion below is about release, and the DELETION is the evidence that matters.
+        assertFalse(
+            "the server's final refusal must DELETE the record's audio",
+            dir.walkTopDown().any { it.isFile && it.name.endsWith("${fixture.id}.recording.wav") },
+        )
+    }
+
+    @Test
     fun `the attempt settles the capture's descriptor on both an acceptance and a refusal`() {
         // Reviewer 9a47123e: captureFor built a Capture and dropped the owned descriptor, leaking one per
         // successful capture. This drives the REAL seam and observes the descriptor's own fate.

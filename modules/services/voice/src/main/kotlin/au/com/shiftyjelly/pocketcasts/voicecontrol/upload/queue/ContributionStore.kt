@@ -518,33 +518,25 @@ class ContributionStore(
         val audio = File(dir, "$captureId$SUFFIX_WAV")
         val meta = File(dir, "$captureId$SUFFIX_META")
         if (!audio.isFile || !meta.isFile) return null
-        if (audio.length() != entry.audioBytes) return null
-        // BOUNDED, EXACT metadata read: read exactly the recorded number of bytes from a regular file and
-        // confirm nothing more follows, so a growing or replaced file cannot exceed the observed bound
-        // (reviewer 31b75e03).
-        val metadataBytes = readExactlyBounded(meta, entry.metadataBytes.toLong(), MAX_METADATA_READ_BYTES) ?: return null
-        val digest = try {
-            sha256Hex(metadataBytes)
-        } catch (io: Throwable) {
-            return null
-        }
-        // The record is exactly the bytes this store published: the in-memory entry AND the durable
-        // .digest sibling must both agree, so a swapped-in valid record of another capture is refused.
-        if (digest != entry.recordSha256) return null
-        // The .digest sibling is read with the same bounded exact-read primitive: 64 hex characters,
-        // nothing more.
-        val digestSibling = readExactlyBounded(File(dir, "$captureId$SUFFIX_DIGEST"), 64L, 64L)
-            ?.toString(Charsets.UTF_8) ?: return null
-        if (digestSibling != digest) return null
+        // SPEC 1e47eba8: THE PHYSICAL FACTS THAT MAKE A REQUEST POSSIBLE ARE THE ONLY REQUIREMENTS HERE.
+        // This function used to refuse on byte-count mismatch, a metadata digest disagreement, a mismatched
+        // .digest sibling and a non-canonical record - all local verdicts on whether the recording is
+        // "valid". That is the server's call. Refusing here meant the record was visible to the queue and
+        // still never transmitted, which is exactly the hold the ruling removed, one layer lower. What
+        // remains is what the transport needs: both files present, the metadata readable within bounds, and
+        // a record object to upload. Everything else is delegated - the server refuses it, and that refusal
+        // deletes it through the ordinary path.
+        // BOUNDED read of the whole metadata file (reviewer 31b75e03): never unbounded, never truncated.
+        // The recorded LENGTH is not enforced as a verdict; the bound is the file's own size.
+        val metadataLength = meta.length()
+        val metadataBytes = readExactlyBounded(meta, metadataLength, MAX_METADATA_READ_BYTES) ?: return null
         val node = try {
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.parse(metadataBytes.toString(Charsets.UTF_8))
         } catch (io: Throwable) {
             return null
         }
         val record = node as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj ?: return null
-        // STREAMED AUDIO BINDING: the header check alone lets a same-length PCM mutation through, so the
-        // FULL payload is hashed while streaming and compared to the sha256 the record itself declares.
-        val declaredAudioSha = audioShaOf(record) ?: return null
+        val declaredAudioSha = audioShaOf(record)
         // BYTE BINDING (spec ee31a3cc): OPEN THE DESCRIPTOR FIRST, then hash THAT descriptor. A path-based
         // hash would validate bytes that a successor owner could replace between validation and the
         // transport's later open; hashing the descriptor we then hand down makes the validated bytes and
@@ -638,9 +630,20 @@ class ContributionStore(
         source: java.io.FileInputStream,
         sourceLease: AutoCloseable,
     ): OpenedAudio? {
-        val declaredAudioSha = audioShaOf(record) ?: return null
+        // SPEC 1e47eba8: the digest and WAV-header checks here are DIAGNOSTIC, not a refusal. They used to
+        // withhold the source - the last place the local-validation gate survived, and the one that made the
+        // new fallback entry pointless because production never got a descriptor to send. The server refuses
+        // a record it cannot use, and that refusal deletes it. What must still hold is the BYTE BINDING:
+        // the descriptor hashed is the descriptor handed to transport, and the payload is read within
+        // maxClipBytes.
+        val declaredAudioSha = audioShaOf(record)
         val actualAudioSha = sha256HexBounded(source, limits.maxClipBytes) ?: return null
-        if (actualAudioSha != declaredAudioSha) return null
+        if (declaredAudioSha != null && declaredAudioSha != actualAudioSha) {
+            Timber.tag(QUEUE_TAG).i(
+                "voice-upload source: audio-digest-mismatch capture=%s action=upload (server decides)",
+                captureId,
+            )
+        }
         source.channel.position(0)
         // The header is read from the SAME descriptor, so it cannot come from a different file than the
         // payload just hashed.
@@ -648,10 +651,15 @@ class ContributionStore(
         var read = 0
         while (read < header.size) {
             val n = source.read(header, read, header.size - read)
-            if (n < 0) return null
+            if (n < 0) break
             read += n
         }
-        if (WavHeaderValidator.validate(header, source.channel.size()) == null) return null
+        if (WavHeaderValidator.validate(header, source.channel.size()) == null) {
+            Timber.tag(QUEUE_TAG).i(
+                "voice-upload source: wav-header-unvalidated capture=%s action=upload (server decides)",
+                captureId,
+            )
+        }
         val owner = readOwnerSidecar(captureId) ?: run {
             sidecarRefusals++
             return null

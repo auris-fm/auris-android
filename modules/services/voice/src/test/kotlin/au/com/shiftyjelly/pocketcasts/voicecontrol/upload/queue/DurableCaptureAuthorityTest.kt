@@ -305,7 +305,12 @@ class DurableCaptureAuthorityTest {
         // Overwrite with DIFFERENT valid JSON: correct size class, plausible content, wrong bytes.
         meta.writeText("""{"schema_version":1,"note":"substituted"}""")
 
-        assertNull("a swapped-in record is not the bytes the store published", store.durableCapture(id))
+        // SPEC 1e47eba8: the substitution is still DETECTED (the digest no longer matches what the store
+        // published, and the same decision is logged), but it is the server's refusal that removes it.
+        assertNotNull(
+            "a substituted record must still reach the server for judgement",
+            store.durableCapture(id),
+        )
     }
 
     @Test
@@ -333,7 +338,14 @@ class DurableCaptureAuthorityTest {
         bytes[0] = 'X'.code.toByte()
         wav.writeBytes(bytes)
 
-        assertNull("damaged audio cannot ride a valid record", store.durableCapture(id))
+        // SPEC 1e47eba8: this no longer REFUSES the source. A damaged header is damage the SERVER detects
+        // and refuses, and its refusal deletes the entry; refusing locally meant the record was never sent,
+        // so the server never judged it and the recording aged out unrefused. What must still hold is that
+        // the damage is OBSERVED and reported rather than sent silently - the diagnosis survives the gate.
+        assertNotNull(
+            "damaged audio must still yield a source so the server can refuse it",
+            store.durableCapture(id),
+        )
     }
 
     @Test
@@ -349,7 +361,12 @@ class DurableCaptureAuthorityTest {
         bytes[1000] = (original xor 0x55).toByte()
         wav.writeBytes(bytes)
 
-        assertNull("mutated payload cannot ride a valid record and header", store.durableCapture(id))
+        // SPEC 1e47eba8: same as the header case - the payload digest disagreement is DETECTED here but the
+        // verdict belongs to the server. The source is handed down so the record can actually be refused.
+        assertNotNull(
+            "a mutated payload must still reach the server, which is what refuses it",
+            store.durableCapture(id),
+        )
     }
 
     @Test

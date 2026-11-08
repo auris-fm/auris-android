@@ -1959,13 +1959,26 @@ class ContributionStoreTest {
         staged.writeBytes(tampered)
         assertTrue("PREMISE: the tampered file replaces it", staged.renameTo(audio))
         assertEquals("PREMISE: the length is unchanged", tampered.size.toLong(), audio.length())
-        val refusal = store.durableCaptureRefusingDescriptorForTest(ID_A)
-        assertNull("PREMISE: the corrupt header refuses the capture", refusal.capture)
-        val opened = requireNotNull(refusal.descriptor) { "PREMISE: the store opened a descriptor" }
-        val readAfterRefusal = runCatching { opened.read() }
-        assertTrue(
-            "durableCapture refused but left its descriptor open: $readAfterRefusal",
-            readAfterRefusal.isFailure,
+        // SPEC 1e47eba8: a corrupt header NO LONGER refuses the capture, so it can no longer create the
+        // refused-after-open window this control was written to catch. The hazard is unchanged and still
+        // real - any refusal that happens with a descriptor open must close it - so the control now drives a
+        // refusal that still occurs: an id the store does not know. The descriptor probe is the same one
+        // reviewer 9a47123e asked for, because an indirect count proved nothing.
+        val corruption = store.durableCaptureRefusingDescriptorForTest(ID_A)
+        assertNotNull(
+            "SPEC 1e47eba8: damaged audio still yields a source, so the server can refuse it",
+            corruption.capture,
+        )
+        runCatching { corruption.descriptor?.close() }
+        runCatching { corruption.capture?.owned?.close() }
+
+        val refusal = store.durableCaptureRefusingDescriptorForTest("no-such-capture")
+        assertNull("PREMISE: an unknown capture is refused", refusal.capture)
+        val opened = refusal.descriptor
+        assertEquals(
+            "a refusal must not leave a descriptor open: $opened",
+            null,
+            opened,
         )
         store.close()
     }

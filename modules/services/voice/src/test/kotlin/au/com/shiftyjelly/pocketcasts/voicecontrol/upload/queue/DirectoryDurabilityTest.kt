@@ -1383,6 +1383,107 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `an ordinary drain finishes a deferred withdrawal purge with no second explicit purge`() {
+        // REVIEWER 20f71675 finding 1. The retry only existed in recover(), which production runs ONCE per
+        // process by design, so a deferred withdrawal purge had no same-process retry: lifting the fault and
+        // receiving ordinary drains left the recordings in place until a restart. A stop must not depend on
+        // a restart. finishPendingPurgeIfStopped() is the purge-only drain opportunity, consulted before any
+        // expiry or polling and running no recovery sweep.
+        val root = tmp.newFolder("queue-drain-purge")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val id = java.util.UUID.randomUUID().toString()
+        File(dir, "$id.recording.wav").writeBytes(ByteArray(2048))
+        File(dir, "$id.metadata.json").writeText("{}")
+
+        var stopped = true
+        val intent = LocalWithdrawalIntentStore(
+            object : WithdrawalIntentPersistence {
+                override fun read(): Boolean = stopped
+
+                override fun write(requested: Boolean): Boolean {
+                    stopped = requested
+                    return true
+                }
+            },
+        )
+        val store = ContributionStore(root, limits(), withdrawalIntent = intent)
+        try {
+            val perms = java.nio.file.Files.getPosixFilePermissions(dir.toPath())
+            java.nio.file.Files.setPosixFilePermissions(
+                dir.toPath(),
+                setOf(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+            )
+            try {
+                store.revokeAndPurge("account_changed")
+                assertTrue("precondition: the purge deferred", store.purgeDeferred)
+            } finally {
+                java.nio.file.Files.setPosixFilePermissions(dir.toPath(), perms)
+            }
+
+            // THE ORDINARY DRAIN OPPORTUNITY, same instance, fault lifted. No explicit purge call.
+            assertTrue("a pending stop must not serve this pass", store.finishPendingPurgeIfStopped())
+
+            assertFalse("the drain must finish the purge", File(dir, "$id.recording.wav").exists())
+            assertFalse("and stop reporting itself deferred", store.purgeDeferred)
+
+            // ...and an ordinary pass with nothing pending is a no-op that does not serve.
+            assertFalse(
+                "a store with nothing pending must let the drain proceed",
+                store.finishPendingPurgeIfStopped(),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `a purge with surviving deletes keeps the pending state until they are gone`() {
+        // REVIEWER 20f71675 finding 2. Completion was inferred from ATTEMPTING every delete. A readable
+        // listing whose deletes FAIL left residue, yet the store cleared purgeDeferred, dropped the
+        // unknown-listing sentinel and recorded QUEUE_PURGED - reporting the audio gone while it was all
+        // still there. Completion must be reconciled against the listing: readable AND empty.
+        val root = tmp.newFolder("queue-purge-partial")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val id = java.util.UUID.randomUUID().toString()
+        // A DIRECTORY where the audio file should be: deleteAll cannot remove a non-empty directory with a
+        // plain file delete, so this is a real, readable-listing delete failure.
+        val stubborn = File(dir, "$id.recording.wav")
+        stubborn.mkdirs()
+        File(stubborn, "held.bin").writeBytes(ByteArray(512))
+        File(dir, "$id.metadata.json").writeText("{}")
+
+        val store = ContributionStore(root, limits())
+        try {
+            store.revokeAndPurge("account_changed")
+
+            assertTrue(
+                "a purge that could not remove everything is still pending",
+                store.purgeDeferred,
+            )
+            assertTrue(
+                "the surviving capture must be reported, not assumed away",
+                store.purgeResidue.contains(id),
+            )
+
+            // Successful cleanup on the SAME instance: once the obstruction is gone, the next purge
+            // reconciles a readable, empty listing and only then clears the pending state.
+            File(stubborn, "held.bin").delete()
+            assertTrue("precondition: the obstruction is removable now", stubborn.delete() || !stubborn.exists())
+
+            store.revokeAndPurge("account_changed")
+            assertFalse("confirmed completion must clear the pending state", store.purgeDeferred)
+            assertFalse(
+                "and the capture must no longer be reported as residue",
+                store.purgeResidue.contains(id),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun `a HELD entry is still OWNED and is purged on revocation`() {
         // Ownership is about "this owner created these files", not "this owner can read them back".
         // A held entry was removed from the index so it could not be served, and that silently removed it

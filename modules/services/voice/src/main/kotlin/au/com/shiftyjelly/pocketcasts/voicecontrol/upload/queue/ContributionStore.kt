@@ -2386,6 +2386,30 @@ class ContributionStore(
     fun purgeQueue(reason: String) = revokeAndPurge(reason)
 
     /**
+     * THE ORDINARY DRAIN OPPORTUNITY (reviewer 20f71675 finding 1, spec 777c18d5).
+     *
+     * [recover] runs ONCE per process by design (its debris sweep would unlink a live `.part` if it ran
+     * per drain), so a withdrawal purge that deferred on an unreadable listing had no retry until the next
+     * restart. A stop is not allowed to depend on a restart: while the durable intent says stop, this
+     * finishes the purge at every drain, BEFORE anything is expired or polled.
+     *
+     * Purge-only by construction: it calls no recovery, no expiry and no sweep, so it cannot race a live
+     * preparation. When there is nothing to do it costs one durable read and returns.
+     *
+     * @return true when the caller should NOT serve this pass (a stop is pending).
+     */
+    fun finishPendingPurgeIfStopped(): Boolean {
+        if (withdrawalIntent?.collectionPermittedByLocalIntent() != false) return false
+        // A STOPPED STORE MUST SERVE NOTHING, but only the FIRST cursor-twitch may claim "purge pending".
+        // purgeDeferred is read BEFORE the call because revokeAndPurge clears it on confirmed completion;
+        // without that ordering the first drain would report a pending purge it had just finished, and the
+        // worker could never distinguish "still blocked" from "done, nothing left".
+        val pendingBefore = purgeDeferred
+        revokeAndPurge("pending withdrawal intent (drain)")
+        return pendingBefore
+    }
+
+    /**
      * LEASED PURGE (reviewer 72a35e19). [acquireOwnership] alone is a point-in-time check: the purge could
      * pass it, pause, and finish deleting after close() released the directory to a successor. The lease
      * keeps close()'s drain waiting for this whole mutation.
@@ -2495,6 +2519,12 @@ class ContributionStore(
             // CONFIRMED INTENT FIRST, for EVERY owned capture, before a single file is touched. Writing it
             // afterwards means a purge that dies mid-way leaves no record of what it was doing, and every
             // survivor it had not reached yet looks like ordinary data to the next healthy store.
+            // EVERY ATTEMPT STARTS FROM THE CURRENT TRUTH (reviewer 20f71675 finding 2). Residue reported
+            // by an earlier attempt is not evidence about THIS one: leaving it in place makes a capture that
+            // was successfully removed keep being reported as surviving, which is the mirror of the
+            // false-success bug (a false ALARM). _purgeDeferred is deliberately NOT reset here - until this
+            // attempt confirms completion, the purge is still pending.
+            _purgeResidue.clear()
             val intentConfirmed = ownedIds.associateWith { writeDisqualificationLocked(it) }
             val residueIds = mutableListOf<String>()
             ownedIds.forEach { id ->
@@ -2526,14 +2556,25 @@ class ContributionStore(
             recovered = true // a purged store must not lazily resurrect anything from disk
             // Retained residue after a purge is reported, not assumed away: a caller that treats a purge
             // as complete when files remain would tell the user their audio is gone while it is not.
-            // COMPLETION IS CONFIRMED, NOT ASSUMED (reviewer c764bea2): the listing was readable, every
-            // enumerated capture was attempted, so any earlier incomplete-purge indicator is now stale.
-            // Clearing here - and ONLY here - is why a same-instance retry does not keep claiming to be
-            // deferred. Deleting this clear leaves a store that finished its purge still reporting it as
-            // incomplete, which is exactly what the new-instance control could not see.
-            _purgeDeferred = false
+            // COMPLETION IS RECONCILED, NOT INFERRED FROM ATTEMPTS (reviewer 20f71675 finding 2, spec
+            // 777c18d5). Attempting every delete is not the same as removing every capture: a delete can
+            // fail, a capture can be unreachable, and a file can be re-created. The purge is complete only
+            // when the listing is READABLE and EMPTY of retained captures. Until then it stays deferred and
+            // its residue stays reported - telling the user their audio is gone while some of it survives
+            // is the exact failure this whole path exists to prevent.
             _purgeResidue.remove(PURGE_RESIDUE_UNKNOWN_LISTING)
             _purgeResidue.addAll(residueIds)
+            val survivors = retainedCaptureIdsLocked()
+            val stillPending = survivors == null || survivors.isNotEmpty()
+            _purgeDeferred = stillPending
+            if (survivors == null) {
+                _purgeResidue.add(PURGE_RESIDUE_UNKNOWN_LISTING)
+            } else {
+                _purgeResidue.addAll(survivors.filterNot { it in _purgeResidue })
+                if (survivors.isNotEmpty()) {
+                    Timber.tag(QUEUE_TAG).w("voice-upload purge: INCOMPLETE, %d capture(s) survive", survivors.size)
+                }
+            }
             stagedAttempts.forEach { attempt -> deleteStaging(attempt) }
             stagingOwners.clear()
             // A PURGE MUST BE VISIBLE AFTER IT HAS HAPPENED, and this is the one moment where the
@@ -2556,10 +2597,15 @@ class ContributionStore(
     }
 
     private fun deferPurgeOnUnknownListingLocked(reason: String) {
-        // Ownership was REVOKED above and stays revoked: nothing here becomes servable. The intent is
-        // recorded so a later purge finishes the job rather than silently dropping it.
-        _purgeReasons.add(reason)
+        // Ownership was REVOKED above and stays revoked: nothing here becomes servable.
+        //
+        // DELIBERATELY NO _purgeReasons ADD (reviewer 20f71675 finding 2): that list is the evidence the
+        // user's audio WAS purged, so appending here would claim a completed purge that never happened. A
+        // deferred purge is reported through purgeDeferred, purgeResidue and its counter instead - the
+        // pending intent itself is derived from the durable withdrawal marker, so it needs no separate
+        // record to survive.
         _purgeDeferred = true
+        _purgeResidue.clear()
         _purgeResidue.add(PURGE_RESIDUE_UNKNOWN_LISTING)
         Timber.tag(QUEUE_TAG).w(
             "voice-upload purge: INCOMPLETE, listing unreadable, retained captures not removed reason=%s",

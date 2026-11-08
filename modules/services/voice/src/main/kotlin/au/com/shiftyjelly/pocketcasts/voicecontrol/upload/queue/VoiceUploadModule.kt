@@ -247,6 +247,14 @@ object VoiceUploadModule {
         assembly: ContributionUploadAssembly,
         aurisToken: AurisTokenProvider,
     ): VoiceUploadDrain = VoiceUploadDrain {
+        // PURGE-ONLY STOP CHECK FIRST (reviewer 20f71675, spec 777c18d5). A withdrawal whose purge
+        // deferred on an unreadable listing must be finished at the next ORDINARY opportunity, not only at
+        // startup: recovery runs once per process, so waiting for it would make the user's stop depend on a
+        // restart. This touches no staging bytes and runs no sweep, so it cannot race a live preparation.
+        if (store.finishPendingPurgeIfStopped()) {
+            Timber.i("voice-upload drain: reason=withdrawal-purge-pending, nothing served this pass")
+            return@VoiceUploadDrain
+        }
         // ACQUIRE before the synchronous poll (reviewer b702cd53): the upload path's fail-closed
         // cache read must find a token that was acquired for THIS pass, not assumed from earlier.
         // A FAILED acquisition is a no-attempt cause the drain must name (reviewer 30d46323 #3):

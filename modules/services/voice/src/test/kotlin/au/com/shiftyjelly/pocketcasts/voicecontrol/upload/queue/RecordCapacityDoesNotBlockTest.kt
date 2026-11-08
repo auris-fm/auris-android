@@ -447,14 +447,20 @@ class RecordCapacityDoesNotBlockTest {
     }
 
     @Test
-    fun `a queue over the listing bound DRAINS to transport after a restart`() {
-        // THE DEVICE SCENARIO, end to end (spec 2741a0ca, reviewer a4a6b1). On the Pixel the queue held
-        // 104 records; every listing aborted past 512 entries, recovery indexed nothing, and the drain
-        // reported `eligible=0` - so nothing uploaded and the queue could never shrink back under the
-        // bound. Not "104 clips are slow": zero could ever move. This drives the REAL drain over a
-        // directory that exceeds the bound and requires the transport to be reached.
+    fun `an inherited 104-record queue over the listing bound is DUE after a restart`() {
+        // THE DEVICE SCENARIO, end to end (spec 2741a0ca, reviewer a4a6b1 and e97ee75e).
+        //
+        // BOUNDARY, STATED ACCURATELY: this drives ContributionRetryCaller's own poll — the real
+        // eligibility, pickup and launch path — with a stub `attemptUpload`. It is NOT an HTTP transport
+        // run and does not exercise the wire. What it proves is the thing that failed on the device:
+        // after a restart over a queue that is both OVER the record cap and OVER the listing bound, the
+        // clips are DUE and reach the upload callback. Previously recovery indexed nothing, so the drain
+        // saw eligible=0 and nothing was ever offered.
+        //
+        // The queue is genuinely the inherited one: 104 records against a cap of 32. Seeding 32 never
+        // exercised the cap condition the owner's Pixel actually had.
         val now = System.currentTimeMillis()
-        val root = tmp.newFolder("over-bound-drain")
+        val root = tmp.newFolder("inherited-104-drain")
         val dir = queueDir(root)
         val probe = ContributionStore(root, limits())
         val bound = try {
@@ -463,8 +469,32 @@ class RecordCapacityDoesNotBlockTest {
             probe.close()
         }
 
-        val seeded = (1..32).map { UUID.randomUUID().toString() }
-        seeded.forEach { seedOne(root, it, now) }
+        // 104 REAL recoverable records. Admission refuses past the cap, so each batch is written with a
+        // permissive cap and the store is then re-read under the real one - which is exactly how a build
+        // that lowered the cap inherited an over-cap queue.
+        val inherited = 104
+        val seeded = (1..inherited).map { UUID.randomUUID().toString() }
+        val permissive = ContributionStore(root, limits().copy(maxQueueRecords = inherited), clock = { now }, jitter = { 0L })
+        try {
+            permissive.recover()
+            seeded.forEach { id ->
+                assertNotNull(
+                    "precondition: record $id must be durably queued",
+                    permissive.prepare(
+                        id,
+                        "epoch-1",
+                        ContributionRetryCallerTestSupport.chunks(1600),
+                        ContributionRetryCallerTestSupport.meta(id, 1600),
+                        "a@x",
+                        7L,
+                    ),
+                )
+            }
+        } finally {
+            permissive.close()
+        }
+
+        // Padding beyond the CURRENT listing bound, on top of a queue already past the record cap.
         dir.mkdirs()
         var pad = 0
         while (dir.list()!!.size <= bound) {
@@ -472,19 +502,23 @@ class RecordCapacityDoesNotBlockTest {
             pad++
         }
         val onDisk = dir.list()!!.size
-        assertTrue("precondition: the directory is over the bound ($onDisk > $bound)", onDisk > bound)
+        assertTrue("precondition: over the bound ($onDisk > $bound)", onDisk > bound)
 
-        // RESTART: a fresh store over the populated directory.
+        // RESTART under the REAL cap of 32, over the inherited 104-record queue.
         val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
         try {
             store.recover()
+            assertTrue(
+                "an inherited over-cap queue must still be counted, not reported empty",
+                store.ownedRecordsForTest() >= inherited,
+            )
             val attempted = mutableListOf<String>()
             val caller = ContributionRetryCaller(
                 store = store,
                 clock = { now },
                 networkAvailable = { true },
-                attemptUpload = { _, id, _, _ ->
-                    attempted += id
+                attemptUpload = { _, captureId, _, _ ->
+                    attempted += captureId
                     true
                 },
                 ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
@@ -492,7 +526,7 @@ class RecordCapacityDoesNotBlockTest {
             caller.pollOnce()
 
             assertTrue(
-                "an over-bound queue after restart must reach transport; attempted=${attempted.size}",
+                "an inherited over-cap, over-bound queue must reach the upload path; attempted=${attempted.size}",
                 attempted.isNotEmpty(),
             )
         } finally {
@@ -501,6 +535,119 @@ class RecordCapacityDoesNotBlockTest {
     }
 
     private fun seedOne_files(dir: File, id: String): List<String> = dir.list()!!.filter { it.startsWith(id) }.sorted()
+
+    // ---------------------------------------------------------------------------------------------
+    // SPEC 2741a0ca CORRECTIONS 1-3: three gates my own audit had listed as "kept, justified". Each was
+    // a local verdict dressed as engineering necessity, and each could strand or destroy a real recording.
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    fun `an unresolvable attempt record SENDS the clip instead of stranding it`() {
+        // CORRECTION 1 (A3/A9). An unreadable attempt/retry record means the BACKOFF IS UNKNOWN, and
+        // unknown means DUE. Holding the clip behind a bookkeeping file stranded recordings forever, which
+        // the allowed list forbids. The retry is safe: the same bytes are idempotent server-side.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("uncertain-attempts-sent")
+        val dir = queueDir(root)
+        val id = UUID.randomUUID().toString()
+        seedOne(root, id, now)
+
+        // Make the BACKOFF unresolvable while everything else stays sound. The `.retry` record holds the
+        // not-before boundary and a DIRECTORY there can never be read as a time; the attempt COUNT is
+        // untouched, so pickup can still consume the attempt. What is unknown is only WHEN this clip may
+        // go, which is exactly correction 1: unknown backoff means DUE, not held. Breaking the count instead
+        // would have tested the wrong thing - pickup requires the count, so nothing would ever be sent and
+        // the control would fail for a reason that has nothing to do with the hold being removed.
+        File(dir, "$id.retry").delete()
+        File(dir, "$id.retry").mkdirs()
+        File(dir, "$id.retry").resolve("blocker").writeText("")
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            val attempted = mutableListOf<String>()
+            val caller = ContributionRetryCaller(
+                store = store,
+                clock = { now },
+                networkAvailable = { true },
+                attemptUpload = { _, captureId, _, _ ->
+                    attempted += captureId
+                    true
+                },
+                ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            )
+            // The DUE clip reaches the transport, which is the whole point: before this correction the
+            // unknown backoff held it forever and `attempted` stayed empty. The poll may still finish with a
+            // bookkeeping error, and that is CORRECT AND SEPARATE - this fixture makes the attempt-count
+            // write itself impossible (its path is a directory), so the store reports a real sidecar
+            // failure AFTER the bytes were sent. What must never happen is the clip being withheld.
+            val result = runCatching { caller.pollOnce() }
+            assertTrue(
+                "an unresolvable attempt record must not strand the clip; unknown backoff is DUE " +
+                    "(attempted=$attempted result=$result)",
+                attempted.contains(id),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `an invalid-on-recovery record is RETAINED for the server to refuse, never deleted locally`() {
+        // CORRECTION 2 (A11/A12/D6). "Invalid record" is the SERVER's final refusal. Deleting locally meant
+        // any client-side bug - a stricter hash, a sidecar written one field differently, a partially synced
+        // directory - silently destroyed real recordings. A wrongly-sent clip costs a rejected upload; a
+        // wrongly-deleted clip costs the recording.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("invalid-retained-not-deleted")
+        val dir = queueDir(root)
+        val id = UUID.randomUUID().toString()
+        seedOne(root, id, now)
+
+        // Corrupt the metadata so local validation must fail, while the audio still exists.
+        val meta = File(dir, "$id$SUFFIX_META")
+        assertTrue("precondition: metadata exists", meta.isFile)
+        meta.writeText("{\"not\":\"a valid record\"}")
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            assertTrue(
+                "a record that fails LOCAL validation must still exist: the server refuses it, not us",
+                File(dir, "$id$SUFFIX_WAV").isFile,
+            )
+            assertTrue("and its metadata must survive too", meta.isFile)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `a complete record whose ready flag was lost in a crash is recovered and served`() {
+        // CORRECTION 3 (A1). `ready` is a WRITE-IN-PROGRESS flag, not byte accounting (a3ef694f deleted
+        // bytes; OwnedCharge holds only this boolean). A crash between the durable files and the flag
+        // leaves a complete record that must be recovered, not stranded.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("ready-flag-lost")
+        val dir = queueDir(root)
+        val id = UUID.randomUUID().toString()
+        seedOne(root, id, now)
+
+        // A crash after the durable record landed but before `.ready` was written.
+        assertTrue("precondition: the ready marker existed", File(dir, "$id.ready").delete())
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            assertTrue(
+                "a complete record missing only its ready flag must be recovered and served",
+                store.readyEntries().any { it.captureId == id },
+            )
+            assertTrue("and the marker must be restored durably", File(dir, "$id.ready").isFile)
+        } finally {
+            store.close()
+        }
+    }
 
     private fun queueDir(root: File): File = File(root, DIR_NAME)
 

@@ -164,13 +164,21 @@ class UploadRemovalLogTest {
 
         ContributionStore(root, QueueLimits.defaults()).recover()
 
+        // CHANGED BY SPEC 2741a0ca CORRECTION 2. Recovery no longer takes a local invalid-record verdict,
+        // so it no longer removes the entry and there is no removal line to assert. What this test exists
+        // for - that a capture failing validation is NAMED in the log with its reason, never silently
+        // dropped - still holds and is asserted against the hold line it now emits instead.
         assertTrue(
-            "recovery deletes corrupt entries, so it must log which (lines=${tree.describe()})",
-            tree.has("voice-upload remove") && tree.has("capture=$bad") && tree.has("reason=invalid-on-recovery"),
+            "a capture that fails validation must be NAMED in the log, never silent (lines=${tree.describe()})",
+            tree.has("capture=$bad") && tree.has("reason=record-not-locally-validated"),
+        )
+        assertTrue(
+            "and it must be RETAINED, not removed",
+            java.io.File(root, "contributions/$bad.recording.wav").isFile,
         )
         assertTrue(
             "a VALID entry must not be logged as removed (lines=${tree.describe()})",
-            !tree.has("capture=$good") || tree.lines.none { it.contains("capture=$good") && it.contains("remove") },
+            tree.lines.none { it.contains("capture=$good") && (it.contains("remove") || it.contains("hold")) },
         )
     }
 

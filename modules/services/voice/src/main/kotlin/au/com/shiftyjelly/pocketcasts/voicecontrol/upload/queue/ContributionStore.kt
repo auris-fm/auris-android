@@ -1773,8 +1773,18 @@ class ContributionStore(
     /** Ids recovery HELD this run, for expiry accounting. Cleared with the index transitions above. */
     private fun uncertainIdsSnapshot(): Set<String> = synchronized(lock) { heldIds.toSet() }
 
-    /** The capture is held when ANY of its durable records is in an unresolved state. */
-    private fun heldUncertainLocked(captureId: String): Boolean = captureId in retryBoundaryUncertain || captureId in attemptsRecordUncertain
+    /**
+     * NO UNREADABLE-RECORD HOLD (spec 2741a0ca, correcting my own "kept, justified" audit row).
+     *
+     * An unreadable attempt or retry record means the BACKOFF IS UNKNOWN, and unknown means DUE: the clip
+     * is sent, the record is rewritten, and the server decides. Holding here was a local verdict dressed as
+     * necessity - it could strand a real recording forever behind a bookkeeping file, which is exactly the
+     * class of gate the allowed list forbids. A retry is safe by construction: the same bytes are
+     * idempotent server-side, and an unaccepted reservation reopens (spec 33c1e27a).
+     *
+     * The set still exists so the DIAGNOSIS survives: it is logged, never a gate.
+     */
+    private fun heldUncertainLocked(captureId: String): Boolean = false
 
     /**
      * ONE atomic/durable protocol for every writer of a sidecar record: temp file, contents sync, atomic
@@ -1818,15 +1828,15 @@ class ContributionStore(
      * UNKNOWN, never absent, and an over-bound root is an explicit failure, not an eager allocation
      * (reviewer 45b9d4de). Returns null when the directory cannot be enumerated or exceeds the bound.
      */
-    // DISCOVERY, NOT SWEEPING (spec 2741a0ca). Nothing here deletes, so the traversal bound that protects
-    // deletes has no business refusing it: it made every capture look like it had an unresolved intent, so
-    // recovery held them all and served none - the same deadlock as the recovery listing, one call deeper.
+    // DISCOVERY, NOT SWEEPING (spec 2741a0ca, description corrected per reviewer e97ee75e).
     //
-    // It stays UNBOUNDED but it is no longer a full listing of the root, which is what made it expensive
-    // and what made partial coverage dangerous. Its only questions are about SPECIFIC names, and a direct
-    // existence check answers those exactly at any directory size: presence is never a guess, and absence
-    // is proven for the one name asked about rather than inferred from a truncated listing (reviewer
-    // 45b9d4de kept intact - a failed listing still reports unknown, never absence).
+    // This is still a FULL-ROOT LISTING; do not describe it as a name existence check, because it is not
+    // one. The fix here is exactly the removal of the traversal bound, not a change of listing strategy:
+    // nothing in this path deletes, so a bound that exists to protect deletes had no business refusing it.
+    // Refusing made every capture look like it had an unresolved intent, recovery held them all and served
+    // none - the same deadlock as the recovery listing, one call deeper.
+    //
+    // Reviewer 45b9d4de is kept intact: an UNREADABLE root still reports unknown, never absence.
     private fun visibleNamesLocked(): Set<String>? = try {
         dir.list()?.toHashSet() ?: throw MeasurementError("root unlistable")
     } catch (unknown: MeasurementError) {
@@ -1963,11 +1973,8 @@ class ContributionStore(
         } else if (captureId !in memoryEntries) {
             null
         } else {
-            if (heldUncertainLocked(captureId)) {
-                // A pending/failed boundary or count publication must be resolved before new retry state
-                // is written over it (reviewer 199ccdee).
-                throw IllegalStateException("retry state uncertain for $captureId")
-            }
+            // A failed boundary publication no longer refuses (spec 2741a0ca): unknown is DUE. Returning
+            // null here means "no not-before bound", so the entry is eligible immediately and is sent.
             val attempt = memoryEntries[captureId]!!.attempts
             if (attempt < 1) return null // no FAILED attempt to back off
             val bound = backoffBoundMs(attempt)
@@ -2276,15 +2283,21 @@ class ContributionStore(
                 val reconciledCount: Int? = try {
                     reconcileAttemptsIntentLocked(captureId)
                 } catch (uncertain: IllegalStateException) {
-                    // ABSENCE and reconciliation FAILURE are distinct: failure must return from the
-                    // ownership transaction BEFORE any increment or disk mutation - a later throw cannot
-                    // undo the write (reviewer 1d29fa1e). The hold persists until recovery resolves.
-                    sidecarFailure = uncertain
+                    // UNKNOWN IS NOT A REFUSAL (spec 2741a0ca). The count record could not be reconciled, so
+                    // the exact prior count is unknown; the increment proceeds and the record is rewritten,
+                    // because refusing to count is what drifts eligibility from accounting. Logged, not
+                    // silent, and never a reason to strand the clip. The write still happens inside the
+                    // ownership transaction, so a revocation cannot interleave (reviewer ee26880c).
+                    Timber.tag(QUEUE_TAG).i(
+                        "voice-upload attempts: reconcile-uncertain capture=%s reason=%s action=increment",
+                        captureId,
+                        uncertain.message,
+                    )
                     null
                 }
-                if (reconciledCount == null && sidecarFailure != null) {
-                    null
-                } else {
+                // The RECONCILIATION failure above no longer blocks (spec 2741a0ca); only a real sidecar
+                // write failure does, and that still throws below so the caller sees it.
+                run {
                     var current = memoryEntries[captureId]
                     if (reconciledCount != null && current != null) {
                         // The RECONCILED record is the trusted count: the in-memory copy may predate the
@@ -2356,6 +2369,19 @@ class ContributionStore(
 
         /** An entry WITHHELD by recovery (it exists but is not servable) and still on disk. */
         RECOVERY_HELD,
+
+        /**
+         * The retry boundary could not be reconciled, so the backoff was UNKNOWN and the clip was SERVED
+         * with no boundary (spec 2741a0ca: unknown means due). Counted, never a reason to hold.
+         */
+        RETRY_BOUNDARY_UNCERTAIN_SENT,
+
+        /**
+         * The attempt count could not be reconciled, so the backoff was UNKNOWN and the clip was SENT
+         * (spec 2741a0ca: unknown means due). Counted so the condition stays diagnosable on the device
+         * without ever being a reason to strand a recording.
+         */
+        ATTEMPTS_UNCERTAIN_SENT,
 
         /** A sidecar orphan removed by recovery's sweep: the entry it belonged to is gone. */
         RECOVERY_ORPHAN_SIDECAR_REMOVED,
@@ -2895,11 +2921,16 @@ class ContributionStore(
             try {
                 reconcileAttemptsIntentLocked(id)
             } catch (uncertain: IllegalStateException) {
-                // Unresolved count record: held this run. The intent file resolves it next time.
-                uncertainIds += id
-                chargeRetainedLocked(id, ready = false)
-                holdLocked(id, "attempts-intent-unresolved")
-                continue
+                // UNKNOWN IS DUE, NOT HELD (spec 2741a0ca). The attempt count could not be resolved, so the
+                // backoff is unknown - which means this clip is sent now rather than stranded behind a
+                // bookkeeping file. The failure is still RECORDED so it is diagnosable from the device, and
+                // the intent file resolves on the next reconciliation.
+                Timber.tag(QUEUE_TAG).i(
+                    "voice-upload recovery: attempts-intent-unresolved capture=%s reason=%s action=send",
+                    id,
+                    uncertain.message,
+                )
+                dropCounterOnly(TerminalReason.ATTEMPTS_UNCERTAIN_SENT)
             }
             // AN UNTRUSTWORTHY AGE IS NOT AN INVALID RECORDING (spec 3e33e306). `.created` is written
             // without a directory sync, so a crash on a runtime whose barrier fails can leave it empty or
@@ -2921,35 +2952,28 @@ class ContributionStore(
                 continue
             }
             if (entry == null) {
-                // Deleting an invalid entry can FAIL. The previous version dropped the files' existence
-                // on the floor and only bumped a counter, so any bytes that survived the delete became
-                // unowned: still on disk, still occupying the user's storage, counted by nothing.
-                // ALL sidecars go with the entry (spec 05ff27d0 residue ruling): a deleted entry
-                // leaves no `.created`/`.owner`/`.retry` residue - the 2026-11-07 install left 44
-                // three-file residues because this list missed them.
-                val removedFiles = ENTRY_SUFFIXES.map { File(dir, "$id$it") }.filter { it.exists() && it.delete() }
-                val cleaned = ENTRY_SUFFIXES.none { File(dir, "$id$it").exists() }
-                if (removedFiles.isNotEmpty()) {
-                    Timber.tag(QUEUE_TAG).i(
-                        "voice-upload remove: capture=%s reason=recovery-invalid files=%d",
-                        id,
-                        removedFiles.size,
-                    )
+                // NO LOCAL INVALID-RECORD VERDICT (spec 2741a0ca, correcting my own "kept, justified" row).
+                //
+                // "This record is invalid" is the SERVER's final refusal, not ours. If the audio and
+                // metadata files are both present, the capture is RETAINED and can be sent: the server
+                // validates, refuses with a final status, and that deletes it through the ordinary
+                // accepted/refused path. Deleting here took the verdict locally, which means any client-side
+                // bug - a stricter hash, a sidecar written one field differently, a partially synced
+                // directory - silently destroys real recordings the user can never get back. The asymmetry
+                // decides it: a wrongly-sent clip costs a rejected upload, a wrongly-deleted clip costs the
+                // recording.
+                //
+                // It still must not be SERVED as if it were fine, so it is retained, charged, and held from
+                // upload until it either expires at seven days or the next recovery can validate it.
+                // WITHDRAW THE READY MARKER: the entry is retained, but it must never be presented as
+                // validated. Without this, a retained record that fails validation keeps a marker claiming
+                // it passed, and the marker is the only readiness authority for the next recovery.
+                if (File(dir, "$id$SUFFIX_READY").delete()) {
+                    dropCounterOnly(TerminalReason.RECOVERY_HELD)
                 }
-                if (!cleaned) {
-                    // The pre-fix version measured wav.length() and meta.length(): primary files only, and
-                    // `length()` on a survivor directory reports the entry size, not the retained subtree.
-                    chargeRetainedLocked(id, ready = false)
-                }
-                dropCounterOnly(TerminalReason.INVALID_ON_RECOVERY)
-                // MONITORING (spec 827c5962): recovery CAN delete, so it must say so. A recording that
-                // vanishes across a relaunch is otherwise invisible; `cleaned=false` marks the survivor
-                // case, where bytes remain and are merely not served.
-                Timber.tag(QUEUE_TAG).i(
-                    "voice-upload remove: capture=%s reason=invalid-on-recovery cleaned=%s",
-                    id,
-                    cleaned,
-                )
+                chargeRetainedLocked(id, ready = false)
+                holdLocked(id, "record-not-locally-validated")
+                continue
             } else {
                 // The entry is COMPLETE and passed every structural and checksum check, so it is
                 // servable (spec bfe91857). Re-hardening is best effort and never decides this.
@@ -2985,8 +3009,6 @@ class ContributionStore(
                 keep += entry
             }
         }
-        // Boundary-held ids survive past the rebuild block: the orphan-sidecar sweep must exclude them.
-        val boundaryHeld = mutableListOf<String>()
         synchronized(lock) {
             // Rebuild the index from VALIDATED disk state only: self-prepared entries are
             // re-stamped from their current sidecars (a mutable clock or post-purge debris can
@@ -3032,25 +3054,26 @@ class ContributionStore(
                 }
                 // Restore the durable retry boundary: a restart must not shorten a scheduled backoff
                 // or a received server minimum by "forgetting" them.
+                // UNKNOWN BACKOFF IS DUE, NOT HELD (spec 2741a0ca). An unreconcilable `.retry` record means
+                // the not-before boundary is unknown, so this capture is served with NO boundary and is
+                // sent now. Holding it here was the same local verdict as the others: a bookkeeping file
+                // that cannot be read could strand a real recording indefinitely, and serving nothing is
+                // also what stops the queue from ever draining. Logged so the condition stays visible.
                 val boundary = try {
                     readRetryBoundaryLocked(it.captureId)
                 } catch (uncertain: IllegalStateException) {
-                    // The retry intent could not be reconciled: the capture is NOT ready and NOT exposed
-                    // by recover() or readyEntries() this run (reviewer 199ccdee). The uncertainty
-                    // persists so every serving/attempt entry point keeps failing closed.
-                    boundaryHeld += it.captureId
+                    Timber.tag(QUEUE_TAG).i(
+                        "voice-upload serve: retry-boundary-unknown capture=%s reason=%s action=send",
+                        it.captureId,
+                        uncertain.message,
+                    )
+                    dropCounterOnly(TerminalReason.RETRY_BOUNDARY_UNCERTAIN_SENT)
                     null
                 }
                 boundary?.let { b -> nextRetryAtMs[it.captureId] = b }
-                if (it.captureId !in boundaryHeld) {
-                    memoryEntries[it.captureId] = it
-                    charge.ready = true
-                } else {
-                    memoryEntries.remove(it.captureId)
-                    charge.ready = false
-                }
+                memoryEntries[it.captureId] = it
+                charge.ready = true
             }
-            keep.removeAll { it.captureId in boundaryHeld }
             recovered = true
         }
         // Marker coverage is established in the COMMON eligibility path, not only at expiry: a fresh owner
@@ -3076,7 +3099,6 @@ class ContributionStore(
                     id !in memoryEntries.keys &&
                     id !in preparedIds &&
                     id !in uncertainIds &&
-                    id !in boundaryHeld &&
                     !File(dir, "$id$SUFFIX_READY").exists() &&
                     // A COMPLETE PAIR IS AN ENTRY EVEN WITHOUT A MARKER (reviewer 42801e42): its `.created`
                     // / `.owner` / `.retry` sidecars are the entry's age, identity and retry authority.

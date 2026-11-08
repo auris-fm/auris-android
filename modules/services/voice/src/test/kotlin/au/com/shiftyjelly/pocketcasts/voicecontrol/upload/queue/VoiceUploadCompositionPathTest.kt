@@ -774,18 +774,22 @@ class VoiceUploadCompositionPathTest {
             val drain = moduleDrain(store2, startup, aurisLive, server)
             runDrain(drain)
 
+            // CHANGED BY SPEC 2741a0ca CORRECTION 2, and the change is deliberate.
+            //
+            // This used to require the old-schema entry be DELETED the moment recovery could not validate
+            // it. "Invalid record" is the SERVER's final refusal, not ours: deleting locally means any
+            // client-side validation difference - exactly this case, a record from the previous schema -
+            // silently destroys a real recording the user can never recover. A wrongly-sent clip costs a
+            // rejected upload; a wrongly-deleted clip costs the recording. So the entry is retained and
+            // simply not served by this build, and it expires under the ordinary seven-day rule.
             assertEquals(
-                "an old-schema entry must never reach the transport",
+                "an entry this build cannot validate must never reach the transport",
                 0,
                 hits.get(),
             )
-            assertTrue(
-                "the creation recovery's record check must delete the old-schema entry at once",
-                store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY) >= 1,
-            )
-            org.junit.Assert.assertFalse(
-                "the deleted entry's files must be gone",
-                metaFile.exists() || java.io.File(appQueue, "$id.recording.wav").exists(),
+            org.junit.Assert.assertTrue(
+                "the entry must be RETAINED for the server to judge, not deleted locally",
+                metaFile.exists() && java.io.File(appQueue, "$id.recording.wav").exists(),
             )
         } finally {
             aurisLive.shutdown()
@@ -1032,12 +1036,17 @@ class VoiceUploadCompositionPathTest {
             val drain = moduleDrain(store2, startup, aurisLive, server)
             runDrain(drain)
 
-            assertTrue(store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY) >= 1)
+            // CHANGED BY SPEC 2741a0ca CORRECTION 2. This control exists to prove that WHEN an entry is
+            // deleted, every sidecar goes with it. Correction 2 removes the local delete for a record this
+            // build cannot validate, so there is no deletion here to have residue - the entry is retained
+            // for the server to judge. Kept as a retention control so the behaviour stays pinned; the
+            // all-sidecars-go invariant is still covered where a delete legitimately happens (accepted,
+            // final refusal, seven days, sharing off).
             assertEquals(0, hits.get())
-            assertEquals(
-                "a deleted entry leaves NO residue - created/owner/retry go too",
-                0,
-                sidecarFilesOf(id).size,
+            org.junit.Assert.assertTrue(
+                "an entry this build cannot validate is retained, so its sidecars remain with it",
+                java.io.File(appQueue, "$id.metadata.json").exists() &&
+                    java.io.File(appQueue, "$id.recording.wav").exists(),
             )
         } finally {
             aurisLive.shutdown()

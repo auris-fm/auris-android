@@ -238,7 +238,7 @@ class ContributionStoreTest {
     }
 
     @Test
-    fun `recovery validates complete entries and drops corrupt ones with content-free counter`() {
+    fun `recovery validates complete entries and RETAINS a corrupt one for the server to judge`() {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val good = UUID.randomUUID().toString()
@@ -252,9 +252,18 @@ class ContributionStoreTest {
         store.close()
         val store2 = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val recovered = store2.recover()
+        // ONLY the valid entry is served.
         assertEquals(listOf(good), recovered.map { it.captureId })
-        assertEquals(1L, store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY))
-        // Corrupt entry files are gone — nothing invalid can be admitted to upload.
+        // CHANGED BY SPEC 2741a0ca CORRECTION 2. Recovery no longer takes a local invalid-record verdict:
+        // "this record is invalid" is the SERVER's final refusal. Deleting here meant any client-side
+        // validation difference destroyed a real recording; a wrongly-sent clip only costs a rejected
+        // upload. The corrupt entry is RETAINED and simply not served, expiring under the 7-day rule.
+        assertEquals(0L, store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY))
+        assertTrue(
+            "the corrupt entry's audio must be RETAINED, not deleted",
+            File(root, "contributions/$bad.recording.wav").isFile,
+        )
+        // It is never SERVED as valid: its ready marker is withdrawn.
         assertFalse(File(root, "contributions/$bad.ready").exists())
     }
 

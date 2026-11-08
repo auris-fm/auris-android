@@ -37,6 +37,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Contributi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
@@ -785,7 +786,7 @@ class VoiceAsrEngine @Inject constructor(
                     // must NOT be typed wake_only; that gate is the transcript emptiness itself.
                     // Joined FIRST so Recognized stays the candidate outcome: the transcript fact
                     // outranks the routing absence, and provenance reads both from the history.
-                    if (transcript.isBlank()) {
+                    if (transcript.isBlank() && WakeOnlyRoutingEmission.enabled) {
                         joinOutcome(CollectionOutcome.RoutingNone(it.captureId, "wake_only"))
                     }
                     joinOutcome(CollectionOutcome.Recognized(it.captureId, asrResult.text, asrResult.detectedLanguage))

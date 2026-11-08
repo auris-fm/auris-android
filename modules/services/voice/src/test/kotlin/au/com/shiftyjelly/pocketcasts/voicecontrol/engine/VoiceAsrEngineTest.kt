@@ -3166,13 +3166,22 @@ class VoiceAsrEngineTest {
         assertEquals(RecordNode.Str("en-US"), asr.fields["source_language"])
     }
 
+    private inline fun withWakeOnlyEmission(block: () -> Unit) {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission.enabled = true
+        try {
+            block()
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission.enabled = false
+        }
+    }
+
     @Test
     fun `a wake-only clip records routing not_run wake_only`() = runTest {
-        // SPEC DELTA 58940cbe (owner-approved): when the wake-positive trim consumes the whole
-        // transcript ("Auris" alone), routing never ran — the record must say not_run/wake_only,
-        // not an unknown. Timestamped tokens make the time-band trim real: "Auris" sits fully
-        // before the wake completion band, so the trimmed command transcript is empty and the
-        // clip takes the wake-only drop the device takes.
+        // SPEC DELTA 58940cbe (owner-approved) with the emission flag ON (spec 5374333c option 2):
+        // when the wake-positive trim consumes the whole transcript ("Auris" alone), routing never
+        // ran — the record says not_run/wake_only, not an unknown. Timestamped tokens make the
+        // time-band trim real: "Auris" sits fully before the wake completion band, so the trimmed
+        // command transcript is empty and the clip takes the wake-only drop the device takes.
         val finalizer = CaptureOutcomeFinalizer(
             retentionSink,
             OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
@@ -3182,6 +3191,41 @@ class VoiceAsrEngineTest {
         )
         finalizer.start()
 
+        withWakeOnlyEmission {
+            val wakeOnly = captureOneSegmentForTest(
+                mode = ListeningMode.WakeWord,
+                transcript = "Auris",
+                detectedLanguage = "en-US",
+                wakeConfidence = 0.91f,
+                wakeThreshold = 0.55f,
+                wakeCompletionSample = 400,
+                asrTokens = listOf(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
+                ),
+                dirName = "wake-only-routing",
+            )
+            val persisted = checkNotNull(wakeOnly.persisted) { "the wake-only clip must reach a persisted record" }
+            val routing = persisted.record.observations.getValue(StageName.Routing)
+            assertEquals(StageState.NotRun, routing.state)
+            assertEquals(RecordNode.Str("wake_only"), routing.fields["reason"])
+        }
+    }
+
+    @Test
+    fun `with the wake_only emission flag OFF the wake-only clip does not emit wake_only`() = runTest {
+        // SPEC 5374333c option 2: Cloud staging is on HOLD for the wake_only vocabulary, so
+        // emission defaults OFF. The identical wake-only clip must then carry NO wake_only typing
+        // anywhere — the wire is unchanged until staging confirms.
+        val finalizer = CaptureOutcomeFinalizer(
+            retentionSink,
+            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
+            this,
+            sleepMs = { kotlinx.coroutines.delay(it) },
+            nowMs = { System.nanoTime() / 1_000_000L },
+        )
+        finalizer.start()
+
+        assertTrue("precondition: emission must default OFF", !au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission.enabled)
         val wakeOnly = captureOneSegmentForTest(
             mode = ListeningMode.WakeWord,
             transcript = "Auris",
@@ -3192,12 +3236,14 @@ class VoiceAsrEngineTest {
             asrTokens = listOf(
                 au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
             ),
-            dirName = "wake-only-routing",
+            dirName = "wake-only-routing-flag-off",
         )
         val persisted = checkNotNull(wakeOnly.persisted) { "the wake-only clip must reach a persisted record" }
         val routing = persisted.record.observations.getValue(StageName.Routing)
-        assertEquals(StageState.NotRun, routing.state)
-        assertEquals(RecordNode.Str("wake_only"), routing.fields["reason"])
+        assertTrue(
+            "flag OFF must never emit wake_only; got ${routing.state} ${routing.fields}",
+            (routing.fields["reason"] as? RecordNode.Str)?.value != "wake_only",
+        )
     }
 
     @Test
@@ -3214,27 +3260,29 @@ class VoiceAsrEngineTest {
         )
         finalizer.start()
 
-        val withCommand = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "Auris, skip this ad",
-            detectedLanguage = "en-US",
-            wakeConfidence = 0.91f,
-            wakeThreshold = 0.55f,
-            wakeCompletionSample = 400,
-            asrTokens = listOf(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
-                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("skip", startMs = 700, endMs = 900),
-                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("this", startMs = 950, endMs = 1100),
-                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("ad", startMs = 1150, endMs = 1300),
-            ),
-            dirName = "wake-command-routing",
-        )
-        val persisted = checkNotNull(withCommand.persisted) { "the command clip must reach a persisted record" }
-        val routing = persisted.record.observations.getValue(StageName.Routing)
-        assertTrue(
-            "a command clip must NOT be typed wake_only; got ${routing.state} ${routing.fields}",
-            routing.fields["reason"] != RecordNode.Str("wake_only"),
-        )
+        withWakeOnlyEmission {
+            val withCommand = captureOneSegmentForTest(
+                mode = ListeningMode.WakeWord,
+                transcript = "Auris, skip this ad",
+                detectedLanguage = "en-US",
+                wakeConfidence = 0.91f,
+                wakeThreshold = 0.55f,
+                wakeCompletionSample = 400,
+                asrTokens = listOf(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("skip", startMs = 700, endMs = 900),
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("this", startMs = 950, endMs = 1100),
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("ad", startMs = 1150, endMs = 1300),
+                ),
+                dirName = "wake-command-routing",
+            )
+            val persisted = checkNotNull(withCommand.persisted) { "the command clip must reach a persisted record" }
+            val routing = persisted.record.observations.getValue(StageName.Routing)
+            assertTrue(
+                "a command clip must NOT be typed wake_only; got ${routing.state} ${routing.fields}",
+                routing.fields["reason"] != RecordNode.Str("wake_only"),
+            )
+        }
     }
 
     // NOTE (reviewer 30d46323 item 1 / spec 027d40d8): the earlier outside-grace wake-rejection

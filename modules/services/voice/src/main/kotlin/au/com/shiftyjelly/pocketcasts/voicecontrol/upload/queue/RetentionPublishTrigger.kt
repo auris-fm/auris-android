@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import java.util.UUID
 import kotlinx.coroutines.Job
+import timber.log.Timber
 
 /**
  * THE ENGINE→PRODUCER PUBLISH TRIGGER (task73 final wiring): the ONE guarded bridge between
@@ -94,12 +95,27 @@ class RetentionPublishTrigger(
             // GUARD 1: the capture arrives ALREADY SEALED (reviewer be6bb62e #1 — ONE seal
             // operation for both completion paths; the sink dispatches only sealed snapshots).
             // Every guard below (frozen identity, consent, eligibility, caps) applies unchanged.
-            if (sealed.pcm.isEmpty()) return
+            if (sealed.pcm.isEmpty()) {
+                Timber.i("voice-capture publish: refused capture=%s reason=empty-pcm", id)
+                return
+            }
             // GUARD 2: the frozen tuple IS the publication owner; validation and the producer's
             // live reads happen inside ONE owner transaction (no check-then-use window).
-            if (issued == null || issued.enrollmentEpoch == null) return
+            if (issued == null || issued.enrollmentEpoch == null) {
+                Timber.i(
+                    "voice-capture publish: refused capture=%s reason=no-issued-authority",
+                    id,
+                )
+                return
+            }
             val frozen = FrozenOwner(
-                account = issued.accountName ?: return,
+                account = issued.accountName ?: run {
+                    Timber.i(
+                        "voice-capture publish: refused capture=%s reason=no-account-name",
+                        id,
+                    )
+                    return
+                },
                 session = issued.sessionGeneration,
                 enrollmentEpoch = issued.enrollmentEpoch,
             )
@@ -107,7 +123,13 @@ class RetentionPublishTrigger(
             // candidate since admission. Missing metadata authority never means unconstrained
             // (reviewer fde5349e): a capture that was never allowance-admitted refuses here,
             // before any queue admission or write.
-            val metadataCapBytes = sealed.allowanceMetadataCap ?: return
+            val metadataCapBytes = sealed.allowanceMetadataCap ?: run {
+                Timber.i(
+                    "voice-capture publish: refused capture=%s reason=no-metadata-cap",
+                    id,
+                )
+                return
+            }
             // GUARD 4 (P1, reviewer 0cd7e39d/7033f4d9): model provenance is INVOCATION evidence.
             // The asr ref is the identity of the backend ACTUALLY INVOKED (frozen at the
             // transcribe call), never the SpeechStarted selection on the frozen context. An
@@ -143,8 +165,23 @@ class RetentionPublishTrigger(
             }
             // ATOMIC section: identity validation + reservation/prepare in the SAME acquisition.
             // A missing binding FAILS CLOSED; false = no matching live owner: record-less.
-            val section = publishUnderOwner ?: return
-            section(frozen) { commit() }
+            val section = publishUnderOwner ?: run {
+                Timber.i(
+                    "voice-capture publish: refused capture=%s reason=no-owner-section",
+                    id,
+                )
+                return
+            }
+            val committed = section(frozen) { commit() }
+            // false = no matching live owner: record-less. Previously silent (spec 2aea78c3).
+            if (!committed) {
+                Timber.i(
+                    "voice-capture publish: refused capture=%s reason=owner-mismatch account=%s session=%s",
+                    id,
+                    frozen.account,
+                    frozen.session,
+                )
+            }
         } finally {
             sink.releaseRetained(id)
         }

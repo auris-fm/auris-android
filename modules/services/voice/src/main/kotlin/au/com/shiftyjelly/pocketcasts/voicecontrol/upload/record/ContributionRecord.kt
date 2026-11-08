@@ -100,7 +100,7 @@ object StageReasons {
             "backend_handles_translation",
             "translator_unavailable",
         ),
-        StageName.Routing to setOf("no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired", "observation_unavailable"),
+        StageName.Routing to setOf("no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired", "observation_unavailable", "wake_only"),
         StageName.Execution to setOf("client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired", "observation_unavailable"),
     )
 

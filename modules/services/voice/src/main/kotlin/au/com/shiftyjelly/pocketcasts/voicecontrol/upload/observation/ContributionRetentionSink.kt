@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import java.util.ArrayDeque
 import java.util.UUID
+import timber.log.Timber
 
 /**
  * Why collection authority was lost. The three loss categories are DISTINCT by construction:
@@ -665,6 +666,15 @@ open class ContributionRetentionSink(
         if (fired != null) {
             // BATCH B (reviewer 62023896 #2): actual sealing cancels the capture's timer too.
             onCaptureSealed?.invoke(outcome.captureId)
+            if (onReadyForPublication == null) {
+                // A seal with NO attached publish trigger means the audio is retained forever with
+                // no queue entry and no log — the exact device symptom of a startup path that never
+                // reached UploadTrigger.start() (spec 2aea78c3: every silent return gets a line).
+                Timber.i(
+                    "voice-capture publish: refused capture=%s reason=no-publish-trigger-attached",
+                    outcome.captureId,
+                )
+            }
             onReadyForPublication?.invoke(fired)
         }
         return true
@@ -734,6 +744,12 @@ open class ContributionRetentionSink(
         // HOOK OUTSIDE THE LOCK: the sealed snapshot goes through the REAL publication path.
         if (fired != null) {
             onCaptureSealed?.invoke(captureId)
+            if (onReadyForPublication == null) {
+                Timber.i(
+                    "voice-capture publish: refused capture=%s reason=no-publish-trigger-attached stage=outcome-wait-expired",
+                    captureId,
+                )
+            }
             onReadyForPublication?.invoke(fired)
         }
         return fired

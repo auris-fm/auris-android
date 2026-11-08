@@ -30,7 +30,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 object EngineStageProvenance {
 
     /** P1: routing not_run reasons the recognizer's own decision may map to (existing set). */
-    private val STAGE_ROUTING_NONE_REASONS = setOf("no_candidates", "low_confidence", "validation_failed")
+    private val STAGE_ROUTING_NONE_REASONS = setOf("no_candidates", "low_confidence", "validation_failed", "wake_only")
 
     fun stagesFor(sealed: SealedCapture): List<Pair<StageName, StageEntry>> {
         // HISTORY, not [outcome] (reviewer 54635caa): the terminal Executed join overwrites

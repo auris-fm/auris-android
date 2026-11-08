@@ -207,7 +207,20 @@ class ContributionRetryCaller(
                 synchronized(inFlightLock) { inFlight.remove(captureId) }
             }
         }
-        return PollResult(attempted, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
+        val result = PollResult(attempted, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
+        // EVERY drain answers why (spec 2aea78c3): an empty drain must say whether it saw eligible
+        // work and where that work was refused, instead of discarding the PollResult in the drain
+        // lambda (VoiceUploadModule provideVoiceUploadDrain) and logging nothing.
+        Timber.i(
+            "voice-upload drain: eligible=%d attempted=%d deferredNetwork=%d skippedInFlight=%d cancelledEpoch=%d pickupRefused=%d",
+            eligible.size,
+            result.attempted,
+            result.deferredNetwork,
+            result.skippedInFlight,
+            result.cancelledEpoch,
+            result.pickupRefused,
+        )
+        return result
     }
 
     /** Durable re-arm, token-scoped: ONE ownership transaction validates the attempt AND mutates.

@@ -2875,6 +2875,8 @@ class VoiceAsrEngineTest {
         wakeConfidence: Float,
         wakeThreshold: Float,
         wakeCompletionSample: Int = 4000,
+        /** Optional ASR tokens: time-band wake trim only applies when tokens are present. */
+        asrTokens: List<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken>? = null,
         dirName: String,
     ): CapturedSegment {
         authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
@@ -2919,7 +2921,7 @@ class VoiceAsrEngineTest {
             )
         }
 
-        val dbgBackend = FakeAsrBackend(transcript, detectedLanguage = detectedLanguage)
+        val dbgBackend = FakeAsrBackend(transcript, tokens = asrTokens, detectedLanguage = detectedLanguage)
         val handledIntentsX = mutableListOf<VoiceIntent>()
         val store = ContributionStore(
             tmp.newFolder(dirName),
@@ -3003,6 +3005,8 @@ class VoiceAsrEngineTest {
         val persisted: RecordValidator.Result.Ok?,
         val persistedRoot: RecordNode.Obj?,
         val delivered: Boolean,
+        /** How many entries the durable queue holds after the segment settled. */
+        val queued: Int = if (delivered) 1 else 0,
     )
 
     /**
@@ -3160,6 +3164,108 @@ class VoiceAsrEngineTest {
         val asr = decoded.record.observations.getValue(StageName.Asr)
         assertEquals(RecordNode.Str("skip this ad"), asr.fields["text"])
         assertEquals(RecordNode.Str("en-US"), asr.fields["source_language"])
+    }
+
+    @Test
+    fun `a wake-only clip records routing not_run wake_only`() = runTest {
+        // SPEC DELTA 58940cbe (owner-approved): when the wake-positive trim consumes the whole
+        // transcript ("Auris" alone), routing never ran — the record must say not_run/wake_only,
+        // not an unknown. Timestamped tokens make the time-band trim real: "Auris" sits fully
+        // before the wake completion band, so the trimmed command transcript is empty and the
+        // clip takes the wake-only drop the device takes.
+        val finalizer = CaptureOutcomeFinalizer(
+            retentionSink,
+            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
+            this,
+            sleepMs = { kotlinx.coroutines.delay(it) },
+            nowMs = { System.nanoTime() / 1_000_000L },
+        )
+        finalizer.start()
+
+        val wakeOnly = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "Auris",
+            detectedLanguage = "en-US",
+            wakeConfidence = 0.91f,
+            wakeThreshold = 0.55f,
+            wakeCompletionSample = 400,
+            asrTokens = listOf(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
+            ),
+            dirName = "wake-only-routing",
+        )
+        val persisted = checkNotNull(wakeOnly.persisted) { "the wake-only clip must reach a persisted record" }
+        val routing = persisted.record.observations.getValue(StageName.Routing)
+        assertEquals(StageState.NotRun, routing.state)
+        assertEquals(RecordNode.Str("wake_only"), routing.fields["reason"])
+    }
+
+    @Test
+    fun `a command clip after the wake word is NOT typed wake_only`() = runTest {
+        // The other half of spec delta 58940cbe: "Auris, <command>" leaves text and routes
+        // normally — the wake_only typing must not leak onto it. Command tokens sit AFTER the
+        // wake band, so the trim removes only "Auris".
+        val finalizer = CaptureOutcomeFinalizer(
+            retentionSink,
+            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
+            this,
+            sleepMs = { kotlinx.coroutines.delay(it) },
+            nowMs = { System.nanoTime() / 1_000_000L },
+        )
+        finalizer.start()
+
+        val withCommand = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "Auris, skip this ad",
+            detectedLanguage = "en-US",
+            wakeConfidence = 0.91f,
+            wakeThreshold = 0.55f,
+            wakeCompletionSample = 400,
+            asrTokens = listOf(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
+                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("skip", startMs = 700, endMs = 900),
+                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("this", startMs = 950, endMs = 1100),
+                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("ad", startMs = 1150, endMs = 1300),
+            ),
+            dirName = "wake-command-routing",
+        )
+        val persisted = checkNotNull(withCommand.persisted) { "the command clip must reach a persisted record" }
+        val routing = persisted.record.observations.getValue(StageName.Routing)
+        assertTrue(
+            "a command clip must NOT be typed wake_only; got ${routing.state} ${routing.fields}",
+            routing.fields["reason"] != RecordNode.Str("wake_only"),
+        )
+    }
+
+    @Test
+    fun `a WAKE-REJECTED segment OUTSIDE grace currently produces no capture context and no queue entry`() = runTest {
+        // DOCUMENTS CURRENT BEHAVIOUR (reviewer 4b2247d0 asked for a preserved wake-negative
+        // control; the 2026-11-08 device incident does not retire it). Outside grace in WakeWord
+        // mode, a below-threshold segment takes the `drop (no grace)` branch BEFORE any capture
+        // context exists — the engine joins nothing, retention never starts, and no queue entry
+        // is produced. Spec line 13 ("initial selection includes utterances rejected by
+        // wakeword") implies these SHOULD be collected; if that behaviour change is made, this
+        // control is the one that must be deliberately flipped, not silently broken.
+        val captured = captureOneSegmentForTest(
+            mode = ListeningMode.WakeWord,
+            transcript = "hello there",
+            detectedLanguage = "en-US",
+            wakeConfidence = 0.03f,
+            wakeThreshold = 0.812f,
+            dirName = "wake-rejected-no-grace",
+        )
+
+        assertTrue(
+            "outside grace, the wake rejection is NOT joined as a collection outcome (capture context is absent from the wake branch)",
+            !observedFor(captured.admitted.captureId).any {
+                it is CollectionOutcome.NotCollected && it.reason == "rejected_by_wake"
+            },
+        )
+        assertEquals(
+            "no capture context -> no queue entry (current behaviour; the pending spec change must flip this deliberately)",
+            0,
+            captured.queued,
+        )
     }
 
     /**

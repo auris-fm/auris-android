@@ -689,6 +689,7 @@ class VoiceAsrEngine @Inject constructor(
                 // P1 (reviewer 7033f4d9): the known wake/bleed decision that skips ASR is a
                 // RECORDED fact (existing vocabulary `rejected_by_wake`), not a wait-expiry unknown.
                 capture?.let { joinOutcome(CollectionOutcome.NotCollected(it.captureId, "rejected_by_wake")) }
+                    ?: Timber.i("voice-capture publish: refused reason=no-capture-context stage=wake-drop")
                 Timber.i("[VoicePipeline] wake %s → drop (no grace)", wakeCmp)
                 null
             }
@@ -777,10 +778,21 @@ class VoiceAsrEngine @Inject constructor(
             // never an erasure of the observed output).
             if (asrResult.text.isNotBlank()) {
                 request.capture?.let {
+                    // SPEC DELTA 58940cbe: the wake-positive trim consumed everything ("Auris"
+                    // alone), so ROUTING never ran — record it as not_run/wake_only rather than
+                    // leaving an unknown the record cannot explain. Reaching this drop with raw
+                    // text and an empty command transcript implies the wake-positive trim did the
+                    // consuming ("Auris, <command>" leaves text and routes normally, never here).
+                    // Joined FIRST so Recognized stays the candidate outcome: the transcript fact
+                    // outranks the routing absence, and provenance reads both from the history.
+                    joinOutcome(CollectionOutcome.RoutingNone(it.captureId, "wake_only"))
                     joinOutcome(CollectionOutcome.Recognized(it.captureId, asrResult.text, asrResult.detectedLanguage))
                 }
             } else {
-                val captureId = request.capture?.captureId ?: return
+                val captureId = request.capture?.captureId ?: run {
+                    Timber.i("voice-capture publish: refused reason=no-capture-context stage=asr-empty")
+                    return
+                }
                 // The backend MEASURED a language on this result even though it produced no text.
                 // The empty-result observation is what the stage records, so the measurement rides
                 // with it: a measured fact dies here otherwise (reviewer 1f7fe074).

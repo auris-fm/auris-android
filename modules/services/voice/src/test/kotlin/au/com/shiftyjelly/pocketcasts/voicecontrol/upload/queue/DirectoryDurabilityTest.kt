@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder
@@ -1267,6 +1269,117 @@ class DirectoryDurabilityTest {
             File(dir, "$id.recording.wav").exists(),
         )
         assertFalse("its sidecar must go too", File(dir, "$id.metadata.json").exists())
+    }
+
+    @Test
+    fun `a deferred purge is finished by recovery after reconstruction with no second purge request`() {
+        // REVIEWER c764bea2 finding 1. My first version of the deferral only set MEMORY fields, so the
+        // "retry" in that control was actually a fresh explicit revokeAndPurge call - it would have passed
+        // even if the intent had been forgotten entirely. The intent must be DERIVED from state that
+        // already survives process death: the durable withdrawal marker (spec 777c18d5). A stop whose purge
+        // could not enumerate the directory is still a stop, and the next ordinary recovery must finish it
+        // BEFORE anything can be validated or served.
+        val root = tmp.newFolder("queue-purge-durable-intent")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val id = java.util.UUID.randomUUID().toString()
+        File(dir, "$id.recording.wav").writeBytes(ByteArray(2048))
+        File(dir, "$id.metadata.json").writeText("{}")
+
+        // The durable marker is the ONLY thing carried across the process boundary.
+        var stopped = true
+        val intent = LocalWithdrawalIntentStore(
+            object : WithdrawalIntentPersistence {
+                override fun read(): Boolean = stopped
+
+                override fun write(requested: Boolean): Boolean {
+                    stopped = requested
+                    return true
+                }
+            },
+        )
+
+        val perms = java.nio.file.Files.getPosixFilePermissions(dir.toPath())
+        java.nio.file.Files.setPosixFilePermissions(
+            dir.toPath(),
+            setOf(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+        )
+        try {
+            val first = ContributionStore(root, limits(), withdrawalIntent = intent)
+            try {
+                first.revokeAndPurge("account_changed")
+                assertTrue("precondition: the first purge deferred", first.purgeDeferred)
+            } finally {
+                first.close()
+            }
+        } finally {
+            java.nio.file.Files.setPosixFilePermissions(dir.toPath(), perms)
+        }
+
+        // RECONSTRUCTION + ORDINARY RECOVERY. Deliberately NO revokeAndPurge call: if the intent were only
+        // in memory, this would leave the audio on disk and promote it, exactly like the original defect.
+        val rebuilt = ContributionStore(root, limits(), withdrawalIntent = intent)
+        try {
+            val served = rebuilt.recover()
+            assertTrue("a stop must serve nothing", served.isEmpty())
+            assertTrue("nothing may be exposed as ready", rebuilt.readyEntries().isEmpty())
+        } finally {
+            rebuilt.close()
+        }
+
+        assertFalse(
+            "recovery must finish a deferred purge from the durable intent alone",
+            File(dir, "$id.recording.wav").exists(),
+        )
+        assertFalse("its sidecar must go too", File(dir, "$id.metadata.json").exists())
+    }
+
+    @Test
+    fun `a same-instance retry clears the incomplete purge indicators only on confirmed completion`() {
+        // REVIEWER c764bea2 finding 2. A successful retry on the SAME store never cleared `purgeDeferred` or
+        // the unknown-listing residue, so a store that had finished its purge still reported itself
+        // incomplete. The new-instance retry in the previous control hid this because it observed a
+        // different object.
+        val root = tmp.newFolder("queue-purge-same-instance")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val id = java.util.UUID.randomUUID().toString()
+        File(dir, "$id.recording.wav").writeBytes(ByteArray(1024))
+        File(dir, "$id.metadata.json").writeText("{}")
+
+        val store = ContributionStore(root, limits())
+        try {
+            val perms = java.nio.file.Files.getPosixFilePermissions(dir.toPath())
+            java.nio.file.Files.setPosixFilePermissions(
+                dir.toPath(),
+                setOf(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+            )
+            try {
+                store.revokeAndPurge("account_changed")
+                assertTrue("precondition: deferred", store.purgeDeferred)
+                assertTrue(
+                    "precondition: incomplete is reported",
+                    store.purgeResidue.contains(ContributionStore.PURGE_RESIDUE_UNKNOWN_LISTING),
+                )
+            } finally {
+                java.nio.file.Files.setPosixFilePermissions(dir.toPath(), perms)
+            }
+
+            // SAME INSTANCE, fault lifted.
+            store.revokeAndPurge("account_changed")
+
+            assertFalse(
+                "a completed purge must stop reporting itself deferred",
+                store.purgeDeferred,
+            )
+            assertFalse(
+                "the incomplete sentinel must clear once completion is confirmed",
+                store.purgeResidue.contains(ContributionStore.PURGE_RESIDUE_UNKNOWN_LISTING),
+            )
+        } finally {
+            store.close()
+        }
+        assertFalse("the recording must actually be gone", File(dir, "$id.recording.wav").exists())
     }
 
     @Test

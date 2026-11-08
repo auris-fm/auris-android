@@ -4,6 +4,7 @@ import android.content.Context
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -42,7 +43,12 @@ object VoiceUploadModule {
     @Singleton
     fun provideContributionStore(
         @ApplicationContext context: Context,
-    ): ContributionStore = contributionStoreFor(File(context.filesDir, CAPTURES_ROOT), directorySyncOverride = null)
+        withdrawalIntent: LocalWithdrawalIntentStore,
+    ): ContributionStore = contributionStoreFor(
+        File(context.filesDir, CAPTURES_ROOT),
+        directorySyncOverride = null,
+        withdrawalIntent = withdrawalIntent,
+    )
 
     /**
      * The store construction core, split from the provider so composition tests can run the REAL
@@ -54,6 +60,7 @@ object VoiceUploadModule {
     internal fun contributionStoreFor(
         root: File,
         directorySyncOverride: DirectorySync?,
+        withdrawalIntent: LocalWithdrawalIntentStore? = null,
     ): ContributionStore = ContributionStore(
         root,
         QueueLimits.defaults(),
@@ -64,6 +71,9 @@ object VoiceUploadModule {
         // success fallback: an unsupported platform propagates a failure, never a claimed sync.
         directorySync = directorySyncOverride ?: DirectorySync.PRODUCTION,
         intentDirectorySyncOverride = directorySyncOverride ?: DirectorySync.PRODUCTION,
+        // The DURABLE revocation state (spec 777c18d5): recovery derives any pending withdrawal purge from
+        // it, so a stop whose purge could not enumerate the directory is finished on the next opportunity.
+        withdrawalIntent = withdrawalIntent,
     ).also { store ->
         // DURABLE RESUME, ONCE PER PROCESS (on-device finding 2026-11-07, spec decision after
         // reviewer 032a8639): recovery happens HERE, at singleton creation, BEFORE any capture

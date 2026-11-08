@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
 import java.io.File
@@ -48,6 +49,16 @@ class ContributionStore(
      * generation that a concurrent revocation is free to change underneath it (reviewer ee26880c finding 1).
      */
     internal val ownership: QueueOwnership = QueueOwnership(),
+    /**
+     * THE DURABLE REVOCATION STATE (reviewer c764bea2, spec 777c18d5). A withdrawal of sharing is recorded
+     * durably before the request leaves and survives process death, which makes it the right place to DERIVE
+     * a pending purge rather than inventing a second marker file. [recover] consults it FIRST and finishes
+     * the purge before anything can be validated, promoted or served.
+     *
+     * Null means "no durable revocation source is wired" (unit tests that are not about this), never
+     * "sharing is on": a null source contributes no veto and no purge, exactly as before it existed.
+     */
+    private val withdrawalIntent: LocalWithdrawalIntentStore? = null,
     // Injection point for the disposal-intent barrier only. Defaults to the queue's barrier so production
     // behaviour is unchanged; tests override it to fault intent recording independently of the queue.
     private val intentDirectorySyncOverride: DirectorySync? = null,
@@ -2406,6 +2417,16 @@ class ContributionStore(
      * check-then-mutate hole here would let it delete in a directory a successor already owns.
      */
     fun recover(): List<Entry> {
+        // PENDING PURGE FIRST (reviewer c764bea2, spec 777c18d5). The durable withdrawal intent is the
+        // authority for STOPPING, and it survives process death - so a stop whose purge deferred is still
+        // a stop. Consuming it HERE, before any validation or promotion, is what makes "the next ordinary
+        // opportunity finishes the job" true: no pending capture is ever validated, promoted or served
+        // on the way to the purge that disposes of it. A failed listing simply leaves the intent in place
+        // and this store reports nothing, so the following opportunity tries again.
+        if (withdrawalIntent?.collectionPermittedByLocalIntent() == false) {
+            revokeAndPurge("pending withdrawal intent")
+            return emptyList()
+        }
         if (!acquireOwnership() || !enterOperation()) {
             logGuardedRefusal()
             return emptyList()
@@ -2505,7 +2526,14 @@ class ContributionStore(
             recovered = true // a purged store must not lazily resurrect anything from disk
             // Retained residue after a purge is reported, not assumed away: a caller that treats a purge
             // as complete when files remain would tell the user their audio is gone while it is not.
-            residueIds.forEach { id -> _purgeResidue.add(id) }
+            // COMPLETION IS CONFIRMED, NOT ASSUMED (reviewer c764bea2): the listing was readable, every
+            // enumerated capture was attempted, so any earlier incomplete-purge indicator is now stale.
+            // Clearing here - and ONLY here - is why a same-instance retry does not keep claiming to be
+            // deferred. Deleting this clear leaves a store that finished its purge still reporting it as
+            // incomplete, which is exactly what the new-instance control could not see.
+            _purgeDeferred = false
+            _purgeResidue.remove(PURGE_RESIDUE_UNKNOWN_LISTING)
+            _purgeResidue.addAll(residueIds)
             stagedAttempts.forEach { attempt -> deleteStaging(attempt) }
             stagingOwners.clear()
             // A PURGE MUST BE VISIBLE AFTER IT HAS HAPPENED, and this is the one moment where the

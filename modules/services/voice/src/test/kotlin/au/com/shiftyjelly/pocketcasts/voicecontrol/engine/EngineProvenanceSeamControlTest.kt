@@ -164,6 +164,30 @@ class EngineProvenanceSeamControlTest {
     }
 
     @Test
+    fun `the time-boundary wake-only drop with command text intact is NEVER typed wake_only`() = runTest {
+        // Reviewer 30d46323 item 2: the drop branch fires on transcript.isBlank() OR the
+        // time-based isWakeOnly arm. Only an OBSERVED trim leaving no text may be typed
+        // wake_only (spec delta 58940cbe). This shape — short speech inside the wake-only
+        // tolerance, command text intact, no tokens so nothing was trimmed — is the boundary
+        // that a naive gate mislabels; it must keep an UNKNOWN/other routing typing, never
+        // wake_only.
+        val h = Harness(
+            this,
+            backend = TextBackend(" ok pause ", detectedLanguage = "en"),
+            wakeDetected = true,
+            speechEndSample = 2, // within the wake-only tolerance of completionSample 4000
+        )
+        h.startTurn()
+        val id = assertNotNull2(h.firstCaptureId())
+        val routing = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineStageProvenance
+            .stagesFor(h.sink.sealedSnapshotForTest(id)!!).toMap().getValue(StageName.Routing)
+        assertTrue(
+            "a time-boundary drop with command text intact must NOT be typed wake_only; got ${routing.state} ${routing.fields}",
+            (routing.fields["reason"] as? RecordNode.Str)?.value != "wake_only",
+        )
+    }
+
+    @Test
     fun `wake-only with recognized text preserves the ACTUAL transcript`() = runTest {
         val h = Harness(
             this,

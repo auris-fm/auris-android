@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import timber.log.Timber
 
 /**
  * BOUNDED OUTCOME FINALIZATION (Batch B, reviewer c5d94af4 #1 / be6bb62e / 62023896): every
@@ -74,6 +75,8 @@ class CaptureOutcomeFinalizer(
 
     /** Attaches this finalizer's hooks to the sink and arms the owning-scope teardown. */
     fun start() {
+        // STARTUP/ATTACHMENT OBSERVATION (reviewer 30d46323 #4).
+        Timber.i("voice-capture finalizer: started")
         lock.withLock {
             if (disposed || installedRetainedHook != null) return
             val retained: (UUID, Long, Long) -> Unit = { id, gen, completedAtMs -> noteRetained(id, gen, completedAtMs) }

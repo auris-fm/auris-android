@@ -52,6 +52,13 @@ import retrofit2.Retrofit
  * If any silent return on the path fires (empty PCM, missing owner, unattached trigger, refused
  * owner section), the reason line now emitted in production names it; this control fails at the
  * point the device failed.
+ *
+ * CLAIM LIMIT (reviewer 30d46323 #4): this control ASSEMBLES the handoff (finalizer.start(),
+ * trigger.attach(), injected Recognized) — it proves the composition works, NOT that the device
+ * reaches it. The real engine and the application startup ordering are deliberately NOT
+ * exercised here; the production startup/attachment log lines (voice-capture finalizer: started /
+ * voice-capture publish: trigger-attached / voice-upload: trigger-started) are what distinguish
+ * a missing finalizer from a missing publisher on the device.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])

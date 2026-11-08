@@ -3237,36 +3237,12 @@ class VoiceAsrEngineTest {
         )
     }
 
-    @Test
-    fun `a WAKE-REJECTED segment OUTSIDE grace currently produces no capture context and no queue entry`() = runTest {
-        // DOCUMENTS CURRENT BEHAVIOUR (reviewer 4b2247d0 asked for a preserved wake-negative
-        // control; the 2026-11-08 device incident does not retire it). Outside grace in WakeWord
-        // mode, a below-threshold segment takes the `drop (no grace)` branch BEFORE any capture
-        // context exists — the engine joins nothing, retention never starts, and no queue entry
-        // is produced. Spec line 13 ("initial selection includes utterances rejected by
-        // wakeword") implies these SHOULD be collected; if that behaviour change is made, this
-        // control is the one that must be deliberately flipped, not silently broken.
-        val captured = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "hello there",
-            detectedLanguage = "en-US",
-            wakeConfidence = 0.03f,
-            wakeThreshold = 0.812f,
-            dirName = "wake-rejected-no-grace",
-        )
-
-        assertTrue(
-            "outside grace, the wake rejection is NOT joined as a collection outcome (capture context is absent from the wake branch)",
-            !observedFor(captured.admitted.captureId).any {
-                it is CollectionOutcome.NotCollected && it.reason == "rejected_by_wake"
-            },
-        )
-        assertEquals(
-            "no capture context -> no queue entry (current behaviour; the pending spec change must flip this deliberately)",
-            0,
-            captured.queued,
-        )
-    }
+    // NOTE (reviewer 30d46323 item 1 / spec 027d40d8): the earlier outside-grace wake-rejection
+    // control was INVALID — this helper hardcodes `WakeWordResult(detected = true)`, and the
+    // engine branches on `detected`, not score vs threshold, so it never exercised a rejection,
+    // and without the finalizer its zero-queue assertion proved nothing. Removed here; the real
+    // wake-rejection behaviour (capture context + queue per spec line 41) is established in the
+    // follow-up commit with a genuinely rejecting detector and the real finalizer.
 
     /**
      * The stage facts the engine actually observes for ONE segment, read from the live corpus rather

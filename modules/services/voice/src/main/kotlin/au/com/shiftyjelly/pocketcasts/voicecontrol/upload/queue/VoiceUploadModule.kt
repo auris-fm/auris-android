@@ -16,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import timber.log.Timber
 
 /**
  * PRODUCTION construction and trigger of the upload assembly (spec e842c497: compiled-off source wiring).
@@ -238,7 +239,11 @@ object VoiceUploadModule {
     ): VoiceUploadDrain = VoiceUploadDrain {
         // ACQUIRE before the synchronous poll (reviewer b702cd53): the upload path's fail-closed
         // cache read must find a token that was acquired for THIS pass, not assumed from earlier.
-        aurisToken.currentToken()
+        // A FAILED acquisition is a no-attempt cause the drain must name (reviewer 30d46323 #3):
+        // every poll without a token would otherwise look identical to one with one.
+        if (aurisToken.currentToken() == null) {
+            Timber.i("voice-upload drain: reason=token-acquisition-failed")
+        }
         // The durable queue needs NO per-drain recovery: it was re-enumerated once, at store
         // creation (see provideContributionStore), before any capture preparation could begin.
         // Re-running recover() here would let its debris sweep unlink a live `.part` write from a
@@ -446,6 +451,9 @@ class UploadTrigger(
     fun start() {
         if (started) return
         started = true
+        // STARTUP/ATTACHMENT OBSERVATION (reviewer 30d46323 #4): if this line is absent from the
+        // device log, the startup coroutine never reached the upload trigger at all.
+        Timber.i("voice-upload: trigger-started")
         publishTrigger?.attach()
         identityRevocationWatcher?.let { watcher -> scope.launch { runCatching { watcher() } } }
         scope.launch {

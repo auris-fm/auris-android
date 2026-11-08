@@ -778,14 +778,16 @@ class VoiceAsrEngine @Inject constructor(
             // never an erasure of the observed output).
             if (asrResult.text.isNotBlank()) {
                 request.capture?.let {
-                    // SPEC DELTA 58940cbe: the wake-positive trim consumed everything ("Auris"
-                    // alone), so ROUTING never ran — record it as not_run/wake_only rather than
-                    // leaving an unknown the record cannot explain. Reaching this drop with raw
-                    // text and an empty command transcript implies the wake-positive trim did the
-                    // consuming ("Auris, <command>" leaves text and routes normally, never here).
+                    // SPEC DELTA 58940cbe (reviewer 30d46323 item 2): the OBSERVED wake-positive
+                    // trim consumed everything — raw text existed and the trimmed command
+                    // transcript is EMPTY — so ROUTING never ran: not_run/wake_only. The
+                    // time-based isWakeOnly arm of this drop (short speech, command text intact)
+                    // must NOT be typed wake_only; that gate is the transcript emptiness itself.
                     // Joined FIRST so Recognized stays the candidate outcome: the transcript fact
                     // outranks the routing absence, and provenance reads both from the history.
-                    joinOutcome(CollectionOutcome.RoutingNone(it.captureId, "wake_only"))
+                    if (transcript.isBlank()) {
+                        joinOutcome(CollectionOutcome.RoutingNone(it.captureId, "wake_only"))
+                    }
                     joinOutcome(CollectionOutcome.Recognized(it.captureId, asrResult.text, asrResult.detectedLanguage))
                 }
             } else {
@@ -829,11 +831,12 @@ class VoiceAsrEngine @Inject constructor(
                         observedText = asrResult.text,
                     ),
                 )
-            }
+            } ?: Timber.i("voice-capture publish: refused reason=no-capture-context stage=non-content")
             return
         }
         // Recognized: the ACTUAL trimmed transcript + detected language of THIS capture.
         request.capture?.let { joinOutcome(CollectionOutcome.Recognized(it.captureId, transcript, asrResult.detectedLanguage)) }
+            ?: Timber.i("voice-capture publish: refused reason=no-capture-context stage=recognized")
         // Translate to English when the ASR backend did not already translate and
         // the detected language is not English (the SenseVoice CJK path).
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.

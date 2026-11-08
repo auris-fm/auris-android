@@ -65,6 +65,10 @@ class RetentionPublishTrigger(
     fun attach() {
         check(sink.onReadyForPublication == null) { "a publish trigger is already attached" }
         sink.onReadyForPublication = ::onCandidate
+        // STARTUP/ATTACHMENT OBSERVATION (reviewer 30d46323 #4): a seal on the device with no
+        // publisher means this line never ran — the log distinguishes a missing publisher from
+        // a missing finalizer.
+        Timber.i("voice-capture publish: trigger-attached")
     }
 
     private fun onCandidate(sealed: SealedCapture) {
@@ -175,12 +179,8 @@ class RetentionPublishTrigger(
             val committed = section(frozen) { commit() }
             // false = no matching live owner: record-less. Previously silent (spec 2aea78c3).
             if (!committed) {
-                Timber.i(
-                    "voice-capture publish: refused capture=%s reason=owner-mismatch account=%s session=%s",
-                    id,
-                    frozen.account,
-                    frozen.session,
-                )
+                // Opaque identity (reviewer 30d46323 #3): capture id + fixed reason only.
+                Timber.i("voice-capture publish: refused capture=%s reason=owner-mismatch", id)
             }
         } finally {
             sink.releaseRetained(id)

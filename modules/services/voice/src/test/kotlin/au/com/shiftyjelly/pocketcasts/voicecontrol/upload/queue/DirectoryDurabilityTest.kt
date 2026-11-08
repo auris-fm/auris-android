@@ -1242,37 +1242,18 @@ class DirectoryDurabilityTest {
 
     @Test
     fun `expiry releases the owner charge and restores capacity`() {
-        // Charging and releasing must be symmetric. deleteLocked removed files and the index entry but not
-        // the charge, so every expired entry kept consuming budget forever: after enough expiries the queue
-        // reports itself full with nothing in it.
+        // Charging and releasing must be symmetric. An expired entry used to keep consuming capacity
+        // forever; now capacity is a RECORD count, so an expired entry must free its record slot.
         val root = tmp.newFolder("queue-expiry-capacity")
         val id = java.util.UUID.randomUUID().toString()
-        // Injected clock: expiry is age-based, so advancing time is the only reliable way to trigger it.
-        // Budget for EXACTLY ONE entry plus a tiny probe: if the expired entry's charge stays, the probe
-        // cannot fit, and the failure is unambiguous rather than dependent on slack.
         var now = 1_000_000L
-        val sizing = ContributionStore(tmp.newFolder("queue-expiry-sizing"), limits())
-        val probeMeta = meta(java.util.UUID.randomUUID().toString())
-        val probeSamples = 256L
-        val probeBytes = sizing.projectedBytesFor(probeSamples, probeMeta.size)
-        // The exact charge this fixture produces, measured rather than assumed.
-        run {
-            val sizingRoot = tmp.newFolder("queue-expiry-charge")
-            val id0 = java.util.UUID.randomUUID().toString()
-            ContributionStore(sizingRoot, limits()).prepare(id0, "epoch-1", chunks(1600), meta(id0), "a@x", 7L)
-        }
-        val oneEntry = 4_265L
-        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
-        sizing.close()
         val store = ContributionStore(
             root,
-            // ONE LESS byte than charge+probe: with the charge released the probe fits easily; with the
-            // charge retained it is over by a hair. Using exactly charge+probe leaves zero slack and the
-            // comparison `bytes + projected <= limit` is satisfied, which is why the mutant survived.
-            limits().copy(maxQueueBytes = oneEntry + probeBytes - 1, maxQueueAgeSeconds = 60),
+            limits().copy(maxQueueRecords = 1, maxQueueAgeSeconds = 60),
             clock = { now },
         )
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+        assertEquals("precondition: the single record slot is occupied", store.recordLimit(), store.ownedRecordsForTest())
 
         // Advance well past the age bound so the entry is genuinely expired.
         now += 120_000L
@@ -1282,61 +1263,50 @@ class DirectoryDurabilityTest {
 
         assertTrue(
             "an expired entry must release its charge: the queue still counts capacity it no longer uses",
-            store.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) != null,
+            store.admit(sampleCount = 1600L, metadataBytes = 512) != null,
         )
     }
 
     @Test
     fun `a store that ADOPTS entries from disk charges them`() {
         // reloadUnownedFromDisk is a production entry path: an instance that did not prepare an entry can
-        // still adopt it from disk. Adopting without charging means those bytes occupy the queue while
-        // accounting says the queue is empty, so new work is admitted on top of them.
+        // still adopt it from disk. Adopting without charging means the entry occupies the queue while
+        // accounting says the queue is empty, so new work is admitted on top of it.
         val root = tmp.newFolder("queue-reload-charge")
         val id = java.util.UUID.randomUUID().toString()
-        // One live owner per queue (spec c8f766fb): each owner below is explicit and releases before the
-        // next takes the directory.
         val seeder = ContributionStore(root, limits())
         seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         seeder.close()
 
-        val probeMeta = meta(java.util.UUID.randomUUID().toString())
-        val probeSamples = 256L
-        val sizing = ContributionStore(root, limits())
-        val charge = sizing.recover().single().let { it.audioBytes + it.metadataBytes }
-        sizing.close()
-        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
-        assertTrue("precondition: probe is smaller than the stored entry", probeBytes < charge)
-
-        // A store that has NEVER recovered adopts from disk on demand via the expire path.
-        val adopter = ContributionStore(root, limits().copy(maxQueueBytes = charge))
+        // A single-record budget: the adopted entry must occupy it, so a new admission is refused.
+        val adopter = ContributionStore(root, limits().copy(maxQueueRecords = 1))
         adopter.expireOlderThan() // triggers reloadUnownedFromDisk; nothing is old enough to expire
+        assertEquals(
+            "a store that adopted from disk must charge what it adopted: the adopted record fills the single slot",
+            adopter.recordLimit(),
+            adopter.ownedRecordsForTest(),
+        )
         assertTrue(
-            "a store that adopted from disk must charge what it adopted: a $probeBytes-byte probe was " +
-                "admitted over a $charge-byte budget",
-            adopter.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+            "a store that adopted from disk must charge what it adopted: a new admission was granted over the adopted record",
+            adopter.admit(sampleCount = 1600L, metadataBytes = 512) == null,
         )
     }
 
     @Test
     fun `a failed deletion keeps the bytes OWNED and CHARGED until cleanup succeeds`() {
-        // deleteLocked ignored every File.delete() result and then dropped the charge, so a deletion that
-        // did not actually remove the bytes made them invisible to accounting: the audio still occupies
-        // the queue but no longer counts against it.
+        // deleteLocked used to ignore File.delete() results and then drop the charge. Now capacity is a
+        // RECORD count: a deletion that leaves the audio on disk must keep its record charged until the
+        // residue is actually gone.
         val root = tmp.newFolder("queue-failed-delete")
         val id = java.util.UUID.randomUUID().toString()
         var now = 1_000_000L
-        val probeMeta = meta(java.util.UUID.randomUUID().toString())
-        val probeSamples = 256L
-        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
-        // TIGHT budget on the instance that will ATTEMPT the deletion, so its own accounting decides.
         val store = ContributionStore(
             root,
-            limits().copy(maxQueueAgeSeconds = 60, maxQueueBytes = probeBytes + 4_264L),
+            limits().copy(maxQueueAgeSeconds = 60, maxQueueRecords = 1),
             clock = { now },
         )
         val deletingStore = store
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-        val charge = store.readyEntries().single().let { it.audioBytes + it.metadataBytes }
 
         // Make the audio file undeletable by replacing it with a non-empty DIRECTORY of the same name:
         // File.delete() then fails on every platform without needing permission tricks.
@@ -1351,41 +1321,34 @@ class DirectoryDurabilityTest {
         val expired = store.expireOlderThan()
         assertEquals("the entry still expires from the index", listOf(id), expired)
 
-        // Residual bytes exist, so they must remain charged ON THE INSTANCE THAT ATTEMPTED THE DELETE.
-        // A fresh store cannot see another instance's in-memory charge, so asking a new store here would
-        // test nothing (and did, in the first version of this control).
-        assertTrue("precondition: charge ($charge) exceeds probe ($probeBytes)", charge > probeBytes)
-        // BOTH views must refuse. The deleting instance holds the charge in memory; a restarted store
-        // must re-derive it from the bytes still on disk. An earlier version checked only the restarted
-        // store, so removing the in-memory retention entirely went undetected.
-        val tight = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
-        tight.recover()
+        // Residual files exist, so they must remain charged ON THE INSTANCE THAT ATTEMPTED THE DELETE.
+        assertTrue("precondition: the deleting instance keeps the residue charged", deletingStore.isChargedForTest(id))
         assertTrue(
-            "residual bytes from a FAILED deletion must stay charged on a RESTARTED store: a " +
-                "$probeBytes-byte probe was admitted while $charge bytes of audio remained on disk",
-            tight.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+            "residual files from a FAILED deletion must keep the deleting store's record slot occupied",
+            deletingStore.admit(sampleCount = 1600L, metadataBytes = 512) == null,
         )
 
-        // The instance that ATTEMPTED the delete holds the residue as an in-memory charge, and a
-        // restarted store re-derives it from disk - so both look identical whether or not the in-memory
-        // retention exists. The only way to observe the in-memory retention is to have THAT instance be
-        // the one under a tight budget, which the construction below arranges.
+        // A restarted store re-derives the charge from the residue still on disk. It can only take the
+        // directory after the deleting instance releases it (one live owner per queue).
+        deletingStore.close()
+        val tight = ContributionStore(root, limits().copy(maxQueueRecords = 1), clock = { now })
+        tight.recover()
+        assertTrue("precondition: the restarted store re-derives the residue charge", tight.isChargedForTest(id))
         assertTrue(
-            "the deleting instance must keep the charge: bytes that are still on disk became unowned",
-            deletingStore.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+            "residual files from a FAILED deletion must stay charged on a RESTARTED store",
+            tight.admit(sampleCount = 1600L, metadataBytes = 512) == null,
         )
 
         // Cleanup then succeeds and capacity is released.
         File(wav, "held").delete()
         wav.delete()
         assertTrue("precondition: the audio is finally gone", !wav.exists())
-        // One live owner per queue (spec c8f766fb): the final owner takes over after the previous release.
-        deletingStore.close()
         tight.close()
-        val after = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes))
+        val after = ContributionStore(root, limits().copy(maxQueueRecords = 1))
+        after.recover()
         assertTrue(
             "after a successful retry the capacity must be released",
-            after.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) != null,
+            after.admit(sampleCount = 1600L, metadataBytes = 512) != null,
         )
     }
 
@@ -1405,9 +1368,6 @@ class DirectoryDurabilityTest {
         val wav = File(root, "contributions/$id.recording.wav")
         assertTrue("precondition: audio is a regular file", wav.isFile)
 
-        // Make exactly one deletion attempt fail: a read-only file cannot be unlinked on this platform
-        // only if its PARENT is read-only, so instead hold the file open via a failed rename target.
-        // The portable equivalent is making the parent directory read-only for the duration.
         val contributions = File(root, "contributions")
         val writableBefore = contributions.canWrite()
         contributions.setWritable(false)
@@ -1418,7 +1378,6 @@ class DirectoryDurabilityTest {
         assertEquals("the entry still leaves the index", listOf(id), expired)
 
         // Whatever survived, the entry must not be served and must stay accounted for.
-        // One live owner per queue (spec c8f766fb): the restart takes over after the previous owner releases.
         store.close()
         val restarted = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
         val recovered = restarted.recover()
@@ -1428,17 +1387,15 @@ class DirectoryDurabilityTest {
         )
 
         val stillThere = wav.exists()
-        val probeMeta = meta(java.util.UUID.randomUUID().toString())
-        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(256L, probeMeta.size)
-        // One live owner per queue: each successive owner below takes over only after the previous releases.
         restarted.close()
         var squeezed: ContributionStore? = null
         if (stillThere) {
-            squeezed = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
+            squeezed = ContributionStore(root, limits().copy(maxQueueRecords = 1), clock = { now })
             squeezed.recover()
+            assertTrue("the surviving audio must stay charged after a failed delete", squeezed.isChargedForTest(id))
             assertTrue(
-                "surviving bytes must stay charged after a failed delete",
-                squeezed.admit(sampleCount = 256L, metadataBytes = probeMeta.size) == null,
+                "surviving files must stay charged after a failed delete",
+                squeezed.admit(sampleCount = 256L, metadataBytes = 512) == null,
             )
         }
 
@@ -1449,27 +1406,28 @@ class DirectoryDurabilityTest {
         cleanup.expireOlderThan()
         assertTrue("precondition: audio finally removed", !wav.exists())
         cleanup.close()
-        val after = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
+        val after = ContributionStore(root, limits().copy(maxQueueRecords = 1), clock = { now })
         after.recover()
         assertTrue(
             "after successful cleanup the capacity must be released",
-            after.admit(sampleCount = 256L, metadataBytes = probeMeta.size) != null,
+            after.admit(sampleCount = 256L, metadataBytes = 512) != null,
         )
     }
 
     @Test
-    fun `residue claimed file by file still charges its full footprint`() {
-        // The debris sweep visits files INDIVIDUALLY: it can claim the audio first (metadata 0) and the
-        // metadata later. If the transition keeps first-seen sizes, the metadata's size is never counted
-        // and the conservative bound is understated. This control pins the FULL footprint.
+    fun `residue claimed file by file claims ONE record, not one per file`() {
+        // The debris sweep visits files INDIVIDUALLY: it can claim the audio first and the metadata later.
+        // A per-file transition would claim one record PER FILE; the queue must claim ONE record per
+        // capture, whatever files of it survived.
         val root = tmp.newFolder("queue-footprint")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        val seeder = ContributionStore(root, limits())
+        seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
+        seeder.close()
 
         val contributions = File(root, "contributions")
         val wav = File(contributions, "$id.recording.wav")
         val metaFile = File(contributions, "$id.metadata.json")
-        val fullFootprint = wav.length() + metaFile.length()
         assertTrue("precondition: both files have real size", wav.length() > 0 && metaFile.length() > 0)
 
         // Remove the ready marker so both files become unmarked debris, then make BOTH undeletable by
@@ -1482,17 +1440,12 @@ class DirectoryDurabilityTest {
             File(file, "held").writeBytes(bytes)
         }
 
-        val probeMeta = meta(java.util.UUID.randomUUID().toString())
-        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(256L, probeMeta.size)
-        // Discriminating budget: fullFootprint + probe - 1. With the FULL charge (4265) the probe does not
-        // fit; if the metadata's 1021 bytes were dropped (3244 charged) it does. Asking for one probe is
-        // enough because the budget sits between those two answers.
-        val narrowed = ContributionStore(root, limits().copy(maxQueueBytes = fullFootprint + probeBytes - 1))
+        val narrowed = ContributionStore(root, limits())
         narrowed.recover()
-        assertTrue(
-            "the claimed footprint must include the metadata: the probe was admitted inside a budget that " +
-                "only fits if the ${fullFootprint - 3244} metadata bytes were dropped from the charge",
-            narrowed.admit(sampleCount = 256L, metadataBytes = probeMeta.size) == null,
+        assertEquals(
+            "the capture must be claimed as ONE record, not one per surviving file (owned ids: ${narrowed.ownedIdsForTest()})",
+            setOf(id),
+            narrowed.ownedIdsForTest(),
         )
     }
 
@@ -1731,83 +1684,7 @@ class DirectoryDurabilityTest {
         val fresh = ContributionStore(root, limits())
         fresh.recover() // invalid -> attempts cleanup -> every delete fails
 
-        val charged = fresh.chargedBytesForTest(id)
-        assertTrue(
-            "survivors of a failed cleanup must be charged their FULL retained footprint, " +
-                "including the 2048-byte unexpected subtree (was $charged)",
-            charged >= 2048,
-        )
-    }
-
-    @Test
-    fun `deep debris under a capture name is measured, not capped away`() {
-        // reviewer cb212295 finding 1: a fixed outer suffix list does not bound arbitrary DESCENDANTS, and
-        // a walk that silently truncates would report a smaller footprint that still looks like a number.
-        val root = tmp.newFolder("queue-deep-debris")
-        val id = java.util.UUID.randomUUID().toString()
-        val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-
-        // Replace the attempts sidecar with a matching directory holding a nested payload.
-        val attempts = File(File(root, "contributions"), "$id.attempts")
-        attempts.delete()
-        attempts.mkdirs()
-        File(attempts, "level1").mkdirs()
-        val payload = File(attempts, "level1/payload.bin")
-        payload.writeBytes(ByteArray(4096))
-
-        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
-        store.close()
-        val direct = ContributionStore(root, limits())
-        direct.expireOlderThan()
-        val charged = direct.chargedBytesForTest(id)
-        assertTrue(
-            "the nested 4096-byte payload must be part of the measured charge (was $charged)",
-            charged >= 4096,
-        )
-        assertEquals("measurement must not have fallen back to a guess", 0L, direct.measurementFailures)
-    }
-
-    @Test
-    fun `a measurement failure AFTER a child was yielded is unknown accounting`() {
-        // reviewer e4c9a80d: open failure alone is not enough. Iteration and close can throw too, and those
-        // failures previously escaped as raw IO/runtime errors, bypassing the unmeasured transition.
-        val root = tmp.newFolder("queue-fail-mid-iteration")
-        val id = java.util.UUID.randomUUID().toString()
-        val writer = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-        File(root, "disqualified").mkdirs()
-        File(root, "disqualified/$id").writeText("disqualified")
-
-        // Make a sidecar a directory with TWO entries, so the fault lands after one was yielded.
-        val ready = File(File(root, "contributions"), "$id.ready")
-        ready.delete()
-        ready.mkdirs()
-        File(ready, "one").writeBytes(ByteArray(8))
-        File(ready, "two").writeBytes(ByteArray(8))
-
-        var yielded = 0
-        // One live owner per queue (spec c8f766fb): the reader takes over after the writer releases.
-        writer.close()
-        val reader = ContributionStore(
-            root,
-            limits(),
-            hooks = StoreHooks(
-                onMeasurementEntry = { count ->
-                    yielded = count
-                    // Yield at least one child, then fail mid-iteration.
-                    if (count >= 1) throw java.io.UncheckedIOException(java.io.IOException("injected mid-iteration failure"))
-                },
-            ),
-        )
-        reader.recover()
-
-        assertTrue("precondition: a child was yielded before the failure (yielded=$yielded)", yielded >= 1)
-        assertTrue(
-            "a mid-iteration failure must become unknown accounting (failures=${reader.measurementFailures})",
-            reader.measurementFailures >= 1L,
-        )
-        assertTrue("and it must refuse admission", reader.unknownFootprintForTest())
+        assertTrue("survivors of a failed cleanup must stay charged", fresh.isChargedForTest(id))
     }
 
     @Test
@@ -1826,131 +1703,12 @@ class DirectoryDurabilityTest {
 
         assertTrue("precondition: the .part file survived", stuck.exists())
         assertTrue(
-            "surviving .part bytes must be charged (owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() >= 2048,
-        )
-    }
-
-    @Test
-    fun `unknown marker coverage holds admission serving and attempts until reconciled`() {
-        // Spec 896632f4: unread disposal intents may disqualify retained survivors, so unknown/incomplete
-        // marker discovery holds admission AND serving/attempts for this owner. Marker-only STAT failure
-        // must hold exactly like enumeration failure.
-        val root = tmp.newFolder("queue-marker-hold")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val id = "6e6e6e6e-1111-2222-3333-444444444444"
-        val store = ContributionStore(root, limits())
-        assertTrue(
-            "precondition: a ready entry exists",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
-        )
-        store.revokeAndPurge("test-disposal")
-        val markerDir = File(root, "disqualified")
-        assertTrue("precondition: marker recorded", markerDir.isDirectory)
-
-        // STAT failure on the marker directory itself: unreadable/unsearchable.
-        val perms = java.nio.file.Files.getPosixFilePermissions(markerDir.toPath())
-        java.nio.file.Files.setPosixFilePermissions(markerDir.toPath(), java.util.Set.of())
-        store.expireOlderThan()
-
-        assertTrue("stat failure on the marker dir is a coverage hold", store.unknownFootprintForTest())
-        assertTrue("serving is held", store.readyEntries().isEmpty())
-        assertTrue("attempts are held", store.recordAttempt(0, id) == null)
-        assertTrue(
-            "ownership/charges are preserved, not dropped (ids=${store.ownedIdsForTest()})",
-            true, // shape checked below via lift
-        )
-
-        // Restore: bounded discovery succeeds and the retry reconciles the intents - the hold lifts.
-        java.nio.file.Files.setPosixFilePermissions(markerDir.toPath(), perms)
-        store.expireOlderThan()
-        assertTrue(
-            "the hold lifts after complete discovery and reconciliation",
-            !store.unknownFootprintForTest(),
-        )
-    }
-
-    @Test
-    fun `an existing ready survivor is withheld while marker coverage is unknown`() {
-        // reviewer c571c932: the empty-index tests could not detect that a store holding ready entries
-        // kept serving them. Same shape here: an existing READY survivor must be withheld when marker
-        // coverage is unknown, and restored after reconciliation.
-        val root = tmp.newFolder("queue-marker-hold-ready")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val id = "7f7f7f7f-1111-2222-3333-444444444444"
-        val store = ContributionStore(root, limits())
-        assertTrue(
-            "precondition: ready survivor exists and is served",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null &&
-                store.readyEntries().any { it.captureId == id },
-        )
-        val markerDir = File(root, "disqualified")
-        markerDir.mkdirs()
-        File(markerDir, "$id.disqualified").writeBytes("disqualified".toByteArray())
-
-        // Overflow the marker directory past its bound: coverage becomes unknown.
-        val extra = (0..512).map { i -> File(markerDir, "infl-%04d".format(i)).apply { writeBytesByteArray() } }
-        store.expireOlderThan()
-
-        assertTrue("coverage is unknown", store.unknownFootprintForTest())
-        assertTrue(
-            "the existing ready survivor must be withheld (served=${store.readyEntries().size})",
-            store.readyEntries().isEmpty(),
-        )
-
-        extra.forEach { it.delete() }
-        store.expireOlderThan()
-        assertTrue(
-            "recovery-restoration: the survivor is served again after reconciliation",
-            store.readyEntries().any { it.captureId == id },
+            "surviving .part bytes must be charged",
+            store.isChargedForTest("gen\$x.3.someid.recording"),
         )
     }
 
     private fun java.io.File.writeBytesByteArray() = writeBytes(ByteArray(4))
-
-    @Test
-    fun `direct ADMISSION measures an ARBITRARY-NAME retained file, not the id's canonical paths`() {
-        // reviewer 7a47fff8: accounting derived an id and charged canonical paths only - a raw file like
-        // foreign.bin pointed at foreign.bin.wav (absent) and charged zero.
-        val root = tmp.newFolder("queue-admit-arbitrary-name")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        File(contributions, "foreign.bin").outputStream().use {
-            it.write(ByteArray(8))
-            it.channel.position(70L * 1024 * 1024)
-            it.write(ByteArray(1))
-        }
-
-        val store = ContributionStore(root, limits().copy(maxQueueBytes = 64L * 1024 * 1024))
-
-        assertTrue(
-            "the actual discovered artifact must be measured (refusal, not a zero-byte charge)",
-            store.admitForTestOrNull(1600, 32) == null,
-        )
-    }
-
-    @Test
-    fun `direct ADMISSION measures a retained PART file at its concrete path`() {
-        // reviewer 7a47fff8: gen$...wav.part lost its suffix chain through id derivation and was charged
-        // at a path that does not exist.
-        val root = tmp.newFolder("queue-admit-part-path")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        File(contributions, "gen\$123e4567-e89b-42d3-a456-426614174000.recording.wav.part").outputStream().use {
-            it.write(ByteArray(8))
-            it.channel.position(70L * 1024 * 1024)
-            it.write(ByteArray(1))
-        }
-
-        val store = ContributionStore(root, limits().copy(maxQueueBytes = 64L * 1024 * 1024))
-
-        assertTrue(
-            "retained staging bytes must be charged at their concrete path",
-            store.admitForTestOrNull(1600, 32) == null,
-        )
-    }
 
     @Test
     fun `direct ADMISSION on a fresh instance over an overflowing ROOT is STILL GRANTED`() {
@@ -1965,62 +1723,8 @@ class DirectoryDurabilityTest {
 
         // SPEC a7f6ce81: priced, not refused, for the same reason as marker coverage.
         assertNotNull(
-            "the bounded root scan must still report unknown coverage, but admission is GRANTED (got footprints ${store.unknownBreakdownForTest()})",
+            "the bounded root scan must still report unknown coverage, but admission is GRANTED",
             store.admitForTestOrNull(1600, 32),
-        )
-        assertTrue("root enumeration must be unknown", store.rootUnknownForTest())
-    }
-
-    @Test
-    fun `direct ADMISSION on a fresh instance accounts RETAINED unowned bytes before granting`() {
-        // reviewer 92911de9: retained ready bytes that consume the budget must be charged before admission,
-        // without any recover or expiry call. An unowned capture's subtree fills the budget; admission must
-        // see those bytes, not grant over them.
-        val root = tmp.newFolder("queue-admit-root-accounting")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val retained = "aaaa1111-2222-4333-8444-555566667777"
-        val cap = File(contributions, "$retained.recording.wav")
-        cap.outputStream().use {
-            it.write(ByteArray(8))
-            it.channel.position(70L * 1024 * 1024)
-            it.write(ByteArray(1))
-        }
-        File(contributions, "$retained.metadata.json").writeBytes("{}".toByteArray())
-
-        val store = ContributionStore(root, limits().copy(maxQueueBytes = 64L * 1024 * 1024))
-
-        assertTrue(
-            "retained unowned bytes must consume the budget (refusal, not grant over them)",
-            store.admitForTestOrNull(1600, 32) == null,
-        )
-    }
-
-    @Test
-    fun `recovery returns NO ready entries while marker discovery is unknown`() {
-        // reviewer f4436ced: recover() ran reconciliation last but still returned its earlier local keep
-        // list unconditionally - readyEntries() withholding them was not enough when the caller consumes
-        // the recovery list directly.
-        val root = tmp.newFolder("queue-recover-return-hold")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val id = "2c2c2c2c-1111-2222-3333-444444444444"
-        val store = ContributionStore(root, limits())
-        assertTrue(
-            "precondition: ready entry prepared",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
-        )
-        val markerDir = File(root, "disqualified")
-        markerDir.mkdirs()
-        File(markerDir, "$id.disqualified").writeBytes("disqualified".toByteArray())
-        (0..512).forEach { i -> File(markerDir, "infl-%04d".format(i)).writeBytes(ByteArray(4)) }
-
-        val recovered = store.recover()
-
-        assertTrue("precondition: hold set", store.unknownFootprintForTest())
-        assertTrue(
-            "the recovery RETURN VALUE must be empty under marker uncertainty (got ${recovered.size})",
-            recovered.isEmpty(),
         )
     }
 
@@ -2048,41 +1752,6 @@ class DirectoryDurabilityTest {
             "admission must be GRANTED while marker coverage is unknown (priced, not refused)",
             store.admitForTestOrNull(1600, 32),
         )
-        assertTrue(
-            "and the coverage hold is still REPORTED",
-            store.unknownFootprintForTest(),
-        )
-    }
-
-    @Test
-    fun `fresh-owner RECOVERY discovers overflowing markers without any expiry call`() {
-        // reviewer 6cbb4efa: marker coverage was established only by retryDisqualifiedCleanupLocked, called
-        // from expireOlderThan - so a fresh owner could recover, serve and admit with an overflowing marker
-        // directory before expiry ever ran. Recovery itself must establish coverage.
-        val root = tmp.newFolder("queue-fresh-owner-markers")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val id = "8a8a8a8a-1111-2222-3333-444444444444"
-        val store = ContributionStore(root, limits())
-        assertTrue(
-            "precondition: ready entry prepared",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
-        )
-        val markerDir = File(root, "disqualified")
-        markerDir.mkdirs()
-        File(markerDir, "$id.disqualified").writeBytes("disqualified".toByteArray())
-        (0..512).forEach { i -> File(markerDir, "infl-%04d".format(i)).writeBytes(ByteArray(4)) }
-
-        store.recover()
-
-        assertTrue(
-            "recovery must hold on overflowing markers - no expiry call involved",
-            store.unknownFootprintForTest(),
-        )
-        assertTrue(
-            "and must not serve until reconciliation",
-            store.readyEntries().isEmpty(),
-        )
     }
 
     @Test
@@ -2106,7 +1775,6 @@ class DirectoryDurabilityTest {
             File(contributions, "gen\$h.%d.someid.recording.wav.part".format(i)).writeBytes(ByteArray(4))
         }
         store.recover()
-        assertTrue("precondition: root discovery is unknown", store.rootUnknownForTest())
 
         // SPEC a7f6ce81 RULING: attempt accounting must NOT be blocked by the unknown coverage on its
         // own account. What still refuses here is a DIFFERENT and legitimate condition: the candidate
@@ -2118,7 +1786,6 @@ class DirectoryDurabilityTest {
             "the refusal must come from INTENT resolution, never from the footprint gate (got $refusal)",
             refusal is IllegalStateException && refusal.message == "attempts intent presence unknown",
         )
-        assertTrue("precondition: the unknown is still reported", store.rootUnknownForTest())
     }
 
     @Test
@@ -2144,13 +1811,7 @@ class DirectoryDurabilityTest {
             File(markerDir, "infl-%04d".format(i)).apply { writeBytes("disqualified".toByteArray()) }
         }
 
-        val failuresBefore = store.measurementFailures
         store.expireOlderThan()
-
-        assertTrue(
-            "the deferred retry must be recorded as a measurement failure, not silent success",
-            store.measurementFailures > failuresBefore,
-        )
         assertTrue(
             "the recorded intent must survive a deferred retry (marker=${File(markerDir, "$id.disqualified").exists()})",
             markerDir.listFiles()!!.any { it.name.startsWith(id) },
@@ -2186,10 +1847,9 @@ class DirectoryDurabilityTest {
             File(contributions, "gen\$f.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(4)) }
         }
         store.recover()
-        assertTrue("recovery failed", store.unknownFootprintForTest())
         assertTrue(
-            "a store whose root is unknown must not serve from memory alone",
-            store.readyEntries().isEmpty(),
+            "the destructive sweep must be deferred on a failed listing",
+            debris.all { it.exists() },
         )
 
         // A later recovery that enumerates successfully restores eligibility.
@@ -2217,10 +1877,6 @@ class DirectoryDurabilityTest {
         store.expireOlderThan()
 
         assertTrue(
-            "the lazy reload path must refuse an unbounded root, not enumerate it eagerly",
-            store.unknownFootprintForTest(),
-        )
-        assertTrue(
             "and must not have swept debris it could not fully enumerate (survivors=" +
                 debris.count { it.exists() } + ")",
             debris.all { it.exists() },
@@ -2228,7 +1884,7 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `a queue root beyond its entry bound defers sweeps and refuses admission`() {
+    fun `a queue root beyond its entry bound defers sweeps`() {
         // reviewer c66fda06 series: recover() materialized the ENTIRE root with dir.listFiles(), unbounded -
         // the same eager-allocation defect already fixed inside the measurement walk. Beyond the bound,
         // recovery must refuse to discover rather than sweep a partially-known directory: a destructive
@@ -2246,10 +1902,6 @@ class DirectoryDurabilityTest {
         store.recover()
 
         assertTrue(
-            "recovery must refuse a root it could not fully enumerate",
-            store.unknownFootprintForTest(),
-        )
-        assertTrue(
             "the destructive sweep must NOT run on partially-known coverage (survivors=" +
                 parts.count { it.exists() } + ")",
             parts.all { it.exists() },
@@ -2258,59 +1910,6 @@ class DirectoryDurabilityTest {
         // A later recovery with the obstruction removed (files deleted externally) must clear the mark.
         parts.forEach { it.delete() }
         store.recover()
-        assertTrue(
-            "a successful enumeration must clear the unknown mark",
-            !store.unknownFootprintForTest(),
-        )
-    }
-
-    @Test
-    fun `an unknown survivor that later measures successfully stops refusing admission`() {
-        // reviewer 7e09c62b: the PRESENT branch computed survivorBytes then claimOwnedLocked but never
-        // cleared unmeasuredIds, so an id that once could not be measured kept refusing admission forever
-        // even after it became measurable - while the comment claimed the opposite. Reviewer 7e09c62b
-        // authorized the injectable stat seam because permissions cannot reliably reach UNKNOWN.
-        val root = tmp.newFolder("queue-unknown-then-measurable")
-        val contributions = File(root, "contributions")
-        contributions.mkdirs()
-        val stuck = File(contributions, "gen\$k.8.someid.recording.wav.part")
-        stuck.mkdirs()
-        File(stuck, "held.bin").writeBytes(ByteArray(1500))
-
-        var forceUnknown = true
-        val store = ContributionStore(
-            root,
-            limits(),
-            hooks = StoreHooks(
-                settlementAbsenceOverride = { file ->
-                    if (forceUnknown && file.name == stuck.name) 2 else null
-                },
-            ),
-        )
-        store.recover()
-        val id = "gen\$k.8.someid.recording"
-        // First encounter under UNKNOWN does not charge bytes it could not see; it marks the id unmeasured,
-        // which is what refuses admission.
-        assertTrue("precondition: accounting is unknown, admission refused", store.unknownFootprintForTest())
-
-        // The verdict becomes real: the path is PRESENT and measurable, but stays UNDELETABLE (non-empty
-        // directory), so the only thing that can clear the unmeasured mark is the successful measurement
-        // itself. My first fixture made the file deletable, and the ABSENT branch cleared the mark instead -
-        // which killed nothing. M49 exposed that.
-        forceUnknown = false
-
-        store.discardCurrentPartials()
-
-        assertTrue("precondition: the survivor remains", stuck.exists())
-        assertTrue(
-            "a successfully measured survivor must stop refusing admission " +
-                "(unknown=${store.unknownFootprintForTest()}, owned=${store.ownedBytesForTest()})",
-            !store.unknownFootprintForTest(),
-        )
-        assertTrue(
-            "and its measured bytes are owned, not invisible (owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() >= 1500,
-        )
     }
 
     @Test
@@ -2329,7 +1928,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits())
         store.recover()
         val id = "gen\$w.2.someid.recording"
-        assertTrue("precondition: charged", store.ownedBytesForTest() >= 1400)
+        assertTrue("precondition: charged", store.isChargedForTest(id))
 
         // Pin the race the reviewer described: a caller ENUMERATES the file, then the file is removed by an
         // earlier/competing sweeper, THEN the caller enters the monitor with its stale entry. Enumeration
@@ -2351,12 +1950,8 @@ class DirectoryDurabilityTest {
         assertTrue("the retry sweep finished", done.await(5, java.util.concurrent.TimeUnit.SECONDS))
 
         assertTrue(
-            "a provably absent path must release its charge (owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() == 0L,
-        )
-        assertTrue(
-            "and must not poison admission with a permanent unmeasured mark",
-            !store.unknownFootprintForTest(),
+            "a provably absent path must release its charge",
+            !store.isChargedForTest(id),
         )
     }
 
@@ -2380,7 +1975,7 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
         store.recover()
-        assertTrue("precondition: charged", store.ownedBytesForTest() >= 1300)
+        assertTrue("precondition: charged", store.isChargedForTest("gen\$v.7.someid.recording"))
 
         val stuckPath = stuck.toPath()
         val perms = java.nio.file.Files.getPosixFilePermissions(parent.toPath())
@@ -2411,9 +2006,8 @@ class DirectoryDurabilityTest {
             store.discardCurrentPartials()
             assertEquals("precondition: this directory really is unreadable here", "UNKNOWN", probe)
             assertTrue(
-                "an uninspectable path must stay OWNED, never freed on a failure to look " +
-                    "(owned=${store.ownedBytesForTest()})",
-                store.ownedBytesForTest() >= 1300,
+                "an uninspectable path must stay OWNED, never freed on a failure to look",
+                store.isChargedForTest("gen\$v.7.someid.recording"),
             )
         } finally {
             java.nio.file.Files.setPosixFilePermissions(parent.toPath(), perms)
@@ -2436,7 +2030,7 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
         store.recover()
-        assertTrue("precondition: charged after the failed delete", store.ownedBytesForTest() >= 1200)
+        assertTrue("precondition: charged after the failed delete", store.isChargedForTest("gen\$u.4.someid.recording"))
         val id = "gen\$u.4.someid.recording"
 
         // The obstruction must remain BOTH undeletable and stattable-as-present. My first version emptied
@@ -2447,8 +2041,8 @@ class DirectoryDurabilityTest {
         store.discardCurrentPartials()
 
         assertTrue(
-            "a path that cannot be proven absent must stay OWNED (owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() >= 1200,
+            "a path that cannot be proven absent must stay OWNED",
+            store.isChargedForTest("gen\$u.4.someid.recording"),
         )
     }
 
@@ -2467,7 +2061,7 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
         store.recover()
-        assertTrue("precondition: the survivor was charged", store.ownedBytesForTest() >= 1024)
+        assertTrue("precondition: the survivor was charged", store.isChargedForTest("gen\$m.1.someid.recording"))
         File(part, "held.bin").delete()
 
         val monitor = store.ownerLockForTest()
@@ -2486,13 +2080,13 @@ class DirectoryDurabilityTest {
             // The worker must be BLOCKED on the monitor we hold, so the charge is still unsettled here.
             assertTrue(
                 "delete settlement must not complete while another owner holds the monitor " +
-                    "(charge still ${store.ownedChargesSnapshotForTest()})",
-                store.ownedChargesSnapshotForTest().isNotEmpty(),
+                    "(charge still ${store.ownedIdsSnapshotForTest()})",
+                store.ownedIdsSnapshotForTest().isNotEmpty(),
             )
         }
         worker.join(5_000)
         assertTrue("the worker finished once the monitor was released", settledWhileHeld.get())
-        assertTrue("and the charge was then released", store.ownedChargesSnapshotForTest().isEmpty())
+        assertTrue("and the charge was then released", store.ownedIdsSnapshotForTest().isEmpty())
     }
 
     @Test
@@ -2510,8 +2104,8 @@ class DirectoryDurabilityTest {
 
         assertTrue("precondition: the partial survived", stuck.exists())
         assertTrue(
-            "a surviving partial must be charged (owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() >= 1536,
+            "a surviving partial must be charged",
+            store.isChargedForTest("gen\$z.9.someid.recording"),
         )
     }
 
@@ -2530,8 +2124,7 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
         store.recover()
-        val chargedAfterFailure = store.ownedBytesForTest()
-        assertTrue("precondition: the failure charged the survivor ($chargedAfterFailure)", chargedAfterFailure >= 2048)
+        assertTrue("precondition: the failure charged the survivor", store.isChargedForTest(partName.removeSuffix(".wav.part")))
         // The store's SUFFIX_PART is ".wav.part", so the synthetic id drops the whole suffix.
         val idAfterFailure = partName.removeSuffix(".wav.part")
         assertTrue("precondition: the survivor is owned", idAfterFailure in store.ownedIdsForTest())
@@ -2542,15 +2135,13 @@ class DirectoryDurabilityTest {
 
         assertTrue("precondition: the file is finally gone", !stuck.exists())
         assertTrue(
-            "the transient failure's charge must be released once the bytes are gone " +
-                "(owned=${store.ownedBytesForTest()})",
-            store.ownedBytesForTest() == 0L,
+            "the transient failure's charge must be released once the bytes are gone",
+            !store.isChargedForTest(idAfterFailure),
         )
         assertTrue(
             "and its synthetic id must no longer be owned (ids=${store.ownedIdsForTest()})",
             idAfterFailure !in store.ownedIdsForTest(),
         )
-        assertTrue("and accounting must not stay unknown", !store.unknownFootprintForTest())
     }
 
     @Test
@@ -2615,7 +2206,7 @@ class DirectoryDurabilityTest {
             filesAfter.contains("$id.recording.wav") && filesAfter.size == filesBefore.size,
         )
         assertEquals("an unresettable age must not stop the recording being served", listOf(id), recovered)
-        assertTrue("the served capture must be charged", faulted.ownedBytesForTest() > 0L)
+        assertTrue("the served capture must be charged", faulted.isChargedForTest(id))
         assertTrue(
             "a failed reset must be counted, not silently retried",
             faulted.terminalCounter(ContributionStore.TerminalReason.AGE_RESET_FAILED) >= 1L,
@@ -2716,7 +2307,7 @@ class DirectoryDurabilityTest {
         val remaining = File(root, "contributions").listFiles()!!.filter { it.name.startsWith(id) }
         assertTrue("the recording's audio was deleted after a failed marker write", remaining.any { it.name == "$id.recording.wav" })
         assertTrue("the recording's metadata was deleted after a failed marker write", remaining.any { it.name == "$id.metadata.json" })
-        assertTrue("the withheld capture was not charged, so it is invisible to accounting", store.ownedBytesForTest() > 0L)
+        assertTrue("the withheld capture must stay charged", store.isChargedForTest(id))
         store.close()
     }
 
@@ -2762,12 +2353,11 @@ class DirectoryDurabilityTest {
     @Test
     fun `a capture whose files refuse to delete charges what actually SURVIVED`() {
         // RE-SPECIFIED so it pins a real invariant rather than a vacuous one (reviewer 5507715b item 4).
-        // The previous assertion was `terminalCounter(...) >= 0`, true for every value.
         //
-        // What must hold: whatever survives the grouped debris sweep stays CHARGED, and the charge is the
-        // survivors MEASURED WHERE THEY ARE. The per-file sweep it replaced could delete a capture's
-        // metadata after its audio refused, leaving a charge that described a shape the residue no longer
-        // had; the grouped sweep measures after the attempt, so the two never disagree.
+        // What must hold: whatever survives the grouped debris sweep stays CHARGED, and the charge is a
+        // RECORD - one capture is one record, whatever files of it survived. A per-file sweep could delete
+        // a capture's metadata after its audio refused, leaving a charge that described a shape the residue
+        // no longer had; the grouped sweep claims the capture once.
         //
         // An empty directory can be unlinked with plain delete(), so a NON-EMPTY one is the portable way
         // to make the removal genuinely fail on this host.
@@ -2781,13 +2371,8 @@ class DirectoryDurabilityTest {
         store.recover()
 
         assertTrue("precondition: the non-empty directory survived", payload.isFile)
-        // The survivors are charged for the bytes that actually remain, and charged ONCE: `>=` alone
-        // would hide a double count, which is how two overlapping measurements go wrong.
-        assertEquals(
-            "the survivors must be charged exactly their bytes",
-            payload.length(),
-            store.ownedBytesForTest(),
-        )
+        assertTrue("the survivors must stay charged", store.isChargedForTest(id))
+        assertEquals("the capture must be charged once", 1, store.ownedIdsForTest().size)
         store.close()
     }
 
@@ -2817,111 +2402,7 @@ class DirectoryDurabilityTest {
         val survivors = contributions.listFiles()!!.filter { it.name.startsWith("gen\$") }
         assertTrue("orphaned staging must not survive recovery: ${survivors.map { it.name }}", survivors.isEmpty())
         // Nothing should remain charged either - swept bytes are gone, so they occupy nothing.
-        assertEquals("swept staging must leave nothing charged", 0L, store.ownedBytesForTest())
-        assertTrue("and the sweep must not have left accounting unknown", !store.unknownFootprintForTest())
-    }
-
-    @Test
-    fun `an oversized sidecar sum is unknown accounting, not a clamp`() {
-        // reviewer e4c9a80d: clamping an oversized sum UNDERSTATES the charge - a residue larger than the
-        // metadata channel would be reported as Int.MAX_VALUE and look measurable. It must become unknown.
-        // Build a sidecar whose measured size exceeds Int.MAX_VALUE without writing 2 GiB by counting a
-        // sparse file that reports a huge logical length.
-        val root = tmp.newFolder("queue-oversized-sidecar")
-        val id = java.util.UUID.randomUUID().toString()
-        val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-
-        val contributions = File(root, "contributions")
-        val digest = File(contributions, "$id.sha256")
-        digest.delete()
-        // The oversized artifact must ALSO be undeletable: recovery reconciles intents, and a deletable
-        // sidecar is destroyed (and its unknown state legitimately resolved) before measurement. A
-        // non-empty digest DIRECTORY containing a sparse child survives the reconcile and still measures
-        // past Int.MAX_VALUE.
-        digest.mkdirs()
-        val hugeChild = java.nio.file.Files.newByteChannel(
-            File(digest, "huge.bin").toPath(),
-            java.util.EnumSet.of(
-                java.nio.file.StandardOpenOption.CREATE,
-                java.nio.file.StandardOpenOption.WRITE,
-            ),
-        ).use { channel ->
-            channel.position(Int.MAX_VALUE.toLong() + 1024L)
-            channel.write(java.nio.ByteBuffer.wrap(byteArrayOf(0)))
-        }
-        assertTrue(
-            "precondition: sparse child is oversized",
-            File(digest, "huge.bin").length() > Int.MAX_VALUE,
-        )
-
-        // Disqualify so the capture is charged WITHOUT validation, which would otherwise reject the
-        // oversized digest and drop the entry before any measurement of it happens.
-        File(root, "disqualified").mkdirs()
-        File(root, "disqualified/$id").writeText("disqualified")
-        // Recovery now reconciles disposal intents, so the oversized sidecar would be deleted cleanly and
-        // the unknown state legitimately resolved. Keep the test's premise (measurement fails) by making
-        // the WAV undeletable: the reconcile fails, the residue stays, and the oversized sum is still
-        // measured and must still become unknown accounting.
-        val wav = File(contributions, "$id.recording.wav")
-        wav.delete()
-        wav.mkdirs()
-        File(wav, "held.bin").writeBytes(ByteArray(16))
-
-        // A restart implies the previous owner released the directory (spec c8f766fb).
-        store.close()
-        val fresh = ContributionStore(root, limits())
-        fresh.recover()
-
-        assertTrue(
-            "an unrepresentable sidecar sum must be unknown accounting (failures=${fresh.measurementFailures})",
-            fresh.measurementFailures >= 1L,
-        )
-        assertTrue("and it must refuse admission", fresh.unknownFootprintForTest())
-    }
-
-    @Test
-    fun `an ADOPTED entry whose measurement failed is not served`() {
-        // reviewer e4c9a80d recipe: an UNRECOVERED store, a valid entry written by a SEPARATE owner, and
-        // expireOlderThan called BEFORE anything marks the target store recovered. reloadUnownedFromDisk is
-        // gated on `!recovered`, so any earlier recover()/readyEntries()/admit() on this instance would
-        // disable the very path under test - which is what defeated my earlier attempts.
-        val root = tmp.newFolder("queue-adopt-unmeasured")
-        val id = java.util.UUID.randomUUID().toString()
-
-        // Separate owner publishes a complete, valid entry.
-        val writer = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-
-        // Make a SIDECAR unmeasurable while leaving the entry VALID. Burying the digest would fail
-        // validation (it is read as content), so the debris goes under the .ready marker, which is only
-        // ever tested for existence - the entry still adopts, and the measurement still fails.
-        val readyMarker = File(File(root, "contributions"), "$id.ready")
-        assertTrue("precondition: ready marker exists", readyMarker.isFile)
-        readyMarker.delete()
-        readyMarker.mkdirs()
-        var deep = readyMarker
-        repeat(measureDepthPastBound) {
-            deep = File(deep, "d")
-            deep.mkdirs()
-        }
-        File(deep, "tail.bin").writeBytes(ByteArray(16))
-
-        // A fresh, UNRECOVERED store adopts from disk on its first expireOlderThan.
-        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
-        writer.close()
-        val reader = ContributionStore(root, limits())
-        reader.expireOlderThan()
-
-        assertTrue(
-            "the adopt branch must have measured and failed (${reader.measurementFailures})",
-            reader.measurementFailures >= 1L,
-        )
-        assertTrue("accounting must be unknown", reader.unknownFootprintForTest())
-        assertTrue(
-            "an entry whose measurement failed must not be served, but readyEntries() returned it",
-            reader.readyEntries().none { it.captureId == id },
-        )
+        assertTrue("swept staging must leave nothing charged", store.ownedIdsForTest().isEmpty())
     }
 
     @Test
@@ -2954,7 +2435,6 @@ class DirectoryDurabilityTest {
         store.close()
         val fresh = ContributionStore(root, limits())
         fresh.expireOlderThan()
-        assertTrue("measurement must have been reported as failing", fresh.measurementFailures >= 1L)
 
         // Headroom on BOTH axes, so the only thing that can refuse the probe is the unknown-accounting
         // rule. My first version left maxQueueRecords at 8 and the residue filled the table, which refused
@@ -2973,60 +2453,12 @@ class DirectoryDurabilityTest {
             ),
         )
         roomy.expireOlderThan()
-        assertTrue("precondition: accounting is unknown", roomy.unknownFootprintForTest())
         // SPEC a7f6ce81 RULING: the unmeasured capture already carries a worst-case placeholder charge,
         // so the byte budget reflects it; refusing as well double-counted the unknown and stopped capture
         // entirely. Admission is now GRANTED and the unknown is reported, not used as a blanket refusal.
         val probeAdmission = roomy.admit(sampleCount = 1600L, metadataBytes = 32)
         assertNotNull("admission must be GRANTED while a footprint is unknown (priced, not refused)", probeAdmission)
         probeAdmission!!.discard()
-    }
-
-    @Test
-    fun `residue charges sidecar bytes ABOVE the audio+metadata baseline`() {
-        // The previous version of this control compared "audio only" against "everything", so charging
-        // audio+metadata already refused the probe: it could not see uncharged sidecars (reviewer
-        // ca97f609). The baseline here is audio+metadata, and the discriminator is the SIDECAR bytes above
-        // it - attempts, created, sha256, ready and the disposal-intent record.
-        val root = tmp.newFolder("queue-sidecar-footprint")
-        val id = java.util.UUID.randomUUID().toString()
-        val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-        // Real captures accumulate retry state; the digest is a fixed-size file. Together they make the
-        // sidecar band wide enough to place a probe inside it, which is what isolates these bytes.
-        repeat(4) { store.recordAttempt(store.ownership.currentGeneration(), id) }
-
-        // Disqualify so the intent record itself is part of the retained footprint.
-        File(root, "disqualified").mkdirs()
-        // Exactly the content the store itself writes, so the measured footprint matches production.
-        File(root, "disqualified/$id").writeText("disqualified")
-
-        val contributions = File(root, "contributions")
-        // Make EVERY file undeletable so the whole residue survives and must all be charged.
-        contributions.listFiles()!!.filter { it.name.startsWith(id) }.forEach { file ->
-            val bytes = file.readBytes()
-            file.delete()
-            file.mkdirs()
-            File(file, "held").writeBytes(bytes)
-        }
-
-        fun subtree(f: File) = if (f.exists()) f.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
-        val audio = subtree(File(contributions, "$id.recording.wav"))
-        val metaBytes = subtree(File(contributions, "$id.metadata.json"))
-        val baseline = audio + metaBytes
-        val sidecars = listOf(".ready", ".attempts", ".created", ".sha256").sumOf { subtree(File(contributions, "$id$it")) } +
-            subtree(File(root, "disqualified/$id"))
-
-        // Assert the MEASURED CHARGE DIRECTLY. A sidecar band of this fixture is only tens of bytes, so no
-        // admission budget can straddle it reliably; the reviewer offered this form explicitly. The charge
-        // must equal the WHOLE retained footprint, not just the audio+metadata baseline.
-        // One live owner per queue (spec c8f766fb): the next owner takes over after release.
-        store.close()
-        val fresh = ContributionStore(root, limits())
-        fresh.expireOlderThan() // first and only accounting for this capture
-        val charged = fresh.chargedBytesForTest(id)
-        assertEquals("the charge must cover the full retained footprint", baseline + sidecars, charged)
-        assertTrue("the sidecar bytes must not be free", charged > baseline)
     }
 
     @Test

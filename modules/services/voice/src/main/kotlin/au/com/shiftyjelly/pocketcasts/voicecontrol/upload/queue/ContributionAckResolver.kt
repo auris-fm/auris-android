@@ -51,6 +51,13 @@ class ContributionAckResolver(
 
         /** ACCEPTED payload failed authoritative validation: treated exactly like AMBIGUOUS. */
         data class UnvalidatedAccept(val retryAtMs: Long?) : Resolution()
+
+        /**
+         * RETAINED and withheld from serving (spec 219d3bb6 / 7087cf00): the response was a 409 that
+         * followed a server 5xx for this capture, which proves nothing about the capture's fate. The entry
+         * keeps its record, is counted as HELD, and is never deleted on this evidence.
+         */
+        object Held : Resolution()
     }
 
     /**
@@ -99,6 +106,7 @@ class ContributionAckResolver(
             is Resolution.Retained -> "retained"
             is Resolution.UnvalidatedAccept -> "retained-unvalidated"
             is Resolution.StaleEpoch -> "stale-epoch"
+            is Resolution.Held -> "held"
         }
         Timber.tag(TAG).i(
             "voice-upload settle: capture=%s attempt=%d ack=%s http=%s outcome=%s",
@@ -136,7 +144,25 @@ class ContributionAckResolver(
         }
 
         Ack.TERMINAL_DISPOSAL ->
-            if (store.releaseForAdmittedAttempt(token, ContributionStore.TerminalReason.SERVER_TERMINAL)) {
+            // A 409 AFTER A SERVER FAILURE IS NOT A CONVICTION (spec 219d3bb6, relayed by spec 7087cf00).
+            // The server disposes a reservation when ITS OWN attempt fails, so a client that retries can
+            // be told capture_conflict for a capture the server never durably disposed. Until that fix is
+            // live, a 409 whose PRECEDING outcome for this capture was a 5xx is INCONCLUSIVE: the entry is
+            // HELD (retained, not served, counted and logged) instead of deleted, so a transient server
+            // fault can never destroy a recording it also refused.
+            if (httpStatus == CONFLICT_STATUS && store.lastOutcomeWasServerError(token.captureId)) {
+                Timber.tag(TAG).i(
+                    "voice-upload hold: capture=%s attempt=%d reason=conflict-after-server-error http=%d",
+                    token.captureId,
+                    token.attemptNumber,
+                    CONFLICT_STATUS,
+                )
+                if (store.holdAfterServerErrorConflict(token)) {
+                    Resolution.Held
+                } else {
+                    Resolution.StaleEpoch
+                }
+            } else if (store.releaseForAdmittedAttempt(token, ContributionStore.TerminalReason.SERVER_TERMINAL)) {
                 Resolution.Released
             } else {
                 Resolution.StaleEpoch
@@ -177,3 +203,6 @@ class ContributionAckResolver(
 }
 
 private const val TAG = "VoiceUploadSettle"
+
+/** 409 `capture_conflict`: the code whose meaning is inconclusive right after a server failure. */
+private const val CONFLICT_STATUS = 409

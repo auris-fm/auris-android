@@ -158,7 +158,7 @@ class ContributionStoreTest {
     }
 
     @Test
-    fun `admission denies on record and byte caps without touching disk`() {
+    fun `admission denies on the record cap without touching disk`() {
         val root = tempRoot()
         val limits = QueueLimits.defaults().copy(maxQueueRecords = 1)
         val store = ContributionStore(root, limits).also { storesForTeardown += it }
@@ -2016,67 +2016,6 @@ class ContributionStoreTest {
         store.close()
     }
 
-    @Test
-    fun `bytes retained by an open descriptor block a new admission`() {
-        // Reviewer 7c2f30e3: totalRetainedBytes had no capacity consumer. An upload whose file was purged
-        // still occupies the device, so it must deny a new admission.
-        //
-        // Sized so the QUEUE BYTE BUDGET is the binding constraint: a tight maxQueueBytes with the clip
-        // caps left generous. Otherwise the per-clip duration/byte cap denies the probe and the control
-        // proves nothing about the pin. (First attempt did exactly that: 64 MiB probe vs a 30 s clip cap.)
-        val defaults = QueueLimits.defaults()
-        // maxClipBytes sits ABOVE the queue budget so the queue budget is what binds; the clip cap must
-        // not deny the probe.
-        val limits = defaults.copy(
-            maxQueueBytes = 2_000_000L,
-            maxClipBytes = 2_600_000L,
-            maxClipMs = 120_000L,
-        )
-        val root = tempRoot()
-        val store = ContributionStore(root, limits).also { storesForTeardown += it }
-        assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
-        val capture = requireNotNull(store.durableCapture(ID_A))
-        val owned = requireNotNull(capture.owned)
-        val audio = File(root, "contributions/$ID_A.recording.wav")
-        assertTrue("PREMISE: the file is linked at handoff", audio.isFile)
-
-        store.revokeAndPurge("test-purge")
-        assertFalse("PREMISE: the purge unlinked the file", audio.isFile)
-        val pinned = store.pinnedUnlinkedBytes()
-        assertTrue("PREMISE: the open descriptor retains bytes", pinned > 0)
-
-        // A probe that fits ONLY IF the retained bytes were free: it needs more than the remaining room
-        // but stays inside the per-clip caps.
-        // The probe must FIT once the pin is released, yet EXCEED the room available while it is held.
-        // So: probe <= budget, and probe + pinned > budget. (First attempt added pinned/2 on top of the
-        // full budget, so it could never fit afterwards - a test arithmetic error, not a product one.)
-        val probeBytes = limits.maxQueueBytes - pinned / 2
-        assertTrue("PREMISE: the probe over-commits while the pin is held", probeBytes + pinned > limits.maxQueueBytes)
-        assertTrue(
-            "PREMISE: the probe stays within the clip cap (probe=$probeBytes cap=${limits.maxClipBytes})",
-            probeBytes <= limits.maxClipBytes,
-        )
-        val samples = sampleCountFor(probeBytes)
-        assertEquals("PREMISE: the probe is not blocked by the clip cap", probeBytes, WavWriter.fileBytes(samples))
-
-        assertNull(
-            "admission ignored bytes an open descriptor still retains",
-            store.admit(samples, 0),
-        )
-        assertEquals("PREMISE: nothing is unmeasured", "unmeasured=[] rootUnknown=false markerUnknown=false", store.unknownBreakdownForTest())
-
-        // Once the descriptor closes the bytes are genuinely gone and the same request fits.
-        owned.close()
-        assertEquals("PREMISE: the settle callback never ran, so the pin could not be dropped", 1, store.settleCallbacksForTest.get())
-        assertEquals("PREMISE: the pin was released", 0L, store.pinnedUnlinkedBytes())
-        assertNotNull(
-            "the freed bytes were not returned to the budget",
-            store.admit(samples, 0),
-        )
-        store.close()
-    }
-
-    @Test
     fun `open sources are bounded by a global slot taken before the open and held to closure`() {
         // Reviewer 6456b2a5 finding 3: no global source slot existed before open/validation. The bound must
         // apply to REAL OPEN DESCRIPTORS, not attempts - a descriptor keeps retaining bytes after unlink, so

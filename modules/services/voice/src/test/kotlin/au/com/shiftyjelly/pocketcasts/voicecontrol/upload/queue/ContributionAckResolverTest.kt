@@ -219,4 +219,79 @@ class ContributionAckResolverTest {
         assertTrue("stale terminal ack retains the entry", store.readyEntries().any { it.captureId == id2 })
         assertTrue(wavOf(store, id2).exists())
     }
+
+    @Test
+    fun `a 409 that follows a server 5xx HELDS the entry instead of deleting it`() {
+        // SPEC 219d3bb6 (relayed by spec 7087cf00): the server disposes a reservation when ITS OWN attempt
+        // fails, so after a 503 a retry can be answered 409 capture_conflict for a capture the server never
+        // durably disposed. Deleting on that evidence destroys a recording a transient fault refused.
+        var now = 17_000_000L
+        val root = tmp.newFolder("ack-conflict-after-5xx")
+        val store = newStore(root) { now }
+        val resolver = ContributionAckResolver(store) { _, _, _ -> true }
+
+        val (id, generation) = prepared(store)
+        val token = store.pickupAttemptToken(generation, id)!!
+        // The outcome immediately before the conflict was a server failure.
+        store.recordTransportOutcome(id, serverError = true)
+
+        assertEquals(
+            ContributionAckResolver.Resolution.Held,
+            resolver.resolveForAttempt(
+                token,
+                ContributionAckResolver.Ack.TERMINAL_DISPOSAL,
+                httpStatus = 409,
+            ),
+        )
+
+        // HELD means: retained, NOT served, NOT picked up again, and counted as held rather than disposed.
+        assertTrue("a HELD capture must still be owned", store.isChargedForTest(id))
+        assertTrue("a HELD capture must not be served", store.readyEntries().none { it.captureId == id })
+        assertTrue("a HELD capture must not be picked up again", store.retryEligible(now + 1_000_000L).isEmpty())
+        assertTrue("a HELD capture keeps its audio on disk", wavOf(store, id).exists())
+        assertEquals(
+            "the hold must be counted under its own reason",
+            1L,
+            store.terminalCounter(ContributionStore.TerminalReason.CONFLICT_AFTER_SERVER_ERROR_HELD),
+        )
+        assertEquals(
+            "a hold is NOT a server-terminal disposal",
+            0L,
+            store.terminalCounter(ContributionStore.TerminalReason.SERVER_TERMINAL),
+        )
+    }
+
+    @Test
+    fun `a 409 with NO preceding server failure still disposes terminally`() {
+        // The control that keeps the hold NARROW: without a 5xx before it, a conflict is still the
+        // server's conviction, and must still delete. If this ever passes for the wrong reason, the hold
+        // has silently become a blanket retention and stranded entries would fill the queue.
+        var now = 17_000_000L
+        val root = tmp.newFolder("ack-conflict-no-5xx")
+        val store = newStore(root) { now }
+        val resolver = ContributionAckResolver(store) { _, _, _ -> true }
+
+        val (id, generation) = prepared(store)
+        val token = store.pickupAttemptToken(generation, id)!!
+        store.recordTransportOutcome(id, serverError = false)
+
+        assertEquals(
+            ContributionAckResolver.Resolution.Released,
+            resolver.resolveForAttempt(
+                token,
+                ContributionAckResolver.Ack.TERMINAL_DISPOSAL,
+                httpStatus = 409,
+            ),
+        )
+        assertTrue("an unexplained conflict still disposes", store.readyEntries().none { it.captureId == id })
+        assertEquals(
+            1L,
+            store.terminalCounter(ContributionStore.TerminalReason.SERVER_TERMINAL),
+        )
+        assertEquals(
+            "no hold may be recorded",
+            0L,
+            store.terminalCounter(ContributionStore.TerminalReason.CONFLICT_AFTER_SERVER_ERROR_HELD),
+        )
+    }
 }

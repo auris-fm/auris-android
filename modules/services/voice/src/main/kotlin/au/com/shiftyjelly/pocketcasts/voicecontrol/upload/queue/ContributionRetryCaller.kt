@@ -180,6 +180,10 @@ class ContributionRetryCaller(
                             }
                         // The server minimum survives the resolver: it is a floor on the next attempt.
                         val retryAfterS = if (accepted) null else retryAfterFor(generation, captureId)
+                        // WHAT CAME IMMEDIATELY BEFORE, for the 409-after-5xx hold (spec 219d3bb6 /
+                        // 7087cf00): a conflict is only decisive when the previous outcome was not a
+                        // server failure. Recorded from the REAL observed status, never from the ack.
+                        store.recordTransportOutcome(captureId, serverError = httpStatus != null && httpStatus in serverErrorRange)
                         when (resolve(token, ack, payload, retryAfterS, httpStatus)) {
                             is ContributionAckResolver.Resolution.Released -> {
                                 attempted++
@@ -188,6 +192,7 @@ class ContributionRetryCaller(
 
                             is ContributionAckResolver.Resolution.UnvalidatedAccept,
                             is ContributionAckResolver.Resolution.Retained,
+                            is ContributionAckResolver.Resolution.Held,
                             -> attempted++
 
                             ContributionAckResolver.Resolution.StaleEpoch -> cancelledEpoch++
@@ -211,12 +216,13 @@ class ContributionRetryCaller(
         // EVERY drain answers why (spec 2aea78c3): an empty drain must say whether it saw eligible
         // work and where that work was refused, instead of discarding the PollResult in the drain
         // lambda (VoiceUploadModule provideVoiceUploadDrain) and logging nothing.
-        // A footprint that cannot be measured is REPORTED, never silently withheld (spec a7f6ce81):
-        // without this line an unknown footprint and a genuinely idle queue look identical.
-        val footprintUnknown = store.unknownFootprintForTest()
-        if (footprintUnknown) {
-            Timber.i("voice-upload drain: footprint-unknown %s", store.footprintBreakdown())
-        }
+        // CAPACITY IS A RECORD COUNT (spec a3ef694f): records and their bound are reported with every
+        // drain, so an empty drain can be told apart from a full queue without any unknown-footprint state.
+        Timber.i(
+            "voice-upload drain: records=%d limit=%d",
+            store.ownedRecordsForTest(),
+            store.recordLimit(),
+        )
         Timber.i(
             "voice-upload drain: eligible=%d attempted=%d deferredNetwork=%d skippedInFlight=%d cancelledEpoch=%d pickupRefused=%d",
             eligible.size,
@@ -244,6 +250,9 @@ class ContributionRetryCaller(
     fun close() {
         closed.set(true)
     }
+
+/** HTTP statuses that mean the SERVER failed, so a following 409 proves nothing about the capture. */
+    private val serverErrorRange = 500..599
 }
 
 private const val UPLOAD_TAG = "VoiceUploadCaller"

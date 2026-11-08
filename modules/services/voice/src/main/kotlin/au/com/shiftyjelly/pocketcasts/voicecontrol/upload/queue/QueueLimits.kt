@@ -41,7 +41,9 @@ data class QueueLimits(
         /** Spec resource defaults (validated against the compiled ceilings above). */
         fun defaults(): QueueLimits = QueueLimits(
             maxQueueBytes = 64L * 1024 * 1024,
-            maxQueueRecords = 200,
+            // 32 COMPLETE ENTRIES ON DISK is the queue bound (spec a3ef694f). Any capture beyond it is
+            // refused admission rather than queued; uploads drain the queue and free the slot again.
+            maxQueueRecords = 32,
             maxClipMs = 30_000L,
             maxClipBytes = 2L * 1024 * 1024,
             maxMetadataBytes = 64 * 1024,

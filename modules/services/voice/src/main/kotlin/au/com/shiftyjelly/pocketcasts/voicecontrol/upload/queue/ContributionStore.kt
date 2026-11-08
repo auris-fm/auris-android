@@ -335,12 +335,9 @@ class ContributionStore(
         return true
     }
 
-    // Marker AND root coverage must be established BEFORE the first admission, not only at
-    // recovery/expiry: a newly constructed store over an EXISTING directory would otherwise admit
-    // immediately over intents and bytes nobody has enumerated (reviewers f4436ced, 92911de9; required
-    // precondition under spec 7e9606b). The scans are bounded and run once per instance - afterwards the
-    // flags reflect what was found. The root pass only ACCOUNTS: it charges retained unowned captures it
-    // finds; deletion stays the recovery sweep's job, so admission never destroys on partial knowledge.
+    // The marker/disqualification reconciliation that admission depends on runs once per instance
+    // before the first admission, not only at recovery/expiry (spec 7e9606b). It is COUNT-FREE (spec
+    // a3ef694f): capacity is decided from complete entries on disk, so nothing here measures bytes.
     private var coverageEstablished = false
 
     /** Ownership-refusal accounting (spec 8adcfd01): durableCapture refusing for sidecar reasons. */
@@ -349,70 +346,29 @@ class ContributionStore(
 
     private fun establishCoverage() {
         if (coverageEstablished) return
-        // A FRESH install has no directory yet; without this, the first listing would fail with
-        // NoSuchFileException and permanently refuse admission on a perfectly empty queue (recover()
-        // creates the directory the same way).
+        // A FRESH install has no directory yet; the counting listing below must see a real directory.
         dir.mkdirs()
-        val files = try {
-            boundedRootListing()
-        } catch (unknown: MeasurementError) {
-            synchronized(lock) {
-                rootEnumerationUnknown = true
-                measurementFailures++
-            }
-            coverageEstablished = true
-            return
-        }
-        synchronized(lock) { rootEnumerationUnknown = false }
-        // Account every on-disk capture this instance holds no charge for, grouped by derived capture id
-        // but measured at the CONCRETE discovered paths. Deriving an id and charging canonical paths only
-        // charged zero for raw or staging debris (reviewer 7a47fff8): the bytes live where they live.
-        val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_RETRY, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
-        synchronized(lock) {
-            files.groupBy { f ->
-                val hit = suffixes.firstOrNull { f.name.endsWith(it) }
-                if (hit != null) {
-                    f.name.removeSuffix(hit).removePrefix(STAGING_PREFIX).removeSuffix(SUFFIX_WAV).removeSuffix(".tmp")
-                } else {
-                    f.name
-                }
-            }.forEach { (id, captureFiles) ->
-                if (id in ownedCharges) return@forEach
-                try {
-                    val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
-                    var audio = 0L
-                    var rest = 0L
-                    for (file in captureFiles) {
-                        val bytes = measuredPathBytes(file, budget, optional = false)
-                        if (file.name.endsWith(SUFFIX_WAV) || file.name.endsWith(SUFFIX_PART)) {
-                            audio = checkedAdd(audio, bytes)
-                        } else {
-                            rest = checkedAdd(rest, bytes)
-                        }
-                    }
-                    if (rest < 0L || rest > Int.MAX_VALUE.toLong()) {
-                        throw MeasurementError("retained footprint unrepresentable: $rest")
-                    }
-                    unmeasuredIds -= id
-                    claimOwnedLocked(id, audio, rest.toInt(), ready = false)
-                } catch (failure: MeasurementError) {
-                    measurementFailures++
-                    unmeasuredIds += id
-                    // Small placeholder; the unknown state above is the refusal mechanism.
-                    claimOwnedLocked(id, 0L, 0, ready = false)
-                }
-            }
-        }
         retryDisqualifiedCleanupLocked()
         coverageEstablished = true
     }
 
-    /** Claim count+bytes atomically; returns null when the queue cannot hold another entry. */
+    /**
+     * CAPACITY IS COUNTED, NOT MEASURED (spec a3ef694f). One record is one COMPLETE entry on disk: a WAV
+     * whose matching metadata sidecar exists, under a UUID name. In-progress captures that only have a
+     * `.wav.part` are NOT records yet, and no byte total is involved - a byte total could be made
+     * "unknown" by a single unreadable file and would then freeze the whole feature.
+     */
+    private fun rootRecordCountLocked(): Int = dir.listFiles()?.count { f ->
+        f.name.endsWith(SUFFIX_WAV) &&
+            f.name.removeSuffix(SUFFIX_WAV).let { id -> id.matches(UUID_RE) && File(dir, "$id$SUFFIX_META").isFile }
+    } ?: 0
+
+    /** Claim one record atomically; returns null when the queue cannot hold another entry. */
     private fun reserve(sampleCount: Long, projected: Long): Admission? {
         establishCoverage()
         val id = java.util.UUID.randomUUID().toString()
         return synchronized(lock) {
-            if (!roomLocked(projected)) {
+            if (!roomLocked()) {
                 null
             } else {
                 reservations[id] = projected
@@ -967,25 +923,15 @@ class ContributionStore(
     private fun liveReservationBytesLocked(): Long = reservations.values.sumOf { it }
 
     /**
-     * THE single definition of what this owner already occupies. Both admission paths call it, so they
-     * cannot disagree: owner charges (ready AND uncertain alike - the files are on disk either way) plus
-     * any live reservation. [exclude] drops one reservation, for re-checking an attempt that already
-     * holds it.
+     * THE single definition of what this owner already occupies, in RECORDS (spec a3ef694f). Both
+     * admission paths call it, so they cannot disagree: owner charges (ready AND uncertain alike - the
+     * files are on disk either way) plus any live reservation. [exclude] drops one reservation, for
+     * re-checking an attempt that already holds it.
      */
-    private fun ownerBytesLocked(exclude: String? = null): Long = ownedCharges.values.sumOf { it.bytes } +
-        reservations.entries.filterNot { it.key == exclude }.sumOf { it.value } +
-        // PINNED-BUT-UNLINKED (reviewer 7c2f30e3): bytes an open descriptor still retains after its
-        // file was unlinked are REAL occupancy on the device. Counting them here is what makes the
-        // retained total a capacity consumer rather than a passive report - otherwise a purge during
-        // an upload would appear to free room that has not been freed.
-        pinnedUnlinkedBytes()
-
-    /** Records occupied = every owned capture (ready or uncertain) + live reservations. */
     private fun ownerRecordsLocked(exclude: String? = null): Int = ownedCharges.size + reservations.keys.count { it != exclude }
 
-    /** Re-check budgets at publication time (a purge/expiry may have moved them since admission). */
-    private fun roomForPublicationLocked(admission: Admission): Boolean = ownerRecordsLocked(exclude = admission.id) < limits.maxQueueRecords &&
-        ownerBytesLocked(exclude = admission.id) + admission.projectedBytes <= limits.maxQueueBytes
+    /** Re-check the record budget at publication time (a purge/expiry may have moved it since admission). */
+    private fun roomForPublicationLocked(admission: Admission): Boolean = ownerRecordsLocked(exclude = admission.id) < limits.maxQueueRecords
 
     /**
      * Claim the capture's final names for this attempt, refusing when any of them already exist: a live
@@ -1032,24 +978,9 @@ class ContributionStore(
             val absence = absenceOf(file)
             when {
                 absence == Absence.PRESENT -> {
-                    // The file survived. Charge it where it actually is; measuring "$id$SUFFIX_WAV" for a
-                    // staging name found nothing and charged zero, the blindness this check exists to remove.
-                    val survivorBytes = try {
-                        measuredPathBytes(file, MeasurementBudget(MEASURE_MAX_ENTRIES))
-                    } catch (unknown: MeasurementError) {
-                        measurementFailures++
-                        unmeasuredIds += id
-                        // Worst-case placeholder: the bytes could not be counted, so they are assumed to
-                        // fill the whole budget until a successful measurement clears the unknown mark.
-                        claimOwnedLocked(id, limits.maxQueueBytes, 0, ready = false)
-                        return@synchronized
-                    }
-                    // A SUCCESSFUL measurement is itself a clearing event: an id that earlier could not be
-                    // measured is now accounted, so refusing admission over it any longer would be refusing
-                    // over bytes that ARE known (reviewer 7e09c62b - the comment claimed this and the code
-                    // did not do it).
-                    unmeasuredIds -= id
-                    claimOwnedLocked(id, survivorBytes, 0, ready = false)
+                    // The file survived the delete. It is still OCCUPIED SPACE on the device, so its
+                    // capture must keep its record (spec a3ef694f: capacity is counted, not measured).
+                    claimOwnedLocked(id, ready = false)
                 }
 
                 absence == Absence.ABSENT -> {
@@ -1058,7 +989,6 @@ class ContributionStore(
                     // sweep already removed it. A retry over an already-absent path must RELEASE the charge,
                     // not poison admission with a permanent unmeasured mark (reviewer 567c0b94).
                     ownedCharges.remove(id)
-                    unmeasuredIds -= id
                     // Absence is proven here, and `delete()` is the operation that produced it. Counted
                     // so that a staging sweep can never again empty bytes without leaving a trace.
                     dropCounterOnly(TerminalReason.RECOVERY_STAGING_REMOVED)
@@ -1069,11 +999,8 @@ class ContributionStore(
                 }
 
                 else -> {
-                    // UNKNOWN: inability to stat. Never free the charge on a failure to look. It is
-                    // recoverable: a LATER sweep that can stat the path either proves absence (this branch
-                    // releases) or measures the survivor successfully, both of which clear the mark.
-                    measurementFailures++
-                    unmeasuredIds += id
+                    // UNKNOWN: inability to stat. The charge is NEVER freed on a failure to look, so a
+                    // staging leftover whose absence cannot be proven keeps its record.
                 }
             }
         }
@@ -1105,17 +1032,9 @@ class ContributionStore(
     }
 
     private fun deleteStaging(attemptId: String) {
-        // Bounded root traversal, like recovery: sweeping a partially-known listing is destructive with
-        // unknown coverage, so enumeration failure defers the sweep and refuses admission instead.
-        val files = try {
-            boundedRootListing()
-        } catch (unknown: MeasurementError) {
-            synchronized(lock) {
-                rootEnumerationUnknown = true
-                measurementFailures++
-            }
-            return
-        }
+        // Bounded root traversal, like recovery: sweeping a partially-known listing is destructive, so an
+        // unreadable listing defers the sweep entirely.
+        val files = boundedRootListingOrNull() ?: return
         files.forEach { f ->
             // Checked, like every other deletion: a staging file that refuses to delete still occupies the
             // queue, and discarding the result left those bytes charged nowhere (reviewer e4342946).
@@ -1127,17 +1046,10 @@ class ContributionStore(
         synchronized(lock) { reservations.remove(id) }
     }
 
-    /** Budget test against durable entries PLUS live reservations (both consume the same budget). */
-    private fun roomLocked(projected: Long): Boolean {
-        // SPEC a7f6ce81 RULING (supersedes spec 896632f4 for ADMISSION): an unknown footprint is priced
-        // CONSERVATIVELY, never used to refuse admission outright. Each unmeasured id is already carried
-        // at the worst-case placeholder weight (claimOwnedLocked charges limits.maxQueueBytes for it), so
-        // the byte budget below already reflects the unknown; refusing here as well double-counted it.
-        // Refusing admission is also SELF-SUSTAINING: uploading is what shrinks the footprint and lets it
-        // heal, so a blanket refusal froze capture until a process restart (owner's Pixel incident).
-        return ownerRecordsLocked() < limits.maxQueueRecords &&
-            ownerBytesLocked() + projected <= limits.maxQueueBytes
-    }
+    /**
+     * Record budget test against durable entries PLUS live reservations.
+     */
+    private fun roomLocked(): Boolean = ownerRecordsLocked() < limits.maxQueueRecords
 
     /** Playback duration of [sampleCount] samples at the specced 16 kHz mono capture rate. */
     private fun durationMs(sampleCount: Long): Long = sampleCount * 1000L / SAMPLE_RATE_HZ
@@ -1409,7 +1321,7 @@ class ContributionStore(
                     // Ownership transfers here, so the owner charge is created here and nowhere else.
                     // It starts NOT ready: readiness is asserted only after the marker is durable, and a
                     // failure in between must leave an owned-but-uncertain capture rather than none.
-                    ownedCharges[captureId] = OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = false)
+                    ownedCharges[captureId] = OwnedCharge(ready = false)
                     syncDirectoryOrFail(dir)
                     // Age + attempt authorities are written BEFORE the marker; failing either is a failed
                     // preparation, not an invented fallback, and must hand the slot back.
@@ -1452,7 +1364,7 @@ class ContributionStore(
                             // owner entry per capture, so this path cannot double-count.
                             synchronized(lock) {
                                 ownedCharges.getOrPut(captureId) {
-                                    OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = false)
+                                    OwnedCharge(ready = false)
                                 }.ready = false
                             }
                             throw PublicationUncertain(
@@ -1486,20 +1398,11 @@ class ContributionStore(
 
     /** Ready entries (durable state), oldest first; age computed against [clock]. */
     fun readyEntries(): List<Entry> = synchronized(lock) {
-        // A failed recovery leaves memoryEntries intact from before the failure, but the queue DIRECTORY
-        // could not be enumerated, so what is on disk can no longer be reconciled with what is in memory.
-        // Serving from memory alone could hand out entries whose files were swept, changed or never
-        // accounted while the root was unknown; eligibility is restored by a recovery that enumerates
-        // successfully (reviewer d1cce25b).
-        if (rootEnumerationUnknown || markerCoverageUnknown) {
-            emptyList()
-        } else {
-            // A capture with an unresolved record (retry boundary or attempt count) is NOT servable,
-            // even though it is charged and indexed (reviewer 199ccdee).
-            memoryEntries.values
-                .filter { !heldUncertainLocked(it.captureId) }
-                .sortedBy { it.createdAtMs }
-        }
+        // A capture with an unresolved record (retry boundary or attempt count) is NOT servable, even
+        // though it is charged and indexed (reviewer 199ccdee).
+        memoryEntries.values
+            .filter { !heldUncertainLocked(it.captureId) }
+            .sortedBy { it.createdAtMs }
     }
 
     private var recovered = false
@@ -1703,14 +1606,14 @@ class ContributionStore(
                 // An implausible age NEVER authorises a delete, held or not.
                 if (createdAtMs <= 0 || createdAtMs > now) continue
                 if ((now - createdAtMs) / 1000L < limits.maxQueueAgeSeconds) continue
-                // deleteLocked only needs the id and the age; the byte figures are already in its charge.
+                // deleteLocked only needs the id and the age; capacity is a record count, not bytes.
                 deleteLocked(
                     Entry(
                         captureId = id,
                         enrollmentEpoch = "",
                         recordSha256 = "",
-                        audioBytes = ownedCharges[id]?.audioBytes ?: 0,
-                        metadataBytes = ownedCharges[id]?.metadataBytes ?: 0,
+                        audioBytes = 0,
+                        metadataBytes = 0,
                         attempts = 0,
                         createdAtMs = createdAtMs,
                     ),
@@ -1803,6 +1706,53 @@ class ContributionStore(
 
     /** The capture is held when ANY of its durable records is in an unresolved state. */
     private fun heldUncertainLocked(captureId: String): Boolean = captureId in retryBoundaryUncertain || captureId in attemptsRecordUncertain
+
+    // THE LAST TRANSPORT OUTCOME PER CAPTURE (spec 219d3bb6 / 7087cf00), in memory only.
+    //
+    // A 409 `capture_conflict` is normally a terminal conviction, but it is NOT one when it follows a
+    // 5xx for the same capture: the server disposes a reservation after its OWN failure, so the conflict
+    // may describe a reservation this client is being charged for but the server never durably settled.
+    // Deleting on that evidence would destroy a recording a transient fault refused. The journal lets the
+    // resolver see what came immediately before the 409.
+    private val lastServerError = mutableSetOf<String>()
+
+    /** Whether the outcome recorded immediately before now was a server (5xx) failure for [captureId]. */
+    fun lastOutcomeWasServerError(captureId: String): Boolean = synchronized(lock) { captureId in lastServerError }
+
+    /**
+     * Record the classification of ONE transport outcome for [captureId]. Only [serverError] matters to
+     * the 409 hold; every other outcome clears the mark, so a stale 5xx can never excuse a later conflict.
+     */
+    fun recordTransportOutcome(captureId: String, serverError: Boolean) = synchronized(lock) {
+        if (serverError) lastServerError += captureId else lastServerError -= captureId
+    }
+
+    /**
+     * HOLD a capture whose 409 followed a server failure (spec 219d3bb6 / 7087cf00): retain its record,
+     * withhold it from serving and from pickup, and count it. Returns false when this generation no longer
+     * owns the queue, in which case nothing changes.
+     *
+     * The 5xx mark is CONSUMED: a single server fault excuses only the one conflict that follows it, so the
+     * entry cannot be held again on the same evidence.
+     */
+    fun holdAfterServerErrorConflict(token: AdmittedAttempt): Boolean = withLeaseResult(false) {
+        synchronized(lock) {
+            if (!ownership.isValidUnderLock(token.generation)) {
+                false
+            } else {
+                lastServerError -= token.captureId
+                // Reuse the existing withheld state: a held capture is retained, NOT served, and NOT picked
+                // up (heldUncertainLocked gates readyEntries and retryEligibleLocked).
+                retryBoundaryUncertain += token.captureId
+                dropCounterOnly(TerminalReason.CONFLICT_AFTER_SERVER_ERROR_HELD)
+                Timber.tag(QUEUE_TAG).i(
+                    "voice-upload hold: capture=%s reason=conflict-after-server-error held=true",
+                    token.captureId,
+                )
+                true
+            }
+        }
+    }
 
     /**
      * ONE atomic/durable protocol for every writer of a sidecar record: temp file, contents sync, atomic
@@ -1977,7 +1927,7 @@ class ContributionStore(
         retryAfterS: Long? = null,
         allowRevokedDisposal: Boolean = false,
     ): Long? {
-        return if (unknownFootprintLocked() || (!ownership.isValidUnderLock(generation) && !allowRevokedDisposal)) {
+        return if (!ownership.isValidUnderLock(generation) && !allowRevokedDisposal) {
             null
         } else if (captureId !in memoryEntries) {
             null
@@ -2034,11 +1984,6 @@ class ContributionStore(
             .sorted()
     }
 
-    /** The three flags behind [unknownFootprintLocked], for the drain's diagnostic line. */
-    fun footprintBreakdown(): String = synchronized(lock) {
-        "unmeasured=${unmeasuredIds.size} rootUnknown=$rootEnumerationUnknown markerUnknown=$markerCoverageUnknown"
-    }
-
     /** The COMPLETE per-entry retry eligibility predicate, shared by listing and atomic pickup. */
     private fun retryEligibleLocked(id: String, entry: Entry, nowMs: Long): Boolean {
         val charge = ownedCharges[id]
@@ -2055,7 +2000,7 @@ class ContributionStore(
     }
 
     // ATOMIC PICKUP (reviewer 1b926fa0, spec 8aa20001): inside ONE ownership transaction the caller
-    // revalidates the COMPLETE current eligibility - readiness, coverage, budget, unresolved records and
+    // revalidates the COMPLETE current eligibility - readiness, the record budget, unresolved records and
     // the durable boundary, i.e. everything that gates retryEligible - and CONSUMES the attempt by
     // recording it durably. A gate callback or a concurrent poll that re-arms a boundary or changes
     // coverage between listing and pickup is caught HERE, not by the generation check alone. Returns the
@@ -2371,6 +2316,9 @@ class ContributionStore(
         ATTEMPTS_EXHAUSTED,
         QUEUE_AGE_EXPIRED,
         SERVER_TERMINAL,
+
+        /** A 409 that followed a server 5xx: HELD, not deleted (spec 219d3bb6 / 7087cf00). */
+        CONFLICT_AFTER_SERVER_ERROR_HELD,
         INVALID_ON_RECOVERY,
         UPLOAD_ACCEPTED,
         PERMANENT_REFUSAL,
@@ -2489,9 +2437,7 @@ class ContributionStore(
                 // AFTER the generation advanced and launches were withdrawn, so a capture a PUT is already
                 // streaming is covered by the revocation rather than by this call.
                 establishCoverage()
-                // The measured, unowned captures are now in ownedCharges; join them WITH the index below.
-                val chargeIds = ownedCharges.keys.toList()
-                chargeIds.forEach { id -> unmeasuredIds -= id }
+                // The counted, unowned captures are now in ownedCharges; join them WITH the index below.
                 // TEST SEAM: observes the state AFTER discovery, which is the boundary the contract is
                 // about. onPurgeOrRecoverMutation fires BEFORE discovery, so it cannot see a promotion.
                 onAfterPurgeDiscoveryForTest?.invoke()
@@ -2579,16 +2525,8 @@ class ContributionStore(
             return
         }
         try {
-            // Same bounded traversal as recovery (reviewer d1cce25b): enumeration failure defers the sweep.
-            val files = try {
-                boundedRootListing()
-            } catch (unknown: MeasurementError) {
-                synchronized(lock) {
-                    rootEnumerationUnknown = true
-                    measurementFailures++
-                }
-                return
-            }
+            // Same bounded traversal as recovery (reviewer d1cce25b): an unreadable listing defers the sweep.
+            val files = boundedRootListingOrNull() ?: return
             // Same checked deletion as the recovery sweep. Discarding the result here left surviving partials
             // invisible to accounting (reviewer e4342946).
             files.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
@@ -2603,28 +2541,24 @@ class ContributionStore(
      * restored). Invalid complete-looking entries are dropped with a content-free counter —
      * recovery admits nothing unvalidated to upload.
      */
-    // Set when root enumeration failed or exceeded its bound. Recovery cannot know what the queue
-    // directory holds, so it must not run a DESTRUCTIVE sweep over a partially-known listing, and
-    // accounting stays unknown - refusing admission - until a later recovery enumerates successfully.
-    @Volatile
-    private var rootEnumerationUnknown = false
+    // Recovery cannot know what the queue directory holds when its listing fails, so it must not run a
+    // DESTRUCTIVE sweep over a partially-known listing. [boundedRootListingOrNull] returns null in that
+    // case and every sweep/refusal decision reads the null directly - no state flag is involved, because
+    // the hold clears on the very next successful list (spec a3ef694f removed the flags that could keep
+    // admission unknown).
+    private fun boundedRootListingOrNull(): List<File>? = try {
+        boundedRootListing()
+    } catch (unknown: MeasurementError) {
+        Timber.tag(QUEUE_TAG).i("voice-upload listing: root-unreadable reason=%s", unknown.message)
+        null
+    }
 
-    // Spec 896632f4 (relayed by reviewer cb236dd5): unknown DISPOSAL-MARKER coverage holds admission AND
-    // serving/attempt for this owner. A marker can disqualify a retained survivor, so neither readiness
-    // nor full accounting can be established while marker coverage is partially known. Ownership and
-    // charges are preserved; the hold lifts only after bounded marker discovery succeeds and the recorded
-    // intents are reconciled (the retry pass runs to completion over the fully enumerated set).
-    // Starts false: a fresh INSTALL has no marker directory (genuine absence). The dangerous case - a
-    // store instance over a directory whose markers were never enumerated - is covered by recover(),
-    // which establishes coverage in the common eligibility path before anything is served or admitted.
-    @Volatile
-    private var markerCoverageUnknown = false
-
-    // Root discovery with the same discipline as the measurement walk: a lazy directory stream, ONE shared
-    // entry budget, error-explicit. The eager `dir.listFiles()` materialized the entire directory with no
-    // bound, so a pathological queue root allocated without limit at every startup (reviewer c66fda06
-    // series; the same defect already fixed inside the measurement walk).
     private fun boundedRootListing(): List<File> = boundedDirectoryListing(dir)
+
+    // ONE shared budget for a whole listing, so the bound is on the traversal and not on each call.
+    private class MeasurementBudget(private var remaining: Int) {
+        fun consume(): Boolean = --remaining >= 0
+    }
 
     private fun boundedDirectoryListing(directory: File): List<File> {
         val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
@@ -2651,19 +2585,12 @@ class ContributionStore(
         // a successor's directory.
         hooks.onPurgeOrRecoverMutation?.invoke("recover")
         dir.mkdirs()
-        val files = try {
-            boundedRootListing()
-        } catch (unknown: MeasurementError) {
-            synchronized(lock) {
-                rootEnumerationUnknown = true
-                measurementFailures++
-            }
+        val files = boundedRootListingOrNull() ?: run {
             // NO sweep, NO serving: deleting from a directory whose contents are only partially known is
-            // destructive with unknown coverage, and nothing can be validated for serving. Accounting is
-            // unknown, so admission is refused until a later recovery enumerates successfully.
+            // destructive. Capacity still COUNTS what it can see (spec a3ef694f), so a failed listing
+            // never freezes admission - only this pass's own sweep and serving are deferred.
             return emptyList()
         }
-        synchronized(lock) { rootEnumerationUnknown = false }
         // 1) Debris sweep: .part files are NEVER ready; .ready without wav/meta is invalid.
         // The RESULT of delete() used to be discarded here, so staging bytes that survived occupied the
         // queue while being charged nowhere (reviewer c71672c0).
@@ -2710,30 +2637,10 @@ class ContributionStore(
             val removed = captureFiles.count { file -> file.delete() || !file.exists() }
             val survivors = captureFiles.filter { it.exists() }
             if (survivors.isNotEmpty()) {
-                // CHARGE WHAT ACTUALLY SURVIVED, MEASURED WHERE IT IS (reviewer 5507715b item 4).
-                // [chargeRetainedLocked] measures the capture's CANONICAL names only, so when the survivor
-                // is a leftover whose exact name the capture does not own it measured zero and the bytes
-                // stayed on disk charged to nobody. The survivor walk is therefore the footprint: it is
-                // taken from the paths that exist AFTER the attempted deletes, and it SETS the charge.
-                //
-                // It must not be ADDED to the canonical measurement (that charged 4096 bytes as 8192), and
-                // it cannot go through [claimOwnedLocked], which deliberately keeps the LARGER of two
-                // possibly-overlapping observations - here the two describe the same bytes.
-                val survivorMeasure = try {
-                    survivors.sumOf { measuredPathBytes(it, MeasurementBudget(MEASURE_MAX_ENTRIES)) } to 0
-                } catch (failure: MeasurementError) {
-                    // UNMEASURABLE IS NOT ZERO: refuse admission over it rather than booking the residue
-                    // as free space (the placeholder marks the capture unknown, not small).
-                    measurementFailures++
-                    unmeasuredIds += id
-                    null
-                }
-                if (survivorMeasure == null) {
-                    chargeRetainedLocked(id, ready = false)
-                } else {
-                    unmeasuredIds -= id
-                    claimOwnedLocked(id, survivorMeasure.first, survivorMeasure.second, ready = false)
-                }
+                // WHAT ACTUALLY SURVIVED STILL OCCUPIES THE QUEUE, so its capture keeps its record. The
+                // record is counted, not measured (spec a3ef694f): one capture is one record, whatever
+                // survived of it.
+                chargeRetainedLocked(id, ready = false)
             }
             if (removed > 0) {
                 // NO UNCOUNTED DELETE. This path can remove bytes a user recorded, so it must be
@@ -2855,7 +2762,7 @@ class ContributionStore(
                     )
                 }
                 synchronized(lock) {
-                    ownedCharges[id] = OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = true)
+                    ownedCharges[id] = OwnedCharge(ready = true)
                 }
                 keep += entry
             }
@@ -2888,7 +2795,7 @@ class ContributionStore(
                     // RECONCILIATION adds no new charge: the capture already holds exactly one, and this
                     // only marks it ready. Adding a second charge here is what double-counted bytes and
                     // records for the life of the entry.
-                    ownedCharges.getOrPut(id) { OwnedCharge(it.audioBytes, it.metadataBytes, ready = false) }
+                    ownedCharges.getOrPut(id) { OwnedCharge(ready = false) }
                         .ready = true
                 } ?: run {
                     preparedIds.remove(id)
@@ -2903,7 +2810,7 @@ class ContributionStore(
             keep.forEach {
                 // Readiness on the SINGLE existing charge; a missing charge is created once, never added to.
                 val charge = ownedCharges.getOrPut(it.captureId) {
-                    OwnedCharge(it.audioBytes, it.metadataBytes, ready = false)
+                    OwnedCharge(ready = false)
                 }
                 // Restore the durable retry boundary: a restart must not shorten a scheduled backoff
                 // or a received server minimum by "forgetting" them.
@@ -2978,10 +2885,6 @@ class ContributionStore(
         val expiredNow = expireOlderThanGuarded()
         keep.removeAll { it.captureId in expiredNow.toSet() }
         coverageEstablished = true
-        // If marker discovery failed, the hold is set: recovery must not hand its caller ready entries
-        // either - readyEntries() withholding them is not enough when the caller consumes this list
-        // directly (reviewer f4436ced).
-        if (markerCoverageUnknown) return emptyList()
         return keep.sortedBy { it.createdAtMs }
     }
 
@@ -3175,18 +3078,11 @@ class ContributionStore(
     // here, so a caller cannot silently omit the accounting step (reviewer 4537e0fe). Three earlier
     // rounds each found a different caller that had: a fresh store's withheld entries, expiry/deletion,
     // and disk reload. One transition, one place to be correct.
-    private fun claimOwnedLocked(captureId: String, audioBytes: Long, metadataBytes: Int, ready: Boolean) {
+    private fun claimOwnedLocked(captureId: String, ready: Boolean) {
         val existing = ownedCharges[captureId]
         if (existing == null) {
-            ownedCharges[captureId] = OwnedCharge(audioBytes, metadataBytes, ready)
+            ownedCharges[captureId] = OwnedCharge(ready)
         } else {
-            // NEVER MOVE THE CHARGE DOWN, and never keep first-seen sizes as authoritative. The debris
-            // sweep visits files individually, so claiming the WAV first (metadata 0) and the metadata
-            // later used to leave its size uncounted forever. Raising to the larger observation keeps
-            // the bound conservative; a caller that knows the true footprint passes it directly and
-            // replaces this anyway.
-            existing.audioBytes = maxOf(existing.audioBytes, audioBytes)
-            existing.metadataBytes = maxOf(existing.metadataBytes, metadataBytes)
             existing.ready = ready
         }
     }
@@ -3280,32 +3176,27 @@ class ContributionStore(
                 )
             } catch (missing: java.nio.file.NoSuchFileException) {
                 // No marker directory at all: coverage is trivially complete.
-                markerCoverageUnknown = false
                 return
             } catch (failure: Exception) {
                 // ANY other stat failure - IOException, SecurityException, a runtime failure thrown by the
-                // filesystem layer - is neither absence nor coverage: hold, count, defer. Normalized like
-                // the directory iterator rather than escaping uncaught (reviewer 6cbb4efa).
-                markerCoverageUnknown = true
-                measurementFailures++
+                // filesystem layer - is neither absence nor coverage: defer. Normalized like the directory
+                // iterator rather than escaping uncaught (reviewer 6cbb4efa). The intent stays on disk and
+                // a later sweep retries it; capacity counting is unaffected (spec a3ef694f).
+                Timber.tag(QUEUE_TAG).i("voice-upload markers: unreadable reason=stat-failed")
                 return
             }
             if (!attributes.isDirectory) {
-                // A file where the marker directory belongs is corrupted state, not an empty set: hold,
-                // refuse to act on it, and record the degradation.
-                markerCoverageUnknown = true
-                measurementFailures++
+                // A file where the marker directory belongs is corrupted state, not an empty set: refuse to
+                // act on it and leave the intents for a later sweep.
+                Timber.tag(QUEUE_TAG).i("voice-upload markers: unreadable reason=not-a-directory")
                 return
             }
             val ids = try {
                 boundedDirectoryListing(markerDir).map { it.name }
             } catch (unknown: MeasurementError) {
                 // FAILURE IS NOT ABSENCE: the retry is deferred - no marker is acted on from partial
-                // knowledge, every recorded intent stays on disk and is retried by a later sweep - and
-                // per spec 896632f4 the unknown coverage holds admission AND serving/attempt until a
-                // later sweep enumerates fully and reconciles the intents.
-                markerCoverageUnknown = true
-                measurementFailures++
+                // knowledge, and every recorded intent stays on disk to be retried by a later sweep.
+                Timber.tag(QUEUE_TAG).i("voice-upload markers: unreadable reason=listing-failed")
                 return
             }
             for (id in ids) {
@@ -3330,16 +3221,10 @@ class ContributionStore(
                         "voice-upload remove: capture=%s reason=disqualified-cleaned-up",
                         id,
                     )
-                    // A CONFIRMED removal clears the unknown state too: the capture is gone, so it no
-                    // longer holds accounting admission must refuse over (reviewer c66fda06).
-                    unmeasuredIds -= id
                 } else {
                     chargeRetainedLocked(id, ready = false)
                 }
             }
-            // Bounded marker discovery succeeded and every enumerated intent was reconciled - the pass
-            // ran to completion, so the hold lifts (spec 896632f4).
-            markerCoverageUnknown = false
         }
     }
 
@@ -3388,9 +3273,8 @@ class ContributionStore(
             // Only now is the disposal itself complete; the marker goes last so intent survives a crash.
             disqualificationMarker(id).delete()
             ownedCharges.remove(id)
-            unmeasuredIds -= id
         } else {
-            // Residual bytes stay OWNED and CHARGED; the capture is not ready, and a later cleanup retries.
+            // Residual files stay OWNED and COUNTED; the capture is not ready, and a later cleanup retries.
             chargeRetainedLocked(id, ready = false)
         }
         // UNLINK ACCOUNTING (reviewer 7c2f30e3): a deletion may have removed the file of a capture whose
@@ -3419,170 +3303,14 @@ class ContributionStore(
     // the failure that distinguishes "absent" from "unreadable" and returns false for both, so it would
     // turn an unreadable path - or a dangling symlink - into a measured zero (reviewer c66fda06).
     //
-    // [optional] says whether a genuinely missing path means zero. Only a TOP-LEVEL artifact the capture
-    // may simply never have written is optional; a child that was already enumerated by its parent is not,
-    // because it was seen and then could not be read.
-    private fun measuredPathBytes(
-        path: File,
-        budget: MeasurementBudget,
-        depth: Int = 0,
-        optional: Boolean = true,
-    ): Long {
-        val attributes = pathAttributes(path, optional)
-            ?: return 0L // genuinely absent, and absence is allowed to mean zero here
-        return when {
-            attributes.isRegularFile -> attributes.size()
-
-            // Depth is threaded through: passing 0 on every call made the bound unreachable.
-            attributes.isDirectory -> measuredDirectoryBytes(path, depth = depth, budget = budget)
-
-            // Symlinks and devices are rejected, not followed: following them would let one capture's
-            // apparent footprint point anywhere on the filesystem.
-            else -> throw MeasurementError("unsupported entry type: $path")
-        }
-    }
-
-    // no-follow stat. Missing is reported as null ONLY when the caller says the path is optional; every
-    // other failure (permissions, I/O, a dangling symlink) is MeasurementError, i.e. unknown accounting.
-    private fun pathAttributes(path: File, optional: Boolean): java.nio.file.attribute.BasicFileAttributes? = try {
-        java.nio.file.Files.readAttributes(
-            path.toPath(),
-            java.nio.file.attribute.BasicFileAttributes::class.java,
-            java.nio.file.LinkOption.NOFOLLOW_LINKS,
-        )
-    } catch (missing: java.nio.file.NoSuchFileException) {
-        if (optional) {
-            null
-        } else {
-            // The parent listed this name and it is gone now: that is a failure to account, not an absence.
-            throw MeasurementError("enumerated child vanished: $path")
-        }
-    } catch (failure: java.io.IOException) {
-        throw MeasurementError("unreadable path $path: ${failure.message}")
-    }
-
-    private fun measuredDirectoryBytes(directory: File, depth: Int, budget: MeasurementBudget): Long {
-        if (depth >= MEASURE_MAX_DEPTH) throw MeasurementError("subtree deeper than $MEASURE_MAX_DEPTH")
-        // A real lazy stream. `list()` and `listFiles()` both allocate the WHOLE directory eagerly, so a
-        // budget checked after either has already paid the cost the bound exists to prevent.
-        // The WHOLE lifetime is wrapped, not just the open: iteration can throw
-        // DirectoryIteratorException and close can throw IOException, and either would escape as a raw
-        // runtime/IO failure instead of becoming unknown accounting (reviewer e4c9a80d).
-        var total = 0L
-        var yielded = 0
-        var yieldedCount = 0
-        try {
-            java.nio.file.Files.newDirectoryStream(directory.toPath()).use { stream ->
-                for (child in stream) {
-                    if (!budget.consume()) throw MeasurementError("traversal exceeds $MEASURE_MAX_ENTRIES entries")
-                    // Injected AFTER a child was yielded: proves the failure is normalized mid-iteration.
-                    hooks.onMeasurementEntry?.invoke(yielded++)
-                    yieldedCount = yielded
-                    total = checkedAdd(
-                        total,
-                        measuredPathBytes(
-                            child.toFile(),
-                            budget,
-                            depth + 1,
-                            optional = false, // enumerated: it existed a moment ago
-                        ),
-                    )
-                }
-            }
-        } catch (unknown: MeasurementError) {
-            throw unknown
-        } catch (failure: java.io.IOException) {
-            // Covers open, per-entry iteration and close, including DirectoryIteratorException.
-            throw MeasurementError("unreadable directory $directory: ${failure.message}")
-        } catch (failure: RuntimeException) {
-            // Anything else raised while iterating or closing - including an injected fault after a child
-            // was yielded - normalizes to unknown accounting rather than escaping as a raw failure.
-            throw MeasurementError("measurement failed after $yieldedCount entries in $directory: ${failure.message}")
-        }
-        return total
-    }
-
-    // Checked accumulation: a wrapped sum is a SMALLER charge, i.e. an understated one. Refuse instead.
-    private fun checkedAdd(left: Long, right: Long): Long = try {
-        Math.addExact(left, right)
-    } catch (overflow: ArithmeticException) {
-        throw MeasurementError("footprint overflows: $left + $right")
-    }
-
-    // ONE shared budget for a whole measurement, so the bound is on the traversal and not on each call.
-    private class MeasurementBudget(private var remaining: Int) {
-        fun consume(): Boolean = --remaining >= 0
-    }
-
-    private fun retainedFootprintLocked(id: String): Pair<Long, Int> {
-        // Deliberately not wrapped in runCatching: a failure must reach chargeRetainedLocked, which marks
-        // the capture unmeasured and refuses admission. Substituting a guess here would hide the failure.
-        val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
-        // Top-level artifacts: a capture may legitimately never have written any one of them, so absence
-        // is a real zero here. Everything below them is enumerated and must account for itself.
-        val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"), budget, optional = true)
-        var rest = 0L
-        for (suffix in SIDECAR_SUFFIXES) {
-            rest = checkedAdd(rest, measuredPathBytes(File(dir, "$id$suffix"), budget, optional = true))
-        }
-        rest = checkedAdd(rest, measuredPathBytes(disqualificationMarker(id), budget, optional = true))
-        // No saturating clamp. `coerceIn(0, Int.MAX_VALUE)` made an oversized residue look SMALLER than it
-        // is - an understated charge is worse than a refused one (reviewer e4c9a80d). A rest figure that
-        // does not fit the metadata channel is unrepresentable, so it becomes unknown accounting.
-        if (rest < 0L || rest > Int.MAX_VALUE.toLong()) {
-            throw MeasurementError("sidecar footprint unrepresentable: $rest")
-        }
-        return audio to rest.toInt()
-    }
-
-    // Captures whose retained footprint could not be measured. While ANY exist the true owner usage is
-    // UNKNOWN, so admission is refused: no per-capture worst case bounds arbitrary retained debris, and a
-    // capture limit that happens to be small is not a queue-wide guarantee (reviewer e6eeabda, 7340fe2d).
-    private val unmeasuredIds = mutableSetOf<String>()
-
-    private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty() || rootEnumerationUnknown || markerCoverageUnknown
-
-    fun unknownFootprintForTest(): Boolean = synchronized(lock) { unknownFootprintLocked() }
-
-    /**
-     * Test seam: mark ONE capture's footprint unmeasured, exactly as a failed measurement does at
-     * `unmeasuredIds += id`. Used by the controls for spec a7f6ce81, where the queue must be loaded
-     * before the mark can be injected (a mark set before recovery is cleared by recovery itself).
-     */
-    fun markUnmeasuredForTest(captureId: String) = synchronized(lock) { unmeasuredIds += captureId }
-
-    fun rootUnknownForTest(): Boolean = synchronized(lock) { rootEnumerationUnknown }
-
-    fun unknownBreakdownForTest(): String = synchronized(lock) {
-        "unmeasured=$unmeasuredIds rootUnknown=$rootEnumerationUnknown markerUnknown=$markerCoverageUnknown"
-    }
-
-    // How many charges had to fall back to the placeholder. Exposed for tests and diagnostics.
-    var measurementFailures: Long = 0L
-        private set
-
-    // The ONE production charge transition. Every caller that owns retained bytes goes through here, so no
-    // entry path can charge a narrower footprint than another (reviewer cb212295 finding 3).
+    // The ONE production charge transition. Every caller that owns retained files goes through here, so
+    // no entry path can claim a different amount than another (reviewer cb212295 finding 3).
     //
-    // On a measurement failure the capture is recorded as UNMEASURED and charged the whole queue budget as
-    // a placeholder, but the placeholder is not what protects the queue - the refusal in roomLocked is.
-    // The capture is retained and NOT served, and each sweep retries the measurement, which is the only
-    // way the unknown state clears.
+    // NO MEASUREMENT (spec a3ef694f): a capture is one RECORD whether it is 4 KB or 40 MB, so there is
+    // nothing to count and nothing that can fail. Readiness is the caller's verdict and nothing else -
+    // an entry is never withheld because an accounting step could not complete.
     private fun chargeRetainedLocked(id: String, ready: Boolean) {
-        val measurement = try {
-            retainedFootprintLocked(id).also { unmeasuredIds -= id }
-        } catch (failure: MeasurementError) {
-            measurementFailures++
-            unmeasuredIds += id
-            // A SMALL placeholder, not the whole queue: the unknown state above is what refuses admission,
-            // and a giant placeholder would ALSO trip the byte check, hiding whether the refusal rule works
-            // at all (it masked the mutant in testing). The placeholder only exists so this capture is not
-            // reported as zero bytes; it is not the mechanism that protects the queue.
-            0L to 0
-        }
-        // An unmeasured capture is retained, never served: readiness is only ever set from a measurement
-        // that succeeded.
-        claimOwnedLocked(id, measurement.first, measurement.second, ready && id !in unmeasuredIds)
+        claimOwnedLocked(id, ready)
     }
 
     /**
@@ -3691,15 +3419,9 @@ class ContributionStore(
     private fun reloadUnownedFromDisk() {
         // Under lock: adopt on-disk entries this instance did not prepare (restart simulation);
         // never resurrect ids it explicitly dropped/purged.
-        val files = try {
-            boundedRootListing()
-        } catch (unknown: MeasurementError) {
-            // Adopting from a partially-known listing could resurrect entries a full listing would have
-            // swept, or miss bytes it would have charged. Unknown accounting refuses admission instead.
-            rootEnumerationUnknown = true
-            measurementFailures++
-            return
-        }
+        // Adopting from a partially-known listing could resurrect entries a full listing would have
+        // swept, so an unreadable listing defers the reload instead of guessing.
+        val files = boundedRootListingOrNull() ?: return
         // Keyed off AUDIO, not the ready marker. A partially-failed deletion can remove the marker while
         // leaving the audio behind; keying off the marker made those residual bytes invisible to a
         // restarted store, so they occupied the queue without being charged anywhere. Anything holding
@@ -3758,15 +3480,14 @@ class ContributionStore(
      */
     private val ownedCharges = LinkedHashMap<String, OwnedCharge>()
 
-    /** One owner's charge for one immutable capture. Readiness is state, not identity. */
+    /**
+     * One owner's claim on one capture. It records EXISTENCE and READINESS only (spec a3ef694f): capacity
+     * is the number of records, so there are no byte fields to keep in sync or to fail to measure.
+     */
     private class OwnedCharge(
-        var audioBytes: Long,
-        var metadataBytes: Int,
         // True once the capture may be handed back as ready; false while it is uncertain.
         var ready: Boolean,
-    ) {
-        val bytes: Long get() = audioBytes + metadataBytes
-    }
+    )
     private val reservations = LinkedHashMap<String, Long>()
 
     /** Attempt ids with staging files owned by THIS instance, so purge cleanup stays scoped. */
@@ -3817,18 +3538,19 @@ class ContributionStore(
     // merely the accounting mutations.
     fun ownerLockForTest(): Any = lock
 
-    // Test seam: total bytes currently charged to this owner.
-    fun ownedBytesForTest(): Long = synchronized(lock) { ownerBytesLocked() }
+    // Test seam: the records currently occupied by this owner (durable entries + live reservations).
+    fun ownedRecordsForTest(): Int = synchronized(lock) { ownerRecordsLocked() }
+
+    /** The record bound admission enforces (spec a3ef694f). */
+    fun recordLimit(): Int = limits.maxQueueRecords
 
     fun ownedIdsForTest(): Set<String> = synchronized(lock) { ownedCharges.keys.toSet() }
 
-    // Lock-free on purpose: the held-monitor control needs to observe the charge while holding the monitor.
-    fun ownedChargesSnapshotForTest(): Map<String, Long> = ownedCharges.mapValues { it.value.audioBytes }
+    // Lock-free on purpose: the held-monitor control needs to observe the claim while holding the monitor.
+    fun ownedIdsSnapshotForTest(): Set<String> = ownedCharges.keys.toSet()
 
-    // Test seam: the exact bytes currently charged for a capture, so a control can assert the MEASURED
-    // charge directly instead of inferring it through an admission probe whose budget has to straddle an
-    // (often tiny) sidecar band.
-    fun chargedBytesForTest(captureId: String): Long = synchronized(lock) { ownedCharges[captureId]?.bytes ?: 0L }
+    // Test seam: whether one capture currently holds an owner record.
+    fun isChargedForTest(captureId: String): Boolean = synchronized(lock) { captureId in ownedCharges }
 
     // Separate barrier for the DURABLE DISPOSAL INTENT record. Production uses the same real fsync; it is
     // a distinct injection point so a fault aimed at the queue cannot silently disable intent recording,

@@ -358,10 +358,24 @@ class ContributionStore(
      * `.wav.part` are NOT records yet, and no byte total is involved - a byte total could be made
      * "unknown" by a single unreadable file and would then freeze the whole feature.
      */
-    private fun rootRecordCountLocked(): Int = dir.listFiles()?.count { f ->
-        f.name.endsWith(SUFFIX_WAV) &&
-            f.name.removeSuffix(SUFFIX_WAV).let { id -> id.matches(UUID_RE) && File(dir, "$id$SUFFIX_META").isFile }
-    } ?: 0
+    private fun rootRecordCountLocked(): Int = // DISTINCT capture ids that still retain AUDIO or its sidecar, not merely complete pairs.
+        //
+        // A failed deletion leaves a partial entry behind (one file deleted, others not), and that residue
+        // still occupies the filesystem, so it must still occupy a slot - otherwise repeated failed deletes
+        // could accumulate unbounded audio under a 32-record bound. Counting only complete pairs would let
+        // such residue fall out of the count entirely.
+        //
+        // Stray files remain excluded because they never spell an entry name: staging writes are prefixed
+        // with their attempt (`gen<attemptId>...`) or end in `.part`, so neither reaches here. A `.part`
+        // is not audio yet; a UUID-named `.recording.wav` or `.metadata.json` is.
+        dir.listFiles()?.mapNotNullTo(mutableSetOf()) { f -> retainedEntryId(f.name) }?.size ?: 0
+
+    /** The capture id [name] retains, or null when the file is not part of any entry. */
+    private fun retainedEntryId(name: String): String? = when {
+        name.endsWith(SUFFIX_WAV) -> name.removeSuffix(SUFFIX_WAV).takeIf { it.matches(UUID_RE) }
+        name.endsWith(SUFFIX_META) -> name.removeSuffix(SUFFIX_META).takeIf { it.matches(UUID_RE) }
+        else -> null
+    }
 
     /** Claim one record atomically; returns null when the queue cannot hold another entry. */
     private fun reserve(sampleCount: Long, projected: Long): Admission? {
@@ -923,12 +937,17 @@ class ContributionStore(
     private fun liveReservationBytesLocked(): Long = reservations.values.sumOf { it }
 
     /**
-     * THE single definition of what this owner already occupies, in RECORDS (spec a3ef694f). Both
-     * admission paths call it, so they cannot disagree: owner charges (ready AND uncertain alike - the
-     * files are on disk either way) plus any live reservation. [exclude] drops one reservation, for
-     * re-checking an attempt that already holds it.
+     * THE single definition of what this owner already occupies, in RECORDS (spec a3ef694f, reviewer
+     * 5e92bba3 finding 1). Both admission paths call it, so they cannot disagree.
+     *
+     * Capacity is the COMPLETE-ENTRY COUNT ON DISK, never an in-memory tally. The map is bookkeeping
+     * about work in flight; disk is the truth about what is retained. A tally that disagrees with disk
+     * is the defect this whole change exists to remove: stale or debris charges would fill the queue
+     * while real files went uncounted. The ONLY memory added is live in-flight reservations, which
+     * hold a slot for a capture that has been admitted but has not yet written its `.meta`. [exclude]
+     * drops one reservation, for re-checking an attempt that already holds it.
      */
-    private fun ownerRecordsLocked(exclude: String? = null): Int = ownedCharges.size + reservations.keys.count { it != exclude }
+    private fun ownerRecordsLocked(exclude: String? = null): Int = rootRecordCountLocked() + reservations.keys.count { it != exclude }
 
     /** Re-check the record budget at publication time (a purge/expiry may have moved it since admission). */
     private fun roomForPublicationLocked(admission: Admission): Boolean = ownerRecordsLocked(exclude = admission.id) < limits.maxQueueRecords
@@ -1047,7 +1066,7 @@ class ContributionStore(
     }
 
     /**
-     * Record budget test against durable entries PLUS live reservations.
+     * Record budget test against the durable entries on disk PLUS live reservations.
      */
     private fun roomLocked(): Boolean = ownerRecordsLocked() < limits.maxQueueRecords
 
@@ -1707,53 +1726,6 @@ class ContributionStore(
     /** The capture is held when ANY of its durable records is in an unresolved state. */
     private fun heldUncertainLocked(captureId: String): Boolean = captureId in retryBoundaryUncertain || captureId in attemptsRecordUncertain
 
-    // THE LAST TRANSPORT OUTCOME PER CAPTURE (spec 219d3bb6 / 7087cf00), in memory only.
-    //
-    // A 409 `capture_conflict` is normally a terminal conviction, but it is NOT one when it follows a
-    // 5xx for the same capture: the server disposes a reservation after its OWN failure, so the conflict
-    // may describe a reservation this client is being charged for but the server never durably settled.
-    // Deleting on that evidence would destroy a recording a transient fault refused. The journal lets the
-    // resolver see what came immediately before the 409.
-    private val lastServerError = mutableSetOf<String>()
-
-    /** Whether the outcome recorded immediately before now was a server (5xx) failure for [captureId]. */
-    fun lastOutcomeWasServerError(captureId: String): Boolean = synchronized(lock) { captureId in lastServerError }
-
-    /**
-     * Record the classification of ONE transport outcome for [captureId]. Only [serverError] matters to
-     * the 409 hold; every other outcome clears the mark, so a stale 5xx can never excuse a later conflict.
-     */
-    fun recordTransportOutcome(captureId: String, serverError: Boolean) = synchronized(lock) {
-        if (serverError) lastServerError += captureId else lastServerError -= captureId
-    }
-
-    /**
-     * HOLD a capture whose 409 followed a server failure (spec 219d3bb6 / 7087cf00): retain its record,
-     * withhold it from serving and from pickup, and count it. Returns false when this generation no longer
-     * owns the queue, in which case nothing changes.
-     *
-     * The 5xx mark is CONSUMED: a single server fault excuses only the one conflict that follows it, so the
-     * entry cannot be held again on the same evidence.
-     */
-    fun holdAfterServerErrorConflict(token: AdmittedAttempt): Boolean = withLeaseResult(false) {
-        synchronized(lock) {
-            if (!ownership.isValidUnderLock(token.generation)) {
-                false
-            } else {
-                lastServerError -= token.captureId
-                // Reuse the existing withheld state: a held capture is retained, NOT served, and NOT picked
-                // up (heldUncertainLocked gates readyEntries and retryEligibleLocked).
-                retryBoundaryUncertain += token.captureId
-                dropCounterOnly(TerminalReason.CONFLICT_AFTER_SERVER_ERROR_HELD)
-                Timber.tag(QUEUE_TAG).i(
-                    "voice-upload hold: capture=%s reason=conflict-after-server-error held=true",
-                    token.captureId,
-                )
-                true
-            }
-        }
-    }
-
     /**
      * ONE atomic/durable protocol for every writer of a sidecar record: temp file, contents sync, atomic
      * rename, record sync, directory sync. writeText alone could truncate a previously good record
@@ -2316,9 +2288,6 @@ class ContributionStore(
         ATTEMPTS_EXHAUSTED,
         QUEUE_AGE_EXPIRED,
         SERVER_TERMINAL,
-
-        /** A 409 that followed a server 5xx: HELD, not deleted (spec 219d3bb6 / 7087cf00). */
-        CONFLICT_AFTER_SERVER_ERROR_HELD,
         INVALID_ON_RECOVERY,
         UPLOAD_ACCEPTED,
         PERMANENT_REFUSAL,
@@ -3551,6 +3520,12 @@ class ContributionStore(
 
     // Test seam: whether one capture currently holds an owner record.
     fun isChargedForTest(captureId: String): Boolean = synchronized(lock) { captureId in ownedCharges }
+
+    /** Test seam: charge a capture with NO file behind it, to simulate a stale in-memory tally. */
+    fun chargeRetainedForTest(captureId: String) = synchronized(lock) { claimOwnedLocked(captureId, ready = false) }
+
+    /** Test seam: how many captures the in-memory tally believes are retained (capacity index ONLY). */
+    fun chargedCountForTest(): Int = synchronized(lock) { ownedCharges.size }
 
     // Separate barrier for the DURABLE DISPOSAL INTENT record. Production uses the same real fsync; it is
     // a distinct injection point so a fault aimed at the queue cannot silently disable intent recording,

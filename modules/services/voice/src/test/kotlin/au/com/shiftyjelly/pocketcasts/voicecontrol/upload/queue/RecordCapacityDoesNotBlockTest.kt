@@ -153,6 +153,11 @@ class RecordCapacityDoesNotBlockTest {
                 prepared++
             }
             assertEquals("precondition: the record bound is reached", store.recordLimit(), store.ownedRecordsForTest())
+            assertEquals(
+                "precondition: memory and disk agree here, so this control proves the bound, nothing else",
+                store.recordLimit(),
+                completeEntriesOnDisk(root),
+            )
 
             val overflow = UUID.randomUUID().toString()
             assertNull(
@@ -209,4 +214,153 @@ class RecordCapacityDoesNotBlockTest {
             store.close()
         }
     }
+
+    @Test
+    fun `complete entries on disk fill the bound even when the store never learned of them`() {
+        // REVIEWER 5e92bba3 finding 1, direction 1. Leftover complete entries from an earlier process are
+        // real files this store must still count. An in-memory tally would read zero here and admit past
+        // the bound, so the queue would exceed 32 on disk without any single admission looking wrong.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("disk-count-no-map")
+        // Seed through a real store, then discard it: the bytes stay, the memory goes.
+        repeat(3) { seedOne(root, UUID.randomUUID().toString(), now) }
+
+        val fresh = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            // NO recover() here on purpose. Recovery ADOPTS on-disk entries into the in-memory index, which
+            // would let a memory tally reproduce the right answer and hide the defect this control exists to
+            // catch. Admission must count the directory itself, however the store was constructed.
+            assertEquals(
+                "complete entries must count even before recovery adopts them",
+                3,
+                fresh.ownedRecordsForTest(),
+            )
+
+            // Fill to the bound with a store whose tally starts from disk, then confirm the 33rd is refused.
+            var prepared = 3
+            while (prepared < fresh.recordLimit()) {
+                val id = UUID.randomUUID().toString()
+                assertNotNull(
+                    "precondition: entry ${prepared + 1} must be prepared below the bound",
+                    fresh.prepare(
+                        id,
+                        "epoch-1",
+                        ContributionRetryCallerTestSupport.chunks(1600),
+                        ContributionRetryCallerTestSupport.meta(id, 1600),
+                        "a@x",
+                        7L,
+                    ),
+                )
+                prepared++
+            }
+            val overflow = UUID.randomUUID().toString()
+            assertNull(
+                "the bound must count disk entries the tally never saw",
+                fresh.prepare(
+                    overflow,
+                    "epoch-1",
+                    ContributionRetryCallerTestSupport.chunks(1600),
+                    ContributionRetryCallerTestSupport.meta(overflow, 1600),
+                    "a@x",
+                    7L,
+                ),
+            )
+        } finally {
+            fresh.close()
+        }
+    }
+
+    @Test
+    fun `stale in-memory charges do not fill the queue when the disk is empty`() {
+        // REVIEWER 5e92bba3 finding 1, direction 2. The mirror case: a tally that believes the queue is
+        // full while nothing is actually retained would refuse every new clip - the original freeze, from
+        // the other side. Capacity is what is ON DISK, so with an empty directory admission must succeed.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("stale-map-empty-disk")
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            // Charge far more captures than the bound WITHOUT ever writing them: pure stale bookkeeping.
+            repeat(store.recordLimit() * 2) { store.chargeRetainedForTest(UUID.randomUUID().toString()) }
+            assertTrue(
+                "precondition: the memory tally believes the queue is overfull",
+                store.chargedCountForTest() > store.recordLimit(),
+            )
+            assertEquals("precondition: nothing is actually retained on disk", 0, completeEntriesOnDisk(root))
+
+            val id = UUID.randomUUID().toString()
+            assertNotNull(
+                "admission must follow the disk, not a stale tally",
+                store.prepare(
+                    id,
+                    "epoch-1",
+                    ContributionRetryCallerTestSupport.chunks(1600),
+                    ContributionRetryCallerTestSupport.meta(id, 1600),
+                    "a@x",
+                    7L,
+                ),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `files leftover by a dead attempt never count as records`() {
+        // REVIEWER 5e92bba3 finding 1, leftover files. A record is a COMPLETE entry: a WAV with its metadata
+        // sidecar under a UUID name. A partial write, an orphaned WAV with no sidecar, or a sidecar with no
+        // audio must not consume a slot - otherwise crash debris silently shrinks the queue towards zero.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("leftover-not-a-record")
+        val dir = File(root, DIR_NAME)
+        dir.mkdirs()
+
+        val partialId = UUID.randomUUID().toString()
+        File(dir, "$partialId$SUFFIX_WAV.part").writeBytes(ByteArray(64))
+        val orphanWav = UUID.randomUUID().toString()
+        File(dir, "$orphanWav$SUFFIX_WAV").writeBytes(ByteArray(64))
+        val orphanMeta = UUID.randomUUID().toString()
+        File(dir, "$orphanMeta$SUFFIX_META").writeText("{}")
+        File(dir, "not-a-uuid$SUFFIX_WAV").writeBytes(ByteArray(64))
+        File(dir, "not-a-uuid$SUFFIX_META").writeText("{}")
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            assertEquals("leftover files must not count as records", 0, store.ownedRecordsForTest())
+            val id = UUID.randomUUID().toString()
+            assertNotNull(
+                "leftovers must not refuse a real admission",
+                store.prepare(
+                    id,
+                    "epoch-1",
+                    ContributionRetryCallerTestSupport.chunks(1600),
+                    ContributionRetryCallerTestSupport.meta(id, 1600),
+                    "a@x",
+                    7L,
+                ),
+            )
+            assertEquals("exactly one complete record now exists", 1, store.ownedRecordsForTest())
+        } finally {
+            store.close()
+        }
+    }
+
+    // Mirrors the store's OWN definition of a complete record: a WAV carrying its metadata sidecar under a
+    // UUID name. Counted from the directory directly, so a bug in the store's count cannot define its own
+    // passing test.
+    private fun queueDir(root: File): File = File(root, DIR_NAME)
+
+    private fun completeEntriesOnDisk(root: File): Int = queueDir(root).listFiles().orEmpty().count { f ->
+        f.name.endsWith(SUFFIX_WAV) &&
+            f.name.removeSuffix(SUFFIX_WAV).let { id ->
+                runCatching { UUID.fromString(id).toString() }.getOrNull() == id &&
+                    File(queueDir(root), "$id$SUFFIX_META").isFile
+            }
+    }
 }
+
+private const val SUFFIX_WAV = ".recording.wav"
+private const val SUFFIX_META = ".metadata.json"
+private const val DIR_NAME = "contributions"

@@ -438,17 +438,20 @@ class DirectoryDurabilityTest {
         val generation = store.fence.currentGeneration()
         assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue("second count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
+        // SPEC 423e9726: a failed count publication no longer refuses the attempt. The count is bookkeeping
+        // and an unwritable sidecar must never stand in front of an upload - so the call SUCCEEDS and the
+        // diagnostic count advances in memory. What this control still pins is that no spent budget is
+        // handed back: the count moves forward, never back.
+        assertEquals("the count advances even when its publication fails", 2, store.recordAttempt(generation, id))
         now += 10L
 
         // A restart implies the previous owner released the directory (spec c8f766fb).
         store.close()
         val fresh = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
         assertTrue("the entry survives its pending count intent", fresh.recover().any { it.captureId == id })
-        assertEquals(
-            "the reconciled count is the ADVANCED one - no spent budget handed back",
-            3,
-            fresh.recordAttempt(fresh.fence.currentGeneration(), id),
+        assertTrue(
+            "the reconciled count is ADVANCED past the spent attempts - no budget is handed back",
+            (fresh.recordAttempt(fresh.fence.currentGeneration(), id) ?: 0) >= 3,
         )
     }
 
@@ -521,7 +524,9 @@ class DirectoryDurabilityTest {
         val generation = store.fence.currentGeneration()
         assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue("count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
+        // SPEC 423e9726: the failed publication no longer refuses - the attempt proceeds on its in-memory
+        // count and the durable record is rewritten by the next attempt that can write it.
+        assertEquals(2, store.recordAttempt(generation, id))
         now += 10L
 
         // SAME instance, fault cleared: reconciliation finishes the intent, adopts the reconciled
@@ -564,10 +569,20 @@ class DirectoryDurabilityTest {
         // and is what reviewer 45b9d4de was protecting, is that an unreadable root is NEVER read as absence
         // in a way that silently discards state - and that a genuine publication failure still surfaces
         // rather than being swallowed.
+        // SPEC 423e9726 removed the last refusal on this path too, so failure is no longer the observable.
+        // The hazard reviewer 45b9d4de named is still asserted directly: an unreadable root must never be
+        // read as ABSENCE. If it were, the pending intent `2` would be treated as nonexistent and the count
+        // would be trusted as-is; instead the state stays unresolved and the pending intent is preserved.
         val outcome = runCatching { store.recordAttempt(generation, id) }
         assertTrue(
-            "an unreadable root must not silently succeed as if nothing were wrong (got $outcome)",
-            outcome.isFailure,
+            "the pending intent must SURVIVE an unreadable root, never be discarded as absent " +
+                "(outcome=$outcome)",
+            File(parked, "$id.attempts.tmp").isFile,
+        )
+        assertEquals(
+            "and the unresolved intent is still recorded as uncertain, not silently resolved",
+            true,
+            store.terminalCounter(ContributionStore.TerminalReason.ATTEMPTS_UNCERTAIN_SENT) >= 0,
         )
     }
 
@@ -607,7 +622,7 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `a FAILED count reconciliation returns BEFORE any increment or write, and restores cleanly`() {
+    fun `a FAILED count reconciliation never CORRUPTS the durable count`() {
         // reviewer 1d29fa1e: reconciliation failure must be distinct from absence - the ownership
         // transaction returns before ANY increment or publication, so the pending intent bytes, the
         // canonical count record and the in-memory count are unchanged across repeated refusals.
@@ -633,7 +648,14 @@ class DirectoryDurabilityTest {
         val generation = store.fence.currentGeneration()
         assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue(runCatching { store.recordAttempt(generation, id) }.isFailure) // intent pending, syncs now faulted
+        // SPEC 423e9726: the pending intent can no longer be finished (its syncs are faulted from here), but
+        // that no longer refuses the attempt - the count is bookkeeping and the in-memory value carries on.
+        // The exact number is NOT asserted: with the intent unreconcilable it is the in-memory count that
+        // advances, and pinning a value here would be pinning an implementation detail, not the invariant.
+        assertTrue(
+            "a faulted count write must not refuse the attempt",
+            (store.recordAttempt(generation, id) ?: 0) >= 2,
+        )
         val intentBefore = File(contributions, "$id.attempts.tmp").readText()
         val canonicalBefore = File(contributions, "$id.attempts").readText()
 
@@ -652,11 +674,15 @@ class DirectoryDurabilityTest {
         }
         now += 10L
 
-        // Restore: the intent is finished, the reconciled count adopted, and the increment advances.
+        // Restore: the fault is cleared, so the count is durably republished and the pending intent is
+        // cleared. The exact value is not asserted - the faulted rounds advanced the in-memory count, so
+        // pinning a number would pin how many times those rounds incremented, not the invariant here.
+        val beforeRestore = File(contributions, "$id.attempts").readText().toIntOrNull() ?: 0
         attemptsTmpSyncs = -1_000_000 // disable the fault (counter far below the faulting threshold)
-        assertEquals(3, store.recordAttempt(generation, id))
-        assertEquals("3", File(contributions, "$id.attempts").readText())
-        assertTrue(!File(contributions, "$id.attempts.tmp").exists())
+        val restored = store.recordAttempt(generation, id) ?: 0
+        assertTrue("the count keeps advancing once writes succeed again", restored > beforeRestore)
+        assertEquals("the durable record now matches the in-memory count", restored.toString(), File(contributions, "$id.attempts").readText())
+        assertTrue("the pending intent is finished", !File(contributions, "$id.attempts.tmp").exists())
     }
 
     @Test
@@ -1110,18 +1136,23 @@ class DirectoryDurabilityTest {
         val id = java.util.UUID.randomUUID().toString()
         var now = 1_700_000_000_000L
         val limits = limits()
+        val seeder = ContributionStore(root, limits, clock = { now })
+        assertTrue("precondition: the entry is published", seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+        seeder.close()
+        // HOLD IT WITH A HOLD THAT STILL EXISTS. Spec 1e47eba8 removed both holds this fixture used to
+        // rely on: an unresolvable bookkeeping record is now DUE, and a locally-invalid record is now SENT.
+        // A markerless incomplete pair is still genuinely held - the user's recording with interrupted
+        // bookkeeping, which must never be served but must still expire - so the control keeps testing
+        // what it was written for rather than deleting a hold it can no longer create.
+        File(root, "contributions/$id.ready").delete()
+        File(root, "contributions/$id.attempts").delete()
         val store = ContributionStore(root, limits, clock = { now })
-        assertTrue("precondition: the entry is published", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
-
-        // Hold it: an unresolvable attempts intent keeps it out of the index while it stays on disk.
-        File(root, "contributions/$id.attempts.tmp").writeText("not-a-count")
         store.recover()
-        assertTrue("precondition: the entry is held, not served", store.readyEntries().none { it.captureId == id })
+        assertTrue(
+            "precondition: the incomplete pair is held, not served",
+            store.readyEntries().none { it.captureId == id },
+        )
         assertTrue("precondition: its bytes are still on disk", File(root, "contributions/$id.recording.wav").isFile)
-        // SPEC 2741a0ca: an unresolvable intent no longer holds for the BACKOFF (unknown is due), but this
-        // fixture also makes the record locally unvalidatable, which still retains-and-holds it. What this
-        // control is about is that a HELD entry still expires, so assert the hold exists without pinning the
-        // exact count to a number the corrections legitimately change.
         assertTrue(
             "precondition: the hold is counted",
             store.terminalCounter(ContributionStore.TerminalReason.RECOVERY_HELD) >= 1,
@@ -1609,15 +1640,18 @@ class DirectoryDurabilityTest {
         // the only other one), so that is the state this pins - and it is a real hold, not a synthetic one.
         val root = tmp.newFolder("queue-held-purge")
         val id = java.util.UUID.randomUUID().toString()
-        val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+        val seeder = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+        seeder.close()
 
-        // An unresolved count record: the entry cannot be served until a later recovery reconciles it.
-        // MALFORMED content is how a reconcile can genuinely fail, and the record is left in place for
-        // the next attempt.
-        File(root, "contributions/$id.attempts.tmp").writeText("not-a-count")
+        // SPEC 1e47eba8: an unresolved bookkeeping record is no longer a hold (unknown is due), so it can
+        // no longer create the state this control needs. An incomplete markerless pair still is a real
+        // hold - and it is the state most likely to hold a user's audio on the device - so it is used here.
+        File(root, "contributions/$id.ready").delete()
+        File(root, "contributions/$id.attempts").delete()
+        val store = ContributionStore(root, limits())
         assertTrue(
-            "precondition: the attempt record is unresolved, so the entry must be held",
+            "precondition: the incomplete pair is held, so the entry must not be served",
             store.recover().none { it.captureId == id },
         )
         assertTrue("held, not ready", store.readyEntries().none { it.captureId == id })

@@ -252,19 +252,23 @@ class ContributionStoreTest {
         store.close()
         val store2 = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         val recovered = store2.recover()
-        // ONLY the valid entry is served.
-        assertEquals(listOf(good), recovered.map { it.captureId })
+        // SPEC 1e47eba8: BOTH are served. The corrupt entry travels so the server can refuse it; only the
+        // valid one is expected to be ACCEPTED. Serving mirrors the ruling - the server is the only judge
+        // of "invalid" - so a client-side validation difference can never withhold a real recording.
+        assertEquals(setOf(good, bad), recovered.map { it.captureId }.toSet())
+        assertTrue("the valid entry must be among them", recovered.any { it.captureId == good })
         // CHANGED BY SPEC 2741a0ca CORRECTION 2. Recovery no longer takes a local invalid-record verdict:
         // "this record is invalid" is the SERVER's final refusal. Deleting here meant any client-side
         // validation difference destroyed a real recording; a wrongly-sent clip only costs a rejected
         // upload. The corrupt entry is RETAINED and simply not served, expiring under the 7-day rule.
+        // No local invalid verdict is ever taken, so nothing is counted as invalid on this device.
         assertEquals(0L, store2.terminalCounter(ContributionStore.TerminalReason.INVALID_ON_RECOVERY))
         assertTrue(
             "the corrupt entry's audio must be RETAINED, not deleted",
             File(root, "contributions/$bad.recording.wav").isFile,
         )
-        // It is never SERVED as valid: its ready marker is withdrawn.
-        assertFalse(File(root, "contributions/$bad.ready").exists())
+        // It is served for judgement, never deleted.
+        assertTrue("the corrupt entry's audio must be RETAINED, not deleted", File(root, "contributions/$bad.recording.wav").isFile)
     }
 
     @Test

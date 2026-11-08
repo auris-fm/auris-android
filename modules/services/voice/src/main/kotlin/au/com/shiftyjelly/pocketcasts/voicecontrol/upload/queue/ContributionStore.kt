@@ -2321,12 +2321,22 @@ class ContributionStore(
                                 throw java.io.IOException("attempts record publication failed")
                             }
                             updated.attempts
-                        } catch (_: Throwable) {
-                            // Roll back only while this generation still owns the queue; after a revoke the whole
-                            // index is gone and inventing a decrement could corrupt a successor's counts.
-                            memoryEntries[captureId] = current
-                            sidecarFailure = IllegalStateException("attempts sidecar write failed")
-                            null
+                        } catch (failure: Throwable) {
+                            // AN UNWRITABLE COUNT IS NOT A REASON TO WITHHOLD THE ATTEMPT (spec 423e9726,
+                            // reviewer adbdc9b4). The count is bookkeeping: it does not decide whether this
+                            // capture may be sent, and holding it here put an unlisted gate in front of
+                            // every upload - pickup runs BEFORE the upload callback, so a disk that refuses
+                            // one sidecar write silently stopped the whole queue. The diagnostic count stays
+                            // in MEMORY (it is what the server's ledger is reconciled against anyway) and
+                            // the failure is logged and counted, so it is never silent. The durable record
+                            // is rewritten by the next attempt that can write.
+                            Timber.tag(QUEUE_TAG).i(
+                                "voice-upload attempts: count-persist-failed capture=%s reason=%s action=send",
+                                captureId,
+                                failure.message,
+                            )
+                            dropCounterOnly(TerminalReason.ATTEMPT_COUNT_UNPERSISTED_SENT)
+                            updated.attempts
                         }
                     }
                 }
@@ -2382,6 +2392,12 @@ class ContributionStore(
          * without ever being a reason to strand a recording.
          */
         ATTEMPTS_UNCERTAIN_SENT,
+
+        /**
+         * The attempt COUNT could not be persisted. The attempt proceeds and the diagnostic count lives in
+         * memory (spec 423e9726): an unwritable bookkeeping file must never stand in front of an upload.
+         */
+        ATTEMPT_COUNT_UNPERSISTED_SENT,
 
         /** A sidecar orphan removed by recovery's sweep: the entry it belonged to is gone. */
         RECOVERY_ORPHAN_SIDECAR_REMOVED,
@@ -2952,28 +2968,29 @@ class ContributionStore(
                 continue
             }
             if (entry == null) {
-                // NO LOCAL INVALID-RECORD VERDICT (spec 2741a0ca, correcting my own "kept, justified" row).
+                // NO LOCAL INVALID-RECORD VERDICT, AND NO LOCAL HOLD EITHER (spec 1e47eba8, correcting my
+                // own A11/A12/D6 row a second time).
                 //
-                // "This record is invalid" is the SERVER's final refusal, not ours. If the audio and
-                // metadata files are both present, the capture is RETAINED and can be sent: the server
-                // validates, refuses with a final status, and that deletes it through the ordinary
-                // accepted/refused path. Deleting here took the verdict locally, which means any client-side
-                // bug - a stricter hash, a sidecar written one field differently, a partially synced
-                // directory - silently destroys real recordings the user can never get back. The asymmetry
-                // decides it: a wrongly-sent clip costs a rejected upload, a wrongly-deleted clip costs the
-                // recording.
+                // "This record is invalid" is the SERVER's final refusal, not ours. My previous fix kept
+                // the verdict out of the delete but left it in a HOLD - retained, charged, withheld from
+                // upload for seven days - and that is a gate the allowed list does not contain. It also
+                // misses the point: if local validation is wrong, the clip is never sent, so it is never
+                // refused, so it is never cleaned up by the path the spec designates. The server must be the
+                // only judge, which means the clip must actually REACH it.
                 //
-                // It still must not be SERVED as if it were fine, so it is retained, charged, and held from
-                // upload until it either expires at seven days or the next recovery can validate it.
-                // WITHDRAW THE READY MARKER: the entry is retained, but it must never be presented as
-                // validated. Without this, a retained record that fails validation keeps a marker claiming
-                // it passed, and the marker is the only readiness authority for the next recovery.
-                if (File(dir, "$id$SUFFIX_READY").delete()) {
-                    dropCounterOnly(TerminalReason.RECOVERY_HELD)
-                }
-                chargeRetainedLocked(id, ready = false)
-                holdLocked(id, "record-not-locally-validated")
-                continue
+                // So a complete record that fails local checks is SERVED and SENT. The server refuses it
+                // with a final status and that deletes it through the ordinary accepted/refused path. The
+                // asymmetry still decides everything: a wrongly-sent clip costs one rejected upload, a
+                // wrongly-withheld clip costs the recording for as long as the bug exists.
+                //
+                // The local verdict is not discarded, it is DEMOTED: logged with its reason and counted, so
+                // a real integrity problem is visible on the device, and never silent.
+                Timber.tag(QUEUE_TAG).i(
+                    "voice-upload recovery: locally-unvalidated capture=%s action=send (server decides)",
+                    id,
+                )
+                chargeRetainedLocked(id, ready = true)
+                keep += servableButUnvalidatedLocked(id, wav, meta, attemptsFile, ageReset)
             } else {
                 // The entry is COMPLETE and passed every structural and checksum check, so it is
                 // servable (spec bfe91857). Re-hardening is best effort and never decides this.
@@ -3202,6 +3219,65 @@ class ContributionStore(
         } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Build a SERVABLE entry for a complete record whose local validation FAILED (spec 1e47eba8).
+     *
+     * This is deliberately NOT [validate] with its checks loosened: `validate` answers "is this record
+     * trustworthy on this device", and every one of its checks exists because a record failing it is
+     * abnormal. The question here is different — "may this be SENT", and for that the only hard
+     * requirements are the ones the transport physically needs: an id, present audio and metadata files,
+     * and an epoch. Everything else is best-effort, and anything missing falls back to a value that is
+     * SAFE TO SEND rather than a reason to withhold.
+     *
+     * The digest is the recorded one when readable, else the digest of the metadata AS IT IS NOW, so the
+     * server receives a self-consistent body and can make its own judgement. Attempts default to 0 only
+     * when the count is unreadable — the server owns the retry ledger for a record it has never accepted,
+     * and this is never used to grant a locally-spent budget.
+     */
+    private fun servableButUnvalidatedLocked(
+        id: String,
+        wav: File,
+        meta: File,
+        attemptsFile: File,
+        ageReset: AgeReset,
+    ): Entry {
+        val declared = wav.length()
+        val metaBytes = readBoundedBytes(meta, limits.maxMetadataBytes)
+        val recordedDigest = readBoundedSidecar(File(dir, "$id$SUFFIX_DIGEST"), MAX_DIGEST_SIDECAR_BYTES)
+            ?.trim()
+            ?.takeIf { HEX_SHA256.matches(it) }
+            ?: metaBytes?.let { sha256Hex(it) }
+            ?: ""
+        val parsedEpoch = metaBytes
+            ?.toString(Charsets.UTF_8)
+            ?.let { runCatching { CanonicalJson.parse(it) }.getOrNull() }
+            ?.let { if (RecordValidator.validate(it) is RecordValidator.Result.Ok) (RecordValidator.validate(it) as RecordValidator.Result.Ok).record.enrollmentEpoch else null }
+        val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
+            ?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: 0
+        val created = ageReset.overrideMs
+            ?: readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
+                ?.trim()?.toLongOrNull()?.takeIf { it > 0 }
+            ?: wav.lastModified().takeIf { it > 0 }
+            ?: System.currentTimeMillis()
+        // OWNERSHIP IS NOT A VALIDATION RESULT (reviewer f4d85031 / spec 718c043c). A present owner
+        // sidecar carries this capture's admitted identity, and dropping it here would make a sendable
+        // record UNLEASABLE - the transport refuses a null-ownership lease, so the clip would be served
+        // and then silently never sent, which is the same stranding by another route. Only a genuinely
+        // absent owner sidecar means unknown ownership.
+        val owner = if (File(dir, "$id$SUFFIX_OWNER").isFile()) runCatching { readOwnerSidecar(id) }.getOrNull() else null
+        return Entry(
+            id,
+            parsedEpoch ?: owner?.epoch.orEmpty(),
+            recordedDigest,
+            declared,
+            metaBytes?.size ?: 0,
+            attempts,
+            createdAtMs = created,
+            enrollmentAccount = owner?.account,
+            enrollmentSession = owner?.session,
+        )
     }
 
     /** Read a small sidecar with a hard byte bound; null when absent, oversized or unreadable. */

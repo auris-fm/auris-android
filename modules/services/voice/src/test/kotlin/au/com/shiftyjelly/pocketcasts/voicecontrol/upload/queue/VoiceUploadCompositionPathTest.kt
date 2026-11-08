@@ -782,13 +782,18 @@ class VoiceUploadCompositionPathTest {
             // silently destroys a real recording the user can never recover. A wrongly-sent clip costs a
             // rejected upload; a wrongly-deleted clip costs the recording. So the entry is retained and
             // simply not served by this build, and it expires under the ordinary seven-day rule.
-            assertEquals(
-                "an entry this build cannot validate must never reach the transport",
-                0,
-                hits.get(),
+            // SPEC 1e47eba8, one step further than my previous fix. I had corrected this to "retained but
+            // not served", which is still a local hold - and a hold is a gate the allowed list does not
+            // contain. A record from the previous schema must actually REACH the server so it can judge it.
+            // If this build's validation is the thing that is wrong, withholding the clip means it is never
+            // refused, never cleaned up, and the user's recording is simply lost on the device after seven
+            // days. Sending it costs one rejected request.
+            org.junit.Assert.assertTrue(
+                "an entry this build cannot validate must REACH the server so the server can judge it",
+                hits.get() >= 1,
             )
             org.junit.Assert.assertTrue(
-                "the entry must be RETAINED for the server to judge, not deleted locally",
+                "and it is never deleted locally before the server answers",
                 metaFile.exists() && java.io.File(appQueue, "$id.recording.wav").exists(),
             )
         } finally {
@@ -1042,11 +1047,19 @@ class VoiceUploadCompositionPathTest {
             // for the server to judge. Kept as a retention control so the behaviour stays pinned; the
             // all-sidecars-go invariant is still covered where a delete legitimately happens (accepted,
             // final refusal, seven days, sharing off).
-            assertEquals(0, hits.get())
+            // SPEC 1e47eba8: correction 2 no longer deletes a record this build cannot validate, so this
+            // fixture no longer produces a deletion to inspect - it now proves the opposite, that the entry
+            // is OFFERED to the server instead of being decided locally. The all-sidecars-go invariant is
+            // still covered where a delete legitimately happens (accepted by the server, final refusal,
+            // seven days, sharing off); asserting it here would be asserting a deletion that must not occur.
             org.junit.Assert.assertTrue(
-                "an entry this build cannot validate is retained, so its sidecars remain with it",
-                java.io.File(appQueue, "$id.metadata.json").exists() &&
-                    java.io.File(appQueue, "$id.recording.wav").exists(),
+                "an old-schema entry must be OFFERED to the server, not decided locally",
+                hits.get() >= 1,
+            )
+            val residue = appQueue.list()?.filter { it.startsWith(id) }.orEmpty()
+            org.junit.Assert.assertTrue(
+                "and it must be RETAINED - no local verdict, nothing deleted before the server answers (found=$residue)",
+                java.io.File(appQueue, "$id.metadata.json").exists() && java.io.File(appQueue, "$id.recording.wav").exists(),
             )
         } finally {
             aurisLive.shutdown()

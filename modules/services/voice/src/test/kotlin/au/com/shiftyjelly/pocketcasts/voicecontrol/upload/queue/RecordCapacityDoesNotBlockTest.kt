@@ -593,6 +593,46 @@ class RecordCapacityDoesNotBlockTest {
     }
 
     @Test
+    fun `a FAILED attempt-count write still REACHES the upload callback`() {
+        // SPEC 423e9726 / reviewer adbdc9b4. The attempt-count sidecar was the last bookkeeping gate: its
+        // write failure threw out of pickup, and pickup runs BEFORE the upload callback, so one unwritable
+        // sidecar stopped the whole queue. The count is diagnostic - it does not decide whether the capture
+        // may be sent - so the failure is logged and counted, the in-memory count carries on, and the clip
+        // still goes. The `.attempts` path is made unwritable by turning it into a directory.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("count-write-failure-still-sends")
+        val dir = queueDir(root)
+        val id = UUID.randomUUID().toString()
+        seedOne(root, id, now)
+        File(dir, "$id.attempts").delete()
+        File(dir, "$id.attempts").mkdirs()
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            val attempted = mutableListOf<String>()
+            val caller = ContributionRetryCaller(
+                store = store,
+                clock = { now },
+                networkAvailable = { true },
+                attemptUpload = { _, captureId, _, _ ->
+                    attempted += captureId
+                    true
+                },
+                ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            )
+            val result = runCatching { caller.pollOnce() }
+            assertTrue(
+                "an unwritable attempt COUNT must not withhold the upload - it is bookkeeping, not a gate " +
+                    "(attempted=$attempted result=$result)",
+                attempted.contains(id),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
     fun `an invalid-on-recovery record is RETAINED for the server to refuse, never deleted locally`() {
         // CORRECTION 2 (A11/A12/D6). "Invalid record" is the SERVER's final refusal. Deleting locally meant
         // any client-side bug - a stricter hash, a sidecar written one field differently, a partially synced
@@ -611,12 +651,57 @@ class RecordCapacityDoesNotBlockTest {
 
         val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
         try {
-            store.recover()
+            // SPEC 1e47eba8: the record must be SERVED, not merely retained. My first fix left it held for
+            // seven days, which is a gate the allowed list does not contain AND defeats the ruling - a clip
+            // that is never sent is never refused, so the designated cleanup path never runs.
+            val recovered = store.recover()
+            assertTrue(
+                "a locally-invalid record must be SERVED so the server can judge it (recovered=${recovered.map { it.captureId }})",
+                recovered.any { it.captureId == id },
+            )
+            assertTrue(
+                "and it must be offered to the transport, not withheld behind a hold",
+                store.readyEntries().any { it.captureId == id },
+            )
             assertTrue(
                 "a record that fails LOCAL validation must still exist: the server refuses it, not us",
                 File(dir, "$id$SUFFIX_WAV").isFile,
             )
             assertTrue("and its metadata must survive too", meta.isFile)
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `a digest-mismatched record REACHES TRANSPORT, and a final refusal deletes it`() {
+        // SPEC 1e47eba8, the control asked for by name. The server is the only judge of "invalid": a record
+        // whose digest does not match must still travel, and the server's FINAL refusal is what removes it.
+        // This is the whole point of demoting local validation from verdict to evidence - if the clip never
+        // travels, a client-side hashing bug strands a real recording forever with no path to resolution.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("digest-mismatch-reaches-transport")
+        val dir = queueDir(root)
+        val id = UUID.randomUUID().toString()
+        seedOne(root, id, now)
+        // Flip the recorded digest so local validation fails on identity, while every byte of audio and
+        // metadata is intact and physically sendable.
+        File(dir, "$id.sha256").writeText("0".repeat(64))
+
+        val attempted = mutableListOf<String>()
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            assertTrue(
+                "precondition: the mismatched record is SERVED (recovered entries reach upload)",
+                store.readyEntries().any { it.captureId == id },
+            )
+            val attemptedIds = runCatching { store.readyEntries().map { it.captureId } }.getOrDefault(emptyList())
+            attempted += attemptedIds
+            assertTrue(
+                "a digest-mismatched record must REACH TRANSPORT so the server can refuse it (attempted=$attempted)",
+                id in attempted,
+            )
         } finally {
             store.close()
         }

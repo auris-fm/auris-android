@@ -168,12 +168,15 @@ class UploadRemovalLogTest {
         // so it no longer removes the entry and there is no removal line to assert. What this test exists
         // for - that a capture failing validation is NAMED in the log with its reason, never silently
         // dropped - still holds and is asserted against the hold line it now emits instead.
+        // SPEC 1e47eba8: recovery no longer holds OR deletes - it SERVES the record so the server judges it.
+        // What must survive from this test's original intent is that the condition is never SILENT: the
+        // local verdict is logged with the capture id and an explicit "server decides", and nothing is lost.
         assertTrue(
-            "a capture that fails validation must be NAMED in the log, never silent (lines=${tree.describe()})",
-            tree.has("capture=$bad") && tree.has("reason=record-not-locally-validated"),
+            "a capture that fails local validation must be NAMED in the log, never silent (lines=${tree.describe()})",
+            tree.has("capture=$bad") && tree.has("action=send") && tree.has("locally-unvalidated"),
         )
         assertTrue(
-            "and it must be RETAINED, not removed",
+            "and it must be RETAINED and sendable, not removed",
             java.io.File(root, "contributions/$bad.recording.wav").isFile,
         )
         assertTrue(

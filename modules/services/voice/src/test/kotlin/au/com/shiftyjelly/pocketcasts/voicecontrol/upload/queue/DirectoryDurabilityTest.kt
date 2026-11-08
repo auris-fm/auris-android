@@ -497,11 +497,15 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `reconciliation through a root BEYOND the bound fails closed`() {
-        // reviewer 45b9d4de: reconciliation must use the bounded listing with its explicit failure, so
-        // an over-bound root holds the capture instead of silently reading absence.
+    fun `reconciliation through an UNREADABLE root fails closed instead of reading absence`() {
+        // reviewer 45b9d4de. The hazard is real: reconciliation decides whether a pending attempt-count
+        // intent exists, and inferring ABSENT from a listing it could not read would let the count proceed
+        // over an unresolved intent and corrupt it. But the SIZE of the root is not that hazard. It used to
+        // be simulated by an over-bound root, and since spec 2741a0ca a root's size no longer limits name
+        // resolution - presence and absence are decided for the specific name asked about. So the control
+        // now creates the condition it actually means: an unlistable root.
         var now = 10_600_000L
-        val root = tmp.newFolder("queue-count-overbound")
+        val root = tmp.newFolder("queue-count-unreadable")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
         val id = "f8f8f8f8-1111-4222-8333-444444444444"
@@ -510,15 +514,62 @@ class DirectoryDurabilityTest {
         val generation = store.fence.currentGeneration()
         assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
-        // Flooding the root past the measurement bound must turn every reconciliation UNKNOWN.
-        repeat(3000) { n ->
+
+        // Make the NAME LISTING fail while leaving the store otherwise healthy. Replacing the directory
+        // itself would fail the ownership transaction first, and the control would then pass for a reason
+        // that has nothing to do with reconciliation - exactly the theatre this file is meant to prevent.
+        // So the pending-intent name is made unresolvable: a `.tmp` intent exists, and the names cannot be
+        // enumerated because the directory is no longer listable while its entries remain.
+        File(contributions, "$id.attempts.tmp").writeText("2")
+        val parked = File(root, "contributions-parked")
+        contributions.renameTo(parked)
+        contributions.writeText("")
+        now += 10L
+
+        // The DISTINGUISHING evidence is not a null count - absence yields null too. A failed resolution
+        // must REFUSE with the intent-presence error and leave the durable count untouched; reading the root
+        // as empty instead would silently conclude "no pending intent" and advance the count.
+        val outcome = runCatching { store.recordAttempt(generation, id) }
+        val failure = outcome.exceptionOrNull()
+        assertTrue(
+            "an unreadable root must fail reconciliation CLOSED (got $outcome)",
+            outcome.isFailure && failure is IllegalStateException &&
+                failure.message == "attempts intent presence unknown",
+        )
+    }
+
+    @Test
+    fun `a LARGE root no longer blocks reconciliation`() {
+        // The counterpart, and the device-fault half: root size must never be mistaken for unreadability.
+        // Before spec 2741a0ca this same fixture made every reconciliation UNKNOWN, so the count could not
+        // advance and the capture was held - which is how the Pixel stalled.
+        var now = 10_600_000L
+        val root = tmp.newFolder("queue-count-large-root")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "a1a1a1a1-2222-4333-8444-555555555555"
+        val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+
+        val bound = ContributionStore(root, limits()).let { probe ->
+            try {
+                probe.listingEntryBoundForTest()
+            } finally {
+                probe.close()
+            }
+        }
+        repeat(bound + 1) { n ->
             File(contributions, "overflow-fill-$n.bin").writeBytes(byteArrayOf(n.toByte()))
         }
         now += 10L
 
-        assertTrue(
-            "over-bound root: attempt recording fails closed",
-            runCatching { store.recordAttempt(generation, id) }.getOrNull() == null,
+        assertEquals(
+            "a large root must not stop attempt accounting; otherwise the queue can never drain",
+            2,
+            store.recordAttempt(generation, id),
         )
     }
 
@@ -2141,11 +2192,18 @@ class DirectoryDurabilityTest {
             store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
         )
 
-        // Overflow the QUEUE ROOT: recovery's root discovery fails -> rootEnumerationUnknown.
-        (0..512).forEach { i ->
-            File(contributions, "gen\$h.%d.someid.recording.wav.part".format(i)).writeBytes(ByteArray(4))
-        }
+        // Make the pending attempt-count intent genuinely unresolvable, which is the condition this control
+        // is about. An over-large root no longer produces it - discovery has no traversal bound since spec
+        // 2741a0ca - so the fixture creates the intent state directly: a `.tmp` intent present while the
+        // names are NOT listable. Presence cannot be decided from a listing that failed, so resolution
+        // reports "attempts intent presence unknown" rather than guessing absence.
+        File(contributions, "$id.attempts.tmp").writeText("1")
         store.recover()
+        // Make the root genuinely unlistable: replace the queue directory with a regular file. `list()`
+        // then returns null, which is the exact state `visibleNamesLocked` reports as unknown.
+        val parked = File(root, "contributions-parked")
+        contributions.renameTo(parked)
+        contributions.writeText("")
 
         // SPEC a7f6ce81 RULING: attempt accounting must NOT be blocked by the unknown coverage on its
         // own account. What still refuses here is a DIFFERENT and legitimate condition: the candidate
@@ -2177,8 +2235,9 @@ class DirectoryDurabilityTest {
         val markerDir = File(root, "disqualified")
         assertTrue("precondition: an intent marker exists", markerDir.isDirectory)
 
-        // Push the marker directory past its enumeration bound with inert entries.
-        val extra = (0..512).map { i ->
+        // Push the marker directory past ITS OWN enumeration bound with inert entries (the marker bound is
+        // separate from the queue root's: one file per withdrawn capture, not ten per record).
+        val extra = (0..1100).map { i ->
             File(markerDir, "infl-%04d".format(i)).apply { writeBytes("disqualified".toByteArray()) }
         }
 
@@ -2213,17 +2272,22 @@ class DirectoryDurabilityTest {
         assertTrue("precondition: prepared ready", prepared != null)
         assertTrue("precondition: served", store.readyEntries().isNotEmpty())
 
-        // Push the root past its enumeration bound: recovery fails, and the entry must stop being served.
+        // CHANGED BY SPEC 2741a0ca / reviewer a4a6b1. This used to push the root past its enumeration bound
+        // and require the entry to STOP being served. That refusal was the device defect: an over-bound
+        // directory served nothing, so nothing drained and the queue could never fall back under the bound.
+        // Recovery no longer consults a traversal bound for DISCOVERY at all, so an over-bound root now
+        // serves normally - asserted here - and the sweep decision belongs to genuine unreadability, which
+        // the sibling control `a queue root beyond its entry bound defers sweeps` covers.
         val debris = (0..512).map { i ->
             File(contributions, "gen\$f.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(4)) }
         }
         store.recover()
         assertTrue(
-            "the destructive sweep must be deferred on a failed listing",
-            debris.all { it.exists() },
+            "recovery never refuses to serve over a large root (spec 2741a0ca): nothing would ever drain",
+            store.readyEntries().any { it.captureId == id },
         )
 
-        // A later recovery that enumerates successfully restores eligibility.
+        // A later recovery still serves it.
         debris.forEach { it.delete() }
         store.recover()
         assertTrue(
@@ -2240,7 +2304,14 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-expire-bypass")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
-        val debris = (0..512).map { i ->
+        val bound = ContributionStore(root, limits()).let { probe ->
+            try {
+                probe.listingEntryBoundForTest()
+            } finally {
+                probe.close()
+            }
+        }
+        val debris = (0..bound).map { i ->
             File(contributions, "gen\$g.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(4)) }
         }
 
@@ -2264,8 +2335,15 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-root-bound")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
-        // Bound + 1 .part files: every one of them is debris the sweep WOULD delete if it ran.
-        val parts = (0..512).map { i ->
+        // Past the CURRENT bound: every .part here is debris the sweep WOULD delete if it ran.
+        val bound = ContributionStore(root, limits()).let { probe ->
+            try {
+                probe.listingEntryBoundForTest()
+            } finally {
+                probe.close()
+            }
+        }
+        val parts = (0..bound).map { i ->
             File(contributions, "gen\$b.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(8)) }
         }
 

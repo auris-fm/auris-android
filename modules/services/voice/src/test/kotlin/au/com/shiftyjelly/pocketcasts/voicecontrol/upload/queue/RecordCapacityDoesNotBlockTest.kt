@@ -395,6 +395,113 @@ class RecordCapacityDoesNotBlockTest {
         }
     }
 
+    @Test
+    fun `an over-bound listing is still DISCOVERED, only its sweep is skipped`() {
+        // REVIEWER a4a6b1 / spec 2741a0ca. Discovery and the destructive sweep were entangled: recovery
+        // returned emptyList() when the bounded listing refused, so an over-bound directory served NOTHING.
+        // A bound that exists to protect a DELETE is not a bound on DISCOVERY.
+        //
+        // Two earlier versions of this control were THEATRE and both passed against the defect:
+        //   (a) 200 fabricated records - under the new bound, so the bound was never exercised;
+        //   (b) assertions on ownedRecordsForTest() - which reads the directory itself and therefore stays
+        //       correct even when recovery serves nothing.
+        // It now (1) builds a directory that genuinely EXCEEDS the current bound, from REAL recoverable
+        // records written by prepare(), and (2) asserts on what UPLOAD can see after recover(), which is
+        // the device symptom (`eligible=0`).
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("over-bound-serving")
+        val dir = queueDir(root)
+        val probe = ContributionStore(root, limits())
+        val bound = try {
+            probe.listingEntryBoundForTest()
+        } finally {
+            probe.close()
+        }
+
+        // Real records, admitted while the cap is still the default 32.
+        val seeded = (1..32).map { UUID.randomUUID().toString() }
+        seeded.forEach { seedOne(root, it, now) }
+        // Pad past the traversal bound with sidecar-only debris. Debris is not a record, so it cannot make
+        // the queue over-cap, but it is what a real device accumulates and it is what the bound measures.
+        dir.mkdirs()
+        var pad = 0
+        while (dir.list()!!.size <= bound) {
+            File(dir, "pad-$pad.part").writeText("")
+            pad++
+        }
+        val onDisk = dir.list()!!.size
+        assertTrue("precondition: this directory really is over the bound ($onDisk > $bound)", onDisk > bound)
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            // THE ASSERTION THAT MATTERS: upload must be able to see the clips. This goes RED when
+            // recovery serves nothing for an over-bound directory.
+            assertTrue(
+                "an over-bound queue must still be SERVED after recovery, not reported empty",
+                store.readyEntries().isNotEmpty(),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    @Test
+    fun `a queue over the listing bound DRAINS to transport after a restart`() {
+        // THE DEVICE SCENARIO, end to end (spec 2741a0ca, reviewer a4a6b1). On the Pixel the queue held
+        // 104 records; every listing aborted past 512 entries, recovery indexed nothing, and the drain
+        // reported `eligible=0` - so nothing uploaded and the queue could never shrink back under the
+        // bound. Not "104 clips are slow": zero could ever move. This drives the REAL drain over a
+        // directory that exceeds the bound and requires the transport to be reached.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("over-bound-drain")
+        val dir = queueDir(root)
+        val probe = ContributionStore(root, limits())
+        val bound = try {
+            probe.listingEntryBoundForTest()
+        } finally {
+            probe.close()
+        }
+
+        val seeded = (1..32).map { UUID.randomUUID().toString() }
+        seeded.forEach { seedOne(root, it, now) }
+        dir.mkdirs()
+        var pad = 0
+        while (dir.list()!!.size <= bound) {
+            File(dir, "pad-$pad.part").writeText("")
+            pad++
+        }
+        val onDisk = dir.list()!!.size
+        assertTrue("precondition: the directory is over the bound ($onDisk > $bound)", onDisk > bound)
+
+        // RESTART: a fresh store over the populated directory.
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            store.recover()
+            val attempted = mutableListOf<String>()
+            val caller = ContributionRetryCaller(
+                store = store,
+                clock = { now },
+                networkAvailable = { true },
+                attemptUpload = { _, id, _, _ ->
+                    attempted += id
+                    true
+                },
+                ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            )
+            caller.pollOnce()
+
+            assertTrue(
+                "an over-bound queue after restart must reach transport; attempted=${attempted.size}",
+                attempted.isNotEmpty(),
+            )
+        } finally {
+            store.close()
+        }
+    }
+
+    private fun seedOne_files(dir: File, id: String): List<String> = dir.list()!!.filter { it.startsWith(id) }.sorted()
+
     private fun queueDir(root: File): File = File(root, DIR_NAME)
 
     private fun completeEntriesOnDisk(root: File): Int = queueDir(root).listFiles().orEmpty().count { f ->
@@ -403,6 +510,49 @@ class RecordCapacityDoesNotBlockTest {
                 runCatching { UUID.fromString(id).toString() }.getOrNull() == id &&
                     File(queueDir(root), "$id$SUFFIX_META").isFile
             }
+    }
+
+    @Test
+    fun `a queue at real-world size is COUNTED, not reported unknown`() {
+        // DEVICE FINDING 2026-11-08, and the reason every other control in this file failed to catch it.
+        // The listing carried a fixed 512-entry traversal bound from the deleted byte-measurement walk.
+        // One record is ~10 files, so the bound was reached at roughly 50 records - a size NO control here
+        // ever built. On the Pixel the queue held 104 records (~1,040 files), every count returned unknown,
+        // admission saw eligible=0, and NOTHING uploaded - including the 104 already on disk, which could
+        // never drain, so the queue could never fall back under the bound. It was unrecoverable on device
+        // while all 1,831 tests were green, because every test queue was tiny.
+        //
+        // This control writes REAL entry files, entry-count-style, so the traversal bound is actually
+        // exercised rather than assumed.
+        val root = tmp.newFolder("capacity-real-size")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val records = 120 // well past the old 512-FILE bound once each record carries its sidecars
+        val ids = (1..records).map { java.util.UUID.randomUUID().toString() }
+        val suffixes = listOf(
+            ".recording.wav",
+            ".metadata.json",
+            ".ready",
+            ".attempts",
+            ".created",
+            ".sha256",
+            ".retry",
+            ".owner",
+        )
+        for (id in ids) {
+            for (suffix in suffixes) File(dir, "$id$suffix").writeBytes(ByteArray(8))
+        }
+        assertTrue("precondition: this directory really does exceed the old 512-file bound", dir.list()!!.size > 512)
+
+        val store = ContributionStore(root, limits())
+
+        // THE COUNT MUST BE READABLE. Unknown here is not a conservative answer, it is a refusal to serve.
+        assertEquals(
+            "a real-sized queue must be counted from disk, not reported unknown",
+            records,
+            store.ownedRecordsForTest(),
+        )
+        assertEquals("the record cap is unchanged policy", 32, store.recordLimit())
     }
 }
 

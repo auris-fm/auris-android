@@ -416,6 +416,12 @@ class ContributionStore(
     // audio. The cleanup sweep removes them, counted and logged. Stray files are excluded for the same
     // reason they are not audio - staging writes are prefixed with their attempt (`gen<attemptId>...`) or
     // end in `.part`, so they never spell an entry name.
+    // THE COUNT IS NOT A TRAVERSAL (spec a3ef694f, exhaustive-gate audit 2741a0ca). It reads the directory
+    // and takes ids; nothing about it needs a byte budget, and the number it produces is what every other
+    // decision compares against. If the count could go "unknown" from a listing bound, then a full queue
+    // would report itself unknowable and stop serving the very clips whose removal reduces it - a deadlock
+    // with no exit. It answers 0 only when the directory truly cannot be read, which admission treats as
+    // "refuse new work", never as "stop uploading".
     private fun rootRecordCountLocked(): Int = dir.listFiles()?.mapNotNullTo(mutableSetOf()) { f -> audioEntryId(f.name) }?.size ?: 0
 
     /** The capture id whose AUDIO is in [name], or null when the file holds none. */
@@ -1812,8 +1818,17 @@ class ContributionStore(
      * UNKNOWN, never absent, and an over-bound root is an explicit failure, not an eager allocation
      * (reviewer 45b9d4de). Returns null when the directory cannot be enumerated or exceeds the bound.
      */
+    // DISCOVERY, NOT SWEEPING (spec 2741a0ca). Nothing here deletes, so the traversal bound that protects
+    // deletes has no business refusing it: it made every capture look like it had an unresolved intent, so
+    // recovery held them all and served none - the same deadlock as the recovery listing, one call deeper.
+    //
+    // It stays UNBOUNDED but it is no longer a full listing of the root, which is what made it expensive
+    // and what made partial coverage dangerous. Its only questions are about SPECIFIC names, and a direct
+    // existence check answers those exactly at any directory size: presence is never a guess, and absence
+    // is proven for the one name asked about rather than inferred from a truncated listing (reviewer
+    // 45b9d4de kept intact - a failed listing still reports unknown, never absence).
     private fun visibleNamesLocked(): Set<String>? = try {
-        boundedDirectoryListing(dir).mapTo(HashSet()) { it.name }
+        dir.list()?.toHashSet() ?: throw MeasurementError("root unlistable")
     } catch (unknown: MeasurementError) {
         null
     }
@@ -2681,18 +2696,75 @@ class ContributionStore(
 
     private fun boundedRootListing(): List<File> = boundedDirectoryListing(dir)
 
+    /**
+     * DISCOVERY ONLY - no traversal budget (reviewer a4a6b1 / spec 2741a0ca).
+     *
+     * Used where the operation is READ-ONLY or where refusing would make the queue unrecoverable: serving
+     * discovery and the record count. Returns null only when the directory genuinely cannot be read.
+     */
+    private fun unboundedRootListingOrNull(): List<File>? = try {
+        (dir.list() ?: throw MeasurementError("root unlistable")).map { File(dir, it) }
+    } catch (unknown: MeasurementError) {
+        Timber.tag(QUEUE_TAG).i("voice-upload listing: root-unreadable reason=%s", unknown.message)
+        null
+    } catch (failure: RuntimeException) {
+        Timber.tag(QUEUE_TAG).i("voice-upload listing: root-unreadable reason=%s", failure.message)
+        null
+    }
+
     // ONE shared budget for a whole listing, so the bound is on the traversal and not on each call.
     private class MeasurementBudget(private var remaining: Int) {
         fun consume(): Boolean = --remaining >= 0
     }
 
-    private fun boundedDirectoryListing(directory: File): List<File> {
-        val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
+    /**
+     * THE TRAVERSAL BOUND IS SIZED FOR THE WORKLOAD IT NOW MEASURES (device finding, 2026-11-08).
+     *
+     * A fixed [MEASURE_MAX_ENTRIES] = 512 was correct when the listing fed a BYTE walk over a handful of
+     * probes. Since spec a3ef694f the SAME helper feeds the record COUNT, and the directory holds up to
+     * [ENTRY_SUFFIXES].size files per record. On a real device the queue reached 104 records - about 784
+     * files - every listing aborted past 512, the count read "unknown", and admission saw `eligible=0`:
+     * NOTHING uploaded, not even the 104 already on disk, and nothing could ever drain, so the queue could
+     * never fall back under the bound either. The machine could not recover on its own.
+     *
+     * The bound still exists (an unbounded traversal of an adversarial directory is a real hazard), but it
+     * is now derived from the record cap it has to hold, with headroom for transient files (`.part`,
+     * staging, in-flight attempts) that are NOT records. Reusing a helper correctly is not the same as
+     * reusing its constants correctly.
+     */
+    internal fun listingEntryBoundForTest(): Int = listingEntryBound()
+
+    // THE BOUND IS AN ALLOCATION GUARD, NOT A QUEUE-SIZE POLICY (spec 2741a0ca, reviewer a4a6b1).
+    //
+    // It exists to stop one crash-restart loop from materialising a hostile directory into memory all at
+    // once. It must therefore sit far above any queue this app can legitimately hold, and the earlier value
+    // (512) did not: sized for a byte-measurement walk, it was reused for a per-file count and broke at
+    // ~50 records. The device queue that exposed it held 104 records (~1,040 files) against a cap of 32,
+    // i.e. an INHERITED over-cap queue, so a cap-derived bound alone would still have been unreadable.
+    //
+    // Crucially the FEEDBACK LOOP was the fatal part: an unreadable root refused SERVING, so encumbered
+    // clips could never drain and the queue could never fall back under the bound. Nothing self-corrected.
+    // Two independent things prevent that now: discovery no longer consults the bound at all, and the bound
+    // itself is sized for an inherited queue. 4,096 entries is ~400 records at 10 files each - an order of
+    // magnitude above the worst queue observed, and still a finite allocation.
+    private fun listingEntryBound(): Int = maxOf(
+        MEASURE_MAX_ENTRIES,
+        INHERITED_QUEUE_RECORDS * ENTRY_SUFFIXES.size,
+        limits.maxQueueRecords * ENTRY_SUFFIXES.size,
+    )
+
+    // The marker directory holds ONE file per withdrawn capture, not ten per record, so it needs its own
+    // bound rather than the queue root's. It stays BOUNDED because this listing drives DELETION from a
+    // possibly partial view (reviewer 3eec6e62): failure defers the retry, never guesses.
+    private fun markerEntryBound(): Int = maxOf(MEASURE_MAX_ENTRIES, INHERITED_QUEUE_RECORDS * 2)
+
+    private fun boundedDirectoryListing(directory: File, bound: Int = listingEntryBound()): List<File> {
+        val budget = MeasurementBudget(bound)
         val found = mutableListOf<File>()
         try {
             java.nio.file.Files.newDirectoryStream(directory.toPath()).use { stream ->
                 for (child in stream) {
-                    if (!budget.consume()) throw MeasurementError("root exceeds $MEASURE_MAX_ENTRIES entries")
+                    if (!budget.consume()) throw MeasurementError("root exceeds $bound entries")
                     found += child.toFile()
                 }
             }
@@ -2711,16 +2783,36 @@ class ContributionStore(
         // a successor's directory.
         hooks.onPurgeOrRecoverMutation?.invoke("recover")
         dir.mkdirs()
-        val files = boundedRootListingOrNull() ?: run {
-            // NO sweep, NO serving: deleting from a directory whose contents are only partially known is
-            // destructive. Capacity still COUNTS what it can see (spec a3ef694f), so a failed listing
-            // never freezes admission - only this pass's own sweep and serving are deferred.
+        // SERVING DISCOVERY IS UNBOUNDED, THE SWEEP IS NOT (reviewer a4a6cmb1 / spec 2741a0ca).
+        //
+        // This used to return emptyList() when the bounded listing refused, so an over-bound directory
+        // made recovery serve NOTHING: every clip on disk was invisible until the queue shrank, and the
+        // queue could not shrink because nothing was served. The two duties are now separated. DISCOVERY
+        // (which ids exist, and validating each one) has no traversal budget - it is a flat directory read
+        // and its size is bounded by what is actually on disk. The DESTRUCTIVE SWEEP keeps the bound,
+        // because deleting from a partially-known listing is the genuinely hazardous operation.
+        val files = unboundedRootListingOrNull() ?: run {
+            // The enumeration itself failed, so nothing is known about coverage: no serving and no sweep.
+            Timber.tag(QUEUE_TAG).i("voice-upload recovery: root unreadable, nothing discovered this pass")
             return emptyList()
+        }
+        // The DESTRUCTIVE SWEEP keeps its own guard (reviewer c66fda06, 3eec6e62). An extensive root is
+        // expensive to enumerate but perfectly safe to SERVE from; deleting from it is the operation that
+        // must never run on a view it could not fully take. Serving and sweeping are decided separately.
+        val sweepPermitted = files.size <= listingEntryBound()
+        if (!sweepPermitted) {
+            Timber.tag(QUEUE_TAG).i(
+                "voice-upload recovery: sweep deferred, sweeps-not-permitted entries=%d bound=%d",
+                files.size,
+                listingEntryBound(),
+            )
         }
         // 1) Debris sweep: .part files are NEVER ready; .ready without wav/meta is invalid.
         // The RESULT of delete() used to be discarded here, so staging bytes that survived occupied the
         // queue while being charged nowhere (reviewer c71672c0).
-        files.filter { it.name.endsWith(SUFFIX_PART) }.forEach { it.deleteOrChargeOnFailure() }
+        if (sweepPermitted) {
+            files.filter { it.name.endsWith(SUFFIX_PART) }.forEach { it.deleteOrChargeOnFailure() }
+        }
         val readyIdsBefore = files.filter { it.name.endsWith(SUFFIX_READY) }.map { it.name.removeSuffix(SUFFIX_READY) }.toSet()
         // CANDIDATES ARE EVERY CAPTURE THAT HAS BOTH PRIMARY FILES, NOT JUST THE MARKED ONES
         // (reviewer 42801e42). Building candidates from `.ready` alone left a preserved markerless pair
@@ -3318,7 +3410,7 @@ class ContributionStore(
                 return
             }
             val ids = try {
-                boundedDirectoryListing(markerDir).map { it.name }
+                boundedDirectoryListing(markerDir, markerEntryBound()).map { it.name }
             } catch (unknown: MeasurementError) {
                 // FAILURE IS NOT ABSENCE: the retry is deferred - no marker is acted on from partial
                 // knowledge, and every recorded intent stays on disk to be retried by a later sweep.
@@ -3770,6 +3862,15 @@ class ContributionStore(
         // Measurement bounds. Hitting either is an ERROR, never a silent truncation.
         private const val MEASURE_MAX_DEPTH = 4
         private const val MEASURE_MAX_ENTRIES = 512
+
+        /**
+         * The largest over-cap queue a build may inherit and still have to DRAIN rather than merely refuse.
+         * The observed worst case was 104 records against a 32 cap; this leaves room above it so the same
+         * failure cannot recur on a queue that is bigger still. At ~10 files per record this puts the
+         * traversal bound around 5,000 entries: transient `.part`/staging residue is absorbed by that
+         * headroom rather than needing a separate multiplier.
+         */
+        private const val INHERITED_QUEUE_RECORDS = 512
         private val SIDECAR_SUFFIXES = listOf(SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY)
         private const val DISQUALIFIED_DIR = "disqualified"
 

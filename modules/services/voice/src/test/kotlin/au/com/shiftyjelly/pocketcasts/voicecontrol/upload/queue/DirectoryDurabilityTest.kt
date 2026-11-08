@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -1952,7 +1953,7 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `direct ADMISSION on a fresh instance over an overflowing ROOT is refused`() {
+    fun `direct ADMISSION on a fresh instance over an overflowing ROOT is STILL GRANTED`() {
         // reviewer 92911de9: admission established marker coverage but not root coverage - a fresh store
         // over an existing overflowing contributions directory could admit without any bounded root scan.
         val root = tmp.newFolder("queue-admit-root-coverage")
@@ -1962,9 +1963,10 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
 
-        assertTrue(
-            "the bounded root scan must fail and refuse admission (got footprints ${store.unknownBreakdownForTest()})",
-            store.admitForTestOrNull(1600, 32) == null,
+        // SPEC a7f6ce81: priced, not refused, for the same reason as marker coverage.
+        assertNotNull(
+            "the bounded root scan must still report unknown coverage, but admission is GRANTED (got footprints ${store.unknownBreakdownForTest()})",
+            store.admitForTestOrNull(1600, 32),
         )
         assertTrue("root enumeration must be unknown", store.rootUnknownForTest())
     }
@@ -2023,7 +2025,7 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `direct ADMISSION on a fresh instance over overflowing markers is refused`() {
+    fun `direct ADMISSION on a fresh instance over overflowing markers is STILL GRANTED`() {
         // reviewer f4436ced: admission did not establish marker coverage, so a newly constructed store
         // over an existing overflowing marker directory could admit immediately - required precondition
         // under spec 7e9606b, pinned WITHOUT any recover/expiry call.
@@ -2039,15 +2041,15 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
 
-        assertTrue(
-            "admission must establish marker coverage and be refused while it is unknown",
-            store.unknownFootprintForTest() || run {
-                // Trigger the admission path itself: reservation must fail.
-                store.admitForTestOrNull(1600, 32) == null
-            },
+        // SPEC a7f6ce81 RULING: an unknown footprint must never stop uploads, and admission is where the
+        // footprint would grow. It is PRICED conservatively (unmeasured bytes carry worst-case weight)
+        // instead of refused, because refusing is self-sustaining: uploading is what lets it heal.
+        assertNotNull(
+            "admission must be GRANTED while marker coverage is unknown (priced, not refused)",
+            store.admitForTestOrNull(1600, 32),
         )
         assertTrue(
-            "and the coverage hold is what refuses it",
+            "and the coverage hold is still REPORTED",
             store.unknownFootprintForTest(),
         )
     }
@@ -2084,10 +2086,11 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `a held handle cannot record an attempt through a root-scan failure`() {
-        // reviewer 6cbb4efa: recordAttempt gated only on markerCoverageUnknown, so a held handle could
-        // still record when rootEnumerationUnknown was true. The gate is now the complete owner-coverage
-        // predicate.
+    fun `a held handle still records an attempt through a root-scan failure`() {
+        // SPEC a7f6ce81 RULING: this replaces the old "an attempt must be refused while ROOT discovery is
+        // unknown" assertion. Attempt accounting is what keeps eligibility honest while the footprint
+        // heals, and withholding it made the unknown state self-sustaining - the exact defect that froze
+        // the owner's Pixel. Unknown coverage is still REPORTED; it just no longer stops the attempt.
         val root = tmp.newFolder("queue-attempt-root-hold")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2105,10 +2108,17 @@ class DirectoryDurabilityTest {
         store.recover()
         assertTrue("precondition: root discovery is unknown", store.rootUnknownForTest())
 
+        // SPEC a7f6ce81 RULING: attempt accounting must NOT be blocked by the unknown coverage on its
+        // own account. What still refuses here is a DIFFERENT and legitimate condition: the candidate
+        // names cannot be listed, so whether a pending attempt-count intent exists is unknown, and
+        // recording an increment over an unresolved intent would corrupt the count. That refusal is
+        // about intent resolution, not about the footprint gate - and the message proves which.
+        val refusal = runCatching { store.recordAttempt(0, id) }.exceptionOrNull()
         assertTrue(
-            "an attempt must be refused while ROOT discovery is unknown, not just marker coverage",
-            store.recordAttempt(0, id) == null,
+            "the refusal must come from INTENT resolution, never from the footprint gate (got $refusal)",
+            refusal is IllegalStateException && refusal.message == "attempts intent presence unknown",
         )
+        assertTrue("precondition: the unknown is still reported", store.rootUnknownForTest())
     }
 
     @Test
@@ -2915,7 +2925,7 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `an UNMEASURABLE capture refuses admission instead of being charged a guess`() {
+    fun `an UNMEASURABLE capture is priced, not used to refuse admission`() {
         // reviewer e6eeabda / 7340fe2d: a per-capture worst case cannot bound arbitrary retained debris.
         // Unknown accounting must REFUSE admission until the capture is successfully measured or removed.
         val root = tmp.newFolder("queue-unmeasurable")
@@ -2964,8 +2974,12 @@ class DirectoryDurabilityTest {
         )
         roomy.expireOlderThan()
         assertTrue("precondition: accounting is unknown", roomy.unknownFootprintForTest())
+        // SPEC a7f6ce81 RULING: the unmeasured capture already carries a worst-case placeholder charge,
+        // so the byte budget reflects it; refusing as well double-counted the unknown and stopped capture
+        // entirely. Admission is now GRANTED and the unknown is reported, not used as a blanket refusal.
         val probeAdmission = roomy.admit(sampleCount = 1600L, metadataBytes = 32)
-        assertNull("admission must be REFUSED while any capture's footprint is unknown", probeAdmission)
+        assertNotNull("admission must be GRANTED while a footprint is unknown (priced, not refused)", probeAdmission)
+        probeAdmission!!.discard()
     }
 
     @Test

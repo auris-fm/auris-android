@@ -882,7 +882,10 @@ class ContributionStore(
     }
 
     private fun pickupAttemptTokenGuarded(generation: Long, captureId: String, nowMs: Long): AdmittedAttempt? = synchronized(lock) {
-        if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
+        // SPEC a7f6ce81: the unknown-footprint hold is removed from the ATTEMPT path. Attempt
+        // accounting does not depend on byte coverage, and withholding attempts is what made an
+        // unknown footprint self-sustaining (uploads shrink it). Ownership is still validated.
+        if (!ownership.isValidUnderLock(generation)) {
             null
         } else {
             val entry = memoryEntries[captureId]
@@ -1126,9 +1129,12 @@ class ContributionStore(
 
     /** Budget test against durable entries PLUS live reservations (both consume the same budget). */
     private fun roomLocked(projected: Long): Boolean {
-        // Unknown usage refuses admission outright: admission is exactly where a made-up footprint would be
-        // trusted to bound everything else.
-        if (unknownFootprintLocked()) return false
+        // SPEC a7f6ce81 RULING (supersedes spec 896632f4 for ADMISSION): an unknown footprint is priced
+        // CONSERVATIVELY, never used to refuse admission outright. Each unmeasured id is already carried
+        // at the worst-case placeholder weight (claimOwnedLocked charges limits.maxQueueBytes for it), so
+        // the byte budget below already reflects the unknown; refusing here as well double-counted it.
+        // Refusing admission is also SELF-SUSTAINING: uploading is what shrinks the footprint and lets it
+        // heal, so a blanket refusal froze capture until a process restart (owner's Pixel incident).
         return ownerRecordsLocked() < limits.maxQueueRecords &&
             ownerBytesLocked() + projected <= limits.maxQueueBytes
     }
@@ -2017,13 +2023,20 @@ class ContributionStore(
      * caller's fence (the ids returned are still only leaves for a guarded pickup).
      */
     fun retryEligible(nowMs: Long = clock()): List<String> = synchronized(lock) {
-        if (unknownFootprintLocked()) {
-            emptyList()
-        } else {
-            memoryEntries
-                .mapNotNull { (id, entry) -> if (retryEligibleLocked(id, entry, nowMs)) id else null }
-                .sorted()
-        }
+        // SPEC a7f6ce81 RULING: an unknown storage footprint must NEVER withhold uploads. Uploading
+        // is what shrinks the footprint, so holding every attempt is the exact opposite of the
+        // spec's intent - and because the same predicate also refused admission, a single
+        // unmeasurable capture could freeze the whole feature until the next process restart.
+        // Eligibility is therefore PER-ENTRY only; an unknown footprint is reported on the drain
+        // line and priced conservatively, never used as a blanket refusal.
+        memoryEntries
+            .mapNotNull { (id, entry) -> if (retryEligibleLocked(id, entry, nowMs)) id else null }
+            .sorted()
+    }
+
+    /** The three flags behind [unknownFootprintLocked], for the drain's diagnostic line. */
+    fun footprintBreakdown(): String = synchronized(lock) {
+        "unmeasured=${unmeasuredIds.size} rootUnknown=$rootEnumerationUnknown markerUnknown=$markerCoverageUnknown"
     }
 
     /** The COMPLETE per-entry retry eligibility predicate, shared by listing and atomic pickup. */
@@ -2239,7 +2252,10 @@ class ContributionStore(
     }
 
     private fun pickupAttemptGuarded(generation: Long, captureId: String, nowMs: Long): Int? = synchronized(lock) {
-        if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
+        // SPEC a7f6ce81: the unknown-footprint hold is removed from the ATTEMPT path. Attempt
+        // accounting does not depend on byte coverage, and withholding attempts is what made an
+        // unknown footprint self-sustaining (uploads shrink it). Ownership is still validated.
+        if (!ownership.isValidUnderLock(generation)) {
             null
         } else {
             val entry = memoryEntries[captureId]
@@ -2276,9 +2292,9 @@ class ContributionStore(
             // while root discovery or marker coverage is unknown could contradict an intent nobody has
             // seen yet. The gate is the complete owner-coverage predicate, so a held handle cannot
             // record an attempt through a root-scan failure either (reviewer 6cbb4efa).
-            if (unknownFootprintLocked()) {
-                null
-            } else if (!ownership.isValidUnderLock(generation)) {
+            // SPEC a7f6ce81: no unknown-footprint hold here either - the durable attempts sidecar
+            // must keep counting while the footprint heals, or eligibility drifts from accounting.
+            if (!ownership.isValidUnderLock(generation)) {
                 null
             } else {
                 val reconciledCount: Int? = try {
@@ -3527,6 +3543,13 @@ class ContributionStore(
     private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty() || rootEnumerationUnknown || markerCoverageUnknown
 
     fun unknownFootprintForTest(): Boolean = synchronized(lock) { unknownFootprintLocked() }
+
+    /**
+     * Test seam: mark ONE capture's footprint unmeasured, exactly as a failed measurement does at
+     * `unmeasuredIds += id`. Used by the controls for spec a7f6ce81, where the queue must be loaded
+     * before the mark can be injected (a mark set before recovery is cleared by recovery itself).
+     */
+    fun markUnmeasuredForTest(captureId: String) = synchronized(lock) { unmeasuredIds += captureId }
 
     fun rootUnknownForTest(): Boolean = synchronized(lock) { rootEnumerationUnknown }
 

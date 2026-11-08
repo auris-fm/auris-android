@@ -211,6 +211,12 @@ class ContributionRetryCaller(
         // EVERY drain answers why (spec 2aea78c3): an empty drain must say whether it saw eligible
         // work and where that work was refused, instead of discarding the PollResult in the drain
         // lambda (VoiceUploadModule provideVoiceUploadDrain) and logging nothing.
+        // A footprint that cannot be measured is REPORTED, never silently withheld (spec a7f6ce81):
+        // without this line an unknown footprint and a genuinely idle queue look identical.
+        val footprintUnknown = store.unknownFootprintForTest()
+        if (footprintUnknown) {
+            Timber.i("voice-upload drain: footprint-unknown %s", store.footprintBreakdown())
+        }
         Timber.i(
             "voice-upload drain: eligible=%d attempted=%d deferredNetwork=%d skippedInFlight=%d cancelledEpoch=%d pickupRefused=%d",
             eligible.size,

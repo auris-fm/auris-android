@@ -361,10 +361,12 @@ class ContributionStore(
      * ownership DISCOVERY, deliberately separate from CAPACITY accounting - it restores no byte or coverage
      * gate and admits nothing, so nothing discovered here can be served or committed. Callers hold the lock.
      */
-    private fun discoverRetainedFromDiskLocked() {
-        for (id in retainedCaptureIdsLocked()) {
+    private fun discoverRetainedFromDiskLocked(): Boolean {
+        val retained = retainedCaptureIdsLocked() ?: return false
+        for (id in retained) {
             claimOwnedLocked(id, ready = false)
         }
+        return true
     }
 
     /**
@@ -372,7 +374,14 @@ class ContributionStore(
      * Wider than the capacity count on purpose: capacity protects AUDIO, so it ignores orphan sidecars,
      * but a purge must remove them too or the withdrawal leaves debris behind.
      */
-    private fun retainedCaptureIdsLocked(): Set<String> = dir.listFiles()?.mapNotNullTo(mutableSetOf()) { f -> entryFileCaptureId(f.name) } ?: emptySet()
+    // NULL means "could not read the directory", which is NOT the same as "nothing there" and must never
+    // be collapsed into an empty set: a purge driven by a proven-empty listing records success while the
+    // user's undiscovered recordings survive (reviewer f7700432). Uses the shared bounded listing so an
+    // unreadable or oversized directory reports unknown instead of masquerading as empty.
+    private fun retainedCaptureIdsLocked(): Set<String>? {
+        val files = boundedRootListingOrNull() ?: return null
+        return files.mapNotNullTo(mutableSetOf()) { f -> entryFileCaptureId(f.name) }
+    }
 
     /** The capture id [name] belongs to, considering EVERY entry suffix, or null when it is not one. */
     private fun entryFileCaptureId(name: String): String? = ENTRY_SUFFIXES.firstNotNullOfOrNull { suffix ->
@@ -2329,6 +2338,12 @@ class ContributionStore(
         DISQUALIFIED_CLEANED_UP,
 
         /**
+         * A purge could not enumerate the directory, so it removed nothing and must be retried (reviewer
+         * f7700432). Counted so an incomplete withdrawal is never silent.
+         */
+        PURGE_DEFERRED_UNKNOWN_LISTING,
+
+        /**
          * THE WHOLE QUEUE WAS REVOKED (withdrawal, account change, remote disable). Cumulative and never
          * reset, because losing this counter is how a purge becomes invisible: the file that holds the
          * counters is itself deleted during the purge.
@@ -2431,7 +2446,14 @@ class ContributionStore(
                 // ready or retryable - so no attempt can acquire a discovered capture during the purge
                 // boundary. It also runs AFTER the generation advanced and launches were withdrawn, so a
                 // capture a PUT is already streaming is covered by the revocation rather than by this call.
-                discoverRetainedFromDiskLocked()
+                if (!discoverRetainedFromDiskLocked()) {
+                    // INCOMPLETE, NOT EMPTY (reviewer f7700432). An unreadable listing means we do not
+                    // know what is on disk, so we cannot claim the audio is gone. Record the retained
+                    // removal intent and retry at the next opportunity rather than reporting a completed
+                    // purge over files we never enumerated. PURGE-only: no capacity or admission gate.
+                    deferPurgeOnUnknownListingLocked(reason)
+                    return@synchronized
+                }
                 // The discovered captures are now in ownedCharges; join them WITH the index below.
                 // TEST SEAM: observes the state AFTER discovery, which is the boundary the contract is
                 // about. onPurgeOrRecoverMutation fires BEFORE discovery, so it cannot see a promotion.
@@ -2504,6 +2526,24 @@ class ContributionStore(
             accountUnlinksLocked()
         }
     }
+
+    private fun deferPurgeOnUnknownListingLocked(reason: String) {
+        // Ownership was REVOKED above and stays revoked: nothing here becomes servable. The intent is
+        // recorded so a later purge finishes the job rather than silently dropping it.
+        _purgeReasons.add(reason)
+        _purgeDeferred = true
+        _purgeResidue.add(PURGE_RESIDUE_UNKNOWN_LISTING)
+        Timber.tag(QUEUE_TAG).w(
+            "voice-upload purge: INCOMPLETE, listing unreadable, retained captures not removed reason=%s",
+            reason,
+        )
+        dropCounterOnly(TerminalReason.PURGE_DEFERRED_UNKNOWN_LISTING)
+        hooks.onPurgeOrRecoverMutation?.invoke("purge-deferred")
+    }
+
+    /** True when the most recent purge could not enumerate the directory and removed nothing. */
+    val purgeDeferred: Boolean get() = synchronized(lock) { _purgeDeferred }
+    private var _purgeDeferred = false
 
     val purgeReasons: List<String> get() = synchronized(lock) { _purgeReasons.toList() }
 
@@ -3563,6 +3603,9 @@ class ContributionStore(
         ?: DirectorySync.REAL
 
     companion object {
+        /** Marks a purge that could not enumerate the directory. NOT a capture id. */
+        const val PURGE_RESIDUE_UNKNOWN_LISTING = "unknown-listing"
+
         private const val DIR_NAME = "contributions"
         private const val COUNTERS_NAME = "terminal-counters.txt"
 

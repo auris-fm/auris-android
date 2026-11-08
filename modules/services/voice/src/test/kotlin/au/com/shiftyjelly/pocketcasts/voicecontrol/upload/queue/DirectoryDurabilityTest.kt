@@ -1206,6 +1206,70 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a purge whose listing fails defers instead of reporting the queue gone, then completes`() {
+        // REVIEWER f7700432. The new disk discovery read `listFiles() ... ?: emptySet()`, so an UNREADABLE
+        // directory looked like a PROVEN EMPTY one: revokeAndPurge recorded a completed purge and set
+        // recovered=true while every retained recording sat untouched on disk. That is the same false
+        // success as ec6ce881, reached by a different path - the user is told their audio was removed
+        // while it is still there. An unknown listing must DEFER the purge and keep its intent, never
+        // report completion.
+        val root = tmp.newFolder("queue-purge-unknown-listing")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val id = java.util.UUID.randomUUID().toString()
+        File(dir, "$id.recording.wav").writeBytes(ByteArray(2048))
+        File(dir, "$id.metadata.json").writeText("{}")
+
+        val perms = java.nio.file.Files.getPosixFilePermissions(dir.toPath())
+        java.nio.file.Files.setPosixFilePermissions(
+            dir.toPath(),
+            setOf(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+        )
+        try {
+            val store = ContributionStore(root, limits())
+            try {
+                store.revokeAndPurge("account_changed")
+
+                assertTrue(
+                    "an unreadable listing cannot be claimed as a completed purge",
+                    store.purgeDeferred,
+                )
+                assertTrue(
+                    "the incomplete purge must be reported, not silent",
+                    store.purgeResidue.contains(ContributionStore.PURGE_RESIDUE_UNKNOWN_LISTING),
+                )
+                assertEquals(
+                    "an incomplete purge must be counted",
+                    1L,
+                    store.terminalCounter(ContributionStore.TerminalReason.PURGE_DEFERRED_UNKNOWN_LISTING),
+                )
+            } finally {
+                store.close()
+            }
+        } finally {
+            // LIFT THE FAULT.
+            java.nio.file.Files.setPosixFilePermissions(dir.toPath(), perms)
+        }
+        assertTrue("precondition: the audio survived the deferred purge", File(dir, "$id.recording.wav").isFile)
+
+        // RETRY AT THE NEXT OPPORTUNITY: with the directory readable again, a purge must find and remove
+        // what the deferred one could not enumerate. Nothing here is re-admitted or made servable.
+        val retry = ContributionStore(root, limits())
+        try {
+            retry.revokeAndPurge("account_changed")
+            assertFalse("the retried purge must not defer", retry.purgeDeferred)
+        } finally {
+            retry.close()
+        }
+
+        assertFalse(
+            "once the listing succeeds, the retained capture must actually be purged",
+            File(dir, "$id.recording.wav").exists(),
+        )
+        assertFalse("its sidecar must go too", File(dir, "$id.metadata.json").exists())
+    }
+
+    @Test
     fun `a HELD entry is still OWNED and is purged on revocation`() {
         // Ownership is about "this owner created these files", not "this owner can read them back".
         // A held entry was removed from the index so it could not be served, and that silently removed it

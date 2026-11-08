@@ -2400,13 +2400,17 @@ class ContributionStore(
      */
     fun finishPendingPurgeIfStopped(): Boolean {
         if (withdrawalIntent?.collectionPermittedByLocalIntent() != false) return false
-        // A STOPPED STORE MUST SERVE NOTHING, but only the FIRST cursor-twitch may claim "purge pending".
-        // purgeDeferred is read BEFORE the call because revokeAndPurge clears it on confirmed completion;
-        // without that ordering the first drain would report a pending purge it had just finished, and the
-        // worker could never distinguish "still blocked" from "done, nothing left".
-        val pendingBefore = purgeDeferred
+        // IF THE PERSISTED STOP APPLIES, THE DRAIN NEVER SERVES - FULL STOP (spec 6731209b).
+        //
+        // This must NOT depend on whether this pass completed the purge. My previous version returned the
+        // pre-call purgeDeferred value, so the FIRST failed purge - where nothing was deferred yet - told
+        // the caller to carry on into expiry and polling while a stop was in force. "Did the purge finish?"
+        // is a question for logging; "may this pass serve?" has exactly one answer while the stop stands.
         revokeAndPurge("pending withdrawal intent (drain)")
-        return pendingBefore
+        if (purgeDeferred) {
+            Timber.i("voice-upload drain: reason=withdrawal-purge-still-pending, nothing served this pass")
+        }
+        return true
     }
 
     /**
@@ -2577,17 +2581,30 @@ class ContributionStore(
             }
             stagedAttempts.forEach { attempt -> deleteStaging(attempt) }
             stagingOwners.clear()
-            // A PURGE MUST BE VISIBLE AFTER IT HAS HAPPENED, and this is the one moment where the
-            // counters file - the only witness - is itself destroyed. The purge record is therefore
-            // CUMULATIVE and lives in its own file, appended BEFORE the counters are cleared, so a
-            // device that is empty always says why it is empty.
-            recordPurgeLocked(reason, ownedIds.size)
-            // Also on the ordinary counter path so a caller can read it without parsing the purge file.
-            // It is cumulative in the purge file because the clear() below wipes it from here.
-            dropCounterOnly(TerminalReason.QUEUE_PURGED)
-            countersFile.delete()
-            terminalCounters.clear()
-            _purgeReasons.add(reason)
+            // COMPLETION EVIDENCE ONLY ON A READABLE, EMPTY LISTING (reviewer 04207559 finding 2, spec
+            // 6731209b). recordPurgeLocked / QUEUE_PURGED / _purgeReasons say "this purge HAPPENED". My
+            // previous version emitted them even with survivors, so a failed deletion produced the same
+            // durable witness as a successful one - the false success this path exists to prevent, written
+            // in the one file that outlives the counters it is meant to explain. stillPending is the only
+            // permission to skip them.
+            if (!stillPending) {
+                // A PURGE MUST BE VISIBLE AFTER IT HAS HAPPENED, and this is the one moment where the
+                // counters file - the only witness - is itself destroyed. The purge record is therefore
+                // CUMULATIVE and lives in its own file, appended BEFORE the counters are cleared, so a
+                // device that is empty always says why it is empty.
+                recordPurgeLocked(reason, ownedIds.size)
+                // Also on the ordinary counter path so a caller can read it without parsing the purge file.
+                // It is cumulative in the purge file because the clear() below wipes it from here.
+                dropCounterOnly(TerminalReason.QUEUE_PURGED)
+                countersFile.delete()
+                terminalCounters.clear()
+                _purgeReasons.add(reason)
+            } else {
+                Timber.tag(QUEUE_TAG).w(
+                    "voice-upload purge: no completion evidence recorded, purge still pending reason=%s",
+                    reason,
+                )
+            }
             // UNLINK ACCOUNTING (reviewer 7c2f30e3): the purge deleted files that an in-flight upload may
             // still hold open. Those bytes are NOT freed - the descriptor retains them - so they must be
             // counted against capacity until it closes. This purge does not route through deleteLocked, so

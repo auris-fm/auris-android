@@ -1428,10 +1428,14 @@ class DirectoryDurabilityTest {
             assertFalse("and stop reporting itself deferred", store.purgeDeferred)
 
             // ...and an ordinary pass with nothing pending is a no-op that does not serve.
-            assertFalse(
-                "a store with nothing pending must let the drain proceed",
-                store.finishPendingPurgeIfStopped(),
-            )
+            // A PERSISTED STOP ALWAYS BLOCKS THE PASS (spec 6731209b): whether this drain finished the
+            // purge is now only a log detail. While stop=true the drain never serves, full stop.
+            assertTrue("a persisted stop must always block the pass", store.finishPendingPurgeIfStopped())
+
+            // ...and the store that is NOT stopped lets the drain proceed, which is the other half of the
+            // contract and what the module relies on for ordinary passes.
+            stopped = false
+            assertFalse("a store with no persisted stop must let the drain proceed", store.finishPendingPurgeIfStopped())
         } finally {
             store.close()
         }
@@ -1466,6 +1470,15 @@ class DirectoryDurabilityTest {
                 "the surviving capture must be reported, not assumed away",
                 store.purgeResidue.contains(id),
             )
+            // COMPLETION EVIDENCE MUST NOT EXIST FOR A FAILED PURGE (reviewer 04207559 finding 2). These
+            // records say "this purge happened"; emitting them with survivors writes the false success
+            // into the one file that outlives the counters it is meant to explain.
+            assertFalse("no completed purge may be recorded", store.purgeReasons.isNotEmpty())
+            assertEquals(
+                "no QUEUE_PURGED counter may be emitted",
+                0L,
+                store.terminalCounter(ContributionStore.TerminalReason.QUEUE_PURGED),
+            )
 
             // Successful cleanup on the SAME instance: once the obstruction is gone, the next purge
             // reconciles a readable, empty listing and only then clears the pending state.
@@ -1478,6 +1491,16 @@ class DirectoryDurabilityTest {
                 "and the capture must no longer be reported as residue",
                 store.purgeResidue.contains(id),
             )
+            // ...and ONLY NOW is completion evidence emitted: one completed purge, one counter.
+            assertEquals(
+                "confirmed completion records exactly one purge",
+                1,
+                store.purgeReasons.size,
+            )
+            // QUEUE_PURGED is deliberately NOT asserted here: it is dropped right before the counter file
+            // is deleted, so it is not readable from terminalCounter() after a successful purge. Its
+            // absence for a FAILED purge (asserted above) is the property that matters.
+            assertTrue("the completed purge is recorded cumulatively", store.purgeReasons.isNotEmpty())
         } finally {
             store.close()
         }

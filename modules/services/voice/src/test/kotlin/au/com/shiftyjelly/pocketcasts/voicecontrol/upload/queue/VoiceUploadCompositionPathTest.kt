@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Provider
 import kotlinx.coroutines.cancel
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -599,6 +600,89 @@ class VoiceUploadCompositionPathTest {
         owner.publish("a@x", 7L, "Bearer-fixture")
         startup.credentials.publish("Bearer-fixture")
         startup.publishEnrolledFixture(enrolledEpoch)
+    }
+
+    @Test
+    fun `a drain under a persisted stop skips expiry and the poll, even before any purge deferred`() {
+        // REVIEWER 04207559 finding 1, spec 6731209b: "if the persisted stop applies, the drain never
+        // serves, full stop". My helper returned the pre-call purgeDeferred value, so on the FIRST failed
+        // purge - where nothing had been marked deferred yet - the module carried on into expiry and polling.
+        //
+        // WHY THIS OBSERVES THE DRAIN'S OWN SKIP AND NOT TRANSPORT HITS: the upload assembly already refuses
+        // to transmit to a stopped owner through its own policy/identity gates, so transport hits stayed 0
+        // even with the bug reintroduced (measured: I ran that mutant and this control still passed). The
+        // only surface that distinguishes the fixed hook from the broken one is whether the pass short-
+        // circuits, and during a withdrawal there is never an entry to expire - so the observable is the
+        // queue's own state: nothing may be touched, deferred, or served by a pass under a standing stop.
+        val aurisLive = VoiceUploadCompositionFixtures.liveAuris()
+        aurisLive.acquire()
+        val (server, hits) = loopback { 500 to "" }
+        try {
+            var stopped = false
+            val intent = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore(
+                object : au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence {
+                    override fun read(): Boolean = stopped
+
+                    override fun write(requested: Boolean): Boolean {
+                        stopped = requested
+                        return true
+                    }
+                },
+            )
+
+            val seed = VoiceUploadModule.contributionStoreFor(
+                java.io.File(appContext.filesDir, "voice-contributions"),
+                directorySyncOverride = DirectorySync.REAL,
+            ).also { stores += it }
+            val id = prepareVerifiedCapture(seed)
+            java.io.File(appQueue, "$id.published").writeText("v1")
+            seed.close()
+
+            // STOP IN FORCE **AND** LISTING UNREADABLE BEFORE CONSTRUCTION: store creation consumes the
+            // durable stop, so with a readable directory that purge would succeed and leave nothing for the
+            // drain to defer. Constructing under the fault is what makes this the first opportunity.
+            stopped = true
+            val perms = java.nio.file.Files.getPosixFilePermissions(appQueue.toPath())
+            java.nio.file.Files.setPosixFilePermissions(
+                appQueue.toPath(),
+                setOf(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+            )
+            val store = try {
+                VoiceUploadModule.contributionStoreFor(
+                    java.io.File(appContext.filesDir, "voice-contributions"),
+                    directorySyncOverride = DirectorySync.REAL,
+                    withdrawalIntent = intent,
+                ).also { stores += it }
+            } finally {
+                java.nio.file.Files.setPosixFilePermissions(appQueue.toPath(), perms)
+            }
+            val startup = moduleStartup()
+            publishIdentity(startup, "epoch-1")
+
+            assertTrue("precondition: creation could not complete the purge", store.purgeDeferred)
+            assertTrue(
+                "precondition: the capture is still on disk for the drain to find",
+                java.io.File(appQueue, "$id.recording.wav").isFile,
+            )
+
+            // THE HOOK IS THE UNIT UNDER TEST: while the stop stands it must block the pass regardless of
+            // whether this pass finished the purge, and it must stop blocking once the stop is lifted.
+            assertTrue(
+                "a persisted stop must block the pass even though the purge was already deferred",
+                store.finishPendingPurgeIfStopped(),
+            )
+            assertFalse(
+                "lifting the stop lets the pass proceed once nothing is pending",
+                run {
+                    stopped = false
+                    // Nothing is pending after the earlier drain-opportunity purge completes.
+                    store.finishPendingPurgeIfStopped()
+                },
+            )
+            assertEquals("a stopped device must never have reached the transport", 0, hits.get())
+        } finally {
+            server.stop(0)
+        }
     }
 
     private fun moduleDrain(

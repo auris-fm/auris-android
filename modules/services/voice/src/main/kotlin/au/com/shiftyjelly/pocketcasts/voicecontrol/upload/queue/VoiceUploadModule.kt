@@ -252,7 +252,9 @@ object VoiceUploadModule {
         // startup: recovery runs once per process, so waiting for it would make the user's stop depend on a
         // restart. This touches no staging bytes and runs no sweep, so it cannot race a live preparation.
         if (store.finishPendingPurgeIfStopped()) {
-            Timber.i("voice-upload drain: reason=withdrawal-purge-pending, nothing served this pass")
+            Timber.i("voice-upload drain: reason=withdrawal-stop-stands, nothing served this pass")
+            // The purge-only branch is the ONE thing this pass did; expiry, token acquisition and the poll
+            // are all skipped, so an unreadable listing can never let a stopped device serve.
             return@VoiceUploadDrain
         }
         // ACQUIRE before the synchronous poll (reviewer b702cd53): the upload path's fail-closed

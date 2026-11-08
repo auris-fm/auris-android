@@ -353,6 +353,33 @@ class ContributionStore(
     }
 
     /**
+     * CLAIM OWNERSHIP OF EVERY RETAINED CAPTURE ON DISK, WITHOUT RE-ADMISSION (reviewer ec6ce881).
+     *
+     * Purge needs a list of what to DELETE, and it must come from the directory rather than from the index:
+     * a freshly constructed store has seen nothing, so an index-driven purge would report success while
+     * deleting zero captures and leave the user's audio on disk after they withdrew sharing. This is
+     * ownership DISCOVERY, deliberately separate from CAPACITY accounting - it restores no byte or coverage
+     * gate and admits nothing, so nothing discovered here can be served or committed. Callers hold the lock.
+     */
+    private fun discoverRetainedFromDiskLocked() {
+        for (id in retainedCaptureIdsLocked()) {
+            claimOwnedLocked(id, ready = false)
+        }
+    }
+
+    /**
+     * Every capture id that retains ANY of its entry files on disk - audio or sidecars (spec 9e6a2081).
+     * Wider than the capacity count on purpose: capacity protects AUDIO, so it ignores orphan sidecars,
+     * but a purge must remove them too or the withdrawal leaves debris behind.
+     */
+    private fun retainedCaptureIdsLocked(): Set<String> = dir.listFiles()?.mapNotNullTo(mutableSetOf()) { f -> entryFileCaptureId(f.name) } ?: emptySet()
+
+    /** The capture id [name] belongs to, considering EVERY entry suffix, or null when it is not one. */
+    private fun entryFileCaptureId(name: String): String? = ENTRY_SUFFIXES.firstNotNullOfOrNull { suffix ->
+        name.removeSuffix(suffix).takeIf { name.endsWith(suffix) && it.matches(UUID_RE) }
+    }
+
+    /**
      * CAPACITY IS COUNTED, NOT MEASURED (spec a3ef694f). One record is one COMPLETE entry on disk: a WAV
      * whose matching metadata sidecar exists, under a UUID name. In-progress captures that only have a
      * `.wav.part` are NOT records yet, and no byte total is involved - a byte total could be made
@@ -2396,14 +2423,16 @@ class ContributionStore(
             ownership.revokeUnderLock()
             cancelLiveLaunchesLocked() // ONE authoritative transition: a purge also withdraws launches
             if (discoverBeforeDelete) {
-                // DISCOVERY INSIDE THE REVOCATION, WITHOUT RE-ADMISSION: establishCoverage() lists the
-                // directory and CLAIMS ownership of every capture it finds (so the purge below can delete
-                // them), but it never writes memoryEntries and never marks anything ready or retryable -
-                // so no attempt can acquire a discovered capture during the purge boundary. It also runs
-                // AFTER the generation advanced and launches were withdrawn, so a capture a PUT is already
-                // streaming is covered by the revocation rather than by this call.
-                establishCoverage()
-                // The counted, unowned captures are now in ownedCharges; join them WITH the index below.
+                // DISCOVERY INSIDE THE REVOCATION, WITHOUT RE-ADMISSION (reviewer ec6ce881). This must
+                // enumerate the DIRECTORY ITSELF: a freshly constructed store's index is empty, so a purge
+                // driven by the index alone deletes nothing and the user's retained audio survives the
+                // disable they asked for. Discovery CLAIMS ownership of every capture it finds so the
+                // deletes below can reach it, but it never writes memoryEntries and never marks anything
+                // ready or retryable - so no attempt can acquire a discovered capture during the purge
+                // boundary. It also runs AFTER the generation advanced and launches were withdrawn, so a
+                // capture a PUT is already streaming is covered by the revocation rather than by this call.
+                discoverRetainedFromDiskLocked()
+                // The discovered captures are now in ownedCharges; join them WITH the index below.
                 // TEST SEAM: observes the state AFTER discovery, which is the boundary the contract is
                 // about. onPurgeOrRecoverMutation fires BEFORE discovery, so it cannot see a promotion.
                 onAfterPurgeDiscoveryForTest?.invoke()

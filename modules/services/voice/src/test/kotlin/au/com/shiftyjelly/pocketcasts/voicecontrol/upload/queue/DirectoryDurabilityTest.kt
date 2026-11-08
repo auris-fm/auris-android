@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -1133,6 +1134,75 @@ class DirectoryDurabilityTest {
                 fresh.recover().none { it.captureId == id },
             )
         }
+    }
+
+    @Test
+    fun `a FRESH unrecovered store still purges retained captures from disk`() {
+        // REVIEWER ec6ce881. A policy-disable observed at STARTUP runs against a store that has seen
+        // nothing: empty memoryEntries, empty ownedCharges. Purge must therefore discover what to remove by
+        // LISTING THE DIRECTORY, not by reading its own index. When discovery rode on the deleted byte
+        // measurement, a fresh store purged ZERO captures, reported success, set recovered, and left the
+        // user's retained audio on disk after they withdrew sharing - to be resurrected by the next
+        // healthy store.
+        val root = tmp.newFolder("queue-fresh-purge")
+        val ids = (1..2).map { java.util.UUID.randomUUID().toString() }
+        val seeder = ContributionStore(root, limits())
+        try {
+            for (id in ids) {
+                assertTrue("precondition: seed $id", seeder.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
+            }
+        } finally {
+            seeder.close()
+        }
+        for (id in ids) {
+            assertTrue("precondition: audio on disk before purge", File(root, "contributions/$id.recording.wav").isFile)
+        }
+
+        // A FRESH store that never recovers. Deliberately no recover() call here.
+        val fresh = ContributionStore(root, limits())
+        try {
+            fresh.revokeAndPurge("account_changed")
+        } finally {
+            fresh.close()
+        }
+
+        for (id in ids) {
+            assertFalse(
+                "a fresh, unrecovered store must still remove retained audio it never admitted",
+                File(root, "contributions/$id.recording.wav").exists(),
+            )
+            assertFalse(
+                "the metadata sidecar must go too",
+                File(root, "contributions/$id.metadata.json").exists(),
+            )
+        }
+    }
+
+    @Test
+    fun `a fresh unrecovered purge removes sidecar-only debris as well as audio`() {
+        // The purge enumerates EVERY entry suffix, wider than the capacity count on purpose: capacity
+        // protects AUDIO, so orphan sidecars do not consume a slot, but a withdrawal must not leave them
+        // behind either (spec 9e6a2081: remove every capture with audio OR sidecars on disk).
+        val root = tmp.newFolder("queue-fresh-purge-sidecars")
+        val dir = File(root, "contributions")
+        dir.mkdirs()
+        val audioId = java.util.UUID.randomUUID().toString()
+        val sidecarId = java.util.UUID.randomUUID().toString()
+        File(dir, "$audioId.recording.wav").writeBytes(ByteArray(64))
+        File(dir, "$audioId.metadata.json").writeText("{}")
+        File(dir, "$sidecarId.metadata.json").writeText("{}")
+        File(dir, "$sidecarId.sha256").writeText("0".repeat(64))
+
+        val fresh = ContributionStore(root, limits())
+        try {
+            fresh.revokeAndPurge("account_changed")
+        } finally {
+            fresh.close()
+        }
+
+        assertFalse("audio must be purged", File(dir, "$audioId.recording.wav").exists())
+        assertFalse("sidecar-only debris must be purged too", File(dir, "$sidecarId.metadata.json").exists())
+        assertFalse("sidecar-only debris must be purged too", File(dir, "$sidecarId.sha256").exists())
     }
 
     @Test

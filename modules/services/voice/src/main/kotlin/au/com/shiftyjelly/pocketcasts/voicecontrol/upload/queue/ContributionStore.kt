@@ -358,24 +358,21 @@ class ContributionStore(
      * `.wav.part` are NOT records yet, and no byte total is involved - a byte total could be made
      * "unknown" by a single unreadable file and would then freeze the whole feature.
      */
-    private fun rootRecordCountLocked(): Int = // DISTINCT capture ids that still retain AUDIO or its sidecar, not merely complete pairs.
-        //
-        // A failed deletion leaves a partial entry behind (one file deleted, others not), and that residue
-        // still occupies the filesystem, so it must still occupy a slot - otherwise repeated failed deletes
-        // could accumulate unbounded audio under a 32-record bound. Counting only complete pairs would let
-        // such residue fall out of the count entirely.
-        //
-        // Stray files remain excluded because they never spell an entry name: staging writes are prefixed
-        // with their attempt (`gen<attemptId>...`) or end in `.part`, so neither reaches here. A `.part`
-        // is not audio yet; a UUID-named `.recording.wav` or `.metadata.json` is.
-        dir.listFiles()?.mapNotNullTo(mutableSetOf()) { f -> retainedEntryId(f.name) }?.size ?: 0
+    // DISTINCT capture ids that STILL HOLD AUDIO (spec 33c1e27a ruling): complete entries and the audio half
+    // of a failed deletion alike, because audio is what the bound exists to protect.
+    //
+    // A failed deletion leaves a partial entry behind (metadata gone, audio undeletable). That residue still
+    // occupies the filesystem, so counting only complete PAIRS would let repeated failed deletes accumulate
+    // unbounded audio under a 32-record bound.
+    //
+    // A SIDECAR-ONLY leftover never counts: orphan sidecars are exactly what wedged iOS, and they hold no
+    // audio. The cleanup sweep removes them, counted and logged. Stray files are excluded for the same
+    // reason they are not audio - staging writes are prefixed with their attempt (`gen<attemptId>...`) or
+    // end in `.part`, so they never spell an entry name.
+    private fun rootRecordCountLocked(): Int = dir.listFiles()?.mapNotNullTo(mutableSetOf()) { f -> audioEntryId(f.name) }?.size ?: 0
 
-    /** The capture id [name] retains, or null when the file is not part of any entry. */
-    private fun retainedEntryId(name: String): String? = when {
-        name.endsWith(SUFFIX_WAV) -> name.removeSuffix(SUFFIX_WAV).takeIf { it.matches(UUID_RE) }
-        name.endsWith(SUFFIX_META) -> name.removeSuffix(SUFFIX_META).takeIf { it.matches(UUID_RE) }
-        else -> null
-    }
+    /** The capture id whose AUDIO is in [name], or null when the file holds none. */
+    private fun audioEntryId(name: String): String? = name.removeSuffix(SUFFIX_WAV).takeIf { name.endsWith(SUFFIX_WAV) && it.matches(UUID_RE) }
 
     /** Claim one record atomically; returns null when the queue cannot hold another entry. */
     private fun reserve(sampleCount: Long, projected: Long): Admission? {

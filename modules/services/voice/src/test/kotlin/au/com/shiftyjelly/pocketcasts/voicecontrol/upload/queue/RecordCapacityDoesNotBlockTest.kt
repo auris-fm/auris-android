@@ -350,6 +350,51 @@ class RecordCapacityDoesNotBlockTest {
     // Mirrors the store's OWN definition of a complete record: a WAV carrying its metadata sidecar under a
     // UUID name. Counted from the directory directly, so a bug in the store's count cannot define its own
     // passing test.
+    @Test
+    fun `sidecar-only leftovers never fill the queue`() {
+        // SPEC 33c1e27a ruling. The bound protects AUDIO. A capture whose audio is gone but whose sidecars
+        // survived holds nothing worth bounding, and orphan sidecars are exactly what wedged iOS when they
+        // were allowed to accumulate. If they counted, a queue could refuse every new clip while holding no
+        // audio at all - the original freeze, reached through sidecars instead of a byte tally.
+        val now = System.currentTimeMillis()
+        val root = tmp.newFolder("sidecar-only-leftovers")
+        val dir = File(root, DIR_NAME)
+        dir.mkdirs()
+
+        // More sidecar-only ids than the bound can hold, none of them carrying audio.
+        repeat(limits().maxQueueRecords * 2) {
+            val id = UUID.randomUUID().toString()
+            File(dir, "$id$SUFFIX_META").writeText("{}")
+            File(dir, "$id.ready").writeText("")
+            File(dir, "$id.sha256").writeText("0".repeat(64))
+            File(dir, "$id.attempts").writeText("0")
+        }
+
+        val store = ContributionStore(root, limits(), clock = { now }, jitter = { 0L })
+        try {
+            assertEquals(
+                "sidecar-only leftovers must not count against the bound",
+                0,
+                store.ownedRecordsForTest(),
+            )
+            val id = UUID.randomUUID().toString()
+            assertNotNull(
+                "a real clip must still be admitted beside orphan sidecars",
+                store.prepare(
+                    id,
+                    "epoch-1",
+                    ContributionRetryCallerTestSupport.chunks(1600),
+                    ContributionRetryCallerTestSupport.meta(id, 1600),
+                    "a@x",
+                    7L,
+                ),
+            )
+            assertEquals("only the one real audio record counts", 1, store.ownedRecordsForTest())
+        } finally {
+            store.close()
+        }
+    }
+
     private fun queueDir(root: File): File = File(root, DIR_NAME)
 
     private fun completeEntriesOnDisk(root: File): Int = queueDir(root).listFiles().orEmpty().count { f ->

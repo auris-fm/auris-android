@@ -148,6 +148,11 @@ class ContributionAckResolver(
             // 409 means the recording was disposed or its bytes differ - both genuinely terminal. The
             // Former 409-after-5xx hold was an interim workaround for the server disposing a reservation
             // When its OWN attempt failed; with that fixed, holding would keep indestructible debris.
+||||||| /tmp/mfb
+            // Terminal is terminal. A 409 here means the recording was disposed, or its bytes differ
+            // from what the server already accepted - both genuinely final, so the record is released.
+            // A 409 that is merely unfinished or superseded is NOT final and arrives as retryable
+            // instead. Holding a confirmed terminal would keep indestructible debris in the queue.
             if (store.releaseForAdmittedAttempt(token, ContributionStore.TerminalReason.SERVER_TERMINAL)) {
                 Resolution.Released
             } else {

@@ -173,7 +173,7 @@ class LoopbackHostDriverTest {
         else -> "other"
     }
 
-    /** FULL upload URL required (cloud d496e610): must end with the contract path; never appended. */
+    /** FULL upload URL required: must end with the contract path; never appended. */
     private fun uploadContractUrl(): String {
         val url = requireNotNull(uploadEndpoint)
         requireLoopbackHttp(url, "AURIS_LOOPBACK_UPLOAD")

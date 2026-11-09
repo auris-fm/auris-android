@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
  * The authoritative check for the route row: what the app's own `GET_DEVICES_OUTPUTS` offers, which is
  * exactly what AndroidAudioRouteMonitor.readRoute() reads.
  *
- * A timestamped audio log says a sink *was* available; only this list says what is offered now. @reviewer
+ * A timestamped audio log says a sink *was* available; only this list says what is offered now.
  * asked for this check specifically, having read a log rather than the live device list.
  */
 @RunWith(AndroidJUnit4::class)

@@ -191,7 +191,7 @@ class EchoRejectionDeviceTest {
 
     @Test
     fun theDetectionPathAcceptsGenuineSpeechLevelAudio() = runBlocking<Unit> {
-        // The positive control @spec requires, and the reason it is not optional: with no control, zero
+        // The positive control the review requires, and the reason it is not optional: with no control, zero
         // segments cannot distinguish correct echo rejection from a scenario that would never have
         // produced a segment whatever the input. 4236631774: the control now drives the PRODUCTION
         // detector -- the same native Silero path via MicrophoneCapture.startCapture() the echo run

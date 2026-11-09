@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
  * Which platform observation, if any, distinguishes "an output is available" from "the audio is being
  * sent to it".
  *
- * @spec asked for a production observation or explicit session requirement that can tell the two apart
+ * A production observation or explicit session requirement is what this needs:rement that can tell the two apart
  * before the route-selection item can be called settled. This enumerates the candidate APIs and reports
  * what each actually answers on a real device, rather than assuming one exists.
  */

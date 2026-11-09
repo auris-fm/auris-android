@@ -34,35 +34,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionCeilings
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.OutcomeWaitLimits
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionCaptureProducer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.EngineStageProvenance
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.QueueLimits
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.TestScope
@@ -77,7 +53,6 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
@@ -95,9 +70,6 @@ class VoiceAsrEngineTest {
     @get:Rule
     val mainCoroutineRule = MainCoroutineRule()
 
-    @get:Rule
-    val tmp = TemporaryFolder()
-
     private val context = mock<Context>()
     private val audioManager = mock<AudioManager>()
     private val voiceAudioProcessor = mock<VoiceAudioProcessor>()
@@ -107,40 +79,7 @@ class VoiceAsrEngineTest {
     private val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
     private val audioFeedbackRenderer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer>()
     private val backend = mock<AsrBackend>()
-
-    // Gate OFF by default: the observation layer must not change any pre-existing engine behaviour.
-    private var authority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-    private var retentionSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-    private var observer = SegmentObserver(
-        CollectionGate { _ -> false },
-        NoopSegmentSink,
-        authority,
-        issueAuthority = { issuedAuthorityForTests },
-        handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-    )
     private val translationStage = mock<TranslationStage>()
-
-    // Engine tests exercise lifecycle; dedicated observer controls validate the real
-    // owner-transaction handoff. Here the frozen value is a constant and validation accepts.
-    private val issuedAuthorityForTests = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
-        "a@b.c",
-        1L,
-        1L,
-        "epoch-1",
-        "disclosure-1",
-    )
-
-    private companion object {
-        // Engine tests exercise lifecycle; dedicated observer controls validate the real
-        // owner-transaction handoff. Here the frozen value is a constant and validation accepts.
-        val issuedAuthorityForTests = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
-            "a@b.c",
-            1L,
-            1L,
-            "epoch-1",
-            "disclosure-1",
-        )
-    }
 
     init {
         // The engine reads the grace window to decide whether the user was addressing us, so the
@@ -149,8 +88,6 @@ class VoiceAsrEngineTest {
         // By default the native capture pipeline attaches. Tests that exercise a failed or
         // cancelled start override this with false.
         `when`(voiceAudioProcessor.attachCapture()).thenReturn(true)
-        // Native prefix peek: no accumulated samples in unit tests unless a test overrides.
-        `when`(voiceAudioProcessor.peekSpeechDelta(any())).thenReturn(0 to ShortArray(0))
     }
 
     private val captureFlow: Flow<VoiceSegmenterResult> = MutableStateFlow(VoiceSegmenterResult.Silence)
@@ -181,9 +118,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -196,7 +130,7 @@ class VoiceAsrEngineTest {
             listeningMode = mode,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
     }
 
@@ -214,48 +148,12 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
             onTerminated = { terminated = true },
         )
         advanceUntilIdle()
 
         assertTrue("the service must learn when the pipeline ends", terminated)
-    }
-
-    @Test
-    fun `a finished processing job stays owned until pruned, and pruning forgets it`() = runTest {
-        // Reviewer 9f873b94, against the REAL engine. Two claims in one control, because they are
-        // the same defect from both sides: ownership must OUTLIVE the unfinished list (so a failure
-        // that finished before the teardown snapshot is still judged), and pruning must scan
-||||||| /tmp/mfb
-        // Reviewer 9f873b94, against the REAL engine. Two claims in one control, because they are
-        // The same defect from both sides: ownership must OUTLIVE the unfinished list (so a failure
-        // That finished before the teardown snapshot is still judged), and pruning must scan
-        // OWNERSHIP (the completion callback already removed the job from `unfinished`, so a pruner
-        // that searched there found nothing and the maps grew once per utterance).
-        createEngine()
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(VoiceSegmenterResult.Silence))
-        startEngine(AudioRoute.Speaker)
-        advanceUntilIdle()
-
-        val owned = engine.ownedJobs
-        assertTrue("a processing job the engine created must be owned", owned.isNotEmpty())
-        // NOT asserted: that the job is still in `unfinished`. The flow is `flowOf(...)`, which
-        // completes immediately, so the job may already have finished by now — and the point of this
-        // control is precisely that ownership does not depend on that list.
-
-        // Let the flow end so the job completes, then confirm ownership survives its completion.
-        engine.stop()
-        advanceUntilIdle()
-        val finishedOwned = engine.ownedJobs.filter { it.isCompleted }
-        assertTrue("finished work must remain owned until it is judged", finishedOwned.isNotEmpty())
-
-        engine.pruneConsumedBookkeeping(onlyKeep = emptySet())
-
-        assertTrue(
-            "pruning must FORGET finished jobs (mutation: scanning the unfinished list prunes nothing)",
-            engine.ownedJobs.none { it.isCompleted },
-        )
     }
 
     @Test
@@ -270,7 +168,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
             onTerminated = { terminated = true },
         )
         advanceUntilIdle()
@@ -466,9 +364,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = realRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         val handledIntents = mutableListOf<VoiceIntent>()
@@ -481,7 +376,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { handledIntents += it },
         )
 
         // The cue reaches AudioTrack.write on the PLAYER'S OWN thread via submit(), so it must be
@@ -566,9 +461,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -622,9 +514,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -652,7 +541,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         discardAsserts(recognizer, handled)
@@ -669,7 +558,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         discardAsserts(recognizer, handled)
@@ -689,7 +578,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         assertEquals(listOf(VoiceIntent.Playback.Pause), handled)
@@ -717,7 +606,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         assertEquals("nothing routed", emptyList<VoiceIntent>(), handled)
@@ -736,7 +625,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         assertEquals("numeric marks are content, so the turn still routes", listOf(VoiceIntent.Playback.Pause), handled)
@@ -756,7 +645,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         assertEquals("supplementary letters are content", listOf(VoiceIntent.Playback.Pause), handled)
@@ -775,7 +664,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         assertEquals("supplementary digits are content", listOf(VoiceIntent.Playback.Pause), handled)
@@ -829,9 +718,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -866,7 +752,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
 
@@ -918,7 +804,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { handled += it },
         )
         advanceUntilIdle()
         assertEquals("content is not discarded", listOf(VoiceIntent.Playback.Pause), handled)
@@ -961,9 +847,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -975,7 +858,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { handledIntents += it },
         )
         advanceUntilIdle()
 
@@ -1026,20 +909,18 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
         val handledIntents = mutableListOf<VoiceIntent>()
+
         engine.start(
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { handledIntents += it },
         )
         advanceUntilIdle()
 
@@ -1288,9 +1169,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1300,7 +1178,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
 
@@ -1352,9 +1230,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -1364,7 +1239,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
 
@@ -1412,9 +1287,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1424,7 +1296,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
 
@@ -1487,9 +1359,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1499,7 +1368,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
         return engine
@@ -1551,9 +1420,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
             templateResolver = templateResolver,
             currentLocale = currentLocale,
@@ -1565,7 +1431,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
         return engine to intents
@@ -1604,9 +1470,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1617,7 +1480,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -1662,9 +1525,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1675,7 +1535,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -1714,9 +1574,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1727,7 +1584,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -1768,9 +1625,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1785,7 +1639,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -1838,9 +1692,6 @@ class VoiceAsrEngineTest {
                 gracePeriodSignal = gracePeriodSignal,
                 audioFeedbackRenderer = audioFeedbackRenderer,
                 translationStage = translationStage,
-                collectionAuthority = authority,
-                retentionSink = retentionSink,
-                segmentObserver = observer,
                 context = context,
             )
             engine.scope = this
@@ -1851,7 +1702,7 @@ class VoiceAsrEngineTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
-                onIntent = { _, _ -> },
+                onIntent = {},
             )
             advanceUntilIdle()
 
@@ -1916,9 +1767,6 @@ class VoiceAsrEngineTest {
                 gracePeriodSignal = gracePeriodSignal,
                 audioFeedbackRenderer = audioFeedbackRenderer,
                 translationStage = localTranslation,
-                collectionAuthority = authority,
-                retentionSink = retentionSink,
-                segmentObserver = observer,
                 context = context,
             )
             engine.scope = this
@@ -1929,7 +1777,7 @@ class VoiceAsrEngineTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
-                onIntent = { _, _ -> },
+                onIntent = {},
             )
             advanceUntilIdle()
 
@@ -1973,9 +1821,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1986,7 +1831,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -2001,131 +1846,11 @@ class VoiceAsrEngineTest {
     private fun CoroutineScope.createEngineWithSpeech(
         recognizer: VoiceRecognizer,
         wakeWordResult: WakeWordResult,
-    ) = createEngineWithSpeech(observer, retentionSink, authority, recognizer, wakeWordResult)
-
-    // / REAL-ENGINE allowance controls (reviewer 174083e0 #2): the engine allocation/drain boundary
-    // / is exercised by the REAL VoiceAsrEngine over the REAL observer + retention sink — not a
-    // / manually allocated array.
-
-    @Test
-    fun `no allowance authority - a consented capture is still admitted and retained while recognition proceeds`() = runTest {
-        // Core c74d7e30 removed the allowance entirely: there is no prepaid token, no
-        // UnavailableCaptureAllowance fallback and no fail-closed allowance refusal. The only
-        // admission gates left are consent/policy and the compiled per-clip ceilings — so a
-        // consented, under-ceiling capture is ADMITTED with no allowance composed at all.
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val bareObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retention,
-            liveAuthority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(bareObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
-        engine.start(
-            backend = FakeAsrBackend("play something"),
-            audioRoute = AudioRoute.Headset(hasMicrophone = true),
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-
-        assertTrue("a consented capture with no allowance authority must be admitted", recognizer.calls.any { it.startsWith("recognize:") })
-        assertEquals("exactly one capture retained from the bare path", 1, retention.retainedCount())
-        engine.stop()
-        advanceUntilIdle()
-    }
-
-    @Test
-    fun `prepaid positive companion - the same engine path retains exactly one capture`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val prepaidObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retention,
-            liveAuthority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(prepaidObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
-        engine.start(
-            backend = FakeAsrBackend("play something"),
-            audioRoute = AudioRoute.Headset(hasMicrophone = true),
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-
-        val candidate = retention.retainedSnapshot().singleOrNull()
-        assertTrue("the prepaid positive companion must retain exactly one capture", candidate != null)
-        assertEquals(1L, candidate!!.context.captureSession)
-        engine.stop()
-        advanceUntilIdle()
-    }
-
-    @Test
-    fun `an over-ceiling capture is refused at admission and recognition still proceeds`() = runTest {
-        // Core c74d7e30 kept the per-clip bound but moved it into the compiled
-        // ContributionCeilings constant; there is no per-capture allowance bound to shrink. The
-        // engine-level bound control therefore drives the ceiling itself: an initial PCM size
-        // whose encoded-WAV encoding (2 B/sample + 44 B header) exceeds MAX_CLIP_BYTES is
-        // refused at admission — nothing drained, nothing retained — while recognition
-        // continues and the engine stops cleanly.
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val overObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retention,
-            liveAuthority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(overObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
-        // Ceiling-exceeding initial buffer: half the byte ceiling in samples + header > ceiling.
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn((ContributionCeilings.MAX_CLIP_BYTES / 2L + 44L).toInt())
-        engine.start(
-            backend = FakeAsrBackend("play something"),
-            audioRoute = AudioRoute.Headset(hasMicrophone = true),
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor, times(0)).drainSpeechPcm(org.mockito.kotlin.any<ShortArray>())
-        assertEquals("nothing may be retained from an over-ceiling capture", 0, retention.retainedCount())
-        assertEquals(0L, retention.retainedBytes())
-        assertTrue(
-            "recognition continues: the utterance still reached the recognizer after retention refused",
-            recognizer.calls.any { it.startsWith("recognize:") },
-        )
-        engine.stop()
-        advanceUntilIdle()
-    }
-
-    private fun CoroutineScope.createEngineWithSpeech(
-        observer: SegmentObserver,
-        sink: ContributionRetentionSink,
-        authorityOverride: () -> AuthorityDecision,
-        recognizer: VoiceRecognizer,
-        wakeWordResult: WakeWordResult,
     ) {
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
             flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechContinuing,
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
                 ),
@@ -2144,9 +1869,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = authorityOverride,
-            retentionSink = sink,
-            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -2178,7 +1900,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { handledIntents += it },
         )
         advanceUntilIdle()
 
@@ -2211,7 +1933,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -2243,7 +1965,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         advanceUntilIdle()
 
@@ -2273,7 +1995,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
 
         assertFalse("the pipeline never attached capture", attachment.await())
@@ -2293,7 +2015,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
 
         assertTrue("the pipeline attached capture", attachment.await())
@@ -2318,7 +2040,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         assertFalse("the pipeline never attached capture", attachment.await())
         verify(voiceAudioProcessor, never()).startProcessing()
@@ -2345,7 +2067,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = {},
         )
         assertTrue("the pipeline attached capture", attachment.await())
 
@@ -2398,9 +2120,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -2410,7 +2129,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
 
@@ -2499,9 +2218,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -2511,7 +2227,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intents += it },
         )
         advanceUntilIdle()
 
@@ -2612,9 +2328,6 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
-            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
-            retentionSink = org.mockito.kotlin.mock(),
-            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -2624,7 +2337,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> engineIntents += intent },
+            onIntent = { engineIntents += it },
         )
         advanceUntilIdle()
         engine.stop()
@@ -2858,1028 +2571,6 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
-    // ── wake_required + measured wake facts (spec phase 2) ──────────────────────────────
-
-    /**
-     * Drives ONE segment from a real SpeechStarted admission through the real wake stage and the
-     * real publish trigger, and returns the decoded record. Everything asserted here is produced by
-     * production code: the freeze of the grace window at admission (`CaptureContext.wakeRequired`),
-     * the detector's measured score/threshold, the ASR language tag, and the trigger's record.
-     *
-     * `wake_required` on the ROOT is asserted from the frozen context the capture was admitted with
-     * (the root field is written from exactly that value); the persisted `wake`/`asr` stages prove
-     * the measurement and the detected language reached the wire.
-     */
-    private suspend fun kotlinx.coroutines.test.TestScope.captureOneSegmentForTest(
-        mode: ListeningMode,
-        /** Optional hook: runs after the window's real state is measured, before the segment. */
-        afterWindowMeasured: (au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal) -> Unit = {},
-        transcript: String,
-        detectedLanguage: String?,
-        wakeConfidence: Float,
-        wakeThreshold: Float,
-        wakeCompletionSample: Int = 4000,
-        /** Optional ASR tokens: time-band wake trim only applies when tokens are present. */
-        asrTokens: List<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken>? = null,
-        dirName: String,
-    ): CapturedSegment {
-        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val admittedContexts = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext>()
-        val admittingObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retentionSink,
-            authority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-            onAdmittedForTest = { admittedContexts += it },
-        )
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
-        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        // A CLEAN segment: no playback bleed, so it proceeds to ASR (a Mockito stub defaults to
-        // false, which the engine reads as a bleed rejection).
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        // THE REAL GRACE WINDOW (cold: closed). The engine freezes `!isActive.value` at segment
-        // start, so the helper MEASURES the signal rather than stubbing a literal — the assertions
-        // below describe the actual window, not a value the test injected.
-        val graceWindow = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
-        `when`(gracePeriodSignal.isActive).thenReturn(graceWindow.isActive)
-        kotlinx.coroutines.runBlocking {
-            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                    detected = true,
-                    confidence = wakeConfidence,
-                    completionSample = wakeCompletionSample,
-                    threshold = wakeThreshold,
-                ),
-            )
-        }
-
-        val dbgBackend = FakeAsrBackend(transcript, tokens = asrTokens, detectedLanguage = detectedLanguage)
-        val handledIntentsX = mutableListOf<VoiceIntent>()
-        val store = ContributionStore(
-            tmp.newFolder(dirName),
-            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
-            clock = { 61_000_000L },
-            jitter = { it - 1 },
-        )
-        val producer = ContributionCaptureProducer(
-            store,
-            appVersion = { "8.20" },
-            appBuild = { "12345" },
-            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
-            enrollmentAccount = { "a@b.c" },
-            enrollmentSession = { 1L },
-        )
-        val trigger = RetentionPublishTrigger(
-            retentionSink,
-            producer,
-            fixedModels = listOf("vad" to ModelRef.None, "wakeword" to ModelRef.None),
-            stagesProvider = { EngineStageProvenance.stagesFor(it) },
-            publishUnderOwner = { frozen, commit ->
-                if (frozen.account == "a@b.c" && frozen.session == 1L && frozen.enrollmentEpoch == "epoch-1") commit() else false
-            },
-            dispatch = { body ->
-                body()
-                null
-            },
-        )
-        trigger.attach()
-
-        afterWindowMeasured(graceWindow)
-        engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = admittingObserver,
-            context = context,
-        )
-        engine.scope = this
-        // WakeWord listening so a spoken command in the SAME segment is treated as a follow-up
-        // (Continuous mode gated the segment behind the open grace window this test varies).
-        engine.start(
-            backend = dbgBackend,
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = mode,
-            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntentsX += intent },
-        )
-        advanceUntilIdle()
-        engine.stop()
-
-        val ready = store.readyEntries()
-        val stored = ready.singleOrNull()?.let {
-            val d = store.durableCapture(it.captureId)
-            // Reading the record keeps the descriptor only transiently: settle it NOW or the slot
-            // leaks process-wide and starves later full-suite neighbours (CompositionPath failures).
-            d?.owned?.settle(1_000L)
-            d?.record
-        }
-        return CapturedSegment(
-            // ADMISSION IS THE OBSERVATION UNDER TEST: the context the engine admitted this segment
-            // with carries the frozen `wakeRequired`, so it is asserted directly rather than through
-            // a persistence path that needs the production outcome-wait finalizer to be installed.
-            admitted = admittedContexts.last(),
-            persisted = stored?.let { RecordValidator.validate(it) as RecordValidator.Result.Ok },
-            persistedRoot = stored,
-            delivered = stored != null,
-        )
-    }
-
-    /** The persisted record of one delivered segment, decoded AND as the root object the wire carries. */
-    private class CapturedSegment(
-        val admitted: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext,
-        val persisted: RecordValidator.Result.Ok?,
-        val persistedRoot: RecordNode.Obj?,
-        val delivered: Boolean,
-        /** How many entries the durable queue holds after the segment settled. */
-        val queued: Int = if (delivered) 1 else 0,
-    )
-
-    /**
-     * The ROOT `wake_required` value for the admitted capture, written through the PRODUCTION
-     * builder from the context the engine actually admitted — the same call the publish trigger
-     * makes, so this reads the wire value rather than a re-derived copy of it.
-     */
-    private fun rootWakeRequired(captured: CapturedSegment): RecordNode? {
-        val builder = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder(
-            captureId = captured.admitted.captureId.toString(),
-            enrollmentEpoch = captured.admitted.issuedAuthority?.enrollmentEpoch ?: "epoch-1",
-            captureSessionId = captured.admitted.captureSession.toString(),
-        )
-        listOf("vad", "wakeword", "asr", "translation", "router").forEach { builder.model(it, ModelRef.None) }
-        // Every stage the pinned schema requires, in its honest absence shape.
-        builder.stage(StageName.Wake, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected"))))
-        builder.stage(
-            StageName.Bleed,
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
-        )
-        builder.stage(
-            StageName.Asr,
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
-        )
-        builder.stage(
-            StageName.Translation,
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
-        )
-        builder.stage(
-            StageName.Routing,
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
-        )
-        builder.stage(
-            StageName.Execution,
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
-        )
-        builder.wakeRequired(captured.admitted.wakeRequired)
-        val record = builder.build(
-            platform = "android",
-            appVersion = "8.20",
-            build = "12345",
-            audio = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock(
-                sha256 = "a".repeat(64),
-                byteCount = 52L,
-                retainedSamples = 4L,
-                sampleRateHz = 16000,
-                channels = 1,
-                encoding = "pcm_s16le",
-                originalFormat = "pcm_s16le",
-                conversionVersion = "v1",
-                truncated = false,
-                droppedSpans = emptyList(),
-            ),
-        )
-        return record.fields["wake_required"]
-    }
-
-    @Test
-    fun `wake_required is true when the grace window is closed at segment start`() = runTest {
-        val captured = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "skip this ad",
-            detectedLanguage = "en",
-            wakeConfidence = 0.87f,
-            wakeThreshold = 0.5f,
-            dirName = "wake-required-closed",
-        )
-        // The window was shut when this segment started, so the capture was admitted needing the
-        // wake word — the value `ContributionRecordBuilder.wakeRequired` writes to the wire.
-        assertEquals(
-            "a segment opened with the grace window shut needs the wake word",
-            RecordNode.Bool(true),
-            rootWakeRequired(captured),
-        )
-        // Admission itself is the observation: `rootWakeRequired` reads the frozen context, so a
-        // capture that never reached admission cannot produce a boolean and the assertion above
-        // would already have failed.
-    }
-
-    @Test
-    fun `wake_required is false during the follow-up grace window`() = runTest {
-        val captured = captureOneSegmentForTest(
-            // Continuous: an unsolicited command is transcribed even with the window shut, which is
-            // the only way to observe a capture CLOSED at segment start whose window opened before it.
-            mode = ListeningMode.Continuous,
-            transcript = "pause",
-            detectedLanguage = "de",
-            wakeConfidence = 0.93f,
-            wakeThreshold = 0.6f,
-            // A GENUINE follow-up: the window is CLOSED at admission (the test's own cold start),
-            // then the detector fires on the previous segment — exactly how a follow-up opens in
-            // production — before this segment begins. `wakeRequired` is read from that live state.
-            afterWindowMeasured = { window -> window.onWakeWordDetected() },
-            dirName = "wake-required-grace",
-        )
-        assertEquals(
-            "a follow-up inside the grace window does not need the wake word",
-            RecordNode.Bool(false),
-            rootWakeRequired(captured),
-        )
-    }
-
-    @Test
-    fun `a combined wake plus command clip records the field and the detected language`() = runTest {
-        // The owner's "Auris, <command>" shape: the detector fires on the SAME segment that carries
-        // the command, so the record must still say wake_required (grace closed at onset) and must
-        // carry the language the backend detected for the command text.
-        // The ORDINARY finalization path: the production finalizer arms a real deadline for the
-        // capture and seals it, so the record below is the one the pipeline actually persists rather
-        // than a shape this test assembled.
-        val finalizer = CaptureOutcomeFinalizer(
-            retentionSink,
-            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
-            this,
-            sleepMs = { kotlinx.coroutines.delay(it) },
-            // Real monotonic time: this control is about the record the pipeline persists, not about
-            // simulating the wait, so the deadline is never reached inside the test.
-            nowMs = { System.nanoTime() / 1_000_000L },
-        )
-        finalizer.start()
-        val captured = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "skip this ad",
-            detectedLanguage = "en-US",
-            wakeConfidence = 0.91f,
-            wakeThreshold = 0.55f,
-            // The wake word is the OPENING of this clip: the completion point sits early in the
-            // segment, so the same segment carries the spoken command after it (not wake-only).
-            wakeCompletionSample = 400,
-            dirName = "wake-required-combined",
-        )
-        // The admission is the observation: the engine froze the window shut, so the field this
-        // capture's admitted context yields is true — asserted through the production builder.
-        assertEquals(RecordNode.Bool(true), rootWakeRequired(captured))
-
-        // THE PERSISTED RECORD IS REQUIRED: if delivery or any of the field connections disappears,
-        // this test fails here rather than passing on the admission check alone (reviewer 1f7fe074).
-        val decoded = checkNotNull(captured.persisted) {
-            "the combined clip must reach a persisted, valid record (delivered=${captured.delivered})"
-        }
-        // ...and the ROOT FIELD ITSELF is read from the persisted bytes, not from a record this test
-        // rebuilt out of the admitted context, so the value the trigger/producer actually wrote is
-        // what fails here if it is wrong or missing (reviewer 5a612a5b).
-        val persistedRoot = checkNotNull(captured.persistedRoot) { "the persisted root object must exist" }
-        assertEquals(
-            "the persisted record must carry the wake_required this capture actually had",
-            RecordNode.Bool(true),
-            persistedRoot.fields["wake_required"],
-        )
-        val wake = checkNotNull(decoded).record.observations.getValue(StageName.Wake)
-        assertEquals(RecordNode.Str("detected"), wake.fields["decision"])
-        assertEquals(0.91, (wake.fields["score"] as RecordNode.Num).value, 1e-6)
-        assertEquals(0.55, (wake.fields["threshold"] as RecordNode.Num).value, 1e-6)
-        // The ASR language is the one the backend ACTUALLY detected for the command text.
-        val asr = decoded.record.observations.getValue(StageName.Asr)
-        assertEquals(RecordNode.Str("skip this ad"), asr.fields["text"])
-        assertEquals(RecordNode.Str("en-US"), asr.fields["source_language"])
-    }
-
-    private inline fun withWakeOnlyEmission(block: () -> Unit) {
-        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission.enabled = true
-        try {
-            block()
-        } finally {
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission.enabled = false
-        }
-    }
-
-    @Test
-    fun `a wake-only clip records routing not_run wake_only`() = runTest {
-        // SPEC DELTA 58940cbe (owner-approved) with the emission flag ON (spec 5374333c option 2):
-        // when the wake-positive trim consumes the whole transcript ("Auris" alone), routing never
-        // ran — the record says not_run/wake_only, not an unknown. Timestamped tokens make the
-        // time-band trim real: "Auris" sits fully before the wake completion band, so the trimmed
-        // command transcript is empty and the clip takes the wake-only drop the device takes.
-        val finalizer = CaptureOutcomeFinalizer(
-            retentionSink,
-            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
-            this,
-            sleepMs = { kotlinx.coroutines.delay(it) },
-            nowMs = { System.nanoTime() / 1_000_000L },
-        )
-        finalizer.start()
-
-        withWakeOnlyEmission {
-            val wakeOnly = captureOneSegmentForTest(
-                mode = ListeningMode.WakeWord,
-                transcript = "Auris",
-                detectedLanguage = "en-US",
-                wakeConfidence = 0.91f,
-                wakeThreshold = 0.55f,
-                wakeCompletionSample = 400,
-                asrTokens = listOf(
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
-                ),
-                dirName = "wake-only-routing",
-            )
-            val persisted = checkNotNull(wakeOnly.persisted) { "the wake-only clip must reach a persisted record" }
-            val routing = persisted.record.observations.getValue(StageName.Routing)
-            assertEquals(StageState.NotRun, routing.state)
-            assertEquals(RecordNode.Str("wake_only"), routing.fields["reason"])
-        }
-    }
-
-    @Test
-    fun `with the wake_only emission flag OFF the wake-only clip does not emit wake_only`() = runTest {
-        // SPEC 5374333c option 2: Cloud staging is on HOLD for the wake_only vocabulary, so
-        // emission defaults OFF. The identical wake-only clip must then carry NO wake_only typing
-        // anywhere — the wire is unchanged until staging confirms.
-        val finalizer = CaptureOutcomeFinalizer(
-            retentionSink,
-            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
-            this,
-            sleepMs = { kotlinx.coroutines.delay(it) },
-            nowMs = { System.nanoTime() / 1_000_000L },
-        )
-        finalizer.start()
-
-        assertTrue("precondition: emission must default OFF", !au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission.enabled)
-        val wakeOnly = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "Auris",
-            detectedLanguage = "en-US",
-            wakeConfidence = 0.91f,
-            wakeThreshold = 0.55f,
-            wakeCompletionSample = 400,
-            asrTokens = listOf(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
-            ),
-            dirName = "wake-only-routing-flag-off",
-        )
-        val persisted = checkNotNull(wakeOnly.persisted) { "the wake-only clip must reach a persisted record" }
-        val routing = persisted.record.observations.getValue(StageName.Routing)
-        assertTrue(
-            "flag OFF must never emit wake_only; got ${routing.state} ${routing.fields}",
-            (routing.fields["reason"] as? RecordNode.Str)?.value != "wake_only",
-        )
-    }
-
-    @Test
-    fun `a command clip after the wake word is NOT typed wake_only`() = runTest {
-        // The other half of spec delta 58940cbe: "Auris, <command>" leaves text and routes
-        // normally — the wake_only typing must not leak onto it. Command tokens sit AFTER the
-        // wake band, so the trim removes only "Auris".
-        val finalizer = CaptureOutcomeFinalizer(
-            retentionSink,
-            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
-            this,
-            sleepMs = { kotlinx.coroutines.delay(it) },
-            nowMs = { System.nanoTime() / 1_000_000L },
-        )
-        finalizer.start()
-
-        withWakeOnlyEmission {
-            val withCommand = captureOneSegmentForTest(
-                mode = ListeningMode.WakeWord,
-                transcript = "Auris, skip this ad",
-                detectedLanguage = "en-US",
-                wakeConfidence = 0.91f,
-                wakeThreshold = 0.55f,
-                wakeCompletionSample = 400,
-                asrTokens = listOf(
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("Auris", startMs = 0, endMs = 240),
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("skip", startMs = 700, endMs = 900),
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("this", startMs = 950, endMs = 1100),
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("ad", startMs = 1150, endMs = 1300),
-                ),
-                dirName = "wake-command-routing",
-            )
-            val persisted = checkNotNull(withCommand.persisted) { "the command clip must reach a persisted record" }
-            val routing = persisted.record.observations.getValue(StageName.Routing)
-            assertTrue(
-                "a command clip must NOT be typed wake_only; got ${routing.state} ${routing.fields}",
-                routing.fields["reason"] != RecordNode.Str("wake_only"),
-            )
-        }
-    }
-
-    // NOTE (reviewer 30d46323 item 1 / spec 027d40d8): the earlier outside-grace wake-rejection
-    // control was INVALID — this helper hardcodes `WakeWordResult(detected = true)`, and the
-    // engine branches on `detected`, not score vs threshold, so it never exercised a rejection,
-    // and without the finalizer its zero-queue assertion proved nothing. Removed here; the real
-    // wake-rejection behaviour (capture context + queue per spec line 41) is established in the
-    // follow-up commit with a genuinely rejecting detector and the real finalizer.
-
-    /**
-     * The stage facts the engine actually observes for ONE segment, read from the live corpus rather
-     * than from a persisted record: the delivered-record path needs the production outcome-wait
-     * finalizer, but the OBSERVATIONS this engine joined are the subject here, and they are what the
-     * provenance maps to `source_language`.
-     */
-    private fun observedFor(captureId: java.util.UUID) = retentionSink.observedForTest(captureId)
-
-    @Test
-    fun `a measured language survives an ASR result whose text is empty`() = runTest {
-        // The backend came back with a language and no text at all. The empty result is what the
-        // stage records, but the language WAS measured and dies nowhere (reviewer 1f7fe074): an
-        // absence that never happened must not be reported as absent.
-        val captured = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "",
-            detectedLanguage = "yue",
-            wakeConfidence = 0.9f,
-            wakeThreshold = 0.5f,
-            dirName = "asr-empty-language",
-        )
-        val empty = observedFor(captured.admitted.captureId)
-            .filterIsInstance<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.NotCollected>()
-            .single { it.reason == "empty" }
-        assertEquals("the measured language must ride on the empty-result observation", "yue", empty.measuredLanguage)
-    }
-
-    @Test
-    fun `a measured language survives an ASR result with no usable content`() = runTest {
-        // Punctuation only: no command, so nothing is routed — but the backend still reported a
-        // language, and that observation is the client's to record (reviewer 1f7fe074).
-        val captured = captureOneSegmentForTest(
-            mode = ListeningMode.WakeWord,
-            transcript = "...",
-            detectedLanguage = "zh",
-            wakeConfidence = 0.9f,
-            wakeThreshold = 0.5f,
-            dirName = "asr-non-content-language",
-        )
-        val nonContent = observedFor(captured.admitted.captureId)
-            .filterIsInstance<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.NotCollected>()
-            .single { it.reason == "non_content" }
-        assertEquals("the measured language must survive a non-content result", "zh", nonContent.measuredLanguage)
-    }
-
-    // PERSISTED PROVENANCE FOR RESULTS THAT BECOME NO COMMAND (reviewer 1f7fe074, cad3379e).
-    //
-    // The provenance controls above stop at the stage entry. These install the real publish trigger
-    // and producer, so the assertions read the PERSISTED record for the same three facts: what ASR
-    // observed (text), what it measured (source_language), and — for a genuinely blank result only —
-    // the `empty_result` representation the wire contract reserves for it.
-    @Test
-    fun `a blank ASR result persists empty_result with the measured language and no text`() = runTest {
-        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val admittingObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retentionSink,
-            authority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
-        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        // GRACE CLOSED and the detector fires on this segment: a Continuous segment that needs the
-        // wake word is the ordinary shape that carries a real `wake_required` into the record.
-        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
-        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = true,
-                confidence = 0.9f,
-                completionSample = 4000,
-            ),
-        )
-
-        val captured = runSegmentToPersistedRecord(
-            dirName = "persisted-asr-empty",
-            transcript = "   ",
-            detectedLanguage = "yue",
-            admittingObserver = admittingObserver,
-        )
-        val asr = captured.record().observations.getValue(StageName.Asr)
-        assertEquals(StageState.Completed, asr.state)
-        assertEquals("a genuinely blank result is the empty_result representation", "empty_result", (asr.fields["reason"] as? RecordNode.Str)?.value)
-        assertTrue("empty_result carries no text", "text" !in asr.fields)
-        assertEquals("the language the backend measured must be in the persisted record", RecordNode.Str("yue"), asr.fields["source_language"])
-    }
-
-    @Test
-    fun `a non-content ASR result persists its observed text and language, not empty_result`() = runTest {
-        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val admittingObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retentionSink,
-            authority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
-        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
-        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = false,
-                confidence = 0f,
-                completionSample = 4000,
-            ),
-        )
-
-        val captured = runSegmentToPersistedRecord(
-            dirName = "persisted-asr-non-content",
-            transcript = "...",
-            detectedLanguage = "zh",
-            admittingObserver = admittingObserver,
-        )
-        val asr = captured.record().observations.getValue(StageName.Asr)
-        assertEquals(StageState.Completed, asr.state)
-        // The pipeline dropped this as a COMMAND; it was still a recognition, so the persisted
-        // observation keeps what ASR produced instead of claiming it produced nothing.
-        assertEquals(RecordNode.Str("..."), asr.fields["text"])
-        assertEquals(
-            "a recognized result is not an empty_result",
-            null,
-            (asr.fields["reason"] as? RecordNode.Str)?.value,
-        )
-        assertEquals(RecordNode.Str("zh"), asr.fields["source_language"])
-        // iOS found the router was recorded as having received input it was never given (spec
-        // aed257b6). The command WAS discarded, so no routing input exists: the observation must
-        // describe only what ASR produced. Android's provenance never writes `router_input` for a
-        // non-content result — this control holds it that way through the real producer and store.
-        assertFalse(
-            "the router never ran, so no router_input may be recorded",
-            asr.fields.containsKey("router_input"),
-        )
-    }
-
-    /** A delivered record, decoded, plus its persisted root — the two shapes the controls read. */
-    private class DeliveredRecord(
-        private val ok: RecordValidator.Result.Ok,
-    ) {
-        fun record(): RecordValidator.Valid = ok.record
-    }
-
-    /**
-     * Run one segment through the REAL publish trigger, producer and store, then require the
-     * delivered record. The record's provenance therefore comes from `EngineStageProvenance` over
-     * the sealed capture, not from a shape this test assembled.
-     */
-    private suspend fun kotlinx.coroutines.test.TestScope.runSegmentToPersistedRecord(
-        dirName: String,
-        transcript: String,
-        detectedLanguage: String?,
-        admittingObserver: SegmentObserver,
-    ): DeliveredRecord {
-        val storeRoot = java.nio.file.Files.createTempDirectory(dirName).toFile()
-        val store = ContributionStore(
-            storeRoot,
-            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
-            clock = { 61_000_000L },
-            jitter = { it - 1 },
-        )
-        val producer = ContributionCaptureProducer(
-            store,
-            appVersion = { "8.20" },
-            appBuild = { "12345" },
-            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
-            enrollmentAccount = { "a@b.c" },
-            enrollmentSession = { 1L },
-        )
-        val trigger = RetentionPublishTrigger(
-            retentionSink,
-            producer,
-            fixedModels = listOf("vad" to ModelRef.None, "wakeword" to ModelRef.None),
-            stagesProvider = { EngineStageProvenance.stagesFor(it) },
-            publishUnderOwner = { frozen, commit ->
-                if (frozen.account == "a@b.c" && frozen.session == 1L && frozen.enrollmentEpoch == "epoch-1") commit() else false
-            },
-            dispatch = { body ->
-                body()
-                null
-            },
-        )
-        trigger.attach()
-        // THE ORDINARY FINALIZATION PATH: an empty or non-content result is NOT a publishable
-        // terminal, so the production bounded wait is what seals it. Two independent evidence
-        // sources install it defensively (the sink holds a single hook, so this is
-        // last-wins idempotent), and both are the production classes with the tests' clock.
-        val finalizer = CaptureOutcomeFinalizer(
-            retentionSink,
-            OutcomeWaitLimits(selectedWaitMs = 500L, ceilingWaitMs = 60_000L),
-            this,
-            sleepMs = { kotlinx.coroutines.delay(it) },
-            nowMs = { System.nanoTime() / 1_000_000L },
-        )
-        finalizer.start()
-        engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = intentRecognizer,
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = admittingObserver,
-            context = context,
-        )
-        engine.scope = this
-        engine.start(
-            backend = FakeAsrBackend(transcript, detectedLanguage = detectedLanguage),
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-        engine.stop()
-        // The wait sealed and dispatched the capture; close the timer owner before reading.
-        finalizer.dispose()
-
-        val ready = store.readyEntries()
-        assertEquals("the capture must be DELIVERED by the trigger, not staged by the test", 1, ready.size)
-        val durable = checkNotNull(store.durableCapture(ready.single().captureId)) { "the delivered capture must be durable" }
-        val recordToValidate = durable.record
-        // The descriptor holds a PROCESS-WIDE source slot; settle it BEFORE any throwing assert so
-        // the slot returns even when validation fails (reviewer 586e0209).
-        durable.owned?.settle(1_000L)
-        val decoded = RecordValidator.validate(recordToValidate)
-        assertTrue(
-            "the delivered record must validate: $decoded",
-            decoded is RecordValidator.Result.Ok,
-        )
-        return DeliveredRecord(decoded as RecordValidator.Result.Ok)
-    }
-
-    // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1; claim corrected per reviewer 3cc4a92f).
-    //
-    // WHAT THIS PROVES: the engine's handling of an INJECTED filter refusal. The segment flows
-    // through real SpeechStarted admission (capture frozen, prefix adopted) and a real segment
-    // close; `utteranceFilter` is a MOCK whose shouldProcess returns false, and the playback
-    // reference is empty, so nothing here demonstrates that the real correlator WOULD have rejected
-    // this audio. When the injection is refused, the engine joins NotCollected("bleed") itself,
-    // the ATTACHED RetentionPublishTrigger fires through the real sink callback, and the producer
-    // persists bytes the control decodes (bleed completed/overlap).
-    //
-    // WHAT THIS DOES NOT PROVE: correlator/filter detection accuracy (device/JNI boundary), and
-    // actual Hilt assembly/owner integration — publishUnderOwner is supplied BY THIS TEST, so the
-    // production owner-binding wiring is exercised only at source level.
-    @Test
-    fun `a bleed-rejected segment is delivered to the producer by the publish trigger`() = runTest {
-        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        // The real admission path: the settings-stop collection gate must be OPEN for the
-        // capture to be admitted and retained at all.
-        val admittingObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retentionSink,
-            authority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
-        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        // THE INJECTED REFUSAL: a mocked filter returning false stands in for the correlator's
-        // bleed verdict. This proves the engine's reaction to a refusal, not the verdict itself.
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(false)
-        // Grace open: a wake-negative segment in Continuous still flows to the transcriber,
-        // which is where the bleed filter decision lives.
-        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
-        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = false,
-                confidence = 0f,
-                completionSample = 4000,
-            ),
-        )
-
-        val root = tmp.newFolder("bleed-delivery")
-        val store = ContributionStore(
-            root,
-            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
-            clock = { 61_000_000L },
-            jitter = { it - 1 },
-        )
-        val admittedContexts = mutableListOf<au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext>()
-        val producer = ContributionCaptureProducer(
-            store,
-            appVersion = { "8.20" },
-            appBuild = { "12345" },
-            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
-            enrollmentAccount = { "a@b.c" },
-            enrollmentSession = { 1L },
-        )
-        val trigger = RetentionPublishTrigger(
-            retentionSink,
-            producer,
-            // SAME KEYS AS PRODUCTION (VoiceUploadModule.ENGINE_FIXED_MODEL_PROVENANCE): the trigger
-            // appends `asr` and `translation` itself, so fixed models cover vad/wakeword only; the trigger supplies router provenance.
-            fixedModels = listOf(
-                "vad" to ModelRef.None,
-                "wakeword" to ModelRef.None,
-            ),
-            stagesProvider = { EngineStageProvenance.stagesFor(it) },
-            publishUnderOwner = { frozen, commit ->
-                // The frozen tuple IS the test authority issued at capture start.
-                if (frozen.account == "a@b.c" && frozen.session == 1L && frozen.enrollmentEpoch == "epoch-1") commit() else false
-            },
-            dispatch = { body ->
-                body()
-                null
-            },
-        )
-        trigger.attach()
-
-        // The bleed branch fires BEFORE ASR, so no ASR model is consulted; the capture's frozen
-        // model provenance still has to satisfy the producer's schema, hence a Named id here.
-        val bleedBackend = object : AsrBackend {
-            override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
-
-            override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult("pause")
-
-            override val requiredModel = ModelSpec(
-                files = listOf(
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile(
-                        url = "u",
-                        filename = "f",
-                        manifestId = "asr-1",
-                    ),
-                ),
-                targetDir = "manifest-version-1",
-            )
-
-            override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
-
-            override fun release() = Unit
-        }
-        engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = intentRecognizer,
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = admittingObserver,
-            context = context,
-        )
-        engine.scope = this
-        engine.start(
-            backend = bleedBackend,
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-        engine.stop()
-
-        // The trigger DELIVERED: exactly one record beside the retained WAV, written by the
-        // producer's validated path, and retention fully released.
-        val ready = store.readyEntries()
-        assertEquals("the bleed rejection must be delivered by the trigger, not staged by the test", 1, ready.size)
-        assertEquals(0, retentionSink.retainedCount())
-        assertEquals(0L, retentionSink.retainedBytes())
-        val durableProbe = checkNotNull(store.durableCapture(ready.single().captureId))
-        val recordToValidate = durableProbe.record
-        durableProbe.owned?.settle(1_000L)
-        val decoded = when (val v = RecordValidator.validate(recordToValidate)) {
-            is RecordValidator.Result.Ok -> v.record
-            else -> error("the persisted record must decode, got $v")
-        }
-        val bleed = decoded.observations.getValue(StageName.Bleed)
-        assertEquals("the PERSISTED bleed state must be a completed check", StageState.Completed, bleed.state)
-        assertEquals("overlap", (bleed.fields.getValue("decision") as RecordNode.Str).value)
-    }
-
-    //
-    // LIFECYCLE CONTROLS for the invocation-token channel (reviewer 268d8cf0): results are
-    // addressed by a token bound BEFORE dispatch, so identical overlapping intents cannot share a
-    // capture, a settled token cannot deliver anywhere, and stop/restart ends every open token.
-    //
-    @Test
-    fun `two identical dispatched intents receive distinct invocation tokens bound to their own captures`() = runTest {
-        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val admittingObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retentionSink,
-            authority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        // TWO speech segments, each recognized to the SAME intent: the identical-value overlap the
-        // old intent-keyed map would have conflated into one capture.
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
-        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
-        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = false,
-                confidence = 0f,
-                completionSample = 4000,
-            ),
-        )
-
-        engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = admittingObserver,
-            context = context,
-        )
-        engine.scope = this
-        val tokens = mutableListOf<VoiceAsrEngine.InvocationToken>()
-        val gotIntents = mutableListOf<VoiceIntent>()
-        engine.start(
-            backend = bleedingBackendForLifecycle(),
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, token ->
-                gotIntents += intent
-                if (token != null) tokens += token
-            },
-        )
-        advanceUntilIdle()
-        engine.stop()
-
-        assertEquals(listOf(VoiceIntent.Playback.Pause, VoiceIntent.Playback.Pause), gotIntents)
-        assertEquals("both identical dispatches must carry a token", 2, tokens.size)
-        assertTrue("identical intents are DIFFERENT dispatches", tokens[0].id != tokens[1].id)
-        assertTrue("different dispatches belong to different captures", tokens[0].captureId != tokens[1].captureId)
-    }
-
-    @Test
-    fun `a result reported after stop or settle is dropped, not applied`() = runTest {
-        authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        val admittingObserver = SegmentObserver(
-            CollectionGate { _ -> true },
-            retentionSink,
-            authority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
-        `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
-        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = false,
-                confidence = 0f,
-                completionSample = 4000,
-            ),
-        )
-
-        engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            collectionAuthority = authority,
-            retentionSink = retentionSink,
-            segmentObserver = admittingObserver,
-            context = context,
-        )
-        engine.scope = this
-        var stopped: VoiceAsrEngine.InvocationToken? = null
-        engine.start(
-            backend = bleedingBackendForLifecycle(),
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, token -> if (token != null) stopped = token },
-        )
-        advanceUntilIdle()
-        engine.stop()
-
-        // STOP/RESTART OWNERSHIP: the token died with the lifecycle.
-        assertEquals(
-            "a stop must end the invocation; a late result must be refused",
-            false,
-            engine.reportExecutionResult(checkNotNull(stopped), au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome.Success),
-        )
-    }
-
-    /** ASR backend whose model provenance satisfies the producer schema (same trick as the bleed control). */
-    private fun bleedingBackendForLifecycle(): AsrBackend = object : AsrBackend {
-        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
-
-        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult("pause")
-
-        override val requiredModel = ModelSpec(
-            files = listOf(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile(
-                    url = "u",
-                    filename = "f",
-                    manifestId = "asr-1",
-                ),
-            ),
-            targetDir = "manifest-version-1",
-        )
-
-        override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
-
-        override fun release() = Unit
-    }
-
     private class RecordingRecognizer(
         private val intent: VoiceIntent?,
     ) : VoiceRecognizer {
@@ -3912,7 +2603,6 @@ class VoiceAsrEngineTest {
     private class FakeAsrBackend(
         private val transcript: String,
         private val tokens: List<AsrToken>? = null,
-        private val detectedLanguage: String? = null,
     ) : AsrBackend {
         /** Counted so a test can assert a segment never reached transcription. */
         var transcribeCalls = 0
@@ -3922,7 +2612,7 @@ class VoiceAsrEngineTest {
 
         override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
             transcribeCalls += 1
-            return AsrResult(transcript, detectedLanguage = detectedLanguage, tokens = tokens)
+            return AsrResult(transcript, tokens = tokens)
         }
 
         override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
@@ -3984,195 +2674,5 @@ class VoiceAsrEngineTest {
         override fun closeInputStream() {
             closeCalls++
         }
-    }
-
-    @Test
-    fun `the engine drives REAL segment events through the observer - frozen context, no double gate check`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        var gateChecks = 0
-        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        observer = SegmentObserver(
-            CollectionGate { _ ->
-                gateChecks++
-                true
-            },
-            retention,
-            liveAuthority,
-            issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(
-            observer,
-            retention,
-            liveAuthority,
-            recognizer = recognizer,
-            wakeWordResult = WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
-        )
-        // Bleed filter passes: the turn proceeds to ASR like any ordinary capture.
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-
-        engine.start(
-            backend = FakeAsrBackend("play something"),
-            audioRoute = AudioRoute.Headset(hasMicrophone = true),
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-
-        // Gate consulted at START and revalidated BEFORE the completion handoff (reviewer
-        // blocker 2: a START-only YES can never authorize retention after authority loss).
-        assertEquals(2, gateChecks)
-        val candidate = retention.retainedSnapshot().single()
-        assertEquals(1L, candidate.context.captureSession)
-        assertEquals("Headset", candidate.context.routeClass)
-        // The engine's per-capture context is threaded through start→incremental→completed:
-        // the 4 samples of the closed segment arrive as the REAL delta (peek reports none), so
-        // the sink prefix accounts exactly what the producer handed over.
-        assertEquals(4L, candidate.incrementalSamplesAccounted)
-        // Exactly the VAD's samples — no virtual padding, no playback reference.
-        assertTrue(candidate.pcm!!.contentEquals(shortArrayOf(100, 200, 300, 400)))
-        assertEquals(SegmentObservation.WakeState.NotDetected, candidate.wakeState)
-        engine.stop()
-
-        // The frozen context travelled the WHOLE ASR → routing → execution chain and every
-        // stage joined by the ISSUED id; the final recorded outcome is Executed — joined at the
-        // invocation's FINALIZATION (settle), not at dispatch, so the persisted record carries a
-        // result-or-unknown decision rather than an unconditional dispatch (reviewer 3fb01865).
-        // This test drives the engine alone (no service settles), so the token is finalized by
-        // stop()'s abandonment path, which records the same Executed-with-unknown. The outcome
-        // assertions therefore come AFTER stop.
-        assertTrue(
-            "the capture must end Executed, was " + (candidate.outcome?.let { it::class.simpleName } ?: "null"),
-            candidate.outcome is CollectionOutcome.Executed,
-        )
-        assertEquals(candidate.context.captureId, (candidate.outcome as CollectionOutcome.Executed).captureId)
-        assertTrue((candidate.outcome as CollectionOutcome.Executed).dispatchedWithoutThrowing)
-    }
-
-    @Test
-    fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
-        val sink = EngineObservationSink()
-        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        observer = SegmentObserver(
-            CollectionGate { true },
-            sink,
-            liveAuthority,
-            { issuedAuthorityForTests },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        val pending = MutableSharedFlow<VoiceSegmenterResult>()
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = intentRecognizer,
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            collectionAuthority = liveAuthority,
-            retentionSink = retentionSink,
-            segmentObserver = observer,
-            context = context,
-        )
-        engine.scope = this
-
-        engine.start(
-            backend = FakeAsrBackend("unused"),
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-        pending.emit(VoiceSegmenterResult.SpeechStarted)
-        advanceUntilIdle()
-        pending.emit(VoiceSegmenterResult.SpeechContinuing)
-        advanceUntilIdle()
-
-        engine.stop()
-        advanceUntilIdle()
-
-        assertEquals(1, sink.cancelled.size)
-        assertEquals("pipeline-stopped", sink.cancelled.single().reason)
-        assertTrue(sink.completed.isEmpty()) // listening closure discards ONLY the current partial
-    }
-
-    @Test
-    fun `gate OFF means the pipeline allocates NOTHING for upload across a full turn`() = runTest {
-        val sink = EngineObservationSink()
-        val deadSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-        observer = SegmentObserver(
-            CollectionGate { false },
-            sink,
-            deadAuthority,
-            { issuedAuthorityForTests },
-            CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
-        )
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(
-            observer,
-            deadSink,
-            deadAuthority,
-            recognizer = recognizer,
-            wakeWordResult = WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
-        )
-
-        engine.start(
-            backend = FakeAsrBackend("play something"),
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
-        )
-        advanceUntilIdle()
-        engine.stop()
-
-        // Recognition still ran (ordinary pipeline untouched):
-        assertEquals(listOf("ensureReady", "recognize:play something"), recognizer.calls)
-        // ...yet zero upload-side observations and zero retained PCM exist anywhere.
-        assertEquals(0, deadSink.retainedCount())
-        assertEquals(0L, deadSink.retainedBytes())
-        assertEquals(0, sink.started.size + sink.incremental.size + sink.completed.size)
-        assertEquals(0, observer.retainedBytes())
-    }
-
-    private class EngineObservationSink : au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentSink {
-        // Admits with a real token so the observer's adoption path proceeds (slice 8 protocol).
-        private var seq = 0L
-        override fun adopted(observation: SegmentObservation.Started, token: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ReservationToken?): Boolean = true
-        override fun admit(observation: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.Admission): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ReservationToken? = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ReservationToken(observation.context.captureId, ++seq, observation.producerSamples.toLong() * 2)
-
-        val started = mutableListOf<SegmentObservation.Started>()
-        val incremental = mutableListOf<SegmentObservation.Incremental>()
-        val completed = mutableListOf<SegmentObservation.Completed>()
-        val cancelled = mutableListOf<SegmentObservation.Cancelled>()
-
-        override fun started(observation: SegmentObservation.Started): Boolean {
-            started += observation
-            return true
-        }
-
-        override fun incremental(observation: SegmentObservation.Incremental, samples: ShortArray) {
-            incremental += observation
-        }
-
-        override fun completed(observation: SegmentObservation.Completed): Boolean {
-            completed += observation
-            return true
-        }
-
-        override fun cancelled(observation: SegmentObservation.Cancelled) {
-            cancelled += observation
-        }
-
-        fun allObservedPcmSamples(): Int = completed.sumOf { o -> o.frames.sumOf { it.size } }
     }
 }

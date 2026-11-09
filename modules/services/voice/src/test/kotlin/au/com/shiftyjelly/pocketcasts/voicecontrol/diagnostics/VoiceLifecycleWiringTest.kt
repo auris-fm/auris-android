@@ -94,10 +94,6 @@ class VoiceLifecycleWiringTest {
                     // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
                     // non-UUID as `request_id=invalid`, so a placeholder here would assert the
                     // opposite of the contract.
-||||||| /tmp/mfb
-                    // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
-                    // Non-UUID as `request_id=invalid`, so a placeholder here would assert the
-                    // Opposite of the contract.
                     hint = null, logicalRequestId = "b7ce1a5e-1c1b-4a4f-9d1e-3f2c8a6d5e70", isRetry = false, sourceLanguage = "zh",
                 )!!
                 val turn = async { sink.dispatchPrepared(prepared) }
@@ -303,16 +299,7 @@ class VoiceLifecycleWiringTest {
                 service.voiceAsrEngine = dagger.Lazy { engine }
                 service.asrBackendSelector = selector
                 service.playbackBufferRecorder = mock()
-                // ensureModelsReady reads digest-VERIFIED readiness; an unstubbed verified
-                // check returns a null Boolean and the unboxing NPE kills the IO start job, so
-                // the observer never installs and capture never starts.
-                service.modelManager = mock {
-                    on { isModelReady(any()) }.thenReturn(true)
-                    on { isModelReadyVerified(any()) }.thenReturn(true)
-                    on { isLfmModelReady() }.thenReturn(true)
-                    on { ensureModel(any()) }.thenReturn(Result.success(Unit))
-                    on { ensureLfmModel() }.thenReturn(Result.success(Unit))
-                }
+                service.modelManager = mock()
                 service.modelsReadyCondition = ready
                 service.voiceControlServiceController = mock()
                 service.audioFeedbackRenderer = mock()

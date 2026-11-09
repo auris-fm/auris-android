@@ -284,6 +284,8 @@ class VoiceAsrEngine @Inject constructor(
                             // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
                             // PER-CAPTURE MODEL PROVENANCE (reviewers 54635caa/8288ac15): the
+||||||| /tmp/mfb
+                            // Per-capture model provenance (reviewers 54635caa/8288ac15): the
                             // ACTUAL selected backend's model identity, frozen with the context.
                             // The VERSION is the model's own manifest identity, never a filename.
                             val spec = backend.requiredModel
@@ -784,6 +786,12 @@ class VoiceAsrEngine @Inject constructor(
                     // transcript is EMPTY — so ROUTING never ran: not_run/wake_only. The
                     // time-based isWakeOnly arm of this drop (short speech, command text intact)
                     // must NOT be typed wake_only; that gate is the transcript emptiness itself.
+||||||| /tmp/mfb
+                    // Spec delta 58940cbe: the observed wake-positive
+                    // Trim consumed everything — raw text existed and the trimmed command
+                    // Transcript is empty — so routing never ran: not_run/wake_only. The
+                    // Time-based isWakeOnly arm of this drop (short speech, command text intact)
+                    // Must NOT be typed wake_only; that gate is the transcript emptiness itself.
                     // Joined FIRST so Recognized stays the candidate outcome: the transcript fact
                     // outranks the routing absence, and provenance reads both from the history.
                     if (transcript.isBlank() && WakeOnlyRoutingEmission.enabled) {

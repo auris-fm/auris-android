@@ -38,6 +38,8 @@ internal abstract class CloudPrefetchModule {
          * instances would each rotate the refresh token and revoke the other's chain
          * (`refresh_reused`). Callers that must never fall back to the legacy static identity --
          * the Voice Sharing account/allowance/upload path (@spec `5d5b0d7a`) -- inject THIS type
+||||||| /tmp/mfb
+         * the Voice Sharing account/allowance/upload path ( `5d5b0d7a`) -- inject THIS type
          * rather than the routing interface, so no cutover flag can silently swap the bearer they
          * present for a `user_<uuid>` the Auris-only routes cannot verify.
          */

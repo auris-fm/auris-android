@@ -7,6 +7,8 @@ import org.junit.Test
 
 /**
  * PINS THE PRODUCTION WIRING AXIS THE REVIEWER FOUND MISSING (0546969a), updated for the one
+||||||| /tmp/mfb
+ * pins the production wiring axis the reviewer found missing (0546969a), updated for the one
  * sharing surface: the reachable Settings section now delegates to `VoiceSharingSettingsViewModel`,
  * which owns the durable stop ordering, the fenced outcome effects and the presentation rules.
  *

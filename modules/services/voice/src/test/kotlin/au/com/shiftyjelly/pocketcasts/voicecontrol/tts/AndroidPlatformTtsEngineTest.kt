@@ -49,9 +49,6 @@ class AndroidPlatformTtsEngineTest {
     fun `speak before initialization reports failure instead of silent delivery`() = runTest {
         // REVIEWER 4356625551: the engine used to swallow this case silently, so the renderer
         // counted a reply as delivered while the user heard nothing. speak must REPORT that no
-||||||| /tmp/mfb
-        // REVIEWER 4356625551: the engine used to swallow this case silently, so the renderer
-        // counted a reply as delivered while the user heard nothing. Speak must REPORT that no
         // synthesis happened.
         assertFalse(engine.speak("hello", "en"))
     }
@@ -59,8 +56,6 @@ class AndroidPlatformTtsEngineTest {
     @Test
     fun `an accepted synthesis whose callbacks never arrive fails the utterance within the bound`() {
         // REVIEWER 4356632247: an engine that queues SUCCESS but never delivers onDone/onError/onStop
-||||||| /tmp/mfb
-        // reviewer 4356632247: an engine that queues success but never delivers onDone/onError/onStop
         // used to leave speak() suspended forever; speakWithHeartbeat kept reporting emission, so
         // the user's next utterance was suppressed for the whole session.
         //
@@ -115,7 +110,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `synthesized audio that cannot be decoded is an incomplete delivery, not success`() {
-        // speak() used to return true after playSynthesized() even when the WAV
+        // REVIEWER 486205ae: speak() used to return true after playSynthesized() even when the WAV
         // decode failed -- a file was synthesized, no audio was heard, and the caller still released
         // the delivery hold as clean. The typed incomplete failure is the truthful outcome.
         // The fake writes GARBAGE bytes for this utterance, so the platform "succeeds" while the
@@ -362,9 +357,6 @@ class AndroidPlatformTtsEngineTest {
     fun `a late onDone from a cancelled utterance must not complete its successor`() {
         // Reviewer 3aaab695 (original finding 4236364898): the utterance listener is SHARED across
         // speak() calls -- B's setOnUtteranceProgressListener REPLACES A's, so any LATE callback
-||||||| /tmp/mfb
-        // Reviewer 3aaab695 (original finding 4236364898): the utterance listener is SHARED across
-        // speak() calls -- B's setOnUtteranceProgressListener replaces A's, so any late callback
         // from the cancelled A is delivered into B's listener, which resumes B's captured
         // continuation WITHOUT checking the utterance id. A cancel / B start / late A onDone thus
         // completes B while B's own synthesis is still outstanding.
@@ -1215,8 +1207,6 @@ class AndroidPlatformTtsEngineTest {
             val oldTickets = tags.filterIndexed { i, _ -> kotlin.math.abs(snapshot[i]) in 0.025f..0.04f }.toSet()
             val successorTickets = tags.filterIndexed { i, _ -> snapshot[i] > 0.6f }.toSet()
             // @reviewer: without this, an empty successor set would make the disjointness below
-||||||| /tmp/mfb
-            // : without this, an empty successor set would make the disjointness below
             // vacuously true even if the successor contributed nothing to the ring at all.
             assertTrue(
                 "the successor must have recorded audio under ITS OWN ticket (else disjointness is vacuous)",

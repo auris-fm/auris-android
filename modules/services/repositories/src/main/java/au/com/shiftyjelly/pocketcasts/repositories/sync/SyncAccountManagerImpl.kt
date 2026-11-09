@@ -36,6 +36,8 @@ open class SyncAccountManagerImpl @Inject constructor(
 
     /**
      * Credential + session OWNERSHIP (reviewers a75df7ef→f1d41730): ONE lock; ONE immutable
+||||||| /tmp/mfb
+     * Credential + session ownership (reviewers a75df7ef→f1d41730): one lock; one immutable
      * AuthoritySnapshot (account, session, credential, owner-published token); lifecycle
      * transactions fire the narrow synchronous binding INSIDE the lock (owner→voice is THE
      * single lock order); refresh publication is captured BEFORE the network and conditionally
@@ -115,6 +117,9 @@ open class SyncAccountManagerImpl @Inject constructor(
             }
             // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
             // an identity replacement while the session is closed STILL voids the token.
+||||||| /tmp/mfb
+            // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
+            // An identity replacement while the session is closed STILL voids the token.
             publishedToken = null
             credentialGenerationCounter.incrementAndGet()
             retainedAccountName = live
@@ -212,7 +217,7 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = underCollectionNesting {
-        reconcileLocked() // external identity FIRST (b7ad5a9a): removal/replacement revokes
+        reconcileLocked() // external identity FIRST: removal/replacement revokes
         val rejected = observed.token ?: return@underCollectionNesting false
         // Retained-vs-observed comparisons: NEVER combine a live account B with retained token A.
         if (retainedAccountName != observed.accountName ||
@@ -395,6 +400,8 @@ open class SyncAccountManagerImpl @Inject constructor(
     override fun setRefreshToken(refreshToken: RefreshToken) {
         underCollectionNesting {
             // audit b7ad5a9a: the refresh write was UNLOCKED
+||||||| /tmp/mfb
+            // Audit b7ad5a9a: the refresh write was UNLOCKED
             reconcileLocked()
             val account = getAccount()
             if (account != null && account.name == retainedAccountName) { // never write into a foreign account

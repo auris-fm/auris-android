@@ -40,6 +40,13 @@ internal object EngineQuiescence {
         // its throwable recorded, and the early return discarded it. Exemption is now literal —
         // the recorded cause must actually BE a cancellation, and a cancellation wrapping a real
         // cause is not one. Anything else keeps its verdict.
+||||||| /tmp/mfb
+        // An expected cancellation is not A failure — but only the cancellation itself is exempt
+        // (reviewers 51baa020, 9f873b94). This used to exempt the job unconditionally, which hid a
+        // Genuine failure: a cleanup path that threw a RuntimeException AFTER we cancelled it had
+        // Its throwable recorded, and the early return discarded it. Exemption is now literal —
+        // The recorded cause must actually BE a cancellation, and a cancellation wrapping a real
+        // Cause is not one. Anything else keeps its verdict.
         if (job in expectedCancellation && recordedCause.isCancellationLike()) return null
         // A RECORDED FAILURE WINS (reviewer 1ff17ee6): a job that had already failed before the stop
         // must keep its own failure, even though the teardown also referenced it.

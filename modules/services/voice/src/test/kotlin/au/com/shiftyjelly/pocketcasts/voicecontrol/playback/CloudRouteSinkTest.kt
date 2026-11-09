@@ -206,10 +206,6 @@ class CloudRouteSinkTest {
         // A NEW utterance under a successor window carries its OWN admitted identity: since
         // spec 3b1def9 the wire id is the admitted one, so reusing the same string here would mean
         // the same utterance, not a successor.
-||||||| /tmp/mfb
-        // A new utterance under a successor window carries its own admitted identity: since
-        // Spec 3b1def9 the wire id is the admitted one, so reusing the same string here would mean
-        // The same utterance, not a successor.
         val successor = sink.prepareTurn("new question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 2, logicalRequestId = "b2f5e9a1-7c34-4d80-9e11-6a4b8c0d2f35")!!
         val newOwner = async { sink.dispatchPrepared(successor) }
         entered.receive()
@@ -863,8 +859,6 @@ class CloudRouteSinkTest {
     @Test
     fun `an UNKNOWN action is carried as Unknown, not as nothing and not as confirmed`() {
         // @spec: "returning true for Unknown still reports confirmed execution" -- the defect is that the
-||||||| /tmp/mfb
-        // : "returning true for Unknown still reports confirmed execution" -- the defect is that the
         // Boolean could not distinguish the three. The RESPONSE cannot show the difference: an `Action`
         // event makes the turn handled regardless, so Unknown and Refused both yield Silent. What the
         // mechanism carries is the ACTION OUTCOME, and it must keep all three apart.
@@ -948,10 +942,6 @@ class CloudRouteSinkTest {
         // @spec: "Preserve the owner's known value; Unknown concerns execution, not whether its
         // pre-action snapshot existed." The TARGET is suppressed because nothing established the player
         // reached it; the PRE-ACTION position is kept because the owner captured it before the attempt.
-||||||| /tmp/mfb
-        // : "Preserve the owner's known value; Unknown concerns execution, not whether its
-        // Pre-action snapshot existed." The TARGET is suppressed because nothing established the player
-        // Reached it; the pre-action position is kept because the owner captured it before the attempt.
         // An early return on a null target would discard BOTH, which is the defect this pins.
         val state = CloudPlaybackContextState()
         val deps = TestDeps(
@@ -1368,9 +1358,6 @@ class CloudRouteSinkTest {
         )
         // Recorded BEFORE the turn, AGAINST the episode this turn is about -- a saved position belongs
         // to the episode it was recorded from, so the control must name it to assert retention.
-||||||| /tmp/mfb
-        // Recorded before the turn, against the episode this turn is about -- a saved position belongs
-        // To the episode it was recorded from, so the control must name it to assert retention.
         deps.cloudPlaybackContextState.record(
             referencePositionMs = 100L,
             previousReferencePositionMs = 300L,
@@ -1402,7 +1389,7 @@ class CloudRouteSinkTest {
 
     @Test
     fun `a superseding turn restores the chain's duck and stops the buffered audio even when silent`() = runTest {
-        // when turn B supersedes turn A mid-answer, A's finally is skipped
+        // REVIEWER 4356625394: when turn B supersedes turn A mid-answer, A's finally is skipped
         // (it no longer owns the audio state) and A's `ducked`/`audioPlayed` die with its frame.
         // A user who barges in on an answer with an action-only (silent) turn was left with the
         // podcast ducked until another app took audio focus, and A's buffered cloud audio kept
@@ -1461,13 +1448,6 @@ class CloudRouteSinkTest {
     // registers and stops the chain player. When the mutation is serialized under the turn mutex,
     // the successor's transfer waits and the stop necessarily lands after the mutation; when it is
     // not, the predecessor resumes submit/play AFTER the stop and restarts stale audio.
-||||||| /tmp/mfb
-    // REVIEWER faeb2546: the AudioFrame mutation (duck/submitFrame/play) must be serialized with
-    // Ownership transfer. The predecessor is paused INSIDE its frame's duck - actively executing,
-    // Not at a suspension point, so a cancellation cannot shield the race - while the successor
-    // Registers and stops the chain player. When the mutation is serialized under the turn mutex,
-    // The successor's transfer waits and the stop necessarily lands after the mutation; when it is
-    // Not, the predecessor resumes submit/play AFTER the stop and restarts stale audio.
     @Test
     fun `an in-flight frame mutation completes before the successor's transfer stop, never after`() = runTest {
         val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
@@ -1555,8 +1535,6 @@ class CloudRouteSinkTest {
     }
 
     // REVIEWER 4357641034: the predecessor's buffered answer must be stopped when OWNERSHIP
-||||||| /tmp/mfb
-    // Reviewer 4357641034: the predecessor's buffered answer must be stopped when ownership
     // TRANSFERS, not when the successor exits. A successor whose server stream stalls keeps the
     // predecessor's answer playing through the successor's whole turn and ahead of its own answer.
     // Observation point: while the successor's route flow is mid-flight (before its exit and
@@ -2290,9 +2268,6 @@ class CloudRouteSinkTest {
     fun `distinct utterances send their own admitted identities unchanged`() = runTest {
         // Spec 3b1def9/f47e972: the wire id IS the admitted identity, so two distinct utterances send
         // two DISTINCT admitted values -- and each is carried through byte-for-byte (no remint).
-||||||| /tmp/mfb
-        // Spec 3b1def9/f47e972: the wire id IS the admitted identity, so two distinct utterances send
-        // Two DISTINCT admitted values -- and each is carried through byte-for-byte (no remint).
         val deps = TestDeps()
         val sink = deps.sink()
         val first = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
@@ -3757,7 +3732,7 @@ class CloudRouteSinkTest {
     }
 
     /**
-     * The delivery-commitment frame CONFIRMS this turn's reservation -- that is the server's arrangement.
+     * The delivery-commitment frame CONFIRMS this turn's reservation -- @cloud's arrangement.
      *
      * WHAT DISTINGUISHES CONFIRMED FROM UNCONFIRMED, and my first two attempts missed it: the playback
      * calls are the SAME either way, because the player is already paused from the RESERVATION, and a
@@ -4729,14 +4704,15 @@ class CloudRouteSinkTest {
         // cancellation catch must release the transferred hold before rethrowing.
         val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
         graceSignal.onWakeWordDetected()
-        var answerRan = false
-        val executor = au.com.shiftyjelly.pocketcasts.voicecontrol.service.StubVoiceExecutor { intent, _, _ ->
-            answerRan = true
-            // Simulate the sink's completed transfer, then the caller withdrawing.
-            val hold = graceSignal.holdCloudTurn(owner = 3L)!!
-            graceSignal.transferHoldToOutput(testWireId, hold)
-            throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
-        }
+        val executor = org.mockito.Mockito.mock(VoicePlaybackIntentExecutor::class.java)
+        org.mockito.kotlin.whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+            .thenAnswer {
+                // Simulate the sink's completed transfer, then the caller withdrawing.
+                val intent = it.getArgument<VoiceIntent.CloudRoute>(0)
+                val hold = graceSignal.holdCloudTurn(owner = 3L)!!
+                graceSignal.transferHoldToOutput(intent.logicalRequestId ?: testWireId, hold)
+                throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
+            }
         val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
             voicePlaybackIntentExecutor = executor
             audioFeedbackRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
@@ -4747,21 +4723,14 @@ class CloudRouteSinkTest {
             gracePeriodSignal = graceSignal
         }
         var releasedThenRethrown = false
-        var threwOther: String? = null
         try {
             service.renderWithFailureHandling(
                 VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Premium, logicalRequestId = testWireId),
             )
         } catch (expected: kotlinx.coroutines.CancellationException) {
             releasedThenRethrown = !graceSignal.hasOutputHold(testWireId)
-        } catch (other: Throwable) {
-            threwOther = other::class.simpleName
         }
-        assertTrue(
-            "answerRan=" + answerRan + " rethrown=" + releasedThenRethrown +
-                " holdPresent=" + graceSignal.hasOutputHold(testWireId) + " other=" + threwOther,
-            releasedThenRethrown,
-        )
+        assertTrue("cancellation must rethrow after releasing the transferred hold", releasedThenRethrown)
     }
 
     @Test

@@ -329,6 +329,9 @@ private fun VoiceControlSettingsPage(
                 // Deleting already-accepted data survives a withdrawal: eligibility is enrolled OR
                 // a recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
                 // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
+||||||| /tmp/mfb
+                // A recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
+                // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
                 if (sharing.deleteAvailable) {
                     item {
                         val deleteSecondary = VoiceSharingSettingsRowCopy.deleteSecondary(sharing, copyResolver)
@@ -432,7 +435,7 @@ internal fun recognitionRowsFor(
  * Resolves the recognition rows by querying the SELECTED backend's own required model through the
  * file-readiness provider.
  *
- * Reviewer finding 16d8af35: the earlier version of this function received an already-computed
+ * An earlier version of this function received an already-computed
  * `backendFilesPresent` Boolean and had no production caller, so its tests could not establish
  * which spec production actually queried. This one takes the spec the backend requires and the
  * readiness provider, so a test can assert the queried spec, and production calls it.
@@ -461,7 +464,7 @@ internal fun resolveRecognitionRows(
 /**
  * The recognition row reports the SELECTED backend and that backend's readiness.
  *
- * Reviewer finding cec2f3be: this row previously reported a different component's download state
+ * This row previously reported a different component's download state
  * under a generic label, so on a device whose selected backend was SenseVoice it announced that
  * speech recognition was unavailable when only an unselected model was missing. A `null` backend
  * means the OS locale is outside the product language set -- say that, rather than blame a model

@@ -73,7 +73,9 @@ class VoiceControlServiceFeedbackLifecycleTest {
         gracePeriodSignal = GracePeriodSignal()
         notificationManager = mock<VoiceControlNotificationManager>()
         voiceControlServiceController = mock<VoiceControlServiceController>()
-        voicePlaybackIntentExecutor = StubVoiceExecutor { _, _, _ -> VoiceResponse.Combined(EarconId.SUCCESS, reply) }
+        voicePlaybackIntentExecutor = mock<VoicePlaybackIntentExecutor>().also { executor ->
+            whenever(executor.execute(any(), any())).thenReturn(VoiceResponse.Combined(EarconId.SUCCESS, reply))
+        }
         // OS transport is outside this boundary test; the actual service teardown runs unchanged.
         doNothing().whenever(this).stopForeground(Service.STOP_FOREGROUND_REMOVE)
         doNothing().whenever(this).stopSelf()

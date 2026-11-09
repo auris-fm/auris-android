@@ -11,7 +11,7 @@ import org.junit.rules.TemporaryFolder
 /**
  * P1 LOADER-EVIDENCE CONTROLS (reviewer b33229ee: "ensure loaded evidence is cleared
  * consistently on release/replace, and test that failed/released load state cannot claim an
- * artifact"; 4927bb31: a fake's private flag cannot detect a missing reset in the REAL loader).
+ * artifact"; a fake's private flag cannot detect a missing reset in the REAL loader).
  *
  * SCOPE LIMIT (reviewer 35eabae3): these are NEGATIVE scaffolds only. They establish that a
  * backend with no completed native load claims no artifact. They do NOT establish a successful

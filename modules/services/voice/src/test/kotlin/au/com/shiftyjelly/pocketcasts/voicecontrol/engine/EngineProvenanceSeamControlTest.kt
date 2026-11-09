@@ -171,6 +171,13 @@ class EngineProvenanceSeamControlTest {
         // tolerance, command text intact, no tokens so nothing was trimmed — is the boundary
         // that a naive gate mislabels; it must keep an UNKNOWN/other routing typing, never
         // wake_only.
+||||||| /tmp/mfb
+        // Reviewer item 2: the drop branch fires on transcript.isBlank() OR the
+        // Time-based isWakeOnly arm. Only an OBSERVED trim leaving no text may be typed
+        // Wake_only (spec delta 58940cbe). This shape — short speech inside the wake-only
+        // Tolerance, command text intact, no tokens so nothing was trimmed — is the boundary
+        // That a naive gate mislabels; it must keep an UNKNOWN/other routing typing, never
+        // Wake_only.
         val h = Harness(
             this,
             backend = TextBackend(" ok pause ", detectedLanguage = "en"),

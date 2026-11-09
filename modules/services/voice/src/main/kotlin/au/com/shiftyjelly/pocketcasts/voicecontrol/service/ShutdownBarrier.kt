@@ -8,7 +8,7 @@ import kotlinx.coroutines.Job
  * The single point that closes a shutdown: it EXCLUDES future starts and returns every job the
  * pipeline owns, in one atomic step.
  *
- * Reviewers asked for this repeatedly (902e0c1a1, cce1f100, 9045dd43). Taking a snapshot of
+ * This was asked for repeatedly. Taking a snapshot of
  * "currently running jobs" and then cancelling is racy: a start that lands between the snapshot and
  * the cancellation is owned by nobody, so its work can outlive the teardown and the backend can be
  * released underneath it. Here the gate closes FIRST and every start must pass through [beginStart],

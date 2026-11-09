@@ -37,6 +37,8 @@ class TeardownOrderContractTest {
         "cancel-mode",
         "stop-engine", // engine teardown is SYNCHRONOUS; nothing engine-owned outlives it
         // CANCEL BEFORE RELEASE (reviewers 0bba7db5 + dbde4427): a cancellation REQUEST is not
+||||||| /tmp/mfb
+        // Cancel before release (reviewers 0bba7db5 + dbde4427): a cancellation request is not
         // "users have finished" — dispatcher children still call render()/onCommandRecognized. So
         // the releases must follow the JOIN, not merely the cancellation.
         "cancel-scope",
@@ -523,6 +525,11 @@ class TeardownOrderContractTest {
         // between owned by nobody. The barrier must be CLOSED (not sampled) and its returned set
         // joined before any release. Source-order because the barrier's behaviour is controlled
         // separately in ShutdownBarrierControlTest.
+||||||| /tmp/mfb
+        // Reviewers 902e0c1a1/cce1f100/9045dd43: a snapshot-then-cancel leaves a start that lands in
+        // Between owned by nobody. The barrier must be CLOSED (not sampled) and its returned set
+        // Joined before any release. Source-order because the barrier's behaviour is controlled
+        // Separately in ShutdownBarrierControlTest.
         val source = productionStopVoiceControlSource()
         val closeAt = source.indexOf("shutdownBarrier.close()")
         val cancelAt = source.indexOf("serviceScope.cancel()")
@@ -579,6 +586,10 @@ class TeardownOrderContractTest {
         // Reviewers 6ce4ad78 + 3104ba44: a resources-held teardown must not look like a clean one,
         // but throwing from this unrouted launch would be an UNCAUGHT exception and could take the
         // process down. The outcome must be RETURNED, and a throwing release must be reported too.
+||||||| /tmp/mfb
+        // Reviewers 6ce4ad78 + 3104ba44: a resources-held teardown must not look like a clean one,
+        // But throwing from this unrouted launch would be an UNCAUGHT exception and could take the
+        // Process down. The outcome must be RETURNED, and a throwing release must be reported too.
         val source = productionStopVoiceControlSource()
         assertTrue(
             "a non-Settled verdict must return Held rather than throw",

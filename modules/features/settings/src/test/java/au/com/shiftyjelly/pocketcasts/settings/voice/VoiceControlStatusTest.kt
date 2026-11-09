@@ -332,7 +332,7 @@ class VoiceControlModelRowsTest {
     }
 
     /**
-     * Reviewer correction (cec2f3be): the row must report the SELECTED transcription backend, not
+     * The row must report the SELECTED transcription backend, not
      * The row must report the SELECTED transcription backend. `AsrBackendSelector` chooses
      * SenseVoice or Canary Flash by locale, so a row keyed to anything else says the wrong
      * component is unready while the real backend is fine.

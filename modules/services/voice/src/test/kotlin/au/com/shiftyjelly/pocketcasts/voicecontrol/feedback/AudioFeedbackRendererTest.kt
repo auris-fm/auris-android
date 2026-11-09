@@ -81,8 +81,6 @@ class AudioFeedbackRendererTest {
     @Test
     fun `a REFUSED cue is reported as refused, not accepted`() {
         // @reviewer: playEarcon returned true even when the player returned null, so a REFUSED cue looked
-||||||| /tmp/mfb
-        // : playEarcon returned true even when the player returned null, so a REFUSED cue looked
         // accepted to every caller -- they could not tell a cue that never sounded from one that did.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(null)
 
@@ -126,7 +124,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a failed synthesis falls back to the error earcon instead of counting as delivered`() = runTest {
-        // when the TTS engine cannot synthesize (never initialized, queue
+        // REVIEWER 4356625551: when the TTS engine cannot synthesize (never initialized, queue
         // refused, onError), the renderer used to record `spoken_submitted` and release the output
         // hold as a clean completion -- the user heard NOTHING while the turn counted as delivered.
         // The renderer must fall back to the error earcon instead.
@@ -427,8 +425,6 @@ class AudioFeedbackRendererTest {
     @Test
     fun `an old stop cannot retire a successor cue's observation`() = runTest {
         // @spec: "an old stop must not retire a successor". The first cue's observation expires to
-||||||| /tmp/mfb
-        // : "an old stop must not retire a successor". The first cue's observation expires to
         // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
         // not overwrite the successor's verdict -- otherwise a stale stop would re-open the gate's
         // attribution on a cue that already finished, or hide one that is still sounding.
@@ -476,8 +472,6 @@ class AudioFeedbackRendererTest {
     @Test
     fun `one cue keeps ONE identity across its verdict changes`() = runTest {
         // @reviewer: "Consumed→Ended on one cue receives two IDs." An identity must be a property of the
-||||||| /tmp/mfb
-        // : "Consumed→Ended on one cue receives two IDs." An identity must be a property of the
         // CUE, allocated once at admission -- otherwise a consumer comparing ids reads its own cue
         // changing its verdict as a DIFFERENT cue and discards the elapsed time it should keep.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
@@ -1081,9 +1075,6 @@ class AudioFeedbackRendererTest {
     fun `a RELEASED old observer cannot overwrite the same-sound successor's verdict`() = runTest {
         // @spec: verify the ACTUAL stale-observer retirement path end to end. Hold A's observer, admit a
         // SAME-SOUND B, release A, and require B's observation to survive. This is where the ownership
-||||||| /tmp/mfb
-        // : verify the ACTUAL stale-observer retirement path end to end. Hold A's observer, admit a
-        // same-sound B, release A, and require B's observation to survive. This is where the ownership
         // guarantee really lives -- `publishObservationIfOwning` refuses a writer that no longer owns the
         // cue -- not in a stop API.
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
@@ -1324,8 +1315,6 @@ class AudioFeedbackRendererTest {
         // wait and BEFORE its completion read. B -- the SAME sound, WAKE_WORD -- is admitted and its
         // write COMPLETES on the player thread, overwriting the shared latest-cue fields
         // cueHeadOrigin/cueHeadTarget (EarconPlayer.kt :290-292, :323/:327) -- but B's admission
-||||||| /tmp/mfb
-        // cueHeadOrigin/cueHeadTarget (EarconPlayer.kt:290-292,:323/:327) -- but B's admission
         // callback has NOT yet run, so the renderer still names A's job as the coverage owner and
         // currentCueId is still A's. In that window A resumes, reads completion(), and the comparison
         // runs against B'S interval while the ownership guard (earconCoverageJob === observer) still
@@ -1441,8 +1430,6 @@ class AudioFeedbackRendererTest {
     @Test
     fun `a successor's frontier mutation that lands before its admission marker must not steal the current observer's verdict`() {
         // Reviewer 52b786fe / @spec 3125932c -- THE WRITER-INTERNAL WINDOW the first control cannot
-||||||| /tmp/mfb
-        // Reviewer 52b786fe / @ -- the writer-internal window the first control cannot
         // reach. The callback-gap control waits for play() to RETURN, so B's marker has already moved
         // and A correctly bails. But B's publication is TWO steps -- frontier fields, then the
         // admission marker -- and marker-last ordering alone does not exclude a reader landing
@@ -1540,7 +1527,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a throwing stop still releases the replaced track, and a throwing play releases the created one`() {
-        // one runCatching around stop()+release() skipped release when stop
+        // REVIEWER 4356632394: one runCatching around stop()+release() skipped release when stop
         // threw (the lambda aborts), leaking the native track; and a created track whose play()
         // threw was never assigned to `track`, so the reference drop orphaned it too.
         val context = org.robolectric.RuntimeEnvironment.getApplication()
@@ -1662,9 +1649,6 @@ class AudioFeedbackRendererTest {
     fun `a stop that lands DURING head sampling must not let the sampled head become a verdict`() {
         // Reviewer 719c64c8: the head read is not validated against stop/release. Land the stop
         // RE-ENTRANTLY inside the head sample itself -- the sample call performs the stop, then
-||||||| /tmp/mfb
-        // Reviewer 719c64c8: the head read is not validated against stop/release. Land the stop
-        // re-entrantly inside the head sample itself -- the sample call performs the stop, then
         // returns a large head. Without a post-sampling revalidation, the in-flight verdict publishes
         // Consumed for a cue whose admission was already stopped and retired. (A latch-based handshake
         // cannot work here: the observer runs on the single Robolectric main dispatcher, so blocking

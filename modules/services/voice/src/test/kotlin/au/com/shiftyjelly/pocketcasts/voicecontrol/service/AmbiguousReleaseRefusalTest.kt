@@ -8,6 +8,8 @@ import org.junit.Test
  * An ambiguous release must never be replayed.
  *
  * THE PROPERTY, in the reviewer's terms (97ab6e9a): a release that THREW may have taken effect
+||||||| /tmp/mfb
+ * the property, in theterms (97ab6e9a): a release that threw may have taken effect
  * before throwing, so retrying it could perform destructive cleanup twice. This is not something a
  * quiescence recheck can resolve — unlike an outstanding-work hold, where the recheck is exactly the
  * right evidence. The production stop path must therefore refuse the retry outright.

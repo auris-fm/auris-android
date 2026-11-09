@@ -975,6 +975,17 @@ class CloudRouteSink internal constructor(
                     // A terminal ERROR can still SPEAK (the localized refusal): TurnFailed with
                     // spoken feedback renders output, so it transfers too. Only CANCELLATION (no
                     // feedback will be rendered) or non-spoken feedback releases here.
+||||||| /tmp/mfb
+                    // The output-hold handoff (spec ruling 7a6a62e3): when this turn will speak
+                    // Locally, its hold transfers to the renderer path — sink return is not the
+                    // Output boundary, and releasing here would unhold the window WHILE the refusal
+                    // Is still being spoken. The renderer's output terminal (completed playback,
+                    // Failure, or clear) releases it exactly once. Everything else — cancellation,
+                    // Failure (no feedback will be rendered), or silent feedback — releases here at
+                    // Terminal turn completion.
+                    // A terminal error can still speak (the localized refusal): TurnFailed with
+                    // Spoken feedback renders output, so it transfers too. Only CANCELLATION (no
+                    // Feedback will be rendered) or non-spoken feedback releases here.
                     val willSpeak = endReason != Reason.TurnCancelled &&
                         outcome?.let { it is VoiceResponse.Spoken || it is VoiceResponse.Combined } == true
                     if (willSpeak) {
@@ -1130,7 +1141,7 @@ class CloudRouteSink internal constructor(
 ||||||| /tmp/mfb
      * A line and the language it was resolved in, so fallbacks stay coherent: unknown/unsupported
      * language or missing resources yield the default line with "en" — never one language's text
-     * paired with another's voice (spec ruling 7c7575f6).
+     * paired with another's voice.
      */
     private fun resolveLocalizedLine(key: String, language: String?): ResolvedSpokenLine = templateResolver.resolveLocalized(key, language)
 

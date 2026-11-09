@@ -12,6 +12,14 @@ object SlotRepair {
             return ToolCall("no_match", action, emptyMap())
         }
 
+        // An unresolved amount or timing condition defers the whole call, before any repair step
+        // can install a magnitude or a default. This runs first deliberately: the later steps fill
+        // a missing delta from the utterance and lean on the sink's configured interval, both of
+        // which would turn an unresolved request into an immediate seek at some invented distance.
+        if (hasUnresolvedAmountOrTiming(utterance) && isExecuteOrNumericTarget(tool, action)) {
+            return null
+        }
+
         val parsed = LfmToolCallParser.parse(raw)
         var params = parsed?.params?.toMutableMap() ?: mutableMapOf()
         params = sanitizeParams(tool, action, params).toMutableMap()
@@ -38,6 +46,103 @@ object SlotRepair {
 
     /** Maximum repaired relative delta (1 hour). Larger amounts return null (no repaired call). */
     private const val MAX_REPAIR_SECONDS = 3600
+
+    /**
+     * Actions whose single numeric target is a seek distance or a chapter position.
+     *
+     * The guard covers these and only these. A duration attached to a different action is not an
+     * amount to be resolved here — a sleep timer of half an hour is a complete request, not an
+     * ambiguous one — so widening the guard would reject valid commands.
+     */
+    private fun isExecuteOrNumericTarget(tool: String, action: String): Boolean = (tool to action) !in TIMER_SCALAR_ACTIONS
+
+    /**
+     * Actions whose numeric argument is a duration or an order, not a position to resolve.
+     *
+     * These carry a complete request when the number is present: a sleep timer of half an hour,
+     * a volume level, a queue insertion point. Guarding them would refuse valid commands, so they
+     * are excluded rather than listed positively — every other action that acts on the episode or
+     * the queue is guarded, including read-only queries, which still must not run early when the
+     * request asks for the answer at some future event.
+     */
+    private val TIMER_SCALAR_ACTIONS = setOf(
+        "effects" to "set_speed",
+        "effects" to "adjust_speed",
+        "effects" to "set_trim_mode",
+        "effects" to "set_volume_boost",
+        "volume" to "set_volume",
+        "volume" to "adjust_volume",
+        "sleep" to "set",
+        "queue" to "move_to_bottom",
+    )
+
+    /**
+     * Whether the utterance leaves an amount or its timing unresolved, so the call must defer.
+     *
+     * Three conditions each defeat a local seek on their own: an alternative than one amount
+     * ("ten or twenty"), a lower bound rather than a point ("at least ten"), and a future execution
+     * condition ("when this episode ends"). A stated "now" or "exactly" settles neither an
+     * alternative nor a condition, so those two are checked last and never rescue the call.
+     *
+     * Detection is per language rather than English-only: the shared fixtures exercise Chinese,
+     * Japanese and Spanish, where the wording carries no English token to match.
+     */
+    internal fun hasUnresolvedAmountOrTiming(utterance: String): Boolean {
+        if (utterance.isBlank()) return false
+        // A quoted span names a chapter, bookmark or playlist. Its wording is a title, not a
+        // description of when to act, so it is removed before any condition is looked for.
+        val text = QUOTED_SPAN_REGEX.replace(utterance.lowercase(), " ")
+        return UNRESOLVED_AMOUNT_REGEX.containsMatchIn(text) ||
+            UNRESOLVED_BOUND_REGEX.containsMatchIn(text) ||
+            UNRESOLVED_CONDITION_REGEX.containsMatchIn(text)
+    }
+
+    // Two quantities offered as alternatives. The amount words are matched on both sides of the
+    // conjunction and no unit is required, because a chapter or index states its unit in the
+    // action rather than the phrase ("chapter ten or twenty"). Fractions count as quantities:
+    // "half or a quarter of a minute" is the same ambiguity as "ten or twenty seconds".
+    private val UNRESOLVED_AMOUNT_REGEX = Regex(
+        """\b\d+(?:\.\d+)?\b[\w\s.]*?\bor\b[\w\s.]*?\b\d+(?:\.\d+)?\b|""" +
+            """\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|hundred|half|quarter)\b[\w\s.]*?\bor\b[\w\s.]*?\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|ninety|hundred|half|quarter)\b|""" +
+            """或者|或是|還是|还是|""" +
+            """\d+\s*秒\s*か\s*\d+|か\d+秒|""" +
+            """\b\w+\s+o\s+\w+\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    // A spoken bound is not a point amount: "at least ten" admits every value above it.
+    private val UNRESOLVED_BOUND_REGEX = Regex(
+        """\b(at\s+least|at\s+most|more\s+than|less\s+than|fewer\s+than|up\s+to|no\s+less\s+than)\b|""" +
+            """至少|至多|不低于|不超过|以上|以下|""" +
+            """少なくとも|以上|以下|より多い|より少ない|""" +
+            """\b(al\s+menos|como\s+mínimo|como\s+maximo|más\s+de|menos\s+de)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    // The seek or index change is attached to a future event, so it cannot run now at any
+    // distance or position. The event may lead the sentence or trail the coordinate
+    // ("the chapter after this one ends"), so both orders are matched.
+    // The seek, index change or queue insertion is attached to a future event, so it cannot run
+    // now at any distance or position. "if" alone is excluded: it is usually politeness ("if you
+    // could, please…") rather than a condition on the action. "until" is excluded for the same
+    // reason in a question about remaining time.
+    //
+    // "once" is deliberately not treated as a conjunction here. It is a condition marker in
+    // English and the number eleven in Spanish, and the shared contract resolves that by the
+    // language of the text being repaired rather than by a list of verbs that may follow it. The
+    // only caller passes the router transcript, which this build constrains to English, so the
+    // numeral reading cannot arise on this path. Treating "once" as a condition here would be
+    // right for this caller and wrong for the function, which is the trade the contract rejects.
+    private val UNRESOLVED_CONDITION_REGEX = Regex(
+        """\b(when|after|whenever)\b[^.?!]*\b(ends?|finish\w*|over|done|stops?|complete\w*)\b|""" +
+            """\b(ends?|finish\w*|over|done|stops?|complete\w*)\b\s*,|""" +
+            """结束后|結束後|完了したら|終わったら|的时候|之後|之后|""" +
+            """\b(cuando|después\s+de\s+que|al\s+terminar)\b[^.?!]*\b(termine|acabe|finalice|acabar)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    // A quoted title or name: single or double, straight or typographic quotes.
+    private val QUOTED_SPAN_REGEX = Regex("""'[^']*'|\"[^\"]*\"|\u2018[^\u2019]*\u2019|\u201c[^\u201d]*\u201d""")
 
     internal fun collapseRepetition(text: String): String {
         if (text.isEmpty()) return text

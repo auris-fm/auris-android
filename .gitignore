@@ -77,3 +77,7 @@ developer.properties
 
 # Local scratch / working notes (not tracked)
 scratch/
+
+# Review and evidence notes are working process material, kept outside the repo.
+reviews/
+evidence/

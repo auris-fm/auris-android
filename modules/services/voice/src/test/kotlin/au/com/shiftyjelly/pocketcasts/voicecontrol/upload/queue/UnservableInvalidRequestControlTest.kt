@@ -172,6 +172,62 @@ class UnservableInvalidRequestControlTest {
     }
 
     @Test
+    fun `410 enrollment_retired also deletes the entry, closing the second way a recording is unusable`() {
+        // Two different things make a recording permanently unacceptable and both arrive as 410:
+        // the record is gone, and the enrollment it was collected under is no longer active. The
+        // second is new to this client. Deletion must not depend on which one it was, and the
+        // entry must not be retried against a server that will keep refusing it.
+        var now = 31_000_000L
+        val root = tmp.newFolder("enrollment-retired")
+        val store = newStore(root) { now }
+        val id = UUID.randomUUID().toString()
+        val samples = 1600
+        val metaBytes = canonicalMeta(id)
+        val admission = store.admitForTest(samples.toLong(), metaBytes.size)
+        val generation = store.fence.currentGeneration()
+        assertNotNull(
+            store.prepareAt(generation, admission, id, "epoch-1", chunks(samples), metaBytes, "a@x", 7L),
+        )
+        assertNotNull("the entry must be on disk before the refusal", audioFile(root))
+
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            networkAvailable = { true },
+            attemptUpload = { _, _, _, _ -> false },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            dispositionFor = { _, _ -> ContributionUploadTransport.Response.Terminal(410, "enrollment_retired") },
+            observedStatusFor = { _, _ -> 410 },
+            responseFor = { _, _ -> null },
+        )
+        caller.pollOnce()
+
+        val remaining = root.walkTopDown().filter { it.isFile && (it.name.endsWith(".recording.wav") || it.name.endsWith(".metadata.json") || it.name.endsWith(".ready")) }.toList()
+        assertTrue(
+            "a retired enrollment must delete the entry; remaining: " +
+                remaining.joinToString(", ") { it.path.removePrefix(root.path) },
+            remaining.isEmpty(),
+        )
+        assertEquals("the deletion must never be served", 0, store.retryEligible(now).size)
+        assertEquals(
+            "a server terminal must be counted as one",
+            1,
+            store.terminalCounter(ContributionStore.TerminalReason.SERVER_TERMINAL),
+        )
+
+        // Recovery must not resurrect it, and no attempt may be launched for it again.
+        store.close()
+        val fresh = newStore(root) { now }
+        fresh.recover()
+        assertTrue(
+            "a deleted entry must stay deleted across recovery",
+            root.walkTopDown().none { it.isFile && (it.name.endsWith(".recording.wav") || it.name.endsWith(".metadata.json")) },
+        )
+        assertEquals("the deleted entry must never be served again", 0, fresh.retryEligible(Long.MAX_VALUE / 2).size)
+        fresh.close()
+    }
+
+    @Test
     fun `a refusal whose durable intent cannot be published retains and reports instead of deleting`() {
         var now = 31_000_000L
         val root = tmp.newFolder("unserviced-uncertain")

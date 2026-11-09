@@ -22,7 +22,7 @@ class LegacyQueueRemovalTest {
         File(File(legacy, "capture-1"), "audio.wav").writeBytes(byteArrayOf(1, 2, 3))
         assertTrue("premise: the old root must exist before this runs", legacy.exists())
 
-        assertTrue("the old root must be removed", VoiceUploadQueueModule.deleteLegacyQueue(filesDir))
+        assertTrue("the old root must be removed", VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { })
         assertFalse("nothing of the old root may remain", legacy.exists())
 
         // The new queue is unaffected and fully usable afterwards.
@@ -35,7 +35,7 @@ class LegacyQueueRemovalTest {
     @Test
     fun `removal is a no-op when there is no old root`() {
         val filesDir = tmp.newFolder("clean")
-        assertFalse("nothing to remove is not a failure", VoiceUploadQueueModule.deleteLegacyQueue(filesDir))
+        assertFalse("nothing to remove is not a failure", VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { })
     }
 
     @Test
@@ -48,10 +48,20 @@ class LegacyQueueRemovalTest {
         val model = File(filesDir, "sensevoice-model")
         model.mkdirs()
 
-        VoiceUploadQueueModule.deleteLegacyQueue(filesDir)
+        VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { }
 
         assertTrue("a saved sharing choice must survive", neighbour.exists())
         assertEquals("a saved sharing choice", neighbour.readText())
         assertTrue("model data must survive", model.exists())
+    }
+
+    @Test
+    fun `the removal is reported, so it is not a silent deletion`() {
+        val filesDir = tmp.newFolder("logging")
+        File(filesDir, "voice-contributions/contributions").mkdirs()
+        val lines = mutableListOf<String>()
+        VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { lines.add(it) }
+        assertEquals("exactly one line for one deletion", 1, lines.size)
+        assertTrue("the line must name what went: ${lines.single()}", lines.single().contains("voice-contributions"))
     }
 }

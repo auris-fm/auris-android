@@ -4,6 +4,7 @@ import android.content.Context
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.servers.di.Raw
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
+import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionAuthorityTransaction
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
@@ -54,11 +55,17 @@ object VoiceUploadQueueModule {
      * before the new queue is constructed, so a leftover can never be mistaken for a recording this
      * path could serve.
      */
-    internal fun deleteLegacyQueue(filesDir: File): Boolean {
+    internal fun deleteLegacyQueue(
+        filesDir: File,
+        // This runs while the object graph is being built, which is before logging is set up, so a
+        // Timber call here goes nowhere. The line is emitted through the application's own log
+        // buffer instead, which exists from process start.
+        log: (String) -> Unit = { message -> LogBuffer.i(TAG, message) },
+    ): Boolean {
         val legacy = File(filesDir, LEGACY_QUEUE_ROOT)
         if (!legacy.exists()) return false
         val removed = legacy.deleteRecursively()
-        Timber.tag(TAG).i("upload queue: removed the previous queue root (removed=$removed)")
+        log("upload queue: removed the previous queue root " + LEGACY_QUEUE_ROOT + " (removed=$removed)")
         return removed
     }
 

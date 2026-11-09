@@ -4,12 +4,20 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
  * Immutable ASR/translation → intent-routing envelope.
  * Local `english_v1` matching consumes [routerTranscript] only. Cloud dispatch preserves
  * [sourceTranscript] when available and [sourceLanguage] independently of that translation.
+ *
+ * [textLanguage] is the language of [routerTranscript] itself, which differs from [sourceLanguage]
+ * whenever the text was translated. Words that mean different things in different languages are
+ * decided by it.
  */
 data class IntentRoutingInput(
     val sourceTranscript: String?,
     val sourceLanguage: String?,
     val routerTranscript: String,
     val translationKind: TranslationKind,
+    val textLanguage: String? = when (translationKind) {
+        TranslationKind.NONE -> sourceLanguage
+        else -> "en"
+    },
 ) {
     companion object {
         /** Same source/router text with [TranslationKind.NONE] (native English path). */

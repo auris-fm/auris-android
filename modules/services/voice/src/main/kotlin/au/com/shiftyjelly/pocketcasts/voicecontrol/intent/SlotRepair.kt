@@ -17,9 +17,12 @@ object SlotRepair {
         // can install a magnitude or a default. This runs first deliberately: the later steps fill
         // a missing delta from the utterance and lean on the sink's configured interval, both of
         // which would turn an unresolved request into an immediate seek at some invented distance.
-        if (hasUnresolvedAmountOrTiming(utterance, textLanguage) &&
+        // Bounds and conditions always defer: a minimum is not a level, and an action attached to
+        // a future event has no time to run at. Only the amount check is waived for an action whose
+        // number a resolved value fully settles.
+        val amountDefers = hasUnresolvedAmount(utterance) &&
             (isExecuteOrNumericTarget(tool, action) || hasUndecidedLanguageWord(utterance, textLanguage))
-        ) {
+        if (amountDefers || hasUnresolvedBound(utterance) || hasUnresolvedTiming(utterance, textLanguage)) {
             return null
         }
 
@@ -129,13 +132,13 @@ object SlotRepair {
     private fun isExecuteOrNumericTarget(tool: String, action: String): Boolean = (tool to action) !in TIMER_SCALAR_ACTIONS
 
     /**
-     * Actions whose numeric argument is a duration or an order, not a position to resolve.
+     * Actions whose numeric argument a resolved number fully settles.
      *
      * These carry a complete request when the number is present: a sleep timer of half an hour,
-     * a volume level, a queue insertion point. Guarding them would refuse valid commands, so they
-     * are excluded rather than listed positively — every other action that acts on the episode or
-     * the queue is guarded, including read-only queries, which still must not run early when the
-     * request asks for the answer at some future event.
+     * a volume level. They are exempt only from the *amount* check — a stated duration is not an
+     * ambiguous position — and never from the bound or condition checks, because "set the volume
+     * to at least twenty percent" offers a minimum rather than a level and "when this episode
+     * ends, set a thirty-minute timer" has a duration but no time to start it.
      */
     private val TIMER_SCALAR_ACTIONS = setOf(
         "effects" to "set_speed",
@@ -164,13 +167,43 @@ object SlotRepair {
         textLanguage: String? = null,
     ): Boolean {
         if (utterance.isBlank()) return false
-        // A quoted span names a chapter, bookmark or playlist. Its wording is a title, not a
-        // description of when to act, so it is removed before any condition is looked for.
-        val text = QUOTED_SPAN_REGEX.replace(utterance.lowercase(), " ")
-        return UNRESOLVED_AMOUNT_REGEX.containsMatchIn(text) ||
-            UNRESOLVED_BOUND_REGEX.containsMatchIn(text) ||
-            UNRESOLVED_CONDITION_REGEX.containsMatchIn(text) ||
-            isOnceCondition(text, textLanguage)
+        return hasUnresolvedAmount(utterance) || hasUnresolvedTiming(utterance, textLanguage)
+    }
+
+    /**
+     * Whether the utterance offers more than one amount: an alternative, a range, or a lower or
+     * upper bound rather than a point.
+     *
+     * A quoted span usually names a chapter, bookmark or playlist, and a title is not a
+     * description of when to act. Its numbering is still meaningful though: quoting an amount
+     * ("rewind 'ten or twenty' seconds") does not resolve it, so the quote marks are dropped and
+     * the words inside are still read.
+     */
+    internal fun hasUnresolvedAmount(utterance: String): Boolean = UNRESOLVED_AMOUNT_REGEX.containsMatchIn(QUOTE_MARK_REGEX.replace(utterance.lowercase(), ""))
+
+    /**
+     * Whether the utterance offers an edge rather than a point: "at least twenty", "up to fifty".
+     *
+     * A bound is never settled by a resolved number, so unlike a plain amount it is not waived for
+     * any action. A volume set to a minimum is a different request from a volume set to a level.
+     */
+    internal fun hasUnresolvedBound(utterance: String): Boolean {
+        val unquoted = QUOTE_MARK_REGEX.replace(utterance.lowercase(), "")
+        return UNRESOLVED_BOUND_REGEX.containsMatchIn(unquoted) ||
+            UNRESOLVED_RANGE_REGEX.containsMatchIn(unquoted)
+    }
+
+    /**
+     * Whether the request is tied to a future event rather than to now.
+     *
+     * Quoted spans are removed first: a chapter titled "When This Episode Ends" is a name, not a
+     * description of when to act.
+     */
+    internal fun hasUnresolvedTiming(utterance: String, textLanguage: String? = null): Boolean {
+        val lowered = utterance.lowercase()
+        val withoutSpans = QUOTED_SPAN_REGEX.replace(lowered, " ")
+        return UNRESOLVED_CONDITION_REGEX.containsMatchIn(withoutSpans) ||
+            isOnceCondition(withoutSpans, textLanguage)
     }
 
     // Two quantities offered as alternatives. The amount words are matched on both sides of the
@@ -217,8 +250,27 @@ object SlotRepair {
         RegexOption.IGNORE_CASE,
     )
 
+    // Two ends of an interval: "between ten and twenty", "from ten to twenty". A range is an
+    // alternative like "ten or twenty", and the client has no way to choose an end.
+    // An amount spoken as a word, so a range written as "between ten and twenty" is read as one.
+    private val NUMBER_WORD =
+        """(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|""" +
+            """fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|""" +
+            """seventy|eighty|ninety|hundred|half|a\s+half|uno|dos|tres|cuatro|cinco|seis|siete|""" +
+            """ocho|nueve|diez|once|doce|veinte|treinta)\b"""
+
+    private val UNRESOLVED_RANGE_REGEX = Regex(
+        """\b(between|from)\b[^.?!]*?(?:\d+|\b""" + NUMBER_WORD + """)[^.?!]*?\b(and|to)\b\s*(?:\d+|\b""" + NUMBER_WORD + """)|""" +
+            """\bentre\b[^.?!]*?\by\b\s*(?:\d+|\b""" + NUMBER_WORD + """)|""" +
+            """(?:\d+|[一二三四五六七八九十百]+)\s*(?:から|〜|~)\s*(?:\d+|[一二三四五六七八九十百]+)""",
+        RegexOption.IGNORE_CASE,
+    )
+
     // A quoted title or name: single or double, straight or typographic quotes.
     private val QUOTED_SPAN_REGEX = Regex("""'[^']*'|\"[^\"]*\"|\u2018[^\u2019]*\u2019|\u201c[^\u201d]*\u201d""")
+
+    /** Quote marks alone, leaving the words they enclosed readable. */
+    private val QUOTE_MARK_REGEX = Regex("""['\"\u2018\u2019\u201c\u201d]""")
 
     internal fun collapseRepetition(text: String): String {
         if (text.isEmpty()) return text

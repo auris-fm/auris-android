@@ -133,6 +133,10 @@ class LfmIntentRouter internal constructor(
 
             // english_v1 only: prompt/token span/slot repair use routerTranscript exclusively.
             val routerText = input.routerTranscript
+            // Slot repair is told the language of the text it repairs, which is not always the
+            // language the user spoke: an English translation of a Spanish request is repaired as
+            // English. Words like "once" differ by language and only this decides between them.
+            val textLanguage = input.textLanguage
             var classifierLabel: String? = null
             try {
                 val prompt = LfmPrompt.render(
@@ -192,6 +196,7 @@ class LfmIntentRouter internal constructor(
                         utterance = routerText,
                         tool = tool,
                         action = action,
+                        textLanguage = textLanguage,
                     )
                 } ?: return@withContext finish(
                     base.fail(

@@ -1,6 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -18,13 +21,19 @@ import org.robolectric.RobolectricTestRunner
 class DeferredCallNeverReachesSinkTest {
     private val mapper = ToolCallMapper()
 
-    private fun deferred(utterance: String, params: String, textLanguage: String? = null): Boolean {
-        val raw = "<|tool_call_start|>[playback(action='seek_relative'$params)]<|tool_call_end|>"
+    private fun deferred(
+        utterance: String,
+        params: String,
+        textLanguage: String? = null,
+        tool: String = "playback",
+        action: String = "seek_relative",
+    ): Boolean {
+        val raw = "<|tool_call_start|>[$tool(action='$action'$params)]<|tool_call_end|>"
         val repaired = SlotRepair.repair(
             raw = raw,
             utterance = utterance,
-            tool = "playback",
-            action = "seek_relative",
+            tool = tool,
+            action = action,
             textLanguage = textLanguage,
         ) ?: return true
         // Anything repair still returns must not become a sink call either.
@@ -124,12 +133,89 @@ class DeferredCallNeverReachesSinkTest {
 
     @Test
     fun `a resolved amount still defers when the request is tied to a future event`() {
-        listOf(
-            "when this episode ends, rewind ten seconds",
-            "when this episode ends, go to chapter 'Introduction'",
-            "when this episode ends, tell me the volume",
-        ).forEach { utterance ->
-            assert(deferred(utterance, ", delta_seconds=-10")) { "$utterance ran before its event" }
+        // Each case keeps its own tool and action: forcing every utterance through one action
+        // would prove only that action, and the guard is meant to hold across the ones that act.
+        assert(deferred("when this episode ends, rewind ten seconds", ", delta_seconds=-10")) {
+            "a seek ran before its event"
         }
+        assert(
+            deferred(
+                "when this episode ends, go to chapter 'Introduction'",
+                ", index=1",
+                tool = "queue",
+                action = "play_next",
+            ),
+        ) { "a queue change ran before its event" }
+        assert(
+            deferred(
+                "when this episode ends, tell me the volume",
+                "",
+                tool = "volume",
+                action = "query",
+            ),
+        ) { "a question was answered before its event" }
+    }
+
+    @Test
+    fun `a bound or condition defers even where a resolved duration would not`() {
+        // A stated duration is complete on its own, so the amount check is waived for these
+        // actions. That waiver must not extend to a bound or a condition: both leave the request
+        // without a single value to act on, even though a duration is present.
+        data class Case(val utterance: String, val tool: String, val action: String, val params: String)
+
+        listOf(
+            Case("set volume to at least twenty percent", "volume", "set_volume", ", level=20"),
+            Case("set volume to between ten and twenty percent", "volume", "set_volume", ", level=20"),
+            Case("set a thirty-minute sleep timer when this episode ends", "sleep", "set", ", minutes=30"),
+            Case("set speed to at least one and a half", "effects", "set_speed", ", speed=1.5"),
+        ).forEach { case ->
+            val raw = "<|tool_call_start|>[${case.tool}(action='${case.action}'${case.params})]<|tool_call_end|>"
+            val repaired = SlotRepair.repair(
+                raw = raw,
+                utterance = case.utterance,
+                tool = case.tool,
+                action = case.action,
+                textLanguage = "en",
+            )
+            assertNull("${case.utterance} ran despite an unresolved bound or condition", repaired)
+        }
+    }
+
+    @Test
+    fun `a quoted amount is still an alternative`() {
+        // Quoting an amount does not settle it. The words inside the quotes are read even though
+        // a quoted span is normally a title.
+        listOf(
+            "rewind \"ten or twenty\" seconds",
+            "rewind 'ten or twenty' seconds",
+            "rewind between ten and twenty seconds",
+            "rewind from ten to twenty seconds",
+        ).forEach { utterance ->
+            assert(deferred(utterance, ", delta_seconds=-10", textLanguage = "en")) {
+                "$utterance was resolved to a single distance"
+            }
+        }
+    }
+
+    @Test
+    fun `the router passes the language of the translated text into repair`() {
+        // The fixtures prove the language behaviour at the boundary of repair; this pins that the
+        // production router actually supplies it, so a Spanish request translated to English is
+        // repaired as English and a Spanish "once" is not.
+        val nativeSpanish = IntentRoutingInput(
+            sourceTranscript = "pon el volumen a once por ciento",
+            sourceLanguage = "es",
+            routerTranscript = "pon el volumen a once por ciento",
+            translationKind = TranslationKind.NONE,
+        )
+        assertEquals("es", nativeSpanish.textLanguage)
+
+        val translated = IntentRoutingInput(
+            sourceTranscript = "pon el volumen a once por ciento",
+            sourceLanguage = "es",
+            routerTranscript = "set the volume to eleven percent",
+            translationKind = TranslationKind.PLATFORM,
+        )
+        assertEquals("en", translated.textLanguage)
     }
 }

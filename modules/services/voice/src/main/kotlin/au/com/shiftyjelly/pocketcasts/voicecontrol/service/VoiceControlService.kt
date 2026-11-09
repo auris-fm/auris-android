@@ -129,6 +129,19 @@ class VoiceControlService : Service() {
      * the engine from another coroutine, which could race an in-flight start.
      */
     private val captureRestartSignal = MutableStateFlow(0L)
+
+    /**
+     * Whether the next engine start is automatic rather than one the user asked for by enabling voice
+     * control. Consumed by [startEngine], which passes it to the start-cue decision.
+     *
+     * A start is automatic unless this session's user-driven start has already happened: capture
+     * resumes on its own after a gate change, a route return or a pipeline termination, and every one
+     * of those is us reclaiming the microphone rather than the user asking to listen. Tracking
+     * "recovery" alone was not enough -- the restart that caused the owner's beep comes from the mode
+     * observer re-admitting capture after the other app released it, which never passes through
+     * [recoverCapture].
+     */
+    private var awaitingUserStart = true
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
@@ -183,7 +196,7 @@ class VoiceControlService : Service() {
         val response = try {
             voicePlaybackIntentExecutor.execute(intent, turnOutcome)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
+            // Cancellation at the execute→handoff boundary: the sink may already
             // have transferred this turn's hold to the renderer path. Rethrow without releasing and
             // the hold is orphaned — the render handoff below never runs. Release whatever was
             // transferred (a no-op when nothing was), then rethrow so structured concurrency unwinds.
@@ -197,14 +210,14 @@ class VoiceControlService : Service() {
         // Carry the cloud turn's request ID into the renderer for diagnostic join.
         val cloudIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
         val renderRequestId = cloudIntent?.logicalRequestId
-        // THE UTTERANCE'S LANGUAGE drives TTS (spec 54287f13): the reply — including a localized
+        // The utterance's language drives TTS: the reply — including a localized
         // refusal — is spoken in the language the user spoke, not the device locale. Falls back
         // to English when the ASR detected nothing this build understands.
-        // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
-        // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
+        // The language the feedback was actually resolved in (coherent text+voice): the sink
+        // reports the resolved language for cloud turns; anything unspoken or
         // local defaults to English, never the raw detected language nor the device locale.
         val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
-        // ACKNOWLEDGED HANDOFF (reviewer 664f82d0): the renderer accepts ownership of the hold by
+        // Acknowledged handoff: the renderer accepts ownership of the hold by
         // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
         // service releases the transferred hold here at the actual failure boundary — never leaving
         // it in the map. Cancellation is re-thrown after release so structured concurrency still
@@ -227,6 +240,9 @@ class VoiceControlService : Service() {
             Timber.i("Voice control already started")
             return
         }
+        // The one start the user asked for: it earns the listening cue. Everything after it in this
+        // session is automatic.
+        awaitingUserStart = true
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
 
@@ -332,6 +348,9 @@ class VoiceControlService : Service() {
                             // the automatic-restart cap so re-enabling it can capture again.
                             if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
                                 captureRestartBudget.reset()
+                                // Re-enabling is the user asking to listen again, so the next
+                                // start is theirs and earns the cue the first start did.
+                                awaitingUserStart = true
                             }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
@@ -512,6 +531,10 @@ class VoiceControlService : Service() {
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private suspend fun startEngine(mode: ListeningMode): Boolean {
+        // Why this start happened, frozen before the attempt can suspend. The start cue needs it: a
+        // recovery start must stay silent. Reading shared state inside onStarted instead would
+        // couple the cue to a later restart that may have overwritten the flag.
+        val isAutomaticRecovery = !awaitingUserStart
         // Captured before the attempt: validated after ensureReady() so a start that was
         // invalidated while suspended (gate loss, stop) does not commit.
         val generation = engineStart.generation()
@@ -619,10 +642,13 @@ class VoiceControlService : Service() {
             // started. They must not be able to un-set it: acquireCandidate hands the acquired
             // stream to the engine based on this result, and a false would close a live stream.
             onStarted = {
-                // Only when the microphone opens where the user cannot see it: the decision is
-                // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
-                // covered in ListeningModePolicyTest.
-                if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
+                // The decision is shouldPlayListeningStartCue in ListeningModePolicy, covered in
+                // ListeningModePolicyTest. It keys on why this start happened, not on the foreground:
+                // an automatic recovery (the pipeline ended on its own and recoverCapture nudged the
+                // observer) must not cue, because that is us taking the microphone back from whatever
+                // released it -- the exact moment the owner reported as a beep fight with another app.
+                awaitingUserStart = false
+                if (shouldPlayListeningStartCue(mode = mode, isAutomaticRecovery = isAutomaticRecovery)) {
                     audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
                 }
 
@@ -691,6 +717,8 @@ class VoiceControlService : Service() {
      */
     private fun recoverCapture() {
         if (!captureRestartBudget.allows()) return
+        // Consumed by the next start: this capture start is ours reclaiming the microphone after it
+        // ended on its own, not the user asking to listen.
         captureRestartSignal.value = SystemClock.elapsedRealtime()
     }
 

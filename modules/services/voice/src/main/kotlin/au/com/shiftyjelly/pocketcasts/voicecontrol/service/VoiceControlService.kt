@@ -701,6 +701,10 @@ class VoiceControlService : Service() {
         // FINAL SHUTDOWN EXCLUDES EVERY ENGINE START, not only the top-level one (reviewer
         // e1b11171). A child that is already inside a start when teardown begins must not open a
         // capture the teardown is about to release from under it.
+||||||| /tmp/mfb
+        // Final shutdown excludes every engine start, not only the top-level one (reviewer
+        // E1b11171). A child that is already inside a start when teardown begins must not open a
+        // Capture the teardown is about to release from under it.
         if (stopInFlightJob != null) {
             Timber.i("[VoicePipeline] stopping; refusing to start the engine")
             return false
@@ -1251,6 +1255,11 @@ class VoiceControlService : Service() {
                 // a9271b39). It used to release inline, recording nothing, so a retry could not tell
                 // which kinds had already completed and repeated them — a second media-session or
                 // renderer release is destructive. One enforcement point, one record.
+||||||| /tmp/mfb
+                // The initial release uses the same per-kind tracker as the retry (reviewer
+                // A9271b39). It used to release inline, recording nothing, so a retry could not tell
+                // Which kinds had already completed and repeated them — a second media-session or
+                // Renderer release is destructive. One enforcement point, one record.
                 runCatching {
                     withContext(Dispatchers.Main) {
                         releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES, releasedResources))

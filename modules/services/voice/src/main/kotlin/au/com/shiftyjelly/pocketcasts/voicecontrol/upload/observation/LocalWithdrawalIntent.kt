@@ -115,6 +115,13 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
         // stopped - a durable-release claim resting on a barrier that did not complete. A failed clear
         // must leave the session stopped in MEMORY as well as on disk, because the two can disagree
         // exactly in that window.
+||||||| /tmp/mfb
+        // Set the latch on every failed clear, including the case that used to slip through (reviewer
+        // E313b32c): the latch was false, write(false) installed cleared, and only the directory sync
+        // Failed. Then read() sees CLEARED and permits, the latch is still false, and nothing is
+        // Stopped - a durable-release claim resting on a barrier that did not complete. A failed clear
+        // Must leave the session stopped in MEMORY as well as on disk, because the two can disagree
+        // Exactly in that window.
         stopCouldNotPersist = !written
         return written
     }

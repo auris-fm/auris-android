@@ -491,6 +491,8 @@ class WorkerWireParityTest {
             cases["reject-$id"] = changed
         }
         // f8cac147: a completed non-ASR stage may not carry a reason.
+||||||| /tmp/mfb
+        // F8cac147: a completed non-ASR stage may not carry a reason.
         perturb(
             "completed-wake-with-reason",
             rawTranscript,

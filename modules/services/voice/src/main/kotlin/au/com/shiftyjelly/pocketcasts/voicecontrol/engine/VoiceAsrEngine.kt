@@ -741,6 +741,9 @@ class VoiceAsrEngine @Inject constructor(
         } catch (ce: java.util.concurrent.CancellationException) {
             // Cancellation is NOT a provider failure: record the KNOWN cancelled fact (reviewer
             // be375ea1) and rethrow — nonterminal, no early publication.
+||||||| /tmp/mfb
+            // Cancellation is not a provider failure: record the known cancelled fact (reviewer
+            // Be375ea1) and rethrow — nonterminal, no early publication.
             request.capture?.let { joinOutcome(CollectionOutcome.AsrCancelled(it.captureId)) }
             throw ce
         } catch (t: Throwable) {
@@ -831,6 +834,12 @@ class VoiceAsrEngine @Inject constructor(
             // travel with the non-content outcome instead of dying here (reviewer 1f7fe074,
             // cad3379e). The text recorded is the RAW result — the observation is what ASR produced,
             // and a trim is a pipeline behaviour, never an erasure of the output.
+||||||| /tmp/mfb
+            // No usable command text, but the backend did observe this transcript and did measure a
+            // Language. Both are facts: the command is discarded, the observation is not, so they
+            // Travel with the non-content outcome instead of dying here (
+            // Cad3379e). The text recorded is the RAW result — the observation is what ASR produced,
+            // And a trim is a pipeline behaviour, never an erasure of the output.
             request.capture?.let {
                 joinOutcome(
                     CollectionOutcome.NotCollected(

@@ -368,6 +368,8 @@ class ContributionStore(
     // a3ef694f): capacity is decided from complete entries on disk, so nothing here measures bytes.
 ||||||| /tmp/mfb
     // Before the first admission, not only at recovery/expiry (spec 7e9606b). It is count-free (spec
+||||||| /tmp/mfb
+    // Before the first admission, not only at recovery/expiry. It is count-free (spec
     // A3ef694f): capacity is decided from complete entries on disk, so nothing here measures bytes.
     private var coverageEstablished = false
 
@@ -2049,6 +2051,10 @@ class ContributionStore(
             // not a wrapped earlier/past retry.
             // Nonpositive Retry-After is ABSENT (a negative value must never wrap positive, reviewer
             // e4820963); a huge positive one saturates.
+||||||| /tmp/mfb
+            // Not a wrapped earlier/past retry.
+            // Nonpositive Retry-After is ABSENT (a negative value must never wrap positive, reviewer
+            // E4820963); a huge positive one saturates.
             val floorMs = when {
                 retryAfterS == null || retryAfterS <= 0L -> 0L
                 retryAfterS > Long.MAX_VALUE / 1000L -> Long.MAX_VALUE
@@ -3283,6 +3289,11 @@ class ContributionStore(
             // b796c5e9): a non-null override replaces the sidecar for THIS process only, so an unwritable
             // `.created` cannot route a complete recording into invalid-record deletion. Every other
             // caller passes null and the strict read below applies unchanged.
+||||||| /tmp/mfb
+            // Age is not part of record validity when recovery could not persist a reset (reviewer
+            // B796c5e9): a non-null override replaces the sidecar for THIS process only, so an unwritable
+            // `.created` cannot route a complete recording into invalid-record deletion. Every other
+            // Caller passes null and the strict read below applies unchanged.
             val created = if (ageOverrideMs != null) {
                 ageOverrideMs
             } else {

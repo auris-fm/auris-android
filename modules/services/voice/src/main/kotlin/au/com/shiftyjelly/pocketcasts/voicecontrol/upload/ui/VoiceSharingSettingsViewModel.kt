@@ -115,8 +115,7 @@ class VoiceSharingSettingsViewModel(
     /**
      * The session whose presentation is currently on screen. The session-change retire clears
      * only presentation belonging to a DIFFERENT (dead) session - a fresh tap under the new
-     * session that landed before this collector processed the emission must survive (reviewer
-     * b7ad7c92, second interleaving).
+     * session that landed before this collector processed the emission must survive.
      */
     private var presentedSession: Long = ownerSession()
 
@@ -210,6 +209,10 @@ class VoiceSharingSettingsViewModel(
         // THE SESSION IS CAPTURED AT THE TAP, not when the queued coroutine starts (reviewer
         // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
         // never reach the new account's controller.
+||||||| /tmp/mfb
+        // The session is captured at the tap, not when the queued coroutine starts (reviewer
+        // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
+        // Never reach the new account's controller.
         val tappedSession = ownerSession()
         mutableState.value = render()
         scope.launch {

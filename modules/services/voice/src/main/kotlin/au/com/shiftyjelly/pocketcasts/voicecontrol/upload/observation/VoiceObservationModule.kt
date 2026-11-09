@@ -145,6 +145,18 @@ object VoiceObservationModule {
         // nor the evidence. The 60 s ceiling is the reviewed construction bound used by every
         // finalizer control. At expiry the retained capture is finalized as
         // outcome_wait_expired and published, never left open forever.
+||||||| /tmp/mfb
+        // Finite production outcome wait: the
+        // Null selection closed EVERY production capture (CollectionStartup installs
+        // OutcomeWaitGuard = { outcomeFinalizer.limitsSelected }, and limitsSelected was false).
+        // Selected 45 s as a bounded wait: it is a finite cap on how long a
+        // Retained capture may stay open without a terminal outcome — not a claim that every
+        // Healthy capture finishes inside it. The one measured full pipeline (report 0c9710ac,
+        // Under 25 s) shows the bound is a plausible order of magnitude; a capture that exceeds
+        // The bound is finalized outcome_wait_expired and PUBLISHED, losing neither the audio
+        // Nor the evidence. The 60 s ceiling is the reviewed construction bound used by every
+        // Finalizer control. At expiry the retained capture is finalized as
+        // Outcome_wait_expired and published, never left open forever.
         waitLimits = PRODUCTION_OUTCOME_WAIT,
         scope = scope,
         // Same monotonic domain the sink composes by default (production clock).

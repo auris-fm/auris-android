@@ -104,6 +104,11 @@ object VoiceUploadModule {
         // on the CONFIGURED staging gateway origin -- the same origin the account routes ride, taken
         // from the same @SyncServiceRetrofit the account API is built on. A blank endpoint cannot be
         // requested, so an unresolved origin fails closed here.
+||||||| /tmp/mfb
+        // Route contract (cloud-voice-uploads 476feadc; core 384952e8): POST /api/v1/voice-recordings
+        // On the CONFIGURED staging gateway origin -- the same origin the account routes ride, taken
+        // From the same @SyncServiceRetrofit the account API is built on. A blank endpoint cannot be
+        // Requested, so an unresolved origin fails closed here.
         endpoint = retrofit.get().baseUrl().resolve("/api/v1/voice-recordings").toString(),
         // Bearer comes ONLY from the AURIS credential (reviewer b702cd53): this route verifies
         // Auris-issued tokens; presenting the upstream mirror token is the wrong-credential defect
@@ -465,6 +470,10 @@ class UploadTrigger(
     private val publishTrigger: RetentionPublishTrigger? = null,
     /**
      * CREDENTIAL ACQUISITION PER PASS (reviewer e8ed131245/57246e46): runs in the loop coroutine
+     * BEFORE each poll, so the fail-closed synchronous read the upload path consumes finds a
+     * token acquired for THIS pass. Null = no acquisition (composition controls only).
+||||||| /tmp/mfb
+     * credential acquisition per pass45/57246e46): runs in the loop coroutine
      * BEFORE each poll, so the fail-closed synchronous read the upload path consumes finds a
      * token acquired for THIS pass. Null = no acquisition (composition controls only).
      */

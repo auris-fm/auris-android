@@ -47,6 +47,11 @@ class CaptureReceiptValidator(
         // `upload_pending` until the owner-side arc completes. That is NOT acceptance: a pending
         // receipt proves staging, not durable contribution, so it retains - it must never release
         // the entry or be reported as a success status.
+||||||| /tmp/mfb
+        // Cloud route contract (cloud-voice-uploads 476feadc): this route's receipts carry
+        // `upload_pending` until the owner-side arc completes. That is NOT acceptance: a pending
+        // Receipt proves staging, not durable contribution, so it retains - it must never release
+        // The entry or be reported as a success status.
         if (receipt.status == "upload_pending") return false
         if (receipt.status !in ACCEPTANCE_STATUSES) return false
         // The owning contract PAIRS each success status with one HTTP status: 201 for a first acceptance

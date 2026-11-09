@@ -14,6 +14,8 @@ import javax.inject.Singleton
  *   watcher.start() → accounts listener, enrollment hook, policy flow, exact lease deadline
  *
  * NO ALLOWANCE COMPOSITION (core c74d7e30, spec §"Actual upload usage"). This class used to own the
+||||||| /tmp/mfb
+ * no allowance composition (core c74d7e30, spec §"Actual upload usage"). This class used to own the
  * capture-allowance lifecycle, its retirement watcher and the provisioner entry point. Those are
  * removed: capture no longer reserves daily capacity before it starts, and the daily limit is
  * metered server-side at acceptance of actual audio bytes. Legacy `no_backup/voice_allowance/`

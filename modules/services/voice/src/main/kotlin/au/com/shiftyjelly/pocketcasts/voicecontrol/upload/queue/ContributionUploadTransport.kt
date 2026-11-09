@@ -41,7 +41,7 @@ class ContributionUploadTransport(
     /** Bound for ONE whole exchange when the caller supplies no deadline of its own. */
     private val callTimeoutMs: Long = 120_000,
     /**
-     * Wall-clock seam (core c74d7e30): the epoch-ms source for the client-side next-UTC-midnight
+     * Wall-clock seam: the epoch-ms source for the client-side next-UTC-midnight
      * retry floor. Production uses the system clock; controls pin it for exact assertions.
      */
     private val nowEpochMs: () -> Long = { System.currentTimeMillis() },
@@ -320,6 +320,14 @@ class ContributionUploadTransport(
         // Worker 79a6c81a, 08:54–56Z bursts), indistinguishable from an absent credential from
         // the wire's point of view. Normalizing HERE covers every credential source in one place;
         // a value already carrying the scheme is passed through byte-exact.
+||||||| /tmp/mfb
+        // Exactly one Bearer scheme at the transport's single request boundary:
+        // The credential sources feed RAW token values (the provider's cache read and the frozen
+        // Assembled override alike), and the Worker intake requires /^Bearer (.+)$/ BEFORE token
+        // Verification — a raw token in this header is classified `missing_bearer` (measured,
+        // Worker 79a6c81a, 08:54–56Z bursts), indistinguishable from an absent credential from
+        // The wire's point of view. Normalizing HERE covers every credential source in one place;
+        // A value already carrying the scheme is passed through byte-exact.
         val bearer = if (credentials.startsWith("Bearer ")) credentials else "Bearer $credentials"
         // The per-call budget is the caller's REMAINING deadline when it has one, so this can never
         // outlive the total the caller promised.
@@ -460,6 +468,18 @@ class ContributionUploadTransport(
             // floor and a valid server hint — a SHORT hint cannot buy an earlier retry, a LONGER
             // server minimum still wins. The store treats the value as a MINIMUM either way, so
             // the jittered backoff can only lengthen it, never shorten.
+||||||| /tmp/mfb
+            // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30
+            // Dc264066): quota_exceeded carries no retry_after_s today, so until the server adds
+            // The day-scale hint the transport supplies the floor itself — seconds until the next
+            // UTC midnight. A present server hint always wins; the store treats the value as a
+            // MINIMUM either way, so the jittered backoff can only lengthen it, never shorten.
+            // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30
+            // Dc264066): quota_exceeded must not permit a retry before the next
+            // UTC accounting day. The minimum sent downstream is the LARGER of the next-midnight
+            // Floor and a valid server hint — a short hint cannot buy an earlier retry, a longer
+            // Server minimum still wins. The store treats the value as a MINIMUM either way, so
+            // The jittered backoff can only lengthen it, never shorten.
             Disposition.RETRY -> Response.Retryable(status, quotaRetryMinimumS(code, retryAfterS))
 
             Disposition.UNAUTHORIZED -> Response.Unauthorized(status)
@@ -513,6 +533,10 @@ class ContributionUploadTransport(
         // SPEC RULING 5c811f83 (iOS measured 16x400 -> client deleted recordings): a REQUEST
         // rejection is not proof about the bytes. The entry is RETAINED, repairable, and STOPPED
         // from being served again - never abandoned/deleted, never retried on a loop.
+||||||| /tmp/mfb
+        // Spec ruling 5c811f83 (iOS measured 16x400 -> client deleted recordings): a request
+        // Rejection is not proof about the bytes. The entry is retained, repairable, and stopped
+        // From being served again - never abandoned/deleted, never retried on a loop.
         "invalid_request" to Disposition.UNSERVICED,
         "unauthorized" to Disposition.UNAUTHORIZED,
         "not_enrolled" to Disposition.POLICY,

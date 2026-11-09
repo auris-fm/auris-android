@@ -109,6 +109,10 @@ class VoiceSharingAccountOperations(
      * THE BEARER SOURCE. The account route verifies Auris-issued tokens only (cloud `84a4d25e`,
      * `bbb9beff`); the upstream Pocket Casts token the owner publishes is `alg=HS256` with no
      * `kid` and that route refuses it structurally.
+||||||| /tmp/mfb
+     * the bearer source. The account route verifies Auris-issued tokens only (cloud `84a4d25e`,
+     * `bbb9beff`); the upstream Pocket Casts token the owner publishes is `alg=HS256` with no
+     * `kid` and that route refuses it structurally.
      */
     private val aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding,
     /** Mirror clear after a committed 401 (synchronous, no authority effect). */
@@ -366,6 +370,10 @@ class VoiceSharingAccountOperations(
         // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else: it answers whether
         // THIS app's token names a signing key staging publishes (cloud 84a4d25e). Only the JOSE
         // header is read, and a diagnostic changes no branch, no retry and no credential path.
+||||||| /tmp/mfb
+        // The key ID is logged where the bearer is attached, and nowhere else: it answers whether
+        // This app's token names a signing key staging publishes (cloud 84a4d25e). Only the jose
+        // Header is read, and a diagnostic changes no branch, no retry and no credential path.
         logTokenKeyId(aurisBearer)
         val body = when (route) {
             Route.GET -> EMPTY_BODY
@@ -486,7 +494,7 @@ class VoiceSharingAccountOperations(
 
     /**
      * 202 deletion_pending receipt: strict complete parse, exact types/keys, numeric schema.
-     * `cutoff` is an OPTIONAL RFC3339 instant (spec ruling 9f7505d6): when present it must parse as
+     * `cutoff` is an optional RFC3339 instant: when present it must parse as
      * a real instant or the body is malformed; when absent the receipt stays valid. Never skipped
      * silently — an unknown key is still rejected.
      */
@@ -554,7 +562,7 @@ class VoiceSharingAccountOperations(
     private companion object {
         const val MAX_ATTEMPTS = 2
 
-        /** Server correlation id echoed on every response (cloud `52fe3319`). */
+        /** Server correlation id echoed on every response. */
         const val REQUEST_ID_HEADER = "X-Request-Id"
         const val MAX_REQUEST_ID_CHARS = 128
 

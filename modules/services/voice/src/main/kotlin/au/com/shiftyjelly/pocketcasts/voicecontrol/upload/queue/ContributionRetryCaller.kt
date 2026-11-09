@@ -57,6 +57,11 @@ class ContributionRetryCaller(
      * belonged to. Feeds ONLY the settle line, so a terminal/retry settlement names the real wire answer
      * instead of `http=none`. Never used for validation or classification. The WIRE line itself is
      * emitted in ContributionUploadAssembly at the point of observation (review 3271cf1c).
+||||||| /tmp/mfb
+     * monitoring only (review gap 1): the status the transport observed, whatever family it
+     * belonged to. Feeds ONLY the settle line, so a terminal/retry settlement names the real wire answer
+     * instead of `http=none`. Never used for validation or classification. The WIRE line itself is
+     * emitted in ContributionUploadAssembly at the point of observation (review 3271cf1c).
      */
     private val observedStatusFor: (generation: Long, captureId: String) -> Int? = { _, _ -> null },
 ) {
@@ -88,6 +93,9 @@ class ContributionRetryCaller(
         val generation = store.fence.currentGeneration()
         // Eligibility ALREADY holds every store-level gate: readiness, accounting/coverage, attempt
         // budget, unresolved records and the durable not-before boundary (reviewers 199ccdee, 1d29fa1e).
+||||||| /tmp/mfb
+        // Eligibility ALREADY holds every store-level gate: readiness, accounting/coverage, attempt
+        // Budget, unresolved records and the durable not-before boundary (reviewers 199ccdee, 1d29fa1e).
         val eligible = store.retryEligible(clock())
         for (captureId in eligible) {
             // ONE attempt in flight per entry: the claim is taken before ANY gate runs, so a slow gate
@@ -110,6 +118,13 @@ class ContributionRetryCaller(
                 // or changed coverage is caught HERE - generation validity alone is not enough.
                 // The token is this attempt's identity for its WHOLE lifetime: never re-read from the
                 // store, never borrowed from currentGeneration (reviewer 20a5440b, spec d6213403).
+||||||| /tmp/mfb
+                // Atomic pickup: the guarded transaction revalidates the complete current eligibility
+                // And durably records/consumes the attempt BEFORE any transport runs (reviewer
+                // 1b926fa0). A gate callback that revoked the epoch, re-armed the backoff
+                // Or changed coverage is caught HERE - generation validity alone is not enough.
+                // The token is this attempt's identity for its WHOLE lifetime: never re-read from the
+                // Store, never borrowed from currentGeneration.
                 val token = store.pickupAttemptToken(generation, captureId, clock())
                 if (token == null) {
                     pickupRefused++
@@ -159,6 +174,11 @@ class ContributionRetryCaller(
                         // The WIRE answer itself is logged in ContributionUploadAssembly at the point of
                         // observation (review 3271cf1c) - it must survive a cancellation throw, which a
                         // caller-side line cannot. Only the settlement decision is logged here.
+||||||| /tmp/mfb
+                        // Disposal (token-scoped, epoch-gated); everything else retries or retains.
+                        // The WIRE answer itself is logged in ContributionUploadAssembly at the point of
+                        // Observation (review 3271cf1c) - it must survive a cancellation throw, which a
+                        // Caller-side line cannot. Only the settlement decision is logged here.
                         val ack = when (val disposition = dispositionFor(generation, captureId)) {
                             is ContributionUploadTransport.Response.Terminal -> ContributionAckResolver.Ack.TERMINAL_DISPOSAL
 
@@ -172,6 +192,10 @@ class ContributionRetryCaller(
                         // Receipt-validation input is UNCHANGED for ACCEPTED (review 3c0f31d3). Other
                         // families now carry their observed status ONLY so the settle line names the real
                         // wire answer; validation never runs on them.
+||||||| /tmp/mfb
+                        // Receipt-validation input is unchanged for accepted (review 3c0f31d3). Other
+                        // Families now carry their observed status ONLY so the settle line names the real
+                        // Wire answer; validation never runs on them.
                         val httpStatus =
                             if (accepted) {
                                 httpStatusFor(generation, captureId)

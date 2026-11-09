@@ -15,7 +15,7 @@ import timber.log.Timber
  * retained capture carries a FINITE outcome wait whose ABSOLUTE deadline is frozen at REAL
  * completion time — the SINK captures the monotonic completion timestamp under its lock and
  * carries it in the retained callback, so a delayed callback or dispatcher can never extend
- * the wait (62023896 #1). At expiry the capture is SEALED — an immutable [SealedCapture]
+ * the wait. At expiry the capture is SEALED — an immutable [SealedCapture]
  * preserving every known fact, unresolved stages typed `unknown/outcome_wait_expired` — and
  * dispatched through the REAL publication path. The deadline never deletes a capture.
  *
@@ -32,6 +32,19 @@ import timber.log.Timber
  *    validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
  *  - a purge notification cancels only registrations from BEFORE that purge (generation
  *    filter), so a capture registered after the purge keeps its valid timer.
+||||||| /tmp/mfb
+ * - one [Registration] per capture; entry inserted before the coroutine launches; removal is
+ * identity-safe (`remove(id, reg)`) and [runDeadline] cleans up in `finally` on any
+ * exception/cancellation path (62023896 #2/#3);
+ * - REGISTRATION is validated against the sink ([canAcceptOutcomeWaitRegistration]:
+ * generation + presence + unsealed + no publishable terminal) and promptly dropped when a
+ * callback arrives for an already-sealed/released/purged capture; actual sealing cancels
+ * the timer through the sink's [onCaptureSealed] hook, alongside release, revocation, and
+ * disposal (62023896 #2);
+ * - the FIRING decision is atomic: [ContributionRetentionSink.sealExpiredOutcome]`(id, gen)`
+ * validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
+ * - a purge notification cancels only registrations from BEFORE that purge (generation
+ * filter), so a capture registered after the purge keeps its valid timer.
  *
  * [waitLimits] carries the INDEPENDENT selected and ceiling inputs. No limits selected →
  * INACTIVE, and that state CLOSES contribution admission (spec cf1b9809).

@@ -175,6 +175,15 @@ class ContributionUploadAssembly(
                 // CONTENT-FREE and FIXED: opaque capture id, the real transport status, and the
                 // transport-allowlisted error code - never a server free-form string. Observation only:
                 // no validation, cancellation or classification decision reads this line.
+||||||| /tmp/mfb
+                // Monitoring (review 3271cf1c, gap 1 placement): the wire answer is logged here, at the
+                // Point of observation, immediately after the transport returns and before the cancellation
+                // Checks below can throw AttemptCancelled. Logging it in the caller was insufficient: a
+                // Cancelled or revoked attempt goes straight to `catch`, so the one case where the wire
+                // Actually answered would leave no record at all.
+                // Content-free and fixed: opaque capture id, the real transport status, and the
+                // Transport-allowlisted error code - never a server free-form string. Observation only:
+                // No validation, cancellation or classification decision reads this line.
                 Timber.tag(UPLOAD_TAG).i(
                     "voice-upload wire: capture=%s http=%s code=%s",
                     captureId,
@@ -219,6 +228,10 @@ class ContributionUploadAssembly(
         // MONITORING ONLY (review 3c0f31d3, gap 1): the status the transport ACTUALLY observed on any
         // settled response, and the transport-ALLOWLISTED error code. Never feeds validation, fences or
         // classification - receipt validation keeps pairing on `httpStatusFor` alone.
+||||||| /tmp/mfb
+        // Monitoring only (review 3c0f31d3, gap 1): the status the transport actually observed on any
+        // Settled response, and the transport-ALLOWLISTED error code. Never feeds validation, fences or
+        // Classification - receipt validation keeps pairing on `httpStatusFor` alone.
         observedStatusFor = { _, captureId ->
             when (val r = lastResponse[captureId]) {
                 is ContributionUploadTransport.Response.Accepted -> r.statusCode
@@ -234,6 +247,8 @@ class ContributionUploadAssembly(
 
     /**
      * MONITORING ONLY (review 3271cf1c): the status the transport ACTUALLY observed, for any response
+||||||| /tmp/mfb
+     * monitoring only (review 3271cf1c): the status the transport actually observed, for any response
      * family. `Cancelled` and `PolicyRefused` never touched the wire, so they report no status.
      * Nothing in validation, fencing or classification reads this.
      */

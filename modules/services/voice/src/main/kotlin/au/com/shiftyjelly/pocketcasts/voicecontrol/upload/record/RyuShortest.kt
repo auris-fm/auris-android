@@ -10,7 +10,7 @@
  * either express or implied. See the License for the specific language governing permissions
  * and limitations under the License.
  *
- * Provenance (task #73, spec msgs 8ac9a961/346d5cb2/59630072): the shortest-round-trip digit
+ * Provenance (task #73): the shortest-round-trip digit
  * selection below is a faithful Kotlin port of upstream RyuDouble.java (ulfjack/ryu, master,
  * src/main/java/info/adams/ryu/RyuDouble.java + RoundingMode.java, Apache-2.0), including its
  * ROUND_EVEN boundary acceptance, which is what ECMA-262 Number::toString step 5 requires and

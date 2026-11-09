@@ -74,7 +74,7 @@ fun interface FileSync {
 /**
  * The ready transition MAY have occurred, but its final synchronization could not be confirmed.
  *
- * This is a third outcome, not a failure. The spec (voice-recording-uploads, `ecbe84dd`) requires it:
+ * This is a third outcome, not a failure. The uploads contract requires it:
  * a failure known to precede the ready transition is uncommitted, but once the marker may exist the
  * store cannot claim either success or definite rejection. Collapsing this into a thrown error is the
  * mistake the spec names explicitly, because a generic error invites a caller to delete files or mint

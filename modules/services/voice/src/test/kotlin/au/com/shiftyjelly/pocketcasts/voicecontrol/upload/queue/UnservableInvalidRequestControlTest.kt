@@ -228,6 +228,55 @@ class UnservableInvalidRequestControlTest {
     }
 
     @Test
+    fun `a 500 keeps the entry and retries it`() {
+        // A server error says nothing about the recording, so the entry must survive: the bytes may
+        // well be acceptable and the failure is on the other side. This is the counterpart to the
+        // terminal controls above - the wrong behaviour here would delete audio the user recorded
+        // because the server was briefly unwell.
+        var now = 31_000_000L
+        val root = tmp.newFolder("server-error")
+        val store = newStore(root) { now }
+        val id = UUID.randomUUID().toString()
+        val samples = 1600
+        val metaBytes = canonicalMeta(id)
+        val admission = store.admitForTest(samples.toLong(), metaBytes.size)
+        val generation = store.fence.currentGeneration()
+        assertNotNull(
+            store.prepareAt(generation, admission, id, "epoch-1", chunks(samples), metaBytes, "a@x", 7L),
+        )
+        assertNotNull("the entry must be on disk before the attempt", audioFile(root))
+
+        val attempts = mutableListOf<String>()
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            networkAvailable = { true },
+            attemptUpload = { _, captureId, _, _ ->
+                attempts.add(captureId)
+                false
+            },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            dispositionFor = { _, _ -> ContributionUploadTransport.Response.Retryable(500, null) },
+            observedStatusFor = { _, _ -> 500 },
+            responseFor = { _, _ -> null },
+        )
+        caller.pollOnce()
+
+        assertTrue("a 500 must not delete the recording", audioFile(root).exists())
+        assertEquals("a 500 must not be counted as a terminal", 0, store.terminalCounter(ContributionStore.TerminalReason.SERVER_TERMINAL))
+        assertEquals(
+            "a 500 must not be counted as a permanent refusal",
+            0,
+            store.terminalCounter(ContributionStore.TerminalReason.PERMANENT_REFUSAL),
+        )
+        assertEquals("the failed attempt must have been launched", 1, attempts.size)
+
+        // It stays eligible, so a later attempt can still succeed.
+        now += 24L * 60 * 60 * 1000
+        assertTrue("a 500 must leave the entry retryable", store.retryEligible(now).contains(id))
+    }
+
+    @Test
     fun `a refusal whose durable intent cannot be published retains and reports instead of deleting`() {
         var now = 31_000_000L
         val root = tmp.newFolder("unserviced-uncertain")

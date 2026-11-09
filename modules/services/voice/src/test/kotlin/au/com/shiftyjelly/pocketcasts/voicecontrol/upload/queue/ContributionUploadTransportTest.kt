@@ -475,6 +475,56 @@ class ContributionUploadTransportTest {
     }
 
     @Test
+    fun `a bare 500 with no body retains the entry`() {
+        // A server error says nothing about the recording. The body may not even be ours, so the
+        // answer must be retryable and must not be read as a refusal of the bytes.
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 500
+        responseBody = ""
+        val result = transport().upload(id, record(id), ownedOf(file))
+        assertTrue(
+            "a bare 500 must be retryable, was $result",
+            result is ContributionUploadTransport.Response.Retryable,
+        )
+    }
+
+    @Test
+    fun `a 500 whose body parses but names no code retains the entry`() {
+        // This is the path that reaches the status fallback rather than the unparseable-body
+        // return: a well-formed error envelope with no code. The status alone has to decide, and
+        // for a server error it must retain.
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 500
+        responseBody = """{"schema_version":1}"""
+        val result = transport().upload(id, record(id), ownedOf(file))
+        assertTrue(
+            "a codeless 500 must be retryable, was $result",
+            result is ContributionUploadTransport.Response.Retryable,
+        )
+        assertTrue(
+            "a codeless 500 must never delete",
+            result !is ContributionUploadTransport.Response.Terminal,
+        )
+    }
+
+    @Test
+    fun `a 500 carrying a malformed body is still retryable`() {
+        // A proxy or edge error page is not a schema-versioned refusal, so it cannot be classified
+        // by code. Treating an unparseable body as terminal would delete audio over an HTML error.
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 500
+        responseBody = "<html><body>Internal Server Error</body></html>"
+        val result = transport().upload(id, record(id), ownedOf(file))
+        assertTrue(
+            "an unparseable 500 must be retryable, was $result",
+            result is ContributionUploadTransport.Response.Retryable,
+        )
+    }
+
+    @Test
     fun `an UNKNOWN error code is never a terminal delete`() {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)

@@ -161,7 +161,7 @@ std::deque<bool> frames(int count, bool loud) {
 // A minimal AudioStream, so the REAL start() branch can be driven. installStreamForTest() marks its
 // placeholder as a test stream and start() returns early for it -- which is exactly how the
 // start()/sampleXrunContinuity deadlock went unnoticed: no control ever reached that line. This
-// subclass implements the ten pure virtuals so OboeAudioCapture:start() takes its production path,
+// subclass implements the ten pure virtuals so OboeAudioCapture::start() takes its production path,
 // calling requestStart() and then the xrun baseline.
 class ScriptedStream : public oboe::AudioStream {
 public:
@@ -688,7 +688,7 @@ int main() {
         if (child == 0) {
         // (9) XRUN CONTINUITY: the ring flag only catches drops the
         // RING performed. An AAudio overrun discards input in the HAL before it ever reaches
-        // RingBuffer:write, so the ring stays self-consistent -- cursors keep advancing, no drop is
+        // RingBuffer::write, so the ring stays self-consistent -- cursors keep advancing, no drop is
         // recorded -- while they fall behind real stream positions. A ring-only continuity check calls
         // that epoch continuous and the anchor derived from it is confidently wrong. The xrun counter is
         // the evidence the ring cannot see.

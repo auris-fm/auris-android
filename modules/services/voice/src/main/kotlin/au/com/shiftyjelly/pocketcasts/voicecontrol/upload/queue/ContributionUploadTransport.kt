@@ -552,6 +552,7 @@ class ContributionUploadTransport(
         "upload_pending" to Disposition.RETRY,
         "policy_unavailable" to Disposition.RETRY,
         "storage_unavailable" to Disposition.RETRY,
+        "internal_error" to Disposition.RETRY,
     )
 
     // The OWNING envelope pairs each code with ONE status; a body whose code disagrees with the HTTP
@@ -567,6 +568,9 @@ class ContributionUploadTransport(
         "payload_too_large" to 413,
         "unsupported_audio" to 415,
         "integrity_mismatch" to 422,
+        // An undecidable server failure. Not a verdict on the recording, so it is retried; naming it
+        // here keeps that deliberate rather than a side effect of an unlisted code.
+        "internal_error" to 500,
         "rate_limited" to 429,
         "quota_exceeded" to 429,
         "upload_pending" to 503,

@@ -491,9 +491,10 @@ class ContributionUploadTransportTest {
 
     @Test
     fun `a 500 whose body parses but names no code retains the entry`() {
-        // This is the path that reaches the status fallback rather than the unparseable-body
-        // return: a well-formed error envelope with no code. The status alone has to decide, and
-        // for a server error it must retain.
+        // Not the status fallback: a body without a code is rejected by the envelope reader, so this
+        // reaches the same unparseable-body return as an error page. Kept as a distinct case because
+        // it is the shape most likely to be mistaken for a valid refusal - it is JSON and it names
+        // the schema, and it still must not delete.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 500

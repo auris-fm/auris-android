@@ -121,6 +121,9 @@ class LoopbackRefusalSettlementTest {
         "upload_pending" to (503 to """{"schema_version":1,"code":"upload_pending","retry_after_s":30}"""),
         "policy_unavailable" to (503 to """{"schema_version":1,"code":"policy_unavailable","retry_after_s":30}"""),
         "storage_unavailable" to (503 to """{"schema_version":1,"code":"storage_unavailable","retry_after_s":30}"""),
+        // A 500 says the server could not decide, which is an outcome unknown rather than a verdict
+        // on the recording: the bytes are kept and the same record is retried.
+        "internal_error" to (500 to """{"schema_version":1,"code":"internal_error"}"""),
     )
 
     private fun transport() = ContributionUploadTransport(

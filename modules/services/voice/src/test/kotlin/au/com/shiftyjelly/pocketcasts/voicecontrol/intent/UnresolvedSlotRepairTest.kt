@@ -862,4 +862,62 @@ class UnresolvedSlotRepairTest {
         // Spanish eleven is numeric; the distinct una vez que conjunction still conditions execution.
         assertNull(SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "una vez que termine este episodio, retrocede diez segundos", tool = "playback", action = "seek_relative", textLanguage = "es"))
     }
+
+    @Test
+    fun `en_once_for_me`() {
+        // Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even w
+        val repaired = SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once for me", tool = "playback", action = "seek_relative", textLanguage = "en")
+        assertNotNull(repaired)
+        assertEquals(-10, repaired?.params?.get("delta_seconds").let { if (it is String) it.trim('"') else it })
+    }
+
+    @Test
+    fun `en_once_for_us`() {
+        // Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even w
+        val repaired = SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once for us", tool = "playback", action = "seek_relative", textLanguage = "en")
+        assertNotNull(repaired)
+        assertEquals(-10, repaired?.params?.get("delta_seconds").let { if (it is String) it.trim('"') else it })
+    }
+
+    @Test
+    fun `en_once_for_listener`() {
+        // Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even w
+        val repaired = SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once for the listener", tool = "playback", action = "seek_relative", textLanguage = "en")
+        assertNotNull(repaired)
+        assertEquals(-10, repaired?.params?.get("delta_seconds").let { if (it is String) it.trim('"') else it })
+    }
+
+    @Test
+    fun `en_once_more_beneficiary`() {
+        // Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even w
+        val repaired = SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once more for me", tool = "playback", action = "seek_relative", textLanguage = "en")
+        assertNotNull(repaired)
+        assertEquals(-10, repaired?.params?.get("delta_seconds").let { if (it is String) it.trim('"') else it })
+    }
+
+    @Test
+    fun `en_once_more_subject`() {
+        // Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even w
+        assertNull(SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once more people arrive", tool = "playback", action = "seek_relative", textLanguage = "en"))
+    }
+
+    @Test
+    fun `en_once_again_subject`() {
+        // Beneficiary/count complements are repetition; a remaining subject/clause conditions execution even w
+        assertNull(SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once again the intro music fades", tool = "playback", action = "seek_relative", textLanguage = "en"))
+    }
+
+    @Test
+    fun `once_beneficiary_politeness`() {
+        // A beneficiary adjunct alone is repetition; a parenthetical cannot conceal a following condition clau
+        val repaired = SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "rewind ten seconds once for me, please", tool = "playback", action = "seek_relative", textLanguage = "en")
+        assertNotNull(repaired)
+        assertEquals(-10, repaired?.params?.get("delta_seconds").let { if (it is String) it.trim('"') else it })
+    }
+
+    @Test
+    fun `once_parenthetical_before_clause`() {
+        // A beneficiary adjunct alone is repetition; a parenthetical cannot conceal a following condition clau
+        assertNull(SlotRepair.repair(raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>", utterance = "once, for whatever reason, the intro music fades, rewind ten seconds", tool = "playback", action = "seek_relative", textLanguage = "en"))
+    }
 }

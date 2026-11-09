@@ -69,7 +69,10 @@ object SlotRepair {
         if (baseLanguage(textLanguage) == "es") return false
         val match = ONCE_REGEX.find(text) ?: return false
         val lang = baseLanguage(textLanguage)
-        val followed = text.substring(match.range.last + 1).trimStart(' ', ',')
+        // An aside such as "once, for whatever reason, the music fades" still opens a clause
+        // after it, so the aside is dropped before the rest is judged.
+        val raw = text.substring(match.range.last + 1)
+        val followed = raw.replaceFirst(ONCE_PARENTHETICAL_REGEX, "").trimStart(' ', ',')
         if (followed.isEmpty()) return false
         // With no language to go on, keep the conservative reading rather than guessing that a
         // bare numeral was meant. The fixture that pins this is a Spanish volume request whose
@@ -77,6 +80,7 @@ object SlotRepair {
         if (lang == null && !ENGLISH_CLAUSE_EVIDENCE_REGEX.containsMatchIn(text)) return true
         // A repetition or beneficiary phrase does not make a clause.
         if (ONCE_NON_CLAUSE_REGEX.containsMatchIn(followed)) return false
+        if (ONCE_REPEAT_WITH_BENEFICIARY_REGEX.containsMatchIn(followed)) return false
         return true
     }
 
@@ -88,10 +92,22 @@ object SlotRepair {
         RegexOption.IGNORE_CASE,
     )
     private val SPANISH_ONCE_CLAUSE_REGEX = Regex("""\buna\s+vez\s+que\b""", RegexOption.IGNORE_CASE)
+
+    // Words that follow "once" without opening a clause. "more" and "again" are the awkward pair:
+    // "once more for me" is a repetition offered to a listener, while "once more people arrive"
+    // and "once again the music fades" are clauses whose subject comes later. They are only
+    // non-clausal when what follows them is a beneficiary or the end of the request.
     private val ONCE_NON_CLAUSE_REGEX = Regex(
-        """^(?:please|again|more|another|or\s+twice|or\s+two|and|for\b|to\b)\b""",
+        """^(?:please|another|or\s+twice|or\s+two|and|for\b|to\b)\b""",
         RegexOption.IGNORE_CASE,
     )
+    private val ONCE_REPEAT_WITH_BENEFICIARY_REGEX = Regex(
+        """^(?:more|again)\s+for\s+(?:me|us|him|her|them|the\s+listener)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /** A leading aside such as "for whatever reason", which delays the clause but is not one. */
+    private val ONCE_PARENTHETICAL_REGEX = Regex("""^,[^,]*,""")
 
     /**
      * Whether a language-dependent word decided this utterance.

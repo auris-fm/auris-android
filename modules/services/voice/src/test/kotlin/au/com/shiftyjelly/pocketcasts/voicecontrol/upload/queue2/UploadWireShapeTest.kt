@@ -11,11 +11,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The encoded multipart body against the server's actual parser.
+ * The wire shape this app sends, checked at the source level.
  *
- * Everything here mirrors a rule in `worker/src/contributions/upload.ts` at cloud-voice-uploads
+ * Each assertion mirrors a rule in `worker/src/contributions/upload.ts` at cloud-voice-uploads
  * `9aa8f662`. The server answers a `400` for any of these, and the uploader's answer to a `400` is
- * to delete the recording — so a mistake pinned here is a silently destroyed capture, not a retry.
+ * to delete the recording — so a mistake here is a silently destroyed capture, not a retry.
+ *
+ * This is NOT a run through the Worker's parser: it asserts on the bytes this app produces, so a
+ * misreading of the contract would still pass here and fail the server. The real proof that the
+ * two agree is a staging upload after deploy.
  *
  * The rules asserted are the ones that cost a recording:
  * - the metadata part must arrive as a plain string, which means no filename;
@@ -23,7 +27,7 @@ import org.junit.Test
  * - `observations` must be an object keyed by stage, never an array;
  * - `audio.byte_count` is required, and the fields the server does read must have the right names.
  */
-class UploadWireInteropTest {
+class UploadWireShapeTest {
     private fun recordJson(): String = PlainRecord(
         captureId = "3f9a1c2e-0000-4000-8000-000000000001",
         enrollmentEpoch = "epoch-1",
@@ -139,6 +143,7 @@ class UploadWireInteropTest {
         // Uses the production body builder so the test cannot drift from what is actually sent.
         return RecordingUploader(
             endpoint = "http://unused.invalid/api/v1/voice-recordings",
+            client = okhttp3.OkHttpClient(),
             authorization = { "token" },
         ).buildBodyForTest("BOUNDARY", metadata, audio)
     }

@@ -1,11 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * Sends one recording as a single multipart request and reports the status code.
@@ -14,18 +16,35 @@ import kotlinx.coroutines.withTimeoutOrNull
  * - `metadata` is a plain form field with NO filename. With a filename it arrives as a file and the
  *   server refuses the request, so the absence is part of the contract.
  * - `audio` is a file part named `recording.wav` with type `audio/wav`.
- * - `Content-Length` is sent explicitly. The server refuses a request that does not state its size.
+ * - The body has a known length, so the request states `Content-Length`. The server refuses a
+ *   request that does not say how large it is.
  *
- * The whole call runs under one deadline. Connect and read timeouts alone do not bound a stalled
- * write, and one recording that never finishes would hold the loop; when the deadline expires the
- * connection is disconnected, which is what actually interrupts the blocked write.
+ * The call is cancellable. A stalled write is not released by a timeout on the coroutine, because
+ * the write blocks in the socket and never returns to be checked; only cancelling the HTTP call
+ * itself closes the connection underneath it. That is why this goes through OkHttp with a real
+ * `Call` handle rather than a blocking connection whose cleanup runs after the block returns.
  */
 class RecordingUploader(
     private val endpoint: String,
+    private val client: OkHttpClient,
     private val authorization: () -> String?,
-    private val connectTimeoutMs: Int = 15_000,
-    private val readTimeoutMs: Int = 60_000,
 ) {
+    /**
+     * The call currently in flight, so it can be cancelled from outside this coroutine.
+     *
+     * One upload runs at a time by construction, so a single slot is enough; it is null whenever
+     * nothing is being sent.
+     */
+    private val inFlight = AtomicReference<okhttp3.Call?>(null)
+
+    /**
+     * Abandon whatever is in flight. Called when sharing is turned off: deleting the queued folder
+     * is not enough, because the request has already been handed to the socket.
+     */
+    fun cancelInFlight() {
+        inFlight.getAndSet(null)?.cancel()
+    }
+
     suspend fun send(recording: FolderQueue.Recording): Int? {
         val bearer = authorization() ?: return null
         val metadata: ByteArray = recording.metadata.readBytes()
@@ -36,35 +55,30 @@ class RecordingUploader(
         val boundary = "auris-" + UUID.randomUUID().toString().replace("-", "")
         val body = buildBody(boundary, metadata, audioBytes)
 
-        // One budget for the whole call, so a stalled write cannot outlive it.
-        return withTimeoutOrNull(WHOLE_CALL_BUDGET_MS) {
-            var connection: HttpURLConnection? = null
-            try {
-                runInterruptible(Dispatchers.IO) {
-                    val c = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                        requestMethod = "POST"
-                        doOutput = true
-                        connectTimeout = connectTimeoutMs
-                        readTimeout = readTimeoutMs
-                        setRequestProperty("Authorization", "Bearer $bearer")
-                        setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-                        // Required by the server: an unstated size has no bound to check.
-                        setFixedLengthStreamingMode(body.size)
-                    }
-                    connection = c
-                    c.outputStream.use { it.write(body) }
-                    c.responseCode
-                }
-            } catch (t: Throwable) {
-                // No answer. The loop treats that as retryable, never as a refusal.
-                null
-            } finally {
-                runCatching { connection?.disconnect() }
+        val request = Request.Builder()
+            .url(endpoint)
+            .header("Authorization", "Bearer $bearer")
+            .header("Content-Type", "multipart/form-data; boundary=$boundary")
+            .post(body.toRequestBody("multipart/form-data; boundary=$boundary".toMediaType()))
+            .build()
+
+        val call = client.newCall(request)
+        inFlight.set(call)
+        return try {
+            withContext(Dispatchers.IO) {
+                // The client carries the whole-call deadline; cancelling here closes the connection
+                // under a blocked write, which no coroutine timeout can do.
+                call.execute().use { it.code }
             }
+        } catch (t: Throwable) {
+            // No answer, or cancelled. The loop treats that as retryable, never as a refusal.
+            null
+        } finally {
+            inFlight.compareAndSet(call, null)
         }
     }
 
-    /** Exposed so a test can assert the exact bytes against the server's parser. */
+    /** Exposed so a test can assert the exact bytes against the wire contract. */
     internal fun buildBodyForTest(boundary: String, metadata: ByteArray, audio: ByteArray): ByteArray = buildBody(boundary, metadata, audio)
 
     /** The exact multipart body, so its length is known before it is sent. */
@@ -90,7 +104,7 @@ class RecordingUploader(
 
     companion object {
         /** The whole call, including the upload write, gets this long and no longer. */
-        const val WHOLE_CALL_BUDGET_MS = 90_000L
+        const val CALL_TIMEOUT_MS = 60_000L
     }
 }
 

@@ -26,6 +26,13 @@ class UploaderLoop(
      * something changed after the recording was queued.
      */
     private val gate: PreSendGate = PreSendGate.OPEN,
+    /**
+     * Abandons a request that is already on the wire.
+     *
+     * Deleting the folder is not enough when sharing turns off: the request has already been handed
+     * to the socket, so only cancelling the call stops it from being delivered.
+     */
+    private val cancelInFlight: () -> Unit = {},
     private val now: () -> Long = System::currentTimeMillis,
     private val baseBackoffMs: Long = DEFAULT_BASE_BACKOFF_MS,
     private val maxBackoffMs: Long = DEFAULT_MAX_BACKOFF_MS,
@@ -61,14 +68,16 @@ class UploaderLoop(
         queue.deleteExpired(t)
 
         for (recording in queue.recordings()) {
-            val dueAt = nextAttemptAt[recording.captureId] ?: 0L
-            if (t < dueAt) continue
-
+            // The gate is asked BEFORE the backoff skip. Waiting does not make an ineligible
+            // recording eligible, so deferring its deletion to its next retry time would keep data
+            // the user has already withdrawn sitting in the queue for no reason.
             // Deleted rather than retried: none of these conditions resolve by waiting, and a
             // recording that can never be sent would otherwise occupy a queue slot until it aged
             // out. Sharing being off is the user's current answer, so it is honoured immediately.
             when (val verdict = gate.verdictFor(recording)) {
                 is GateVerdict.Refuse -> {
+                    // Anything buffered for this recording must stop too, not just its folder.
+                    cancelInFlight()
                     queue.delete(recording, verdict.reason)
                     clearBackoff(recording.captureId)
                     deleted++
@@ -77,6 +86,10 @@ class UploaderLoop(
 
                 GateVerdict.Send -> Unit
             }
+
+            // Only now does the retry schedule matter: this recording may be sent, but not yet.
+            val dueAt = nextAttemptAt[recording.captureId] ?: 0L
+            if (t < dueAt) continue
 
             val status = runCatching { send(recording) }
                 .onFailure { log("upload: request failed (${it.javaClass.simpleName})") }

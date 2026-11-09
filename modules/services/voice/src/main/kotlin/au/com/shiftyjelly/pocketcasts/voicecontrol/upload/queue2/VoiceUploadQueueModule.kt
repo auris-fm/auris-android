@@ -2,8 +2,10 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 
 import android.content.Context
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
+import au.com.shiftyjelly.pocketcasts.servers.di.Raw
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionAuthorityTransaction
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
 import dagger.Module
 import dagger.Provides
@@ -12,6 +14,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import java.io.File
 import javax.inject.Singleton
+import okhttp3.OkHttpClient
 import timber.log.Timber
 
 /**
@@ -69,18 +72,29 @@ object VoiceUploadQueueModule {
         aurisToken: AurisTokenProvider,
         collectionTx: CollectionAuthorityTransaction,
         savedSharingChoice: SavedSharingChoiceStore,
+        withdrawalIntent: LocalWithdrawalIntentStore,
+        @Raw rawClient: OkHttpClient,
     ): UploaderLoop {
         // Resolved against the same gateway origin the account routes use, so the endpoint is never
         // guessed. A blank endpoint simply cannot produce a request.
         val endpoint = retrofit.get().baseUrl().resolve("/api/v1/voice-recordings").toString()
+        // One instance, so the loop can cancel exactly the call the sender started.
+        val uploader = RecordingUploader(
+            endpoint = endpoint,
+            // The whole call is bounded by the client, and cancelling the call is what releases
+            // a stalled write: interrupting the coroutine cannot, because the write never
+            // returns to be interrupted.
+            client = rawClient.newBuilder()
+                .callTimeout(RecordingUploader.CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .build(),
+            // Fail-closed: no cached Auris token means no attempt. The recording is retained
+            // and retried, never sent under a different credential.
+            authorization = { aurisToken.peekCurrentToken() },
+        )
         return UploaderLoop(
             queue = queue,
-            send = RecordingUploader(
-                endpoint = endpoint,
-                // Fail-closed: no cached Auris token means no attempt. The recording is retained
-                // and retried, never sent under a different credential.
-                authorization = { aurisToken.peekCurrentToken() },
-            )::send,
+            send = uploader::send,
+            cancelInFlight = uploader::cancelInFlight,
             refreshSignIn = {
                 // 401 is a lapsed sign-in, not a refusal. Refreshing is best-effort: if it fails the
                 // recording stays queued and the next pass tries again.
@@ -98,8 +112,15 @@ object VoiceUploadQueueModule {
                 // The saved choice is the durable record of what the user decided, so switching
                 // sharing off stops the queue on the next pass rather than at the next sign-in.
                 sharingEnabled = {
-                    val account = collectionTx.coherentAuthority().accountName
-                    savedSharingChoice.enrolledChoiceFor(account) != null
+                    // The local intent is consulted as well as the saved choice, because a stop
+                    // whose write failed is still a stop: the saved record can still say enrolled
+                    // after the user has asked to stop.
+                    if (!withdrawalIntent.collectionPermittedByLocalIntent()) {
+                        false
+                    } else {
+                        val account = collectionTx.coherentAuthority().accountName
+                        savedSharingChoice.enrolledChoiceFor(account) != null
+                    }
                 },
             ),
             log = { Timber.tag(TAG).i(it) },

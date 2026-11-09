@@ -3,9 +3,11 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SealedCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
 import java.util.UUID
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -30,6 +32,9 @@ class RecordingPublisherTest {
         asrModel: ModelRef? = ModelRef.Named("whisper", "base"),
         pcm: ShortArray = ShortArray(1_600) { 7 },
         epoch: String? = "epoch-1",
+        stageHistory: List<CollectionOutcome> = emptyList(),
+        translation: TranslationProvenance? = null,
+        executionOutcome: ExecutionOutcome? = null,
     ): SealedCapture {
         val id = outcome?.captureId ?: UUID.randomUUID()
         return SealedCapture(
@@ -46,11 +51,11 @@ class RecordingPublisherTest {
             wakeState = wakeState,
             wakeMeasurement = measurement,
             outcome = outcome,
-            stageHistory = emptyList(),
-            translation = null,
+            stageHistory = stageHistory,
+            translation = translation,
             asrInvocationModel = asrModel,
             routerInvocationModel = null,
-            executionOutcome = null,
+            executionOutcome = executionOutcome,
             allowanceMetadataCap = null,
             cause = SealedCapture.CAUSE_TERMINAL,
         )
@@ -146,5 +151,60 @@ class RecordingPublisherTest {
         val q = FolderQueue(tmp.newFolder("q"), 32, {})
         assertFalse(publisher(q).publish(sealed(pcm = ShortArray(0))))
         assertNull(q.recordings().firstOrNull())
+    }
+
+    @Test
+    fun `the signal filter is not claimed as a decision it never recorded`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        publisher(q).publish(sealed())
+        val bleed = metadata(q).getJSONObject("observations").getJSONObject("bleed")
+        // The filter passed the segment, but what it decided was never recorded. Reporting
+        // "no_overlap" would invent a fact the engine does not keep.
+        assertFalse("a decision that was never observed must not be asserted", bleed.has("decision"))
+        assertEquals("unknown", bleed.getString("state"))
+    }
+
+    @Test
+    fun `a capture refused before recognition reports asr as not run with the recorded reason`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        val refused = CollectionOutcome.NotCollected(UUID.randomUUID(), "rejected_by_wake")
+        publisher(q).publish(
+            sealed(outcome = refused, asrModel = null, measurement = null, stageHistory = listOf(refused)),
+        )
+        val observations = metadata(q).getJSONObject("observations")
+        val asr = observations.getJSONObject("asr")
+        assertEquals("asr never ran, so it cannot be completed", "not_run", asr.getString("state"))
+        assertFalse(asr.has("text"))
+
+        // The wake detector did answer, and its answer was no.
+        assertEquals("completed", observations.getJSONObject("wake").getString("state"))
+        assertEquals("rejected", observations.getJSONObject("wake").getString("decision"))
+    }
+
+    @Test
+    fun `an unobserved execution result is unknown and carries no outcome`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        publisher(q).publish(sealed(executionOutcome = ExecutionOutcome.NotObserved))
+        val execution = metadata(q).getJSONObject("observations").getJSONObject("execution")
+        assertEquals("unknown", execution.getString("state"))
+        assertFalse("no result was seen, so no outcome may be reported", execution.has("outcome"))
+    }
+
+    @Test
+    fun `a translation failure is not reported as equal languages`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        publisher(q).publish(
+            sealed(
+                translation = TranslationProvenance(
+                    model = ModelRef.Named("t", "v"),
+                    producedResult = false,
+                    targetLanguage = null,
+                    failedWith = "translator_unavailable",
+                ),
+            ),
+        )
+        val translation = metadata(q).getJSONObject("observations").getJSONObject("translation")
+        assertEquals("failed", translation.getString("state"))
+        assertEquals("translator_unavailable", translation.getString("reason"))
     }
 }

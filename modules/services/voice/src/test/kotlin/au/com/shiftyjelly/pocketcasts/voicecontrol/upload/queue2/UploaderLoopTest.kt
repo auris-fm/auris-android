@@ -132,4 +132,52 @@ class UploaderLoopTest {
         assertEquals(1, r.retried)
         assertEquals("a network failure must never delete a recording", 1, q.count())
     }
+
+    @Test
+    fun `an ineligible recording is deleted even while it is in backoff`() = runTest {
+        val q = queue()
+        publish(q, "a")
+        // ONE loop for both passes: backoff lives in the loop's memory, so a second instance would
+        // start with an empty schedule and the ordering under test would never be exercised.
+        var t = 10_000L
+        var sharingOff = false
+        val loop = UploaderLoop(
+            queue = q,
+            send = { 503 },
+            refreshSignIn = {},
+            gate = { if (sharingOff) GateVerdict.Refuse("recording sharing is off") else GateVerdict.Send },
+            now = { t },
+            baseBackoffMs = 60_000,
+        )
+        loop.runOnce()
+        assertEquals(1, q.count())
+        assertTrue("the recording must be in backoff for this to mean anything", loop.backoffRemainingMs("a") > 0)
+
+        // Second pass, still inside the 60s backoff window, but sharing is now off. Waiting would
+        // not make it eligible, so the gate must be consulted before the retry schedule is.
+        sharingOff = true
+        t += 1
+        val result = loop.runOnce()
+        assertEquals(1, result.deleted)
+        assertEquals("a recording the user withdrew must not linger in the queue", 0, q.count())
+    }
+
+    @Test
+    fun `turning sharing off cancels a request already in flight`() = runTest {
+        val q = queue()
+        publish(q, "a")
+        var cancelled = 0
+        val loop = UploaderLoop(
+            queue = q,
+            send = { 201 },
+            refreshSignIn = {},
+            gate = { GateVerdict.Refuse("recording sharing is off") },
+            cancelInFlight = { cancelled++ },
+            now = { 10_000 },
+        )
+        loop.runOnce()
+        // Deleting the folder alone would leave the buffered request running to the server.
+        assertEquals(1, cancelled)
+        assertEquals(0, q.count())
+    }
 }

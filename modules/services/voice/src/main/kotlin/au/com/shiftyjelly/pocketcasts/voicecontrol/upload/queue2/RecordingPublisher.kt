@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SealedCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record2.AudioDescription
@@ -117,14 +118,30 @@ class RecordingPublisher(
     }
 
     /**
-     * The signal filter. This record is only ever published after collection finished, so the
-     * filter let the segment through; the decision it made is not retained anywhere else.
+     * The signal filter.
+     *
+     * The only filter fact the engine records is that it refused the segment: the reason `bleed`
+     * on a not-collected outcome. A published capture therefore passed the filter, but the decision
+     * itself was never observed, so it is reported as unknown rather than asserted as no overlap —
+     * the record states what happened, not what probably happened.
      */
-    private fun bleedObservation() = StageObservation.completed("decision" to "no_overlap")
+    private fun bleedObservation(): StageObservation = StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE)
 
     private fun wakeObservation(sealed: SealedCapture): StageObservation {
+        // A refusal before the wake word was even evaluated carries its own reason.
+        val refusedByWake = sealed.stageHistory.filterIsInstance<CollectionOutcome.NotCollected>()
+            .any { it.reason == REASON_REJECTED_BY_WAKE }
+
         val measurement = sealed.wakeMeasurement
-            ?: return StageObservation.notRun("not_measured")
+        if (measurement == null) {
+            return if (refusedByWake) {
+                // The detector answered, and its answer was no. That is a completed decision with
+                // no measured numbers, not a stage that failed to run.
+                StageObservation.completed("decision" to "rejected")
+            } else {
+                StageObservation.notRun(REASON_NOT_MEASURED)
+            }
+        }
         return StageObservation.completed(
             *buildMap<String, Any> {
                 if (measurement.score != null) put("score", measurement.score)
@@ -143,6 +160,15 @@ class RecordingPublisher(
             transcript?.let { put("text", it) }
             sourceLanguage?.let { put("source_language", it) }
         }
+        // A capture refused before recognition never reached ASR. Marking it completed would claim
+        // a run that did not happen, so the refusal reason decides the state.
+        val refusalReason = sealed.stageHistory.filterIsInstance<CollectionOutcome.NotCollected>()
+            .map { it.reason }
+            .lastOrNull { it == REASON_BLEED || it == REASON_REJECTED_BY_WAKE || it == REASON_WAKE_ONLY }
+        if (refusalReason != null && sealed.asrInvocationModel == null) {
+            return StageObservation("not_run", reason = refusalReason)
+        }
+
         return when (sealed.outcome) {
             is CollectionOutcome.AsrFailed -> StageObservation("failed", reason = "recognition_failed")
 
@@ -154,18 +180,22 @@ class RecordingPublisher(
 
             null ->
                 if (sealed.asrInvocationModel != null) {
-                    StageObservation("unknown", reason = "observation_unavailable", fields = fields)
+                    StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE, fields = fields)
                 } else {
-                    StageObservation("not_run", reason = "not_invoked")
+                    StageObservation("not_run", reason = REASON_NOT_INVOKED)
                 }
         }
     }
 
     private fun translationObservation(sealed: SealedCapture): StageObservation {
         val translation = sealed.translation
-            ?: return StageObservation.notRun("not_invoked")
+            ?: return StageObservation.notRun(REASON_NOT_INVOKED)
+        // A stage that ran and failed is a failure, not a skip. Conflating them would report a
+        // broken translator as "the languages were already the same".
+        translation.failedWith?.let { return StageObservation("failed", reason = it) }
+        // Otherwise a stage that produced nothing keeps its own recorded skip reason.
         if (!translation.producedResult) {
-            return StageObservation.notRun("source_language_target_language")
+            return StageObservation.notRun(translation.skipReason ?: "source_language_target_language")
         }
         return StageObservation.completed(
             *buildMap<String, Any> {
@@ -177,8 +207,8 @@ class RecordingPublisher(
 
     private fun routingObservation(sealed: SealedCapture, routed: CollectionOutcome.Routed?): StageObservation {
         // A wake-positive trim that left no text is the one routing case the spec names.
-        if (sealed.outcome is CollectionOutcome.NotCollected && sealed.outcome.reason == "wake_only") {
-            return StageObservation.notRun("wake_only")
+        if (sealed.outcome is CollectionOutcome.NotCollected && sealed.outcome.reason == REASON_WAKE_ONLY) {
+            return StageObservation.notRun(REASON_WAKE_ONLY)
         }
         if (routed != null) {
             return StageObservation.completed("predicted_intent" to routed.intentCategory)
@@ -186,11 +216,9 @@ class RecordingPublisher(
         val none = (sealed.stageHistory + listOfNotNull(sealed.outcome))
             .filterIsInstance<CollectionOutcome.RoutingNone>().lastOrNull()
         if (none != null) {
-            return StageObservation(
-                "failed",
-                reason = "no_usable_intent",
-                fields = buildMap<String, Any> { none.recognizerReason?.let { put("reason_detail", it) } },
-            )
+            // The recogniser's own reported reason travels; a blanket label would replace a fact
+            // the pipeline recorded with a guess.
+            return StageObservation("failed", reason = none.recognizerReason ?: "no_usable_intent")
         }
         return if (sealed.routerInvocationModel != null) {
             StageObservation("completed")
@@ -200,9 +228,15 @@ class RecordingPublisher(
     }
 
     private fun executionObservation(sealed: SealedCapture): StageObservation {
-        val observed = sealed.executionOutcome?.wire
+        val observed = sealed.executionOutcome
             ?: return StageObservation.notRun("not_dispatched")
-        return StageObservation.completed("outcome" to observed)
+        // NotObserved means literally no result was seen. Reporting it as a completed outcome
+        // would put a value the spec does not define into the record and claim an observation
+        // that was never made.
+        if (observed == ExecutionOutcome.NotObserved) {
+            return StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE, fields = emptyMap())
+        }
+        return StageObservation.completed("outcome" to observed.wire)
     }
 
     /** Writes a 16 kHz mono PCM16 WAV: a 44-byte RIFF header then the samples. */
@@ -243,6 +277,15 @@ class RecordingPublisher(
     )
 
     companion object {
+        /** The engine's own reasons for a capture it did not collect. */
+        const val REASON_BLEED = "bleed"
+        const val REASON_REJECTED_BY_WAKE = "rejected_by_wake"
+        const val REASON_WAKE_ONLY = "wake_only"
+
+        const val REASON_NOT_MEASURED = "not_measured"
+        const val REASON_NOT_INVOKED = "not_invoked"
+        const val OBSERVATION_UNAVAILABLE = "observation_unavailable"
+
         const val WAV_HEADER_BYTES = 44L
 
         /** 60 seconds at 16 kHz, the spec's bound on a retained segment. */

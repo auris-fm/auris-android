@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.LegacyQueueRemoval
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.UploaderLoop
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,12 +37,24 @@ class CollectionStartup @Inject constructor(
     private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
     private val uploaderLoop: UploaderLoop,
     @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope private val appScope: CoroutineScope,
+    /**
+     * Removes the previous upload path's queue root.
+     *
+     * It runs here rather than when the queue is constructed, because the queue is built while the
+     * object graph is assembled - before logging exists - so a deletion there leaves no record of
+     * itself. This hook runs at app start, after logging is live.
+     */
+    private val legacyQueueRemoval: LegacyQueueRemoval,
 ) {
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {
         // Enrollment evidence: the state fence's post-commit hook feeds the authority AND the
         // loss watcher; both are set before any capture can start because initializeOnAppStart
         // runs at app startup, ahead of any voice session.
+||||||| /tmp/mfb
+        // Loss watcher; both are set before any capture can start because initializeOnAppStart
+        // Runs at app startup, ahead of any voice session.
+        legacyQueueRemoval.run()
         watcher.start() // installs chained evidence + loss hooks (single composition point)
         // Bounded outcome finalization hooks onto the sink: a retained capture finalizes within
         // the fixed window (background-only; it is never an admission gate).

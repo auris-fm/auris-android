@@ -41,7 +41,6 @@ object VoiceUploadQueueModule {
     fun provideFolderQueue(
         @ApplicationContext context: Context,
     ): FolderQueue {
-        deleteLegacyQueue(context.filesDir)
         return FolderQueue(File(context.filesDir, QUEUE_ROOT)).also {
             // Anything still under a temporary name is an interrupted write from a previous process.
             it.discardIncompleteWrites()
@@ -55,6 +54,12 @@ object VoiceUploadQueueModule {
      * before the new queue is constructed, so a leftover can never be mistaken for a recording this
      * path could serve.
      */
+    @Provides
+    @Singleton
+    fun provideLegacyQueueRemoval(
+        @ApplicationContext context: Context,
+    ): LegacyQueueRemoval = LegacyQueueRemoval(context.filesDir)
+
     internal fun deleteLegacyQueue(
         filesDir: File,
         // This runs while the object graph is being built, which is before logging is set up, so a
@@ -132,5 +137,19 @@ object VoiceUploadQueueModule {
             ),
             log = { Timber.tag(TAG).i(it) },
         )
+    }
+}
+
+/**
+ * Removes the previous upload path's queue root, once, at a point where logging exists.
+ *
+ * The queue itself is built during object-graph assembly, before the app has set up logging, so
+ * doing this there would delete the right directory and leave no trace of having done it.
+ */
+class LegacyQueueRemoval(private val filesDir: File) {
+    fun run() {
+        VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { message ->
+            LogBuffer.i("VoiceUploadQueue2", message)
+        }
     }
 }

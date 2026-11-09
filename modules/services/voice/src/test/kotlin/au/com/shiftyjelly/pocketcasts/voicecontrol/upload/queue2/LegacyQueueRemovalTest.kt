@@ -64,4 +64,20 @@ class LegacyQueueRemovalTest {
         assertEquals("exactly one line for one deletion", 1, lines.size)
         assertTrue("the line must name what went: ${lines.single()}", lines.single().contains("voice-contributions"))
     }
+
+    @Test
+    fun `the removal is available as a startup step, not only at construction`() {
+        // The queue is built before logging exists, so removal has a separate entry point that the
+        // app calls once it is up. If this hook vanished the deletion would still happen but leave
+        // no record, which is the defect this covers.
+        val filesDir = tmp.newFolder("startup")
+        File(filesDir, "voice-contributions").mkdirs()
+        assertTrue("the old root must exist first", File(filesDir, "voice-contributions").exists())
+        hmLegacyRemoval(filesDir)
+        assertFalse(File(filesDir, "voice-contributions").exists())
+    }
+
+    private fun hmLegacyRemoval(filesDir: File) {
+        VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { }
+    }
 }

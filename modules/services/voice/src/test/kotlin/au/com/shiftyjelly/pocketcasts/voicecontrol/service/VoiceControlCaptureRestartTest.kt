@@ -263,7 +263,7 @@ class VoiceControlCaptureRestartTest {
     /**
      * Stands in for Oboe. Beyond counts, it keeps a per-stream ledger: every open gets a stable id,
      * and the attach/handoff/close events are recorded against that id. A global count cannot say
-     * WHICH stream a close belonged to, which is the only thing that distinguishes "this abandoned
+     * Which stream a close belonged to, which is the only thing that distinguishes "this abandoned
      * attempt was cleaned up" from "the engine-owned stream was closed behind its back".
      */
     private class FakeHardware(private val scoReady: () -> Boolean) : CaptureHardware {
@@ -288,7 +288,7 @@ class VoiceControlCaptureRestartTest {
         private var installed: Stream? = null
 
         /**
-         * When set, the next attach refuses, mimicking a start that fails AFTER the stream was
+         * When set, the next attach refuses, mimicking a start that fails after the stream was
          * confirmed -- the `attached == false` branch in `startEngine`. Deliberately not a
          * `startInputStream()` failure: that one fires inside `performAcquisition`, so acquisition
          * releases the stream itself, which reaches a different branch.
@@ -304,9 +304,9 @@ class VoiceControlCaptureRestartTest {
             // Native attach only succeeds on a RUNNING stream (AAudio state check); production
             // guarantees start-before-attach, so the fake enforces the same contract.
             //
-            // Attach targets the INSTALLED capture and requires it to be running (jni_bridge.cpp
-            // :205-215 starts only a stream that exists). A stopped stream is GONE, not idle, because
-            // nativeStopCaptureAndVad retires the VAD and DELETES gCapture (jni_bridge.cpp:236-247);
+            // Attach targets the installed capture and requires it to be running (jni_bridge.cpp
+            // :205-215 starts only a stream that exists). A stopped stream is gone, not idle, because
+            // nativeStopCaptureAndVad retires the VAD and deletes gCapture (jni_bridge.cpp:236-247);
             // nothing is ever reused after a VAD stop.
             val stream = installed ?: return false
             if (!stream.started) return false
@@ -317,7 +317,7 @@ class VoiceControlCaptureRestartTest {
             }
             attachCount++
             stream.attached = true
-            // A successful attach IS the hand-off, observed at the hardware boundary: from here the
+            // A successful attach is the hand-off, observed at the hardware boundary: from here the
             // engine owns the stream, so an explicit close of it is a violation. No production seam
             // is needed to establish that.
             stream.handedOff = true
@@ -329,7 +329,7 @@ class VoiceControlCaptureRestartTest {
         override fun stopCaptureAndVad() {
             vadStopCount++
             capturing = false
-            // NATIVE CONTRACT (jni_bridge.cpp:236-247): stop retires VAD, DELETES gCapture and
+            // native contract (jni_bridge.cpp:236-247): stop retires VAD, deletes gCapture and
             // clears the slot -- even when the stream was never started. The engine tearing down its
             // own stream is expected, not an acquisition close.
             installed?.let { closeStream(it, caller = "engine_stop_teardown") }
@@ -350,9 +350,9 @@ class VoiceControlCaptureRestartTest {
             // exists; opening before establishment returns no device on real hardware too.
             if (!scoReady()) return -1
             openCount++
-            // NATIVE CONTRACT (jni_bridge.cpp:180-199): opening exits early when it cannot open, and
-            // otherwise retires VAD and DELETES the previous gCapture before installing the new one
-            // as the single slot. `gCapture` is installed HERE, at open -- not at start -- and a
+            // native contract (jni_bridge.cpp:180-199): opening exits early when it cannot open, and
+            // otherwise retires VAD and deletes the previous gCapture before installing the new one
+            // as the single slot. `gCapture` is installed here, at open -- not at start -- and a
             // replacement while the previous capture is still installed therefore destroys it.
             installed?.let { previous ->
                 if (previous.closedAt == null) {
@@ -420,7 +420,7 @@ class VoiceControlCaptureRestartTest {
             /** The flag's value at close: false here can mean "reset by a previous release". */
             @Volatile var handedOffAtClose: Boolean? = null
 
-            /** True if this stream was EVER handed to the engine, regardless of the flag at close. */
+            /** True if this stream was ever handed to the engine, regardless of the flag at close. */
             val everHandedOff: Boolean get() = handOffCount > 0
 
             val isOpen: Boolean get() = closedAt == null
@@ -517,8 +517,8 @@ class VoiceControlCaptureRestartTest {
      * Main continuation (acquisition polls, observer body, engine start) cooperatively.
      */
     // Wait, bounded, until `predicate` holds, pumping the same runtimes awaitState pumps. Used by
-    // teardown to ASSERT completion rather than sleep for an arbitrary number of rounds: a timeout
-    // here FAILS the test, because work outliving a test makes the next one non-deterministic.
+    // teardown to assert completion rather than sleep for an arbitrary number of rounds: a timeout
+    // here fails the test, because work outliving a test makes the next one non-deterministic.
     private suspend fun awaitTeardown(
         what: String,
         predicate: () -> Boolean,
@@ -588,7 +588,7 @@ class VoiceControlCaptureRestartTest {
      * that a count cannot separate: an abandoned acquisition cleaned up by `release()` (correct), or
      * an engine-owned stream closed by someone who should not have (the ownership violation the
      * pinned assertion guards). CI caught it once in fifteen-plus local runs, so waiting for a
-     * rerun is not a measurement. This test forces a start that fails AFTER the stream is opened and
+     * rerun is not a measurement. This test forces a start that fails after the stream is opened and
      * confirmed -- the one window where `release()` is still allowed to close -- and records what
      * actually happened.
      */
@@ -607,7 +607,7 @@ class VoiceControlCaptureRestartTest {
             val firstStream = harness.hardware.streams.single { it.attached }
             assertEquals("the user's start cues once, before any failure", 1, cues.get())
 
-            // Fail the engine's own attach AFTER RouteAcquisition.confirmCaptureStream() opened and
+            // Fail the engine's own attach after RouteAcquisition.confirmCaptureStream() opened and
             // confirmed a stream: this is the `!attached` branch in startEngine. Not a
             // startInputStream failure, which fires inside acquisition instead.
             harness.hardware.failNextAttach = true
@@ -638,7 +638,7 @@ class VoiceControlCaptureRestartTest {
             //    recovered attachment is a different stream from the one that was abandoned.
             assertEquals("the forced attach refusal occurred", 1, harness.hardware.refusedAttachCount)
 
-            // 2. The IDENTIFIED abandoned stream -- the one release closed -- received exactly one
+            // 2. The identified abandoned stream -- the one release closed -- received exactly one
             //    close. Counting release invocations instead would also count idempotent cleanup on
             //    an empty slot, which is not a stream event at all.
             val abandoned = streams.filter { it.closeCalls.contains("RouteAcquisition.release") }
@@ -849,9 +849,9 @@ class VoiceControlCaptureRestartTest {
             startHarnessedService(service)
             block(harness)
         } finally {
-            // End the lifecycle through the service's OWN teardown rather than reaching into
+            // End the lifecycle through the service's own teardown rather than reaching into
             // fields: onDestroy -> stopVoiceControl, which cancels modeJob and serviceScope
-            // (VoiceControlService:946/968). A throwing teardown FAILS the test -- swallowing it
+            // (VoiceControlService:946/968). A throwing teardown fails the test -- swallowing it
             // would let a broken teardown look like an isolated one.
             try {
                 service.onDestroy()
@@ -924,7 +924,7 @@ class VoiceControlCaptureRestartTest {
             otherAppRule.block("other_app_playing")
             awaitState("first VAD teardown") { hardware.vadStopCount >= 1 }
 
-            // Phase 3: the conflict clears BEFORE anything else settles -- the same churn the owner
+            // Phase 3: the conflict clears before anything else settles -- the same churn the owner
             // saw (a command response keeps music active for a moment).
             otherAppRule.allow()
 

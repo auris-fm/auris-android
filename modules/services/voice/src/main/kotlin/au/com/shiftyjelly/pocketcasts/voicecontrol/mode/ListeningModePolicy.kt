@@ -22,7 +22,7 @@ import kotlinx.coroutines.flow.stateIn
  *
  * [EarconId.LISTENING_START] means "the microphone is on": optional, independent of the mandatory
  * wake-word confirmation, and "very subtle ... should not distract" (`voice-intents.md`). It plays
- * when listening STARTS in a session that requires the wake word.
+ * when listening starts in a session that requires the wake word.
  *
  * The question is why this start happened, not whether the app is visible. Two earlier versions got
  * it wrong in opposite directions: gating on "the app is in the background" made every automatic

@@ -696,12 +696,64 @@ class VoiceControlCaptureRestartTest {
             // capture state and recovers, which starts the engine a second time.
             harness.otherAppRule.block("other_app_playing")
             awaitState("teardown", probe = { "vadStop=${harness.hardware.vadStopCount} attach=${harness.hardware.attachCount} cues=${cues.get()}" }) { harness.hardware.vadStopCount >= 1 }
-            System.err.println("[PROBE] after teardown: mode-ish cues=" + cues.get())
             harness.otherAppRule.allow()
             awaitState("recovered engine start", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) { harness.hardware.attachCount >= 2 }
 
             assertEquals("the recovery restarted capture, so the cue decision ran twice", 2, harness.hardware.attachCount)
             assertEquals("an automatic recovery must not beep: that is the audio fight the owner reported", 1, cues.get())
+        }
+    }
+
+    /**
+     * Re-enabling voice control is a user start, so it earns the cue again.
+     *
+     * The cue rule keys on whether this start was the user's. A user who turns voice control off and
+     * back on has asked to listen again in the same sense they did the first time, so the re-enabled
+     * session cues once -- and the automatic recoveries inside it stay silent, exactly as they do
+     * after a first start.
+     */
+    @Test
+    fun `re-enabling after a disable cues once more, and its recoveries stay silent`() = runBlocking {
+        val cues = java.util.concurrent.atomic.AtomicInteger(0)
+        val recordingRenderer = mock(AudioFeedbackRenderer::class.java)
+        whenever(recordingRenderer.playEarcon(any())).thenAnswer { invocation ->
+            val id = invocation.getArgument<Any>(0)
+            if (id == EarconId.LISTENING_START) cues.incrementAndGet()
+            true
+        }
+
+        withServiceHarness(recordingRenderer) { harness ->
+            awaitState("first engine start", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) {
+                harness.hardware.attachCount >= 1
+            }
+            assertEquals("the first user start cues once", 1, cues.get())
+
+            // A recovery inside the first session stays silent.
+            harness.otherAppRule.block("other_app_playing")
+            awaitState("teardown", probe = { "vadStop=${harness.hardware.vadStopCount} cues=${cues.get()}" }) {
+                harness.hardware.vadStopCount >= 1
+            }
+            harness.otherAppRule.allow()
+            awaitState("first recovery", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) {
+                harness.hardware.attachCount >= 2
+            }
+            assertEquals("a recovery inside the first session must not cue", 1, cues.get())
+
+            // The user turns voice control off, then on again. Disable retires the session; enable
+            // is a user start and earns one more cue.
+            harness.userRule.block("disabled_by_user")
+            awaitState("disabled", probe = { "mode stops, cues=${cues.get()}" }) {
+                harness.hardware.vadStopCount >= 2
+            }
+            harness.userRule.allow()
+            awaitState("re-enabled", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) {
+                harness.hardware.attachCount >= 3
+            }
+            assertEquals(
+                "re-enabling is a user start, so it cues once more",
+                2,
+                cues.get(),
+            )
         }
     }
 
@@ -718,6 +770,7 @@ class VoiceControlCaptureRestartTest {
     private inner class ServiceHarness(
         val service: VoiceControlService,
         val otherAppRule: FakeRule,
+        val userRule: FakeRule,
         val hardware: FakeHardware,
         val scoPlatform: FakeScoPlatform,
         val monitor: AndroidAudioRouteMonitor,
@@ -844,7 +897,7 @@ class VoiceControlCaptureRestartTest {
         // when Main is not a TestDispatcher -- and that executor does not run while the Robolectric
         // main thread sits inside runBlocking. With the shared scheduler, acquisition's poll-delay
         // resumes on this thread during idle().
-        val harness = ServiceHarness(service, otherAppRule, hardware, scoPlatform, monitor, policy, microphoneCapture)
+        val harness = ServiceHarness(service, otherAppRule, userRule, hardware, scoPlatform, monitor, policy, microphoneCapture)
         try {
             startHarnessedService(service)
             block(harness)

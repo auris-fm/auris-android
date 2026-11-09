@@ -142,6 +142,12 @@ class VoiceControlService : Service() {
      * [recoverCapture].
      */
     private var awaitingUserStart = true
+
+    /**
+     * Whether the user switched voice control off while this service was running, so a later
+     * re-enable can be recognised as a user start rather than an automatic recovery.
+     */
+    private var userDisabledVoiceControl = false
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
@@ -348,6 +354,7 @@ class VoiceControlService : Service() {
                             // the automatic-restart cap so re-enabling it can capture again.
                             if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
                                 captureRestartBudget.reset()
+                                userDisabledVoiceControl = true
                             }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
@@ -404,6 +411,13 @@ class VoiceControlService : Service() {
                                 currentMode = mode
                                 updateListeningState()
                             } else if (captureRestartBudget.allows()) {
+                                // Re-enabling after a user disable is a user start: they asked to
+                                // listen again, so this session earns the cue the same way the
+                                // first start did, and the recoveries inside it stay silent.
+                                if (userDisabledVoiceControl) {
+                                    awaitingUserStart = true
+                                    userDisabledVoiceControl = false
+                                }
                                 @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                                 if (startEngine(mode)) {
                                     currentMode = mode

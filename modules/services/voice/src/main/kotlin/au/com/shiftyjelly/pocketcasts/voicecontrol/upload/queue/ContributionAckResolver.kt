@@ -5,6 +5,9 @@ import timber.log.Timber
 /**
  * Resolves a transport ACK into the ONE local ownership transition it authorizes (spec task73; reviewer
  * coordination 7c5b344d). The caller records the attempt, posts the capture, and hands the classified
+||||||| /tmp/mfb
+ * Resolves a transport ack into the one local ownership transition it authorizes (spec task73; reviewer
+ * coordination 7c5b344d). The caller records the attempt, posts the capture, and hands the classified
  * response here. Local ownership is removed ONLY on validated authoritative acceptance or confirmed
  * terminal disposal, and ONLY while the completion's generation is STILL valid - a stale completion
  * after an epoch/account change changes nothing locally.
@@ -140,6 +143,11 @@ class ContributionAckResolver(
             // 409 means the recording was disposed or its bytes differ - both genuinely terminal. The
             // former 409-after-5xx hold was an interim workaround for the server disposing a reservation
             // when its OWN attempt failed; with that fixed, holding would keep indestructible debris.
+||||||| /tmp/mfb
+            // Terminal is terminal. The server now reopens on retry (Cloud 8637a0fd), so a
+            // 409 means the recording was disposed or its bytes differ - both genuinely terminal. The
+            // Former 409-after-5xx hold was an interim workaround for the server disposing a reservation
+            // When its OWN attempt failed; with that fixed, holding would keep indestructible debris.
             if (store.releaseForAdmittedAttempt(token, ContributionStore.TerminalReason.SERVER_TERMINAL)) {
                 Resolution.Released
             } else {

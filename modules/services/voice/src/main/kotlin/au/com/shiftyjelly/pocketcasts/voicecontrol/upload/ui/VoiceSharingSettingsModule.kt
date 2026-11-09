@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAc
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.FolderQueue
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.UploaderLoop
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -29,6 +30,7 @@ object VoiceSharingSettingsModule {
         accountStartup: VoiceSharingAccountStartup,
         withdrawalIntent: LocalWithdrawalIntentStore,
         queue: FolderQueue,
+        uploaderLoop: UploaderLoop,
     ): VoiceSharingSettingsViewModel {
         val controller: EnrollmentController = accountStartup.enrollmentController(
             // THE QUEUE'S OWN REVOCATION: "stop everything now" uses the same ownership-locked
@@ -50,6 +52,8 @@ object VoiceSharingSettingsModule {
             // The membership GET the surface depends on: production-only request prefix. The
             // ordinary signed-in bearer is read by the operations layer itself.
             refreshProjection = { accountStartup.operations.refreshProjection() },
+            // The loop cannot cancel itself while it is blocked in the call, so the tap does it.
+            cancelInFlightUpload = uploaderLoop::cancelInFlight,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
     }

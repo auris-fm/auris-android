@@ -103,6 +103,15 @@ class VoiceSharingSettingsViewModel(
      */
     private val ownerSession: () -> Long,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    /**
+     * Abandons a request that is already on the wire.
+     *
+     * The uploader loop cannot do this itself: while a call is active the loop is suspended inside
+     * it and never reaches its own pre-send gate, so a stop that waits for the loop to notice waits
+     * for the very request it is meant to stop. The user's action is the only place that runs while
+     * the loop is blocked.
+     */
+    private val cancelInFlightUpload: () -> Unit = {},
 ) {
 
     // DURABLE UI STATE, not transient render inputs (reviewer ae7922f9): the combine collector
@@ -303,6 +312,9 @@ class VoiceSharingSettingsViewModel(
         // recorded first: stopping collection on the old account is correct the instant of the tap.
         val tappedSession = ownerSession()
         withdrawalIntent.recordWithdrawalRequested()
+        // Stopping collection must reach a request already being sent. Cancelling here, at the
+        // moment of the tap, is the only point that is not blocked behind that request.
+        cancelInFlightUpload()
         mutableState.value = render()
         scope.launch {
             if (ownerSession() != tappedSession) {

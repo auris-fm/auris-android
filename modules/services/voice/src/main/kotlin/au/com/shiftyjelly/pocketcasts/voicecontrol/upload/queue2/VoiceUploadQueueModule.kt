@@ -94,7 +94,7 @@ object VoiceUploadQueueModule {
         return UploaderLoop(
             queue = queue,
             send = uploader::send,
-            cancelInFlight = uploader::cancelInFlight,
+            cancelInFlightOnce = uploader::cancelInFlight,
             refreshSignIn = {
                 // 401 is a lapsed sign-in, not a refusal. Refreshing is best-effort: if it fails the
                 // recording stays queued and the next pass tries again.

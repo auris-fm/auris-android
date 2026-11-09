@@ -127,6 +127,7 @@ class VoiceSharingSettingsViewModelTest {
         ownerSession: () -> Long = { 1L },
         onEnrollIssue: (() -> Unit)? = null,
         onWithdrawIssue: (() -> Unit)? = null,
+        cancelInFlightUpload: () -> Unit = {},
     ): VoiceSharingSettingsViewModel {
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
@@ -151,6 +152,7 @@ class VoiceSharingSettingsViewModelTest {
             withdrawalIntent = LocalWithdrawalIntentStore(persistence),
             ownerSession = ownerSession,
             scope = effective,
+            cancelInFlightUpload = cancelInFlightUpload,
         )
     }
 
@@ -961,5 +963,18 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.pendingOperation,
         )
         assertTrue("B's action is still pending", vm.state.value.pending)
+    }
+
+    @Test
+    fun `a withdraw tap cancels a request that is already being sent`() = runTest(mainDispatcher) {
+        setProjection(enrolledProjection())
+        var cancelled = 0
+        // The uploader loop is blocked inside the send and cannot reach its own gate, so the tap is
+        // the only thing that can stop the request.
+        val vm = viewModel(cancelInFlightUpload = { cancelled++ })
+
+        vm.withdraw()
+
+        assertEquals("withdrawing must reach a request already on the wire", 1, cancelled)
     }
 }

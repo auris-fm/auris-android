@@ -172,7 +172,7 @@ class UploaderLoopTest {
             send = { 201 },
             refreshSignIn = {},
             gate = { GateVerdict.Refuse("recording sharing is off") },
-            cancelInFlight = { cancelled++ },
+            cancelInFlightOnce = { cancelled++ },
             now = { 10_000 },
         )
         loop.runOnce()

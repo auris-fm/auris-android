@@ -182,6 +182,45 @@ class RecordingPublisherTest {
     }
 
     @Test
+    fun `a filter refusal keeps its recorded overlap decision`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        val refused = CollectionOutcome.NotCollected(UUID.randomUUID(), "bleed")
+        publisher(q).publish(sealed(outcome = refused, asrModel = null, measurement = null, stageHistory = listOf(refused)))
+        val bleed = metadata(q).getJSONObject("observations").getJSONObject("bleed")
+        // The engine records this refusal, so it is a known decision and must survive.
+        assertEquals("completed", bleed.getString("state"))
+        assertEquals("overlap", bleed.getString("decision"))
+    }
+
+    @Test
+    fun `each execution outcome uses the spec's state outcome and reason triple`() {
+        val cases = listOf(
+            Triple(ExecutionOutcome.Failure, "failed", "action_failed"),
+            Triple(ExecutionOutcome.Refused, "failed", "client_refused"),
+            Triple(ExecutionOutcome.Cancelled, "cancelled", "cancelled_by_user"),
+        )
+        for ((index, case) in cases.withIndex()) {
+            val (outcome, state, reason) = case
+            val q = FolderQueue(tmp.newFolder("q$index"), 32, {})
+            publisher(q).publish(sealed(executionOutcome = outcome))
+            val execution = metadata(q).getJSONObject("observations").getJSONObject("execution")
+            assertEquals("state for $outcome", state, execution.getString("state"))
+            assertEquals("reason for $outcome", reason, execution.getString("reason"))
+            assertEquals("outcome for $outcome", outcome.wire, execution.getString("outcome"))
+        }
+    }
+
+    @Test
+    fun `a successful execution is completed with its outcome and no reason`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        publisher(q).publish(sealed(executionOutcome = ExecutionOutcome.Success))
+        val execution = metadata(q).getJSONObject("observations").getJSONObject("execution")
+        assertEquals("completed", execution.getString("state"))
+        assertEquals("success", execution.getString("outcome"))
+        assertFalse("a completed stage states no reason", execution.has("reason"))
+    }
+
+    @Test
     fun `an unobserved execution result is unknown and carries no outcome`() {
         val q = FolderQueue(tmp.newFolder("q"), 32, {})
         publisher(q).publish(sealed(executionOutcome = ExecutionOutcome.NotObserved))

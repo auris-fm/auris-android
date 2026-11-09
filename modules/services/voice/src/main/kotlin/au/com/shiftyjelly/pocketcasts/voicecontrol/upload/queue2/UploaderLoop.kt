@@ -32,7 +32,7 @@ class UploaderLoop(
      * Deleting the folder is not enough when sharing turns off: the request has already been handed
      * to the socket, so only cancelling the call stops it from being delivered.
      */
-    private val cancelInFlight: () -> Unit = {},
+    private val cancelInFlightOnce: () -> Unit = {},
     private val now: () -> Long = System::currentTimeMillis,
     private val baseBackoffMs: Long = DEFAULT_BASE_BACKOFF_MS,
     private val maxBackoffMs: Long = DEFAULT_MAX_BACKOFF_MS,
@@ -77,7 +77,7 @@ class UploaderLoop(
             when (val verdict = gate.verdictFor(recording)) {
                 is GateVerdict.Refuse -> {
                     // Anything buffered for this recording must stop too, not just its folder.
-                    cancelInFlight()
+                    cancelInFlightOnce()
                     queue.delete(recording, verdict.reason)
                     clearBackoff(recording.captureId)
                     deleted++
@@ -126,6 +126,11 @@ class UploaderLoop(
     }
 
     /** How long until [captureId] may be attempted, or 0 when it is due. */
+    // Abandons a request already on the wire, from outside the loop. While a call is active this
+    // loop is suspended inside it and cannot reach its own gate to notice that sharing was turned
+    // off, so whoever performs the stop calls this instead.
+    fun cancelInFlight() = cancelInFlightOnce()
+
     fun backoffRemainingMs(captureId: String): Long = ((nextAttemptAt[captureId] ?: 0L) - now()).coerceAtLeast(0L)
 
     private fun scheduleRetry(captureId: String, t: Long) {

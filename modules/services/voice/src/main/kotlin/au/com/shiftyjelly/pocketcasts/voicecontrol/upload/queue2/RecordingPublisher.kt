@@ -108,7 +108,7 @@ class RecordingPublisher(
         val sourceLanguage = recognized?.detectedLanguage ?: notCollected?.measuredLanguage
 
         return linkedMapOf(
-            "bleed" to bleedObservation(),
+            "bleed" to bleedObservation(sealed),
             "wake" to wakeObservation(sealed),
             "asr" to asrObservation(sealed, transcript, sourceLanguage),
             "translation" to translationObservation(sealed),
@@ -122,10 +122,22 @@ class RecordingPublisher(
      *
      * The only filter fact the engine records is that it refused the segment: the reason `bleed`
      * on a not-collected outcome. A published capture therefore passed the filter, but the decision
-     * itself was never observed, so it is reported as unknown rather than asserted as no overlap —
-     * the record states what happened, not what probably happened.
+     * itself was never observed, so a segment that passed is reported as unknown rather than
+     * asserted as no overlap. The one recorded decision, a refusal, is kept.
      */
-    private fun bleedObservation(): StageObservation = StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE)
+    private fun bleedObservation(sealed: SealedCapture): StageObservation {
+        // The engine records ONE filter fact: that it refused the segment. That is an overlap
+        // decision and is kept. A segment that passed leaves no recorded decision, so its decision
+        // stays unknown rather than being asserted as no overlap.
+        val refusedByFilter = (sealed.stageHistory + listOfNotNull(sealed.outcome))
+            .filterIsInstance<CollectionOutcome.NotCollected>()
+            .any { it.reason == REASON_BLEED }
+        return if (refusedByFilter) {
+            StageObservation.completed("decision" to "overlap")
+        } else {
+            StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE)
+        }
+    }
 
     private fun wakeObservation(sealed: SealedCapture): StageObservation {
         // A refusal before the wake word was even evaluated carries its own reason.
@@ -172,7 +184,7 @@ class RecordingPublisher(
         return when (sealed.outcome) {
             is CollectionOutcome.AsrFailed -> StageObservation("failed", reason = "recognition_failed")
 
-            is CollectionOutcome.AsrCancelled -> StageObservation("cancelled")
+            is CollectionOutcome.AsrCancelled -> StageObservation("cancelled", reason = "cancelled_by_user")
 
             is CollectionOutcome.Recognized, is CollectionOutcome.Routed, is CollectionOutcome.Executed,
             is CollectionOutcome.RoutingNone, is CollectionOutcome.NotCollected,
@@ -230,13 +242,23 @@ class RecordingPublisher(
     private fun executionObservation(sealed: SealedCapture): StageObservation {
         val observed = sealed.executionOutcome
             ?: return StageObservation.notRun("not_dispatched")
-        // NotObserved means literally no result was seen. Reporting it as a completed outcome
-        // would put a value the spec does not define into the record and claim an observation
-        // that was never made.
-        if (observed == ExecutionOutcome.NotObserved) {
-            return StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE, fields = emptyMap())
+        // The spec fixes state, outcome and reason together. A failure and a refusal are different
+        // facts about the action, and a user cancel is not a failure at all.
+        return when (observed) {
+            ExecutionOutcome.Success -> StageObservation.completed("outcome" to observed.wire)
+
+            ExecutionOutcome.Failure ->
+                StageObservation("failed", reason = "action_failed", fields = mapOf("outcome" to observed.wire))
+
+            ExecutionOutcome.Refused ->
+                StageObservation("failed", reason = "client_refused", fields = mapOf("outcome" to observed.wire))
+
+            ExecutionOutcome.Cancelled ->
+                StageObservation("cancelled", reason = "cancelled_by_user", fields = mapOf("outcome" to observed.wire))
+
+            // No result was seen at all: say so, and omit the outcome entirely.
+            ExecutionOutcome.NotObserved -> StageObservation("unknown", reason = OBSERVATION_UNAVAILABLE)
         }
-        return StageObservation.completed("outcome" to observed.wire)
     }
 
     /** Writes a 16 kHz mono PCM16 WAV: a 44-byte RIFF header then the samples. */

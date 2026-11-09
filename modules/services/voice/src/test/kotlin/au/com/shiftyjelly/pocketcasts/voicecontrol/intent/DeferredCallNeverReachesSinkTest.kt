@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -141,11 +142,11 @@ class DeferredCallNeverReachesSinkTest {
         assert(
             deferred(
                 "when this episode ends, go to chapter 'Introduction'",
-                ", index=1",
-                tool = "queue",
-                action = "play_next",
+                ", title='Introduction'",
+                tool = "chapter",
+                action = "by_title",
             ),
-        ) { "a queue change ran before its event" }
+        ) { "a chapter change ran before its event" }
         assert(
             deferred(
                 "when this episode ends, tell me the volume",
@@ -217,5 +218,44 @@ class DeferredCallNeverReachesSinkTest {
             translationKind = TranslationKind.PLATFORM,
         )
         assertEquals("en", translated.textLanguage)
+    }
+
+    @Test
+    fun `an alternative defers even where a decoded value would otherwise be acted on`() {
+        // The duration waiver exists because a single stated number is a complete request. An
+        // alternative is not: another amount is still named, so a decoded value is a guess between
+        // two. These carry a valid decoded value precisely so the assertion cannot pass merely
+        // because nothing was decoded.
+        data class Case(val utterance: String, val tool: String, val action: String, val params: String)
+
+        listOf(
+            Case("set volume to ten or twenty percent", "volume", "set_volume", ", level=10"),
+            Case("set a ten or twenty minute sleep timer", "sleep", "set", ", minutes=10"),
+            Case("set volume to ten or twenty percent", "volume", "set_volume", ", level=20"),
+            Case("set a ten or twenty minute sleep timer", "sleep", "set", ", minutes=20"),
+        ).forEach { case ->
+            val raw = "<|tool_call_start|>[${case.tool}(action='${case.action}'${case.params})]<|tool_call_end|>"
+            val repaired = SlotRepair.repair(
+                raw = raw,
+                utterance = case.utterance,
+                tool = case.tool,
+                action = case.action,
+                textLanguage = "en",
+            )
+            assertNull("${case.utterance} was settled by a decoded value", repaired)
+        }
+    }
+
+    @Test
+    fun `a single stated number is still honoured for an action it fully settles`() {
+        // The waiver must keep working, or valid commands would be refused.
+        val repaired = SlotRepair.repair(
+            raw = "<|tool_call_start|>[sleep(action='set', minutes=30)]<|tool_call_end|>",
+            utterance = "set a thirty minute sleep timer",
+            tool = "sleep",
+            action = "set",
+            textLanguage = "en",
+        )
+        assertNotNull("a complete timer request was refused", repaired)
     }
 }

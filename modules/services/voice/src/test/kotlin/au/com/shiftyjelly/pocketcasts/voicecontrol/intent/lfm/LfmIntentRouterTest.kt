@@ -18,6 +18,7 @@ import java.security.MessageDigest
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -364,6 +365,80 @@ class LfmIntentRouterTest {
         assertTrue(
             "request_id must be a UUID",
             Regex("request_id=[0-9a-fA-F-]{36}").containsMatchIn(line),
+        )
+    }
+
+    @Test
+    fun an_unresolved_alternative_never_reaches_a_local_dispatch() = runTest {
+        // The guarantee is about the whole route, not about repair returning null: whatever repair
+        // decides, an unresolved request must not become an intent the executor could act on.
+        // This drives the real router with a fake model that produces a valid-looking tool call for
+        // an utterance that offers two amounts, and asserts no local intent comes out.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback:seek_relative"
+            generateResult = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>"
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+        router.ensureReady().getOrThrow()
+
+        val unresolved = listOf(
+            "rewind ten or twenty seconds",
+            "rewind at least ten seconds",
+            "when this episode ends, rewind ten seconds",
+        )
+        for (utterance in unresolved) {
+            val result = router.recognize(english(utterance), RECOGNITION_CONTEXT, admittedId)
+            assertNull("$utterance reached a local dispatch", result.intent)
+        }
+
+        // The control: the same model output for a settled request must produce an intent, so the
+        // assertions above cannot be passing because the route is broken for every utterance.
+        val settled = router.recognize(english("rewind ten seconds"), RECOGNITION_CONTEXT, admittedId)
+        assertNotNull("the settled control produced no intent, so the route is not being exercised", settled.intent)
+    }
+
+    @Test
+    fun the_deferral_reads_the_language_of_the_text_being_repaired() = runTest {
+        // "once" is a condition in English and the number eleven in Spanish, and a count rather
+        // than either in "rewind ten seconds once please". Only the language settles it, so a
+        // router that drops the language cannot get both readings right: it would refuse the count
+        // while accepting it, or accept a real condition.
+        //
+        // The count is the discriminating case. With the language dropped it becomes undecided
+        // and defers; with English supplied it is honoured. Asserting only that conditions defer
+        // proves nothing, because deferring is also what a missing language does.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback:seek_relative"
+            generateResult = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-10)]<|tool_call_end|>"
+        }
+        val router = createRouter(inference)
+        router.ensureReady().getOrThrow()
+
+        val count = IntentRoutingInput.english("rewind ten seconds once please")
+        assertEquals("en", count.textLanguage)
+        assertNotNull(
+            "a settled request was refused, so the router is not using the language",
+            router.recognize(count, RECOGNITION_CONTEXT, admittedId).intent,
+        )
+
+        // The same word as a condition still defers, in native English and after translation.
+        val nativeCondition = IntentRoutingInput.english("rewind ten seconds once the intro music fades")
+        assertNull(
+            "a native English condition reached a local dispatch",
+            router.recognize(nativeCondition, RECOGNITION_CONTEXT, admittedId).intent,
+        )
+
+        val translated = IntentRoutingInput(
+            sourceTranscript = "retrocede diez segundos una vez que termine el episodio",
+            sourceLanguage = "es",
+            routerTranscript = "rewind ten seconds once the intro music fades",
+            translationKind = TranslationKind.PLATFORM,
+        )
+        assertEquals("a translated request is repaired as English", "en", translated.textLanguage)
+        assertNull(
+            "a translated condition reached a local dispatch",
+            router.recognize(translated, RECOGNITION_CONTEXT, admittedId).intent,
         )
     }
 

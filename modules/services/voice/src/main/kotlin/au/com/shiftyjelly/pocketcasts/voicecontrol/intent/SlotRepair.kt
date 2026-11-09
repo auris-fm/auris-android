@@ -20,9 +20,15 @@ object SlotRepair {
         // Bounds and conditions always defer: a minimum is not a level, and an action attached to
         // a future event has no time to run at. Only the amount check is waived for an action whose
         // number a resolved value fully settles.
-        val amountDefers = hasUnresolvedAmount(utterance) &&
-            (isExecuteOrNumericTarget(tool, action) || hasUndecidedLanguageWord(utterance, textLanguage))
-        if (amountDefers || hasUnresolvedBound(utterance) || hasUnresolvedTiming(utterance, textLanguage)) {
+        // An alternative never resolves, whatever the action: a decoded level does not settle
+        // "ten or twenty percent", and a decoded duration does not settle "ten or twenty minutes".
+        // Bounds and future conditions are the same. Only a plain single number can be waived for
+        // an action whose target it fully states.
+        if (hasUnresolvedAlternative(utterance) ||
+            hasUnresolvedBound(utterance) ||
+            hasUnresolvedTiming(utterance, textLanguage) ||
+            (hasUnresolvedAmount(utterance, textLanguage) && isExecuteOrNumericTarget(tool, action))
+        ) {
             return null
         }
 
@@ -171,15 +177,26 @@ object SlotRepair {
     }
 
     /**
-     * Whether the utterance offers more than one amount: an alternative, a range, or a lower or
-     * upper bound rather than a point.
+     * Whether the utterance still leaves the amount open in any way: an alternative, a range, or
+     * an edge instead of a point.
+     */
+    internal fun hasUnresolvedAmount(utterance: String, textLanguage: String? = null): Boolean = hasUnresolvedAlternative(utterance) ||
+        hasUnresolvedBound(utterance) ||
+        hasUnresolvedTiming(utterance, textLanguage)
+
+    /**
+     * Whether more than one amount is on offer: "ten or twenty", in any of the supported
+     * languages.
+     *
+     * An alternative is never a resolved duration. Whatever number was decoded, the request still
+     * names another, so this is not waived for any action.
      *
      * A quoted span usually names a chapter, bookmark or playlist, and a title is not a
      * description of when to act. Its numbering is still meaningful though: quoting an amount
      * ("rewind 'ten or twenty' seconds") does not resolve it, so the quote marks are dropped and
      * the words inside are still read.
      */
-    internal fun hasUnresolvedAmount(utterance: String): Boolean = UNRESOLVED_AMOUNT_REGEX.containsMatchIn(QUOTE_MARK_REGEX.replace(utterance.lowercase(), ""))
+    internal fun hasUnresolvedAlternative(utterance: String): Boolean = UNRESOLVED_AMOUNT_REGEX.containsMatchIn(QUOTE_MARK_REGEX.replace(utterance.lowercase(), ""))
 
     /**
      * Whether the utterance offers an edge rather than a point: "at least twenty", "up to fifty".

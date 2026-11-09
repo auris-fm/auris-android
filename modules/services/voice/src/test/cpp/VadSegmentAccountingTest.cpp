@@ -215,7 +215,7 @@ bool waitForChild(pid_t pid, int timeoutMs, int* status) {
 int main() {
     std::printf("native VAD segment accounting\n");
 
-    // (0) UNTHREAD-U1 (4d1e5946/2d8d5c4a): the stuck-detector branch. A detector stuck
+    // (0) UNTHREAD-U1: the stuck-detector branch. A detector stuck
     // speech-classified past kStuckDetectorFrameLimit must surface the FAULT sentinel (kFaultEvent,
     // not the stop sentinel) and must NOT emit a completed segment. The script is 4000 loud frames
     // (limit 3750): the frames are served as fast as the loop reads them, so the script runs in

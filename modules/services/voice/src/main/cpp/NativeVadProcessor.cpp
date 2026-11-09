@@ -304,7 +304,7 @@ void NativeVadProcessor::runLoop() {
             mEventReady = true;
             mFaultLatched = true; // preserve the terminal cause through loop exit
             // The processor is STOPPED by the fault: clear mActive BEFORE unlocking so a later
-            // start() cannot report already-running against an exiting worker (b124a183).
+            // start() cannot report already-running against an exiting worker.
             mActive.store(false, std::memory_order_release);
             mEventCv.notify_one();
             break;

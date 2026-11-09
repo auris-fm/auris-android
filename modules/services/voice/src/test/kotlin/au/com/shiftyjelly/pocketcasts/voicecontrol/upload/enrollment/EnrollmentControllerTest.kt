@@ -472,24 +472,6 @@ class EnrollmentControllerTest {
     }
 
     @Test
-    fun `enrollment sends the accepted disclosure version and surfaces a conflict without replaying`() = runTest {
-        val conflicted = VoiceSharingMutationResult.MembershipConflict(
-            currentProjection = projection(revision = "rev-2"),
-        )
-        val operations = FakeOperations(enrollResult = conflicted)
-        val subject = controller(operations)
-
-        val outcome = subject.enroll(acceptedDisclosureVersion = "2026-10-01")
-
-        assertTrue("a 409 must surface as a conflict", outcome is EnrollmentOutcome.Conflict)
-        assertEquals(
-            "a conflicted opt-in must NOT be retried automatically",
-            listOf("enroll:2026-10-01"),
-            operations.calls,
-        )
-    }
-
-    @Test
     fun `deletion is separate from withdrawal and a 202 is pending not deleted`() = runTest {
         val operations = FakeOperations(deletion = DeletionReceipt("del-1", "deletion_pending"))
         val subject = controller(operations)

@@ -46,9 +46,9 @@ class LfmIntentRouter internal constructor(
      * P1 (reviewer 7033f4d9): the loader's OWN verified identity — [loadedRelease] is set only
      * after a successful native load of the manifest-verified release. Null until then.
      */
-    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
         val version = loadedRelease ?: return null
-        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("lfm", version)
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named("lfm", version)
     }
 
     /** Optional sink for structured local diagnostics (tests / tooling). */

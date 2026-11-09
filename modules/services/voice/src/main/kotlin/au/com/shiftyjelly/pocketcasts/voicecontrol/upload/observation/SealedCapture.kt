@@ -28,8 +28,12 @@ class SealedCapture(
     val translation: TranslationProvenance?,
     /** P1 (reviewer 0cd7e39d): identity of the backend ACTUALLY invoked for ASR; null = never invoked. */
     val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
+||||||| /tmp/mfb
+    /** P1: identity of the backend ACTUALLY invoked for ASR; null = never invoked.*/
+    val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
+    val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef?,
     /** P1: identity of the router ACTUALLY invoked; null = routing never ran. */
-    val routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
+    val routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef?,
     val executionOutcome: ExecutionOutcome?,
     val allowanceMetadataCap: Int?,
     val cause: String,

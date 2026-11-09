@@ -159,9 +159,13 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
     // `whisper.cpp-ggml-small-q5_1@5359861c…`; the identity is known only when the verified
     // handoff delivered it AND this backend's own native init of that same file succeeded.
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+||||||| /tmp/mfb
+    // Handoff delivered it AND this backend's own native init of that same file succeeded.
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
         if (!loadVerified) return null
         val id = handoffManifestId ?: return null
-        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(id, id)
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named(id, id)
     }
 
     override val requiredModel: ModelSpec = ModelSpec(

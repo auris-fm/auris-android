@@ -70,7 +70,7 @@ data class VoiceSharingSettingsUiState(
     val disclosureDetail: String,
 )
 
-enum class SettingsOperationStatus { NONE, CONFLICT, FAILED, RELEASE_FAILED }
+enum class SettingsOperationStatus { NONE, FAILED, RELEASE_FAILED }
 
 /** The operation a visible failure refers to; the copy differs per operation's honest state. */
 enum class FailedOperation { NONE, ENROLL, WITHDRAW }
@@ -359,6 +359,22 @@ class VoiceSharingSettingsViewModel(
                     // A CONFLICTED withdrawal did not apply either: the user's stop decision
                     // stands and is latched through the same fenced path as a failure
                     // (reviewer 578bb62a).
+                    enrollmentController.applyForOutcome(outcome) {
+                        withdrawalIntent.onWithdrawalFailed()
+                    }
+                }
+                pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.CONFLICT
+                mutableState.value = render(SettingsOperationStatus.CONFLICT)
+            }
+
+||||||| /tmp/mfb
+            is EnrollmentOutcome.Conflict -> {
+                if (generation != actionGeneration) return
+                if (operation == FailedOperation.WITHDRAW) {
+                    // A CONFLICTED withdrawal did not apply either: the user's stop decision
+                    // Stands and is latched through the same fenced path as a failure
+                    //
                     enrollmentController.applyForOutcome(outcome) {
                         withdrawalIntent.onWithdrawalFailed()
                     }

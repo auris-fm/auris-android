@@ -26,7 +26,7 @@ interface VoiceRecognizer {
      * established artifact. Loading alone is not routing; callers attach the ref only at the
      * actual invocation.
      */
-    fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? = null
+    fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? = null
 }
 
 class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {

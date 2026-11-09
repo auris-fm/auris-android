@@ -1,7 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import android.content.Context
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.fs.DirectorySync
 import java.io.File
 import java.io.FileOutputStream
 

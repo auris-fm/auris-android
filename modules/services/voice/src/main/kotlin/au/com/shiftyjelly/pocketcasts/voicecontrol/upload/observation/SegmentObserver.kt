@@ -99,7 +99,7 @@ class SegmentObserver(
      */
     fun noteAsrInvocation(
         context: CaptureContext,
-        ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
+        ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef,
     ) {
         (sink as? ContributionRetentionSink)?.noteAsrInvocation(context.captureId, ref)
     }
@@ -107,7 +107,7 @@ class SegmentObserver(
     /** P1: identity of the router ACTUALLY invoked — loading a model is not routing. */
     fun noteRouterInvocation(
         context: CaptureContext,
-        ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
+        ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef,
     ) {
         (sink as? ContributionRetentionSink)?.noteRouterInvocation(context.captureId, ref)
     }
@@ -141,8 +141,8 @@ class SegmentObserver(
         captureSession: Long,
         routeClass: String,
         producerSize: Int,
-        asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+        asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef =
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
         /** Real grace state frozen at segment start (spec phase 2): true = wake word required. */
         wakeRequired: Boolean = true,
     ): AdmissionHandle? = fenceGate.gate {
@@ -174,7 +174,7 @@ class SegmentObserver(
         }
     }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, wakeRequired: Boolean): CaptureContext? {
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef, wakeRequired: Boolean): CaptureContext? {
         val context = CaptureContext(
             UUID.randomUUID(),
             captureSession,

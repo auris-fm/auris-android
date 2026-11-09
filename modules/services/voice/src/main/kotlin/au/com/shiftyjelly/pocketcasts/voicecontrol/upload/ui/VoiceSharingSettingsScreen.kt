@@ -95,11 +95,5 @@ fun VoiceSharingSettingsScreen(
                 style = MaterialTheme.typography.caption,
             )
         }
-        if (state.status == SettingsOperationStatus.CONFLICT) {
-            Text(
-                text = stringResource(R.string.voice_sharing_conflict),
-                style = MaterialTheme.typography.caption,
-            )
-        }
     }
 }

@@ -255,7 +255,6 @@ private fun VoiceControlSettingsPage(
         LR.string.voice_sharing_enroll_failed to stringResource(LR.string.voice_sharing_enroll_failed),
         LR.string.voice_sharing_withdraw_failed to stringResource(LR.string.voice_sharing_withdraw_failed),
         LR.string.voice_sharing_local_stop_failed to stringResource(LR.string.voice_sharing_local_stop_failed),
-        LR.string.voice_sharing_conflict to stringResource(LR.string.voice_sharing_conflict),
         LR.string.voice_sharing_delete_pending to stringResource(LR.string.voice_sharing_delete_pending),
         LR.string.voice_sharing_delete_failed to stringResource(LR.string.voice_sharing_delete_failed),
     )

@@ -17,5 +17,5 @@ interface AsrBackend {
      * A configured [requiredModel] requirement alone is NOT load evidence. Callers attach the
      * ref only at the actual invocation of THIS backend.
      */
-    fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? = null
+    fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? = null
 }

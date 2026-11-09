@@ -116,9 +116,9 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
      * P1 (reviewer be375ea1): load evidence = THIS loader's successful creation from the
      * content-verified bytes of the pinned manifest identity ([SENSEVOICE_MANIFEST_ID]).
      */
-    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
         if (!loadVerified) return null
-        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named(
             "sense-voice",
             SENSEVOICE_MANIFEST_ID,
         )

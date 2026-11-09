@@ -3,7 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.FolderQueue
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -28,12 +28,17 @@ object VoiceSharingSettingsModule {
     fun provideVoiceSharingSettingsViewModel(
         accountStartup: VoiceSharingAccountStartup,
         withdrawalIntent: LocalWithdrawalIntentStore,
-        store: ContributionStore,
+        queue: FolderQueue,
     ): VoiceSharingSettingsViewModel {
         val controller: EnrollmentController = accountStartup.enrollmentController(
             // THE QUEUE'S OWN REVOCATION: "stop everything now" uses the same ownership-locked
             // purge as every other revocation, not a bare file sweep.
             clearLocalPending = { runCatching { store.revokeAndPurge("withdrawal requested from settings") } },
+||||||| /tmp/mfb
+            // The queue'S own revocation: "stop everything now" uses the same ownership-locked
+            // Purge as every other revocation, not a bare file sweep.
+            clearLocalPending = { runCatching { store.revokeAndPurge("withdrawal requested from settings") } },
+            clearLocalPending = { runCatching { queue.deleteAll("sharing turned off") } },
         )
         return VoiceSharingSettingsViewModel(
             projection = accountStartup.state.projection,

@@ -43,7 +43,7 @@ object VoiceObservationModule {
         @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
     ): SharingChoicePersistence = FileSharingChoicePersistence(
         context,
-        directorySync = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync.PRODUCTION,
+        directorySync = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.fs.DirectorySync.PRODUCTION,
     )
 
     @Provides
@@ -82,9 +82,32 @@ object VoiceObservationModule {
         sharedLock = accountStartup.sharedCollectionLock(),
     )
 
+    /**
+     * The publish path: a sealed capture becomes a queued recording.
+     *
+     * Attached here rather than in the sink's construction so the sink itself stays free of the
+     * record and queue layers, and so a test can drive the sink with a different publisher.
+     */
     @Provides
     @Singleton
-    fun provideRetentionSink(budget: CollectionBudget): ContributionRetentionSink = ContributionRetentionSink(budget)
+    fun provideRetentionSink(
+        budget: CollectionBudget,
+        publisher: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.RecordingPublisher,
+    ): ContributionRetentionSink = ContributionRetentionSink(budget).apply {
+        onReadyForPublication = { sealed -> publisher.publish(sealed) }
+    }
+
+    @Provides
+    @Singleton
+    fun provideRecordingPublisher(
+        queue: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.FolderQueue,
+        settings: au.com.shiftyjelly.pocketcasts.preferences.Settings,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.RecordingPublisher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.RecordingPublisher(
+        queue = queue,
+        // Real binary provenance: the record names the build that produced it.
+        appVersion = { settings.getVersion() },
+        appBuild = { settings.getVersionCode().toString() },
+    )
 
     @Provides
     @Singleton
@@ -173,7 +196,7 @@ object VoiceObservationModule {
         @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
     ): WithdrawalIntentPersistence = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.FileWithdrawalIntentPersistence(
         context,
-        directorySyncOverride = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync.PRODUCTION,
+        directorySyncOverride = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.fs.DirectorySync.PRODUCTION,
     )
 
     /**

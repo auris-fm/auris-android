@@ -1,8 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.UploaderLoop
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * Production composition owner for the collection boundary (reviewer 01877984 blocker 1: no
@@ -29,6 +34,8 @@ class CollectionStartup @Inject constructor(
     private val authority: CollectionAuthority,
     private val observer: SegmentObserver,
     private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
+    private val uploaderLoop: UploaderLoop,
+    @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope private val appScope: CoroutineScope,
 ) {
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {
@@ -39,5 +46,28 @@ class CollectionStartup @Inject constructor(
         // Bounded outcome finalization hooks onto the sink: a retained capture finalizes within
         // the fixed window (background-only; it is never an admission gate).
         outcomeFinalizer.start()
+        startUploader()
+    }
+
+    /**
+     * The one uploader loop. Started at app start and never restarted per capture: a recording is
+     * picked up by the next pass, so publishing never depends on the uploader being awake at that
+     * instant. Backoff lives in the loop, so a stalled recording simply waits its turn.
+     */
+    private fun startUploader() {
+        if (uploaderStarted) return
+        uploaderStarted = true
+        appScope.launch {
+            while (isActive) {
+                runCatching { uploaderLoop.runOnce() }
+                delay(UPLOAD_POLL_MS)
+            }
+        }
+    }
+
+    private var uploaderStarted = false
+
+    private companion object {
+        const val UPLOAD_POLL_MS = 60_000L
     }
 }

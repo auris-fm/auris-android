@@ -27,8 +27,8 @@ data class CaptureContext(
      * 54635caa/spec: per-capture backend provenance is record truth). [ModelRef.None] is the
      * honest absence — a capture with no observed ASR model is not publishable.
      */
-    val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
-        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+    val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef =
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
     /**
      * The TRANSLATION provenance OBSERVED for this capture (reviewer 8288ac15): null when no
      * translation ran or its identity was not observed. Never claimed when unobserved.
@@ -44,7 +44,7 @@ data class CaptureContext(
 
 /** What the translation stage actually did for one capture. */
 data class TranslationProvenance(
-    val model: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
+    val model: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef,
     /** True only when a translated result was actually produced for this capture. */
     val producedResult: Boolean,
     /** The OBSERVED translated text (the result itself), when a result exists. */

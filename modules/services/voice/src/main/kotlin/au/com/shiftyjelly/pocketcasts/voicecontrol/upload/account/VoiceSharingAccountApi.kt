@@ -39,11 +39,14 @@ interface VoiceSharingAccountApi {
      * THE SWITCH (spec 0264051b): one desired-state request. `If-Match` carries the last-read
      * `membership_revision` as an HTTP precondition, so a stale device is refused by the server
      * instead of overwriting a newer choice.
+||||||| /tmp/mfb
+     * the switch: one desired-state request. `If-Match` carries the last-read
+     * `membership_revision` as an HTTP precondition, so a stale device is refused by the server
+     * instead of overwriting a newer choice.
      */
     @PUT("/api/v1/account/voice-sharing")
     suspend fun putVoiceSharing(
         @Header("Authorization") bearer: String?,
-        @Header("If-Match") ifMatch: String?,
         @Body body: okhttp3.RequestBody,
     ): Response<ResponseBody>
 
@@ -72,11 +75,6 @@ sealed interface VoiceSharingMutationResult {
     /** Terminal 200 apply: the projection the server returned and published. */
     data class Applied(
         val projection: VoiceSharingAccountProjection,
-    ) : VoiceSharingMutationResult
-
-    /** 409 membership conflict: the server-current projection (published), never a silent retry. */
-    data class MembershipConflict(
-        val currentProjection: VoiceSharingAccountProjection,
     ) : VoiceSharingMutationResult
 
     data object Failure : VoiceSharingMutationResult
@@ -149,12 +147,11 @@ class VoiceSharingAccountOperations(
                     VoiceSharingRefreshDiagnostic(
                         kind = VoiceSharingRefreshDiagnostic.Kind.REJECTED,
                         status = when (outcome) {
-                            is Outcome.Conflict -> 409
                             is Outcome.Rejected -> 401
                             is Outcome.Unavailable -> outcome.status
                             is Outcome.Body -> 200
                         },
-                        bodyBytes = (outcome as? Outcome.Conflict)?.json?.length,
+                        bodyBytes = null,
                         requestIds = outcome.requestIds,
                         detail = when (outcome) {
                             is Outcome.Unavailable -> "UNAVAILABLE (not an auth rejection; no credential cleared)"
@@ -196,11 +193,24 @@ class VoiceSharingAccountOperations(
             val (accountNow, sessionNow) = ownerNow()
             if (accountNow != ownerAccount || sessionNow != ownerSession) return VoiceSharingMutationResult.Failure
         }
+||||||| /tmp/mfb
+        // The precondition is required: the server refuses a PUT that names no
+        // Revision, so a client holding none reads first and then sends that revision. The read is
+        // The ordinary GET, so its answer also becomes the current projection — a switch issued on a
+        // Stale screen then fails its own precondition instead of overwriting a newer choice. The
+        // Read of the projection happens INSIDE that owner check, so a read that lands for a
+        // Superseded account cannot be borrowed by the new one.
+        if (state.projection.value?.membershipRevision == null) {
+            if (!refreshProjection()) return VoiceSharingMutationResult.Failure
+            // A read that landed for a SUPERSEDED account must not be borrowed: the choice was
+            // Expressed under [ownerAccount], so the session must still be that one here.
+            val (accountNow, sessionNow) = ownerNow()
+            if (accountNow != ownerAccount || sessionNow != ownerSession) return VoiceSharingMutationResult.Failure
+        }
         val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null, ownerAccount, ownerSession)
             ?: return VoiceSharingMutationResult.Failure
-        return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, request.op.ifMatch, payload) }) {
+        return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, payload) }) {
             is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
-            is Outcome.Conflict -> conflictOrFailure(outcome.json, request.issued)
             is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
@@ -213,13 +223,6 @@ class VoiceSharingAccountOperations(
     private fun appliedOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
         return if (apply(json, issued)) VoiceSharingMutationResult.Applied(projection) else VoiceSharingMutationResult.Failure
-    }
-
-    /** 409: a conflict ONLY when the body parses strictly AND it was applied; never a silent retry. */
-    private fun conflictOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
-        val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        if (!apply(json, issued)) return VoiceSharingMutationResult.Failure
-        return VoiceSharingMutationResult.MembershipConflict(projection)
     }
 
     /**
@@ -326,6 +329,10 @@ class VoiceSharingAccountOperations(
      * [issue] for a request whose intent was expressed under an ALREADY CAPTURED owner (the switch's
      * read-first step). The captured owner must still be the live one, both before the bearer is
      * acquired and after it, or the request is refused rather than relabelled onto a new session.
+||||||| /tmp/mfb
+     * [issue] for a request whose intent was expressed under an already captured owner (the switch's
+     * read-first step). The captured owner must still be the live one, both before the bearer is
+     * acquired and after it, or the request is refused rather than relabelled onto a new session.
      */
     private suspend fun issue(route: Route, disclosureVersion: String?, accountName: String?, session: Long): IssuedRequest? {
         val (liveAccount, liveSession) = ownerNow()
@@ -337,6 +344,10 @@ class VoiceSharingAccountOperations(
             // The precondition is READ inside this same transaction: frozen() refuses a SWITCH without
             // one, and a projection cleared during bearer acquisition must not degrade into an
             // unconditional PUT.
+||||||| /tmp/mfb
+            // The precondition is read inside this same transaction: frozen() refuses a switch without
+            // One, and a projection cleared during bearer acquisition must not degrade into an
+            // Unconditional PUT.
             val op = frozen(bearer, route, disclosureVersion) ?: return@transaction null
             IssuedRequest(op, Issued(accountName, session, state.publicationCount()))
         }
@@ -353,7 +364,6 @@ class VoiceSharingAccountOperations(
         data class Body(val json: String, override val requestIds: List<String> = emptyList()) : Outcome
 
         /** Explicit 409 membership conflict: carries the current projection body. */
-        data class Conflict(val json: String, override val requestIds: List<String> = emptyList()) : Outcome
 
         data class Rejected(override val requestIds: List<String> = emptyList()) : Outcome
 
@@ -390,6 +400,16 @@ class VoiceSharingAccountOperations(
         // the check.
         if (route == Route.SWITCH && ifMatch == null) return null
         return FrozenOperation(bearer, body, route, ifMatch)
+||||||| /tmp/mfb
+        val ifMatch = projection?.membershipRevision?.takeIf { it.isNotBlank() }
+        // A switch never leaves without its precondition: the
+        // Revision can disappear between the read-first step and this construction — a lifecycle
+        // Clear empties the projection — and sending the PUT anyway would override another device's
+        // Newer choice. The refusal happens HERE, at request construction, so no caller can forget
+        // The check.
+        if (route == Route.SWITCH && ifMatch == null) return null
+        return FrozenOperation(bearer, body, route, ifMatch)
+        return FrozenOperation(bearer, body, route)
     }
 
     /** Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint status. */
@@ -410,12 +430,6 @@ class VoiceSharingAccountOperations(
                     response.code() == 401 -> {
                         handleUnauthorized(op)
                         return Outcome.Rejected(requestIds.toList())
-                    }
-
-                    response.code() == 409 && expectedStatus == 200 -> {
-                        // Non-2xx content lives in errorBody() for Response<ResponseBody>.
-                        val body = response.errorBody()?.string() ?: response.body()?.string()
-                        return if (body.isNullOrBlank()) Outcome.Rejected(requestIds.toList()) else Outcome.Conflict(body, requestIds.toList())
                     }
 
                     response.code() == expectedStatus -> return Outcome.Body(response.body()!!.string(), requestIds.toList())
@@ -555,6 +569,13 @@ class VoiceSharingAccountOperations(
          * The last-read `membership_revision`, sent as `If-Match`. Null only for the GET itself: a
          * SWITCH never leaves without a revision, because `setVoiceSharing` reads first when it
          * holds none (spec e3cfc8ae).
+         */
+        val ifMatch: String? = null,
+||||||| /tmp/mfb
+        /**
+         * The last-read `membership_revision`, sent as `If-Match`. Null only for the GET itself: a
+         * SWITCH never leaves without a revision, because `setVoiceSharing` reads first when it
+         * holds none.
          */
         val ifMatch: String? = null,
     )

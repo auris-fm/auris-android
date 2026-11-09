@@ -268,7 +268,7 @@ class VoiceSharingAccountOperationsTest {
 
         override suspend fun getVoiceSharing(bearer: String?): Response<ResponseBody> = fail()
 
-        override suspend fun putVoiceSharing(bearer: String?, ifMatch: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+        override suspend fun putVoiceSharing(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
 
         override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
     }
@@ -291,13 +291,16 @@ class VoiceSharingAccountOperationsTest {
 
         // 2. Enrollment is the SWITCH turned on: an EXACT body of the desired state plus the
         // disclosure the user accepted; the last-read revision travels as the If-Match precondition.
+||||||| /tmp/mfb
+        // 2. Enrollment is the switch turned on: an exact body of the desired state plus the
+        // Disclosure the user accepted; the last-read revision travels as the If-Match precondition.
         enqueueProjection(revision = "rev-2")
         assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("PUT", posted.method)
         assertEquals("/api/v1/account/voice-sharing", posted.path)
-        assertEquals(listOf("rev-1"), posted.headers.values("If-Match"))
+        assertTrue("no precondition is sent: ${posted.headers}", posted.headers.values("If-Match").isEmpty())
         assertEquals(
             "the PUT body is exactly the desired state — no request_id, no derived fields",
             "{\"enrolled\":true,\"disclosure_version\":\"v3\"}",
@@ -325,10 +328,10 @@ class VoiceSharingAccountOperationsTest {
         assertApplied(operations.withdraw())
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
-        // Withdrawal is the SAME switch turned off: no disclosure claimed, revision as precondition.
+        // Withdrawal is the SAME switch turned off: no disclosure claimed, no precondition.
         assertEquals("PUT", posted.method)
         assertEquals("/api/v1/account/voice-sharing", posted.path)
-        assertEquals(listOf("rev-1"), posted.headers.values("If-Match"))
+        assertTrue("no precondition is sent: ${posted.headers}", posted.headers.values("If-Match").isEmpty())
         val body = posted.body.readUtf8()
         assertTrue(body.contains("\"enrolled\":false"))
         assertTrue("no disclosure is claimed when turning sharing off: $body", !body.contains("disclosure"))
@@ -523,9 +526,9 @@ class VoiceSharingAccountOperationsTest {
         val attempt2 = server.takeRequest(5, TimeUnit.SECONDS)!!
         val body1 = attempt1.body.readUtf8()
         val body2 = attempt2.body.readUtf8()
-        // The precondition is a HEADER here, so a byte-identical resend also carries it identically.
-        assertEquals(listOf("rev-1"), attempt1.headers.values("If-Match"))
-        assertEquals(listOf("rev-1"), attempt2.headers.values("If-Match"))
+        // Nothing about the request changes between attempts, so a resend is safe by construction.
+        assertTrue(attempt1.headers.values("If-Match").isEmpty())
+        assertTrue(attempt2.headers.values("If-Match").isEmpty())
         assertEquals("the retry body must be byte-identical: the same desired state", body1, body2)
         assertEquals("and the exact contract body", "{\"enrolled\":true,\"disclosure_version\":\"v3\"}", body1)
     }

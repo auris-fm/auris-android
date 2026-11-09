@@ -142,9 +142,9 @@ class CanaryFlashBackend @Inject constructor(
      * P1 (reviewer be375ea1): load evidence = THIS loader's successful preparation from the
      * content-verified bytes of the pinned manifest identity ([CANARY_MANIFEST_ID]).
      */
-    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? {
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
         if (!loadVerified) return null
-        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named(
             "canary-flash",
             CANARY_MANIFEST_ID,
         )

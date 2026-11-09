@@ -62,11 +62,9 @@ class VoiceSharingSettingsRowCopyTest {
         val enrollFailed = VoiceSharingSettingsRowCopy.switchSecondary(state(failedOperation = FailedOperation.ENROLL), "benefits", r)
         val withdrawFailed = VoiceSharingSettingsRowCopy.switchSecondary(state(failedOperation = FailedOperation.WITHDRAW), "benefits", r)
         val releaseFailed = VoiceSharingSettingsRowCopy.switchSecondary(state(status = SettingsOperationStatus.RELEASE_FAILED), "benefits", r)
-        val conflict = VoiceSharingSettingsRowCopy.switchSecondary(state(status = SettingsOperationStatus.CONFLICT), "benefits", r)
         assertEquals(strings[au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_enroll_failed], enrollFailed)
         assertEquals(strings[au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_withdraw_failed], withdrawFailed)
         assertEquals(strings[au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_local_stop_failed], releaseFailed)
-        assertEquals(strings[au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_conflict], conflict)
         assertEquals("an idle honest state shows the benefits copy", "benefits", VoiceSharingSettingsRowCopy.switchSecondary(state(), "benefits", r))
     }
 

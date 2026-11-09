@@ -117,13 +117,13 @@ class RetainedCandidate internal constructor(
      * for this capture; the record then claims NO asr model. Never read from the SpeechStarted
      * selection: a backend replacement between selection and invocation must not misattribute.
      */
-    var asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? = null
+    var asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? = null
 
     /**
      * P1: identity of the router ACTUALLY INVOKED for this capture, frozen when routing runs.
      * Null = routing never ran; the record claims NO router model (loading alone is not routing).
      */
-    var routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef? = null
+    var routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? = null
 
     /**
      * EVERY joined outcome in join order (reviewer 54635caa): stage provenance reads the
@@ -670,8 +670,12 @@ open class ContributionRetentionSink(
                 // A seal with NO attached publish trigger means the audio is retained forever with
                 // no queue entry and no log — the exact device symptom of a startup path that never
                 // reached UploadTrigger.start() (spec 2aea78c3: every silent return gets a line).
+||||||| /tmp/mfb
+                // A seal with NO attached publish trigger means the audio is retained forever with
+                // No queue entry and no log — the exact device symptom of a startup path that never
+                // Reached UploadTrigger.start().
                 Timber.i(
-                    "voice-capture publish: refused capture=%s reason=no-publish-trigger-attached",
+                    "voice-capture publish: refused capture=%s reason=no-publisher-attached",
                     outcome.captureId,
                 )
             }
@@ -807,7 +811,7 @@ open class ContributionRetentionSink(
      * [noteTranslation]; refused after sealing. A backend replaced between the SpeechStarted
      * selection and this call cannot misattribute: THIS value is what the record claims.
      */
-    open fun noteAsrInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): Boolean = synchronized(lock) {
+    open fun noteAsrInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef): Boolean = synchronized(lock) {
         val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
         if (candidate.sealed) return false
         candidate.asrInvocationModel = ref
@@ -818,7 +822,7 @@ open class ContributionRetentionSink(
      * P1: freezes the router identity AT the actual routing invocation. Loading a model is not
      * routing; a record claims the router model only when routing ran with it.
      */
-    open fun noteRouterInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): Boolean = synchronized(lock) {
+    open fun noteRouterInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef): Boolean = synchronized(lock) {
         val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
         if (candidate.sealed) return false
         candidate.routerInvocationModel = ref

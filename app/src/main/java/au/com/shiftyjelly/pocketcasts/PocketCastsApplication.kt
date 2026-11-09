@@ -118,12 +118,6 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
 
-    @Inject lateinit var voiceUploadTrigger: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadTrigger
-
-    @Inject lateinit var voiceUploadScheduler: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadScheduler
-
-    @Inject lateinit var voiceUploadSchedulerBinding: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadSchedulerBinding
-
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -250,12 +244,19 @@ class PocketCastsApplication :
             try {
                 defaultPlaylistsInitializer.initialize()
                 voiceSharingAccountStartup.initializeOnAppStart()
-                // Loss subscriptions (accounts/enrollment) + sink wiring.
+                // Loss subscriptions (accounts/enrollment), sink wiring and the one uploader loop.
+                // A pass with nothing queued or no signed-in account puts nothing on the network.
                 voiceCollectionStartup.initializeOnAppStart()
                 // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
                 // starting it puts nothing on the network until every eligibility gate opens.
                 voiceUploadTrigger.start()
                 // Platform deferred-transfer scheduling: ONE unique periodic drain, ANY network.
+                voiceUploadSchedulerBinding.start()
+||||||| /tmp/mfb
+                // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
+                // Starting it puts nothing on the network until every eligibility gate opens.
+                voiceUploadTrigger.start()
+                // Platform deferred-transfer scheduling: one unique periodic drain, any network.
                 voiceUploadSchedulerBinding.start()
             } catch (e: CancellationException) {
                 throw e

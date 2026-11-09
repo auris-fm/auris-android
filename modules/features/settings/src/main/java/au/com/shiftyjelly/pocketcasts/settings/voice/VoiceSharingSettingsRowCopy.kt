@@ -32,9 +32,6 @@ object VoiceSharingSettingsRowCopy {
         if (state.status == SettingsOperationStatus.RELEASE_FAILED) {
             return strings(au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_local_stop_failed)
         }
-        if (state.status == SettingsOperationStatus.CONFLICT) {
-            return strings(au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_conflict)
-        }
         return when (state.failedOperation) {
             FailedOperation.ENROLL -> strings(au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_enroll_failed)
             FailedOperation.WITHDRAW -> strings(au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_withdraw_failed)

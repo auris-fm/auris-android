@@ -20,9 +20,6 @@ sealed interface EnrollmentState {
     /** Last operation was applied by the server. */
     data object Applied : EnrollmentState
 
-    /** The server reported the membership moved under us (409). Requires a fresh user action. */
-    data object Conflict : EnrollmentState
-
     /**
      * The server-side operation did not complete. Reported honestly as failed — NOT as "not sharing".
      * Note this says nothing about local collection: turning sharing off clears local pending work
@@ -46,7 +43,6 @@ sealed interface EnrollmentOutcome {
     val attempt: MutationFence.Attempt?
 
     data class Applied(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
-    data class Conflict(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
     data class Failed(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
     data class DeletionRequested(val state: DeletionState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
 
@@ -124,13 +120,11 @@ class EnrollmentController(
         if (!fence.isCurrent(attempt, ownerSession)) return EnrollmentOutcome.Superseded
         val settled = when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentState.Applied
-            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentState.Conflict
             VoiceSharingMutationResult.Failure -> EnrollmentState.Failed
         }
         mutableState.value = settled
         return when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentOutcome.Applied(settled, attempt)
-            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentOutcome.Conflict(settled, attempt)
             VoiceSharingMutationResult.Failure -> EnrollmentOutcome.Failed(settled, attempt)
         }
     }
@@ -204,13 +198,11 @@ class EnrollmentController(
         if (!fence.isCurrent(attempt, ownerSession)) return EnrollmentOutcome.Superseded
         val settled = when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentState.Applied
-            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentState.Conflict
             VoiceSharingMutationResult.Failure -> EnrollmentState.Failed
         }
         mutableState.value = settled
         return when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentOutcome.Applied(settled, attempt)
-            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentOutcome.Conflict(settled, attempt)
             VoiceSharingMutationResult.Failure -> EnrollmentOutcome.Failed(settled, attempt)
         }
     }

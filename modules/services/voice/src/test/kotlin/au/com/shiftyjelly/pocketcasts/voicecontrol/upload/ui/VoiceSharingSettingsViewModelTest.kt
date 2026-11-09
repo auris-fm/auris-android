@@ -623,27 +623,6 @@ class VoiceSharingSettingsViewModelTest {
     // ---: deletion lifecycle, conflict keeps the stop, current-session projection.
 
     @Test
-    fun `a withdrawal conflict keeps the local stop and reconciles through the fence`() = runTest(mainDispatcher) {
-        setProjection(enrolledProjection())
-        val gate = Gate()
-        val vm = viewModel(withdrawGate = gate)
-
-        vm.withdraw()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.MembershipConflict(enrolledProjection())
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-
-        assertTrue("PREMISE: the stop survives a conflicted withdrawal", persistenceFlag.stopped)
-        assertEquals(
-            "a CONFLICTED withdrawal must also latch through onWithdrawalFailed (tap write + outcome write)",
-            listOf(true, true),
-            persistenceFlag.writes,
-        )
-        assertEquals(SettingsOperationStatus.CONFLICT, vm.state.value.status)
-    }
-
-    @Test
     fun `deletion request-in-flight is distinct from the accepted-but-pending receipt`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection())
         lateinit var vm: VoiceSharingSettingsViewModel

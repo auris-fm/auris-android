@@ -29,6 +29,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.WakeOnlyRoutingEmission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
@@ -37,7 +38,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Contributi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.WakeOnlyRoutingEmission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
@@ -289,7 +289,7 @@ class VoiceAsrEngine @Inject constructor(
                             // ACTUAL selected backend's model identity, frozen with the context.
                             // The VERSION is the model's own manifest identity, never a filename.
                             val spec = backend.requiredModel
-                            val asrRef = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+                            val asrRef = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named(
                                 spec.targetDir,
                                 spec.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
                             )
@@ -868,7 +868,7 @@ class VoiceAsrEngine @Inject constructor(
                 segmentObserver.noteTranslation(
                     ctx,
                     au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
-                        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
                         producedResult = false,
                         translatedText = null,
                         targetLanguage = null,
@@ -883,7 +883,7 @@ class VoiceAsrEngine @Inject constructor(
                 segmentObserver.noteTranslation(
                     ctx,
                     au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
-                        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
                         producedResult = false,
                         translatedText = null,
                         targetLanguage = null,
@@ -1226,7 +1226,7 @@ class VoiceAsrEngine @Inject constructor(
             // A translated RESULT was observed; the on-device model's own identity/version is not
             // observable here, so the model is honest absence rather than a fixed label.
             translation = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
-                model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
                 producedResult = true,
                 // The OBSERVED result text and the target language travel as SEPARATE fields
                 // (reviewer 57719ad2): the record schema has translated_text AND target_language.
@@ -1244,13 +1244,19 @@ class VoiceAsrEngine @Inject constructor(
     private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef = // P1 (reviewer be375ea1): ONLY the backend's OWN successful-load evidence counts; a
         // configured requiredModel is a requirement, not evidence. Absence → None.
         backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None
+||||||| /tmp/mfb
+    private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef = // P1: only the backend's own successful-load evidence counts; a
+        // Configured requiredModel is a requirement, not evidence. Absence → None.
+        backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None
+    private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef = // P1: only the backend's own successful-load evidence counts; a
+        backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None
 
     /** The selected backend's manifest identity, when it is the component translating. */
     private fun requestTranslationProvenance(
         backend: AsrBackend,
         translatedText: String,
     ) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
-        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named(
             backend.requiredModel.targetDir,
             backend.requiredModel.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
         ),

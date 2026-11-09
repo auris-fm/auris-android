@@ -342,8 +342,8 @@ class VoiceUploadCompositionPathTest {
     /**
      * RED PENDING SPEC DELTA (spec 14:46:41Z): the REAL EngineStageProvenance emits Unknown stages
      * with NO reason and the record builder refuses them — every real engine publish currently dies
-     * record-less. Spec adjudicated a new shared reason `observation_unavailable` (state unknown
-     * ONLY); the fix lands with the exact spec delta + strict Worker-validator parity, not before.
+     * record-less. A new shared reason `observation_unavailable` applies with state unknown only;
+     * the fix lands with the exact contract delta + strict worker-validator parity, not before.
      * RED receipt: receipts-backup/task73-joined-red/ (sha256 50b7dd2b…).
      */
     @Test
@@ -832,6 +832,9 @@ class VoiceUploadCompositionPathTest {
 
             val startup = moduleStartup()
             // The account has re-enrolled SINCE the recording: the projection carries a NEWER epoch.
+            // An older epoch alone is PROVENANCE (4afc6e43) - never a deletion or refusal reason.
+||||||| /tmp/mfb
+            // The account has re-enrolled since the recording: the projection carries a newer epoch.
             // An older epoch alone is PROVENANCE (4afc6e43) - never a deletion or refusal reason.
             publishIdentity(startup, "epoch-2")
             val store2 = providerStore()

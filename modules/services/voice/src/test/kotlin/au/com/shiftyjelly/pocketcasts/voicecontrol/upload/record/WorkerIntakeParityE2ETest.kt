@@ -67,6 +67,13 @@ class WorkerIntakeParityE2ETest {
     // nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
     // is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
     // blessing of the server revision.
+||||||| /tmp/mfb
+    // Scope, stated exactly: `d8fe823c` is pinned for intake guard behaviour only — the two digest
+    // Checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
+    // Reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
+    // Nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
+    // Is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
+    // Blessing of the server revision.
     //
     // Recording whatever HEAD happens to be checked out is provenance, not an authority: a clean
     // checkout of a different revision is a different intake, and a parity claim against it says
@@ -85,6 +92,9 @@ class WorkerIntakeParityE2ETest {
         "c569b319e19b5971ada44a0f53245630688c1305",
         // a030ff31 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
         // strict superset of c569b319, so every rule proven against the delta is still measured here.
+||||||| /tmp/mfb
+        // A030ff31 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
+        // Strict superset of c569b319, so every rule proven against the delta is still measured here.
         "a030ff31d95dd703fab6c5c976f36826ef77f499",
         "3dd0c91d095512e3c49108c25b726a3b66a66eef",
         "862c7ed3fdc540eccc9fdacd6819c97a9e679536",

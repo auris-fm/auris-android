@@ -30,6 +30,9 @@ import org.robolectric.RobolectricTestRunner
 /**
  * Persistence-boundary controls for the per-clip METADATA bound (reviewer 55433b71 #3 / fde5349e,
  * spec 0987c46f; core c74d7e30 retired the allowance that used to select it — the bound is now the
+||||||| /tmp/mfb
+ * Persistence-boundary controls for the per-clip METADATA bound#3 / fde5349e,
+ * ; core retired the allowance that used to select it — the bound is now the
  * compiled [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionCeilings]
  * constant or an explicitly set sink input). It is FROZEN into the immutable retained candidate,
  * carried through the REAL trigger→producer→store path, and counts the FULL canonical

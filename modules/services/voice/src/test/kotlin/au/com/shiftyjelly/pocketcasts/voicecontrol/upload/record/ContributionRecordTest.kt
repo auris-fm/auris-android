@@ -73,6 +73,8 @@ class ContributionRecordTest {
 
     /**
      * c6f3bdf7: EMPTY ASR RESULT IS AN OBSERVATION, NOT AN ABSENCE.
+||||||| /tmp/mfb
+     * c6f3bdf7: empty ASR result is an observation, not an absence.
      *
      * A recognizer that ran successfully and heard no usable text produced a real observation. The
      * record must say so explicitly (`completed`/`empty_result`, both text fields absent) rather than
@@ -138,6 +140,8 @@ class ContributionRecordTest {
 
     /**
      * EMITTED-BYTES PARITY BETWEEN BUILDER AND RECOVERY (c6f3bdf7).
+||||||| /tmp/mfb
+     * emitted-bytes parity between builder and recovery (c6f3bdf7).
      *
      * The full cross-process parity (Android bytes → pinned Worker) needs an intake revision that
      * implements `empty_result`, which does not exist yet — the spec says intake catches up. What CAN
@@ -336,6 +340,10 @@ class ContributionRecordTest {
         // THE SUBSTITUTION CONTROL the spec called out: a skip reason must never stand in for a
         // completed translation. A completed translation still needs real output fields, and it may
         // not carry a reason at all (f8cac147).
+||||||| /tmp/mfb
+        // The substitution control the spec called out: a skip reason must never stand in for a
+        // Completed translation. A completed translation still needs real output fields, and it may
+        // Not carry a reason at all (f8cac147).
         val completedWithSkip = runCatching {
             complete(builder())
                 .replaceStage(

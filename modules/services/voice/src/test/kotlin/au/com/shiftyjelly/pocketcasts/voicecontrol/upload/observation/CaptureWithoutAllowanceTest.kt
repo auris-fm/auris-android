@@ -9,7 +9,7 @@ private val LIVE_CONSENT = AuthorityDecision(collectionPermitted = true, fullRev
 private val ISSUED_AUTHORITY = IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1")
 
 /**
- * Core c74d7e30, spec §"Actual upload usage", plan delta item 2:
+ * Required by the uploads contract:
  *
  * > Remove allowance fetch/provision/readiness gates, prepaid usage charging and allocation-identity
  * > dependencies from contribution capture. [...] A fresh install with no allowance state must work.

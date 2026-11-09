@@ -25,7 +25,7 @@ import retrofit2.Retrofit
 /**
  * WHICH credential this app presents to the account route.
  *
- * The Pixel's live capture (cloud `84a4d25e`, the `kid` line) established that the app was sending
+ * A live capture on device (the `kid` line) established that the app was sending
  * the Pocket Casts account token -- `alg=HS256`, no `kid` -- to a route that only verifies
  * Auris-issued tokens. Staging refused it correctly and no re-login could ever have helped. The
  * fix is selection, not acquisition: [AurisTokenProvider] already mints and refreshes correctly.

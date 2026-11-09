@@ -19,8 +19,8 @@ import retrofit2.Retrofit
 /**
  * What a 401 from the account route is allowed to REVOKE.
  *
- * The route only ever verifies the Auris token, so a 401 can only speak about that credential
- * (cloud `bbb9beff`). Handing it to the owner's `invalidateAuthToken` would sign the user out of
+ * The route only ever verifies the Auris token, so a 401 can only speak about that credential.
+ * Handing it to the owner's `invalidateAuthToken` would sign the user out of
  * the very account that minted the token -- a rejected *derived* credential killing the session it
  * derives from. This control asserts both halves at once: the Auris credential IS replaced, and the
  * upstream session is untouched.
@@ -95,6 +95,10 @@ class VoiceSharingAurisCredentialInvalidationTest {
         // Auris token (cloud `bbb9beff`), so handing its 401 to the owner's invalidateAuthToken
         // would sign the user out of the account that MINTED that token -- a rejected derived
         // credential taking the session down with it.
+||||||| /tmp/mfb
+        // Auris token (cloud `bbb9beff`), so handing its 401 to the owner's invalidateAuthToken
+        // Would sign the user out of the account that MINTED that token -- a rejected derived
+        // Credential taking the session down with it.
         val ops = operations()
 
         server.enqueue(projection())

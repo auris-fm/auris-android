@@ -231,6 +231,11 @@ class ContributionAckResolverTest {
         // Disposed or its bytes differ - both genuinely terminal. The former hold was an interim
         // Workaround for the server disposing a reservation when its OWN attempt failed. With that fixed,
         // Holding would only strand indestructible debris that fills the record bound.
+||||||| /tmp/mfb
+        // the server now reopens on retry (Cloud 8637a0fd), so a 409 means the recording was
+        // Disposed or its bytes differ - both genuinely terminal. The former hold was an interim
+        // Workaround for the server disposing a reservation when its OWN attempt failed. With that fixed,
+        // Holding would only strand indestructible debris that fills the record bound.
         var now = 17_000_000L
         val root = tmp.newFolder("ack-conflict-after-5xx")
         val store = newStore(root) { now }

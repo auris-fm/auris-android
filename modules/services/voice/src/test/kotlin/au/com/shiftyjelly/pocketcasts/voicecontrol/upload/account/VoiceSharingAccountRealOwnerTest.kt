@@ -111,6 +111,11 @@ class VoiceSharingAccountRealOwnerTest {
         // else. The upstream credential and its incarnation survive: until today this test asserted
         // the opposite, and THAT contract is what would have signed the user out of the account
         // that minted the rejected token (cloud bbb9beff).
+||||||| /tmp/mfb
+        // This route only ever sees the auris token, so its 401 revokes the voice scope and nothing
+        // Else. The upstream credential and its incarnation survive: until today this test asserted
+        // The opposite, and THAT contract is what would have signed the user out of the account
+        // That minted the rejected token (cloud bbb9beff).
         assertEquals("t1", auth.authoritySnapshot().token!!.value)
         assertEquals(1L, auth.credentialGeneration())
         // The 401 rejects the AURIS token, not the projection: the account answer stays valid.

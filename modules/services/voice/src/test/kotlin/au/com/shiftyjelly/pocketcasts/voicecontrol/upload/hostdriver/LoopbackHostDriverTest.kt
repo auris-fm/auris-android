@@ -57,6 +57,12 @@ import retrofit2.Retrofit
  *   requires it to END with the contract path (no append, no double-append)
  * - AURIS_LOOPBACK_ACCOUNT — base URL of the Go account mount, e.g. http://127.0.0.1:PORT/
  * - AURIS_LOOPBACK_BEARER  — fixture token value (optional; default "loopback-fixture")
+||||||| /tmp/mfb
+ * Required environment (cloud d496e610, final alignment):
+ * - AURIS_LOOPBACK_UPLOAD — the FULL upload URL <listener>/api/v1/voice-recordings; the driver
+ * requires it to END with the contract path (no append, no double-append)
+ * - AURIS_LOOPBACK_ACCOUNT — base URL of the Go account mount, e.g. Http://127.0.0.1:PORT/
+ * - AURIS_LOOPBACK_BEARER — fixture token value (optional; default "loopback-fixture")
  *
  * Server-mode selection is by the EXACT capture ID (a fixture-side mapping shared with the Cloud
  * recipe). The envelope contract requires capture_id to be a UUID (`ContributionRecord.kt` HEX_UUID
@@ -112,6 +118,9 @@ class LoopbackHostDriverTest {
     /**
      * Fixture identity (cloud pins, 163532b3): the account subject is printed on the Go rig's stdout
      * and supplied per run; absent values HOLD. The EPOCH is NOT supplied: it is minted by the
+||||||| /tmp/mfb
+     * Fixture identity (cloud pins, 163532b3): the account subject is printed on the Go rig's stdout
+     * and supplied per run; absent values hold. The epoch is not supplied: it is minted by the
      * driver's own enroll call through the REAL account mount, so the upload captures carry an
      * epoch the production flow actually issued. AURIS_LOOPBACK_DISCLOSURE is the disclosure
      * version the rig's enrollment accepts (proposed; cloud to confirm the value).
@@ -223,6 +232,12 @@ class LoopbackHostDriverTest {
                     // 61029730): validated loopback host:port and a fixed route label only, never
                     // bearer, raw URL, query, or body. @reviewer compares this retained line against
                     // the run's fresh receipt manifest before accepting upload/completion claims.
+||||||| /tmp/mfb
+                    // Allowlisted actual-target line on EVERY account GET - success or failure - so a
+                    // PASSING account setup also leaves independent target evidence (reviewer
+                    // 61029730): validated loopback host:port and a fixed route label only, never
+                    // Bearer, raw URL, query, or body. compares this retained line against
+                    // The run's fresh receipt manifest before accepting upload/completion claims.
                     println("account exchange target=${url.host}:${url.port} route=${routeLabelOf(url.encodedPath)}")
                 }
             }
@@ -500,6 +515,10 @@ class LoopbackHostDriverTest {
                 // ALLOWED_KEYS STRICTNESS (cloud b2fa681f): the production decoder fails closed on
                 // unknown keys; the control must too, or a future rig regression that adds a fourth
                 // field would pass here while the real decoder rejects it.
+||||||| /tmp/mfb
+                // ALLOWED_KEYS STRICTNESS (cloud b2fa681f): the production decoder fails closed on
+                // Unknown keys; the control must too, or a future rig regression that adds a fourth
+                // Field would pass here while the real decoder rejects it.
                 check(name in setOf("schema_version", "code", "retry_after_s")) { "unexpected error-envelope key: $name" }
                 check(seen.add(name)) { "duplicate error-envelope key: $name" }
                 when (name) {

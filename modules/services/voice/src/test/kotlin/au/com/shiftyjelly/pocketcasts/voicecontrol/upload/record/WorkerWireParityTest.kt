@@ -112,6 +112,13 @@ class WorkerWireParityTest {
     // nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
     // is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
     // blessing of the server revision.
+||||||| /tmp/mfb
+    // Scope, stated exactly: `d8fe823c` is pinned for intake guard behaviour only — the two digest
+    // Checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
+    // Reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
+    // Nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
+    // Is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
+    // Blessing of the server revision.
     //
     // Both controls must compare against the SAME revision, or their combined evidence describes two
     // different servers. Advancing this value is a deliberate, reviewable edit made when a new
@@ -124,6 +131,10 @@ class WorkerWireParityTest {
      *  - d8fe823c: pre-delta INTAKE GUARD baseline (digest checks + record schema fixtures);
      *  - c569b319: delta736d3180 strict intake (observation_unavailable with state unknown).
      * c569b319 is pushed source for fixture/intake parity — NOT a deployed live intake (spec).
+||||||| /tmp/mfb
+     * - d8fe823c: pre-delta intake guard baseline (digest checks + record schema fixtures);
+     * - c569b319: delta736d3180 strict intake (observation_unavailable with state unknown).
+     * is pushed source for fixture/intake parity — NOT a deployed live intake.
      */
     private val emptyResultRevision = "a030ff31d95dd703fab6c5c976f36826ef77f499"
 
@@ -394,6 +405,8 @@ class WorkerWireParityTest {
 
     /**
      * delta736d3180 STRICT INTAKE PARITY against a pinned Cloud revision (c569b319 — pushed source
+||||||| /tmp/mfb
+     * delta736d3180 strict intake parity against a pinned Cloud revision (c569b319 — pushed source
      * for fixture/intake parity, NOT a deployed live intake): the Worker accepts
      * `observation_unavailable` ONLY with state `unknown` and refuses the reason with any other
      * state, on ALL SIX stages (spec 52e0f608), so a per-stage divergence cannot hide behind the one
@@ -491,14 +504,14 @@ class WorkerWireParityTest {
             "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\"}",
             "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\",\"text\":\"hi\"}",
         )
-        // 4d10275f: a skip reason is not_run-only, `failed` included.
+        // A skip reason is not_run-only, `failed` included.
         perturb(
             "translation-skip-at-failed",
             translationSkip,
             "\"translation\":{\"reason\":\"backend_handles_translation\",\"state\":\"not_run\"}",
             "\"translation\":{\"reason\":\"backend_handles_translation\",\"state\":\"failed\"}",
         )
-        // 4d10275f: and it belongs to translation, not any other stage.
+        // And it belongs to translation, not any other stage.
         perturb(
             "translation-skip-on-wake",
             translationSkip,
@@ -551,6 +564,8 @@ class WorkerWireParityTest {
     @Test
     fun `the pinned Worker accepts exactly the empty_result bytes the builder emits`() {
         // ACTUAL EMITTED-BYTE PARITY (spec 20:08Z, c6f3bdf7 / pin a030ff31).
+||||||| /tmp/mfb
+        // Actual emitted-byte parity (spec 20:08Z, c6f3bdf7 / pin a030ff31).
         //
         // This is the half I previously could not prove: no intake revision implemented empty_result,
         // so I stated the gap rather than papering over it. a030ff31 closes it, so the control now

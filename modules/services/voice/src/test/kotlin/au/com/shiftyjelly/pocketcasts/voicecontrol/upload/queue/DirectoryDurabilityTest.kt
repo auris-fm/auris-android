@@ -923,6 +923,11 @@ class DirectoryDurabilityTest {
         // and UNCERTAIN when the ready transition may have occurred but its final synchronization
         // could not be confirmed. A thrown error must not collapse that third state into "definitely
         // not published" — the marker may exist and be recovered on restart.
+||||||| /tmp/mfb
+        // The spec (voice-recording-uploads, ecbe84dd) separates three outcomes: uncommitted, ready,
+        // And UNCERTAIN when the ready transition may have occurred but its final synchronization
+        // Could not be confirmed. A thrown error must not collapse that third state into "definitely
+        // Not published" — the marker may exist and be recovered on restart.
         //
         // This test previously asserted nothing on the failing path: runCatching().getOrNull()
         // returns null when the sync throws, so the sole assertion sat inside `if (entry != null)`
@@ -1412,9 +1417,9 @@ class DirectoryDurabilityTest {
         // Reviewer f7700432. The new disk discovery read `listFiles()... ?: emptySet()`, so an unreadable
         // Directory looked like a proven empty one: revokeAndPurge recorded a completed purge and set
         // Recovered=true while every retained recording sat untouched on disk. That is the same false
-        // Success as ec6ce881, reached by a different path - the user is told their audio was removed
-        // While it is still there. An unknown listing must DEFER the purge and keep its intent, never
-        // Report completion.
+        // success, reached by a different path - the user is told their audio was removed while it is
+        // still there. An unknown listing must defer the purge and keep its intent, never report
+        // completion.
         val root = tmp.newFolder("queue-purge-unknown-listing")
         val dir = File(root, "contributions")
         dir.mkdirs()
@@ -2359,6 +2364,11 @@ class DirectoryDurabilityTest {
         // 2741a0ca - so the fixture creates the intent state directly: a `.tmp` intent present while the
         // names are NOT listable. Presence cannot be decided from a listing that failed, so resolution
         // reports "attempts intent presence unknown" rather than guessing absence.
+||||||| /tmp/mfb
+        // Is about. An over-large root no longer produces it - discovery has no traversal bound since spec
+        // 2741a0ca - so the fixture creates the intent state directly: a `.tmp` intent present while the
+        // Names are NOT listable. Presence cannot be decided from a listing that failed, so resolution
+        // Reports "attempts intent presence unknown" rather than guessing absence.
         File(contributions, "$id.attempts.tmp").writeText("1")
         store.recover()
         // Make the root genuinely unlistable: replace the queue directory with a regular file. `list()`

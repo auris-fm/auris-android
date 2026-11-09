@@ -50,6 +50,9 @@ class TransportBytesParityTest {
         "c569b319e19b5971ada44a0f53245630688c1305",
         // a030ff31 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
         // strict superset of c569b319, so every rule proven against the delta is still measured here.
+||||||| /tmp/mfb
+        // A030ff31 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
+        // Strict superset of c569b319, so every rule proven against the delta is still measured here.
         "a030ff31d95dd703fab6c5c976f36826ef77f499",
         "3dd0c91d095512e3c49108c25b726a3b66a66eef",
         "862c7ed3fdc540eccc9fdacd6819c97a9e679536",

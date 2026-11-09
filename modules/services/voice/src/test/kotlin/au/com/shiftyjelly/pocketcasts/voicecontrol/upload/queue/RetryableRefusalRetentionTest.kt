@@ -39,8 +39,8 @@ import org.junit.rules.TemporaryFolder
  *
  * FIVE codes, not six. An earlier version of this list also carried `capture_conflict`, following the
  * first Cloud fixture, which classified 409 capture_conflict as retryable. That classification was
- * WRONG and Cloud corrected it (spec ruling 681704d4): the same capture identity arriving with a
- * DIFFERENT digest is a permanent refusal, since repeating the request can never succeed. The
+ * wrong and Cloud corrected it: the same capture identity arriving with a different digest is a
+ * permanent refusal, since repeating the request can never succeed. The
  * genuinely retryable concurrent case is 503 upload_pending - same capture, same bytes, still in
  * flight. Production has always classified 409 capture_conflict as TERMINAL
  * (ContributionUploadTransport.byCode), so keeping it here asserted store-retention semantics for a
@@ -290,6 +290,12 @@ class RetryableRefusalRetentionTest {
         // OUT of the terminal set per spec ruling 5c811f83: a REQUEST rejection retains the bytes
         // and stops serving the entry (UnservableInvalidRequestControlTest), so it must NEVER be
         // listed here as delete-on-reject.
+||||||| /tmp/mfb
+        // And the codes we deliberately keep out must be genuinely non-retryable, so removing them
+        // From the list was a correction rather than a convenient omission. `invalid_request` moved
+        // Out of the terminal set per spec ruling 5c811f83: a request rejection retains the bytes
+        // And stops serving the entry (UnservableInvalidRequestControlTest), so it must NEVER be
+        // Listed here as delete-on-reject.
         val terminal = listOf(
             "capture_conflict" to (409 to """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}"""),
             "record_gone" to (410 to """{"schema_version":1,"code":"record_gone"}"""),

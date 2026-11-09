@@ -1,7 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload
 
 /**
- * Marks the REAL-Worker parity tests (owner a793f239: the ordinary code-test suite must be
+ * Marks the real-Worker parity tests (the ordinary code-test suite must be
  * self-contained; these tests execute the pinned approved Worker tree and node toolchain).
  *
  * The ordinary `testDebugUnitTest` task EXCLUDES this category so absent external prerequisites

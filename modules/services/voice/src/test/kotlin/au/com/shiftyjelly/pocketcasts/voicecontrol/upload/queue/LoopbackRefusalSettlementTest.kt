@@ -108,6 +108,10 @@ class LoopbackRefusalSettlementTest {
      * `capture_conflict` is NOT among them, and that is a deliberate divergence from Cloud's fixture
      * title ("retryable upload responses"), which was WRONG (spec ruling 681704d4): 409
      * capture_conflict means the SAME capture identity arrived with a DIFFERENT digest - a genuine
+||||||| /tmp/mfb
+     * `capture_conflict` is NOT among them, and that is a deliberate divergence from Cloud's fixture
+     * title ("retryable upload responses"), which was WRONG (spec ruling 681704d4): 409
+     * capture_conflict means the same capture identity arrived with a different digest - a genuine
      * refusal, not a wait. An identical concurrent reservation still finalizing is 503 upload_pending
      * and IS retryable. Cloud is correcting the fixture classification; the client keeps 409 terminal.
      */
@@ -568,6 +572,11 @@ class LoopbackRefusalSettlementTest {
         // means the same capture identity came in with a DIFFERENT digest - a genuine refusal. An
         // identical in-flight reservation finalizing is 503 upload_pending, which IS retryable; the
         // retryable control above covers that path.
+||||||| /tmp/mfb
+        // Pins the spec ruling (681704d4) so it cannot drift back into a retry. 409 capture_conflict
+        // Means the same capture identity came in with a DIFFERENT digest - a genuine refusal. An
+        // Identical in-flight reservation finalizing is 503 upload_pending, which IS retryable; the
+        // Retryable control above covers that path.
         responseStatus = 409
         responseBody = """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}"""
         receivedBodies.clear()

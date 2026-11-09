@@ -580,6 +580,9 @@ class ContributionUploadAssemblyTest {
 ||||||| /tmp/mfb
         // Spec 1a0d3ffb (amending 5c811f83): a REQUEST rejection can never be served, so the entry
         // Is deleted at once through the store's reconciled purge - the queue must always drain.
+||||||| /tmp/mfb
+        //  (amending 5c811f83): a REQUEST rejection can never be served, so the entry
+        // Is deleted at once through the store's reconciled purge - the queue must always drain.
         // This is the real-HTTP pin for that semantics on the assembled path.
         var now = 30_000_000L
         val store = newStore { now }
@@ -698,6 +701,9 @@ class ContributionUploadAssemblyTest {
     fun `the WIRE line is emitted at the observation point even when the response is then discarded`() {
         // Review 3271cf1c: the wire answer must be logged where it is OBSERVED, not in the caller, because
         // a cancelled or revoked attempt goes straight to `catch` and a caller-side line would never run.
+||||||| /tmp/mfb
+        // Review 3271cf1c: the wire answer must be logged where it is OBSERVED, not in the caller, because
+        // A cancelled or revoked attempt goes straight to `catch` and a caller-side line would never run.
         // A genuine mid-flight revocation settles as REVOKED, so the transport deliberately reports
         // Cancelled and the HTTP answer is discarded - the honest wire line is therefore http=none, and it
         // must still be emitted. That is exactly the case a caller-side log could not cover.

@@ -236,6 +236,9 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         // Cloud route contract (476feadc): this route can answer 201 with `upload_pending` until the
         // owner-side arc completes. That must retain, never release or report success.
+||||||| /tmp/mfb
+        // Cloud route contract (476feadc): this route can answer 201 with `upload_pending` until the
+        // Owner-side arc completes. That must retain, never release or report success.
         responseStatus = 201
         responseBody = receipt(id, sha256(file), status = "upload_pending")
 
@@ -398,6 +401,11 @@ class ContributionUploadTransportTest {
         // (quota_exceeded, @cloud dc264066: NO retry_after_s today) must not burn the bounded
         // Attempt budget in hours of jittered backoff. When the server names no minimum, the
         // Transport supplies the floor itself: seconds until the next UTC midnight.
+||||||| /tmp/mfb
+        // Core c74d7e30: the daily limit is metered at acceptance, and its refusal
+        // (quota_exceeded dc264066: no retry_after_s today) must not burn the bounded
+        // Attempt budget in hours of jittered backoff. When the server names no minimum, the
+        // Transport supplies the floor itself: seconds until the next UTC midnight.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 429
@@ -453,6 +461,9 @@ class ContributionUploadTransportTest {
         // backoff and must not be pushed to the next UTC midnight.
 ||||||| /tmp/mfb
         // The day floor is quota-specific (@cloud dc264066): rate limiting resolves on its own
+        // Backoff and must not be pushed to the next UTC midnight.
+||||||| /tmp/mfb
+        // The day floor is quota-specific (dc264066): rate limiting resolves on its own
         // Backoff and must not be pushed to the next UTC midnight.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)

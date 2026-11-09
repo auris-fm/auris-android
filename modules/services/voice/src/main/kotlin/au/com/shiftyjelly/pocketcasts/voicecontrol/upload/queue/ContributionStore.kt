@@ -27,6 +27,23 @@ import timber.log.Timber
 //   - listening/permission closure alone -> discardCurrentPartials() removes only in-progress
 //     preparation; ready entries stay.
 // QueueFence generation wiring into these paths is still pending (reviewer f003b49f finding 5).
+||||||| /tmp/mfb
+// Scope actually implemented here (no more than this):
+// - This class performs synchronous file I/O on the calling thread. It does not itself provide
+// Off-capture-thread execution: no controller or async worker exists yet, so callers must not
+// Invoke prepare()/recover()/purgeQueue() from the audio capture callback. A follow-up slice
+// Adds the dispatcher that makes this guarantee real.
+// - Admission is bounded and denies before any pcm copy, but the count/byte reservation is not yet
+// Atomic across concurrent prepare() calls; hardening is scheduled.
+// - Durability: fsyncDir() is currently a no-op stub, so directory-entry durability after the
+// Rename/marker is NOT substantiated. Do not claim crash-atomicity
+// Beyond "a missing.ready means the entry is not trusted".
+// Revocation semantics implemented (spec @05dc7937):
+// - account/session change, withdrawal, remote disable OR lease loss -> purgeQueue() clears
+// EVERY pending entry immediately (audio + metadata + partial buffers).
+// - listening/permission closure alone -> discardCurrentPartials() removes only in-progress
+// Preparation; ready entries stay.
+// QueueFence generation wiring into these paths is still pending.
 class ContributionStore(
     private val root: File,
     internal val limits: QueueLimits,
@@ -979,6 +996,9 @@ class ContributionStore(
     // Same contract for a validated acceptance or terminal disposal: drop only if this exact attempt
     // still owns the entry AND its epoch is STILL VALID - a retired token never releases (spec
     // 442bfbd7); retry-boundary disposal is the only revoked-epoch write.
+||||||| /tmp/mfb
+    // Still owns the entry and its epoch is still valid - a retired token never releases (spec
+    // 442bfbd7); retry-boundary disposal is the only revoked-epoch write.
     fun releaseForAdmittedAttempt(
         token: AdmittedAttempt,
         reason: TerminalReason = TerminalReason.UPLOAD_ACCEPTED,
@@ -995,6 +1015,9 @@ class ContributionStore(
         } != null
         // MONITORING (review 3c0f31d3, gap 2): the truthful file-level outcome is logged INSIDE
         // deleteLocked with this caller's fixed reason; `removed` here is only the index transition.
+||||||| /tmp/mfb
+        // Monitoring (review 3c0f31d3, gap 2): the truthful file-level outcome is logged inside
+        // DeleteLocked with this caller's fixed reason; `removed` here is only the index transition.
         if (removed) dropCounterOnly(reason)
         removed
     }
@@ -1206,6 +1229,18 @@ class ContributionStore(
      *    committed entry's WAV/metadata are immutable.
      *  - Publication happens only while the captured generation is current AND inside the store lock, under
      *    the single fixed lock order store -> fence; a fenced-off attempt publishes nothing.
+||||||| /tmp/mfb
+     * Ownership rules enforced here (reviewers 32d8012c / 195845cb):
+     * - [admission] is CONSUMED exactly once by this call: adopted when the entry publishes, otherwise
+     * released on EVERY exit, including the early returns for invalid sizes and the exception path. There
+     * is deliberately no `admit` inside, so passing a pre-retention handle never double-charges.
+     * - Bytes go to staging named after the UNIQUE attempt (`gen$<attemptId>.<generation>.<captureId>…`), not
+     * merely generation+captureId, so two same-generation attempts cannot truncate each other and a stale
+     * attempt's cleanup only ever touches its own staging prefix — never a successor's committed files.
+     * - If [captureId] is already owned as a ready entry, the request is refused before any write: a
+     * committed entry's WAV/metadata are immutable.
+     * - Publication happens only while the captured generation is current AND inside the store lock, under
+     * the single fixed lock order store -> fence; a fenced-off attempt publishes nothing.
      */
     fun prepareAt(
         generation: Long,
@@ -1267,6 +1302,11 @@ class ContributionStore(
             // error handler must not erase the difference between "not published" and "may have been
             // published". Returning null here would tell the caller the slot is free and invite it to
             // mint a new capture id for an entry a restart may still find intact.
+||||||| /tmp/mfb
+            // Re-thrown, NOT converted to null. The spec (ecbe84dd) names this exact mistake: a generic
+            // Error handler must not erase the difference between "not published" and "may have been
+            // Published". Returning null here would tell the caller the slot is free and invite it to
+            // Mint a new capture id for an entry a restart may still find intact.
             throw uncertain
         } catch (_: Throwable) {
             null
@@ -1986,8 +2026,8 @@ class ContributionStore(
         retryAfterS: Long? = null,
     ): Long? = synchronized(lock) { scheduleRetryAfterFailureLocked(generation, captureId, retryAfterS) }
 
-    // Requires the caller to already hold the lock: validate-and-mutate must be indivisible (reviewer
-    // 20a5440b) so a successor attempt cannot be admitted between the identity check and the write.
+    // Requires the caller to already hold the lock: validate-and-mutate must be indivisible, so a
+    // successor attempt cannot be admitted between the identity check and the write.
     private fun scheduleRetryAfterFailureLocked(
         generation: Long,
         captureId: String,
@@ -2025,6 +2065,10 @@ class ContributionStore(
             // The not-before boundary is DURABLE in its own .retry record: a restart cannot reroll the
             // jitter or bypass a received server minimum, and a fresh owner reconciles the intent's
             // barriers before eligibility (reviewers 7433e6a9, 21176965).
+||||||| /tmp/mfb
+            // The not-before boundary is DURABLE in its own.retry record: a restart cannot reroll the
+            // Jitter or bypass a received server minimum, and a fresh owner reconciles the intent's
+            // Barriers before eligibility (reviewers 7433e6a9, 21176965).
             publishRetryBoundaryLocked(captureId, eligibleAt)
             nextRetryAtMs[captureId] = eligibleAt
             eligibleAt
@@ -2677,6 +2721,14 @@ class ContributionStore(
             // when the listing is READABLE and EMPTY of retained captures. Until then it stays deferred and
             // its residue stays reported - telling the user their audio is gone while some of it survives
             // is the exact failure this whole path exists to prevent.
+||||||| /tmp/mfb
+            // As complete when files remain would tell the user their audio is gone while it is not.
+            // Completion is reconciled, not inferred from attempts ( finding 2, spec
+            // 777c18d5). Attempting every delete is not the same as removing every capture: a delete can
+            // Fail, a capture can be unreachable, and a file can be re-created. The purge is complete only
+            // When the listing is readable and empty of retained captures. Until then it stays deferred and
+            // Its residue stays reported - telling the user their audio is gone while some of it survives
+            // Is the exact failure this whole path exists to prevent.
             _purgeResidue.remove(PURGE_RESIDUE_UNKNOWN_LISTING)
             _purgeResidue.addAll(residueIds)
             val survivors = retainedCaptureIdsLocked()
@@ -2698,6 +2750,13 @@ class ContributionStore(
             // durable witness as a successful one - the false success this path exists to prevent, written
             // in the one file that outlives the counters it is meant to explain. stillPending is the only
             // permission to skip them.
+||||||| /tmp/mfb
+            // Completion evidence only on A readable, empty listing ( finding 2, spec
+            // 6731209b). RecordPurgeLocked / QUEUE_PURGED / _purgeReasons say "this purge HAPPENED". My
+            // Previous version emitted them even with survivors, so a failed deletion produced the same
+            // Durable witness as a successful one - the false success this path exists to prevent, written
+            // In the one file that outlives the counters it is meant to explain. StillPending is the only
+            // Permission to skip them.
             if (!stillPending) {
                 // A PURGE MUST BE VISIBLE AFTER IT HAS HAPPENED, and this is the one moment where the
                 // counters file - the only witness - is itself destroyed. The purge record is therefore
@@ -3212,6 +3271,12 @@ class ContributionStore(
             // The attempts sidecar is STRICTLY the count: the retry boundary lives in its own .retry
             // record with its own reconciliation. Any multi-token or malformed sidecar fails the entry
             // closed - never a silent default (reviewers e4820963, 7433e6a9).
+||||||| /tmp/mfb
+            // Would hand back a spent retry budget, and defaulting created-at to mtime would let a
+            // Touched file silently renew its queue age.
+            // The attempts sidecar is STRICTLY the count: the retry boundary lives in its own.retry
+            // Record with its own reconciliation. Any multi-token or malformed sidecar fails the entry
+            // Closed - never a silent default (reviewers e4820963, 7433e6a9).
             val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
                 ?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
             // AGE IS NOT PART OF RECORD VALIDITY when recovery could not persist a reset (reviewer
@@ -3396,6 +3461,13 @@ class ContributionStore(
     //  - the queue directory's PARENT namespace, which is what makes the directory reachable at all.
     // Reviewed 805f0828: reloadUnownedFromDisk used to promote marker+validate directly, a SECOND and
     // weaker load path than recovery. Both now call this one transition, so they cannot diverge.
+||||||| /tmp/mfb
+    // - every content file, INCLUDING the ready marker (marker-content durability is an explicit
+    // Uncertain case at publication time, so a reader must not be more trusting than the writer);
+    // - the queue directory that names them;
+    // - the queue directory's PARENT namespace, which is what makes the directory reachable at all.
+    // Reviewed 805f0828: reloadUnownedFromDisk used to promote marker+validate directly, a SECOND and
+    // Weaker load path than recovery. Both now call this one transition, so they cannot diverge.
 
     /**
      * RE-HARDENING, NOT A GATE (device incident 2026-11-07, spec bfe91857).
@@ -3615,6 +3687,8 @@ class ContributionStore(
 
     /**
      * MONITORING (review 3c0f31d3, gap 2): index removal is NOT proof files were deleted - the
+||||||| /tmp/mfb
+     * monitoring (review 3c0f31d3, gap 2): index removal is not proof files were deleted - the
      * disqualification write or the file deletes themselves can fail and RETAIN the bytes. The truthful
      * outcome is therefore logged HERE, at the only place that knows it, with the caller's FIXED reason.
      * outcome=removed only when every file is gone; otherwise outcome=retained.

@@ -59,7 +59,7 @@ object StageFieldAllowlist {
 }
 
 /**
- * 4d10275f: reasons that explain a skipped separate translation stage.
+ * reasons that explain a skipped separate translation stage.
  *
  * Each explains a stage that did NOT run. None of them asserts translation happened, which is why
  * they are not_run-only and why a completed translation must still carry real output fields.
@@ -98,6 +98,11 @@ object StageReasons {
         // capture itself succeeded. Each explains a skipped stage; none of them asserts translation
         // happened, which is why they are not_run-only (enforced below) and why a completed
         // translation must still carry real translated_text/target_language.
+||||||| /tmp/mfb
+        // 4d10275f: three ways a SEPARATE translation stage can be legitimately skipped while the
+        // Capture itself succeeded. Each explains a skipped stage; none of them asserts translation
+        // Happened, which is why they are not_run-only (enforced below) and why a completed
+        // Translation must still carry real translated_text/target_language.
         StageName.Translation to setOf(
             "source_language_target_language",
             "no_text",
@@ -268,6 +273,11 @@ class ContributionRecordBuilder(
             // invalid with failed/cancelled/unknown too — those states assert something happened and
             // went wrong, which no skip reason can represent. Letting one through would dress an
             // output-less completed translation up as legitimate.
+||||||| /tmp/mfb
+            // 4d10275f: the translation SKIP reasons describe a stage that did not run. They are
+            // Invalid with failed/cancelled/unknown too — those states assert something happened and
+            // Went wrong, which no skip reason can represent. Letting one through would dress an
+            // Output-less completed translation up as legitimate.
             if (reason in TRANSLATION_SKIP_REASONS) {
                 require(stage == StageName.Translation && entry.state == StageState.NotRun) {
                     "reason '$reason' is only valid with translation + not_run " +

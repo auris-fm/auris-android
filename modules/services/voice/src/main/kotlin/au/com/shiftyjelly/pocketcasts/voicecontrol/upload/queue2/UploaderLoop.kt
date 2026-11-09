@@ -9,11 +9,23 @@ import kotlin.math.pow
  * Backoff is kept in memory only: a restart forgets it and simply tries again, which is correct for
  * a queue whose worst case is one extra request. One recording never blocks the others - a failure
  * schedules that recording's next attempt and the loop moves on.
+ *
+ * Nothing is sent until this pass has established that sending it is still meaningful and still
+ * permitted. Those checks live here rather than at publish time because the facts they read can
+ * change while a recording sits in the queue: the account can change, sharing can be switched off,
+ * and a recording can simply get old.
  */
 class UploaderLoop(
     private val queue: FolderQueue,
     private val send: suspend (FolderQueue.Recording) -> Int?,
     private val refreshSignIn: suspend () -> Unit,
+    /**
+     * Establishes whether this recording may be sent right now, and why not when it may not.
+     *
+     * The answer is read fresh on every pass, never cached: the whole point is to notice that
+     * something changed after the recording was queued.
+     */
+    private val gate: PreSendGate = PreSendGate.OPEN,
     private val now: () -> Long = System::currentTimeMillis,
     private val baseBackoffMs: Long = DEFAULT_BASE_BACKOFF_MS,
     private val maxBackoffMs: Long = DEFAULT_MAX_BACKOFF_MS,
@@ -43,9 +55,28 @@ class UploaderLoop(
         var retried = 0
         var refreshed = 0
         val t = now()
+
+        // Age is a property of the queue, not of one recording: settle it once per pass so an
+        // expired recording cannot be sent even if it is first in line.
+        queue.deleteExpired(t)
+
         for (recording in queue.recordings()) {
             val dueAt = nextAttemptAt[recording.captureId] ?: 0L
             if (t < dueAt) continue
+
+            // Deleted rather than retried: none of these conditions resolve by waiting, and a
+            // recording that can never be sent would otherwise occupy a queue slot until it aged
+            // out. Sharing being off is the user's current answer, so it is honoured immediately.
+            when (val verdict = gate.verdictFor(recording)) {
+                is GateVerdict.Refuse -> {
+                    queue.delete(recording, verdict.reason)
+                    clearBackoff(recording.captureId)
+                    deleted++
+                    continue
+                }
+
+                GateVerdict.Send -> Unit
+            }
 
             val status = runCatching { send(recording) }
                 .onFailure { log("upload: request failed (${it.javaClass.simpleName})") }

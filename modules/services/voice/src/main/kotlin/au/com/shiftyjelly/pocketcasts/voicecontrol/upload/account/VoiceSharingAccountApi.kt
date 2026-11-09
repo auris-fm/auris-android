@@ -19,8 +19,8 @@ import retrofit2.HttpException
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
-import retrofit2.http.HTTP
 import retrofit2.http.Header
 import retrofit2.http.PUT
 import timber.log.Timber
@@ -50,11 +50,13 @@ interface VoiceSharingAccountApi {
         @Body body: okhttp3.RequestBody,
     ): Response<ResponseBody>
 
-    // Retrofit rejects @Body on @DELETE; @HTTP(hasBody = true) carries the contract request_id.
-    @HTTP(method = "DELETE", path = "/api/v1/account/voice-sharing/data", hasBody = true)
+    /**
+     * Deletion is synchronous: it answers 204 with no body, and nothing is retried on the client's
+     * side once the server has said it happened. There is no body to send and no receipt to parse.
+     */
+    @DELETE("/api/v1/account/voice-sharing/data")
     suspend fun deleteData(
         @Header("Authorization") bearer: String?,
-        @Body body: okhttp3.RequestBody,
     ): Response<ResponseBody>
 
     companion object {
@@ -79,9 +81,6 @@ sealed interface VoiceSharingMutationResult {
 
     data object Failure : VoiceSharingMutationResult
 }
-
-/** 202 receipt of the separate deletion workflow: distinct from withdrawal, which never deletes. */
-data class DeletionReceipt(val deletionRequestId: String, val status: String, val cutoff: String? = null)
 
 /**
  * Account operations (the consent path, spec 06392988). Contract:
@@ -149,7 +148,7 @@ class VoiceSharingAccountOperations(
                         status = when (outcome) {
                             is Outcome.Rejected -> 401
                             is Outcome.Unavailable -> outcome.status
-                            is Outcome.Body -> 200
+                            is Outcome.Body, is Outcome.Done -> 200
                         },
                         bodyBytes = null,
                         requestIds = outcome.requestIds,
@@ -211,7 +210,7 @@ class VoiceSharingAccountOperations(
             ?: return VoiceSharingMutationResult.Failure
         return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, payload) }) {
             is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
-            is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
+            is Outcome.Done, is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
 
@@ -274,11 +273,16 @@ class VoiceSharingAccountOperations(
         }
     }
 
-    suspend fun deleteData(): DeletionReceipt? {
-        val request = issue(Route.DELETION, null) ?: return null
-        val body = execute(request.op, expectedStatus = 202) { b, payload -> api.deleteData(b, payload) }
-            .let { (it as? Outcome.Body)?.json } ?: return null
-        return parseDeletionReceipt(body)
+    /**
+     * Delete the account's accepted recordings.
+     *
+     * Returns true when the server confirmed it. A synchronous 204 means the work is done, so there
+     * is no receipt, no request id and no second step to follow.
+     */
+    suspend fun deleteData(): Boolean {
+        val request = issue(Route.DELETION, null) ?: return false
+        val outcome = execute(request.op, expectedStatus = 204) { b, _ -> api.deleteData(b) }
+        return outcome is Outcome.Done
     }
 
     /**
@@ -363,7 +367,8 @@ class VoiceSharingAccountOperations(
 
         data class Body(val json: String, override val requestIds: List<String> = emptyList()) : Outcome
 
-        /** Explicit 409 membership conflict: carries the current projection body. */
+        /** The expected status with no body: a synchronous 204, where the work is already done. */
+        data class Done(override val requestIds: List<String> = emptyList()) : Outcome
 
         data class Rejected(override val requestIds: List<String> = emptyList()) : Outcome
 
@@ -387,6 +392,9 @@ class VoiceSharingAccountOperations(
         logTokenKeyId(aurisBearer)
         val body = when (route) {
             Route.GET -> EMPTY_BODY
+
+            // Synchronous deletion: no body, no request id.
+            Route.DELETION -> EMPTY_BODY
 
             // The desired state IS "a disclosure was accepted": turning on names one, turning off
             // names none. Both are the same request shape.
@@ -432,7 +440,13 @@ class VoiceSharingAccountOperations(
                         return Outcome.Rejected(requestIds.toList())
                     }
 
-                    response.code() == expectedStatus -> return Outcome.Body(response.body()!!.string(), requestIds.toList())
+                    // A 204 has no body at all, so reading it would throw on a success.
+                    response.code() == expectedStatus ->
+                        return if (expectedStatus == 204) {
+                            Outcome.Done(requestIds.toList())
+                        } else {
+                            Outcome.Body(response.body()!!.string(), requestIds.toList())
+                        }
 
                     response.code() in 500..599 && attempt < MAX_ATTEMPTS -> {
                         lastStatus = response.code()
@@ -538,6 +552,56 @@ class VoiceSharingAccountOperations(
                     val raw = reader.nonEmptyString() ?: return null
                     // A cutoff that cannot parse as a real instant is a malformed receipt, not an
                     // optional field to ignore.
+                    runCatching { java.time.Instant.parse(raw) }.getOrNull() ?: return null
+                    cutoff = raw
+                }
+
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+        if (reader.peek() != com.squareup.moshi.JsonReader.Token.END_DOCUMENT) return null
+        val required = setOf("schema_version", "deletion_request_id", "status")
+        if (!schemaOk || !(required.all { it in seen } && seen.all { it in required + "cutoff" })) return null
+        if (id == null || status != "deletion_pending") return null
+        DeletionReceipt(deletionRequestId = id, status = status, cutoff = cutoff)
+    } catch (_: Exception) {
+        null
+    }
+
+||||||| /tmp/mfb
+    /**
+     * 202 deletion_pending receipt: strict complete parse, exact types/keys, numeric schema.
+     * `cutoff` is an optional RFC3339 instant: when present it must parse as
+     * a real instant or the body is malformed; when absent the receipt stays valid. Never skipped
+     * silently — an unknown key is still rejected.
+     */
+    private fun parseDeletionReceipt(json: String): DeletionReceipt? = try {
+        val reader = JsonReader.of(okio.Buffer().writeUtf8(json))
+        reader.beginObject()
+        var schemaOk = false
+        var id: String? = null
+        var status: String? = null
+        var cutoff: String? = null
+        val seen = HashSet<String>()
+        while (reader.hasNext()) {
+            val key = reader.nextName()
+            if (!seen.add(key)) return null // decoded duplicate detection
+            when (key) {
+                "schema_version" -> {
+                    if (reader.peek() != com.squareup.moshi.JsonReader.Token.NUMBER) return null
+                    val lexeme = reader.nextString() // NUMBER lexeme preserved exactly
+                    schemaOk = java.math.BigDecimal(lexeme).compareTo(java.math.BigDecimal.ONE) == 0
+                }
+
+                "deletion_request_id" -> id = reader.nonEmptyString()
+
+                "status" -> status = reader.nonEmptyString()
+
+                "cutoff" -> {
+                    val raw = reader.nonEmptyString() ?: return null
+                    // A cutoff that cannot parse as a real instant is a malformed receipt, not an
+                    // Optional field to ignore.
                     runCatching { java.time.Instant.parse(raw) }.getOrNull() ?: return null
                     cutoff = raw
                 }

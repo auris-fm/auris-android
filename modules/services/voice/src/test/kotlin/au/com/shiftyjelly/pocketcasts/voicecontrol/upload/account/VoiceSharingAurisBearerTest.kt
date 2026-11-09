@@ -106,7 +106,7 @@ class VoiceSharingAurisBearerTest {
     private fun projection(): MockResponse = MockResponse().setResponseCode(200)
         .setHeader("Content-Type", "application/json")
         .setBody(
-            "{\"schema_version\":1,\"membership_revision\":\"rev-1\",\"plan\":\"free\"," +
+            "{\"schema_version\":1,\"plan\":\"free\"," +
                 "\"voice_sharing_enrolled\":false,\"enrollment_epoch\":null," +
                 "\"accepted_disclosure_version\":null,\"withdrawal_state\":\"not_enrolled\"}",
         )

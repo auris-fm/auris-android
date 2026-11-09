@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.DeletionReceipt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,7 +28,7 @@ sealed interface EnrollmentState {
 }
 
 /** The separate deletion workflow's observed status. A 202 is PENDING, never "deleted". */
-enum class DeletionState { Pending, }
+enum class DeletionState { Done, }
 
 sealed interface EnrollmentOutcome {
     /**
@@ -44,7 +43,7 @@ sealed interface EnrollmentOutcome {
 
     data class Applied(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
     data class Failed(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
-    data class DeletionRequested(val state: DeletionState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
+    data class DataDeleted(val state: DeletionState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
 
     /** Refused locally before any network call (e.g. no accepted disclosure). */
     data class Refused(val reason: String, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
@@ -79,7 +78,7 @@ sealed interface EnrollmentOutcome {
 class EnrollmentController(
     private val enrollOperation: suspend (acceptedDisclosureVersion: String) -> VoiceSharingMutationResult,
     private val withdrawOperation: suspend () -> VoiceSharingMutationResult,
-    private val deleteOperation: suspend () -> DeletionReceipt?,
+    private val deleteOperation: suspend () -> Boolean,
     private val clearLocalPending: () -> Unit,
     /** Owner session each operation is issued under; a change drops in-flight results. */
     private val ownerSession: () -> Long,
@@ -208,18 +207,19 @@ class EnrollmentController(
     }
 
     /**
-     * Request deletion of already-accepted data. Separate from withdrawal, and never described as
-     * stopping future sharing. A 202 is PENDING; the absence of a receipt means we do not know the
-     * status and it is reported as failed rather than assumed.
+     * Delete already-accepted data. Separate from withdrawal, and never described as stopping
+     * future sharing.
+     *
+     * Deletion is synchronous, so there is no pending state to report: the server has either done it
+     * or not. A refusal is reported as failed rather than assumed to have succeeded.
      */
     suspend fun deleteSharedData(): EnrollmentOutcome {
         mutableState.value = EnrollmentState.Pending
-        val receipt = deleteOperation()
-        if (receipt == null) {
+        if (!deleteOperation()) {
             mutableState.value = EnrollmentState.Failed
             return EnrollmentOutcome.Failed(EnrollmentState.Failed)
         }
         mutableState.value = EnrollmentState.Applied
-        return EnrollmentOutcome.DeletionRequested(DeletionState.Pending)
+        return EnrollmentOutcome.DataDeleted(DeletionState.Done)
     }
 }

@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.DeletionReceipt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan
@@ -79,8 +78,8 @@ class VoiceSharingSettingsViewModelTest {
 
     /** Delete resolves to a nullable DeletionReceipt, not a mutation result. */
     private class ReceiptGate {
-        val release = CompletableDeferred<DeletionReceipt?>()
-        suspend fun await(): DeletionReceipt? = release.await()
+        val release = CompletableDeferred<Boolean>()
+        suspend fun await(): Boolean = release.await()
     }
     private val deleteGate = ReceiptGate()
     private val persistenceFlag = RecordingPersistence()
@@ -102,7 +101,6 @@ class VoiceSharingSettingsViewModelTest {
     }
 
     private fun enrolledProjection() = VoiceSharingAccountProjection(
-        membershipRevision = "rev-1",
         plan = VoiceSharingPlan.PRO,
         voiceSharingEnrolled = true,
         enrollmentEpoch = "epoch-2",
@@ -143,7 +141,7 @@ class VoiceSharingSettingsViewModelTest {
                 onWithdrawIssue?.invoke()
                 withdrawGate.await()
             },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = ownerSession,
         )
@@ -296,7 +294,7 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals("PREMISE: the failure names the enrollment", FailedOperation.ENROLL, vm.state.value.failedOperation)
 
         // An unrelated downstream emission (account projection refresh) re-renders the screen.
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-2"))
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         mainDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals("an unrelated update must NOT erase the failure copy", SettingsOperationStatus.FAILED, vm.state.value.status)
@@ -363,6 +361,11 @@ class VoiceSharingSettingsViewModelTest {
         // one with an unrelated projection emission and assert again (timeline-probed: the stale
         // consume settles at advance #3, this render at #4 exposes any poison).
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-mid"))
+||||||| /tmp/mfb
+        // One with an unrelated projection emission and assert again (timeline-probed: the stale
+        // Consume settles at advance #3, this render at #4 exposes any poison).
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-mid"))
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         mainDispatcher.scheduler.advanceUntilIdle()
         assertEquals(
             "the stale outcome must not have poisoned the durable pending label",
@@ -392,7 +395,17 @@ class VoiceSharingSettingsViewModelTest {
 
         // A DIFFERENT account signs in; the projection switches.
         session = 2L
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
+        // B's projection differs from A's: an equal value is not an emission, so it would not
+        // report the new session at all.
+        setProjection(
+            VoiceSharingAccountProjection(
+                plan = VoiceSharingPlan.FREE,
+                voiceSharingEnrolled = false,
+                enrollmentEpoch = null,
+                acceptedDisclosureVersion = null,
+                withdrawalState = WithdrawalState.NOT_ENROLLED,
+            ),
+        )
         mainDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(
@@ -442,9 +455,18 @@ class VoiceSharingSettingsViewModelTest {
         mainDispatcher.scheduler.advanceUntilIdle()
         assertTrue("PREMISE: account A's enrollment is pending", vm.state.value.pending)
 
-        // Account B signs in while A's enrollment is still in flight.
+        // Account B signs in while A's enrollment is still in flight. B's projection must differ
+        // from A's, because an equal value is not an emission and so would report no new session.
         session = 2L
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
+        setProjection(
+            VoiceSharingAccountProjection(
+                plan = VoiceSharingPlan.FREE,
+                voiceSharingEnrolled = false,
+                enrollmentEpoch = null,
+                acceptedDisclosureVersion = null,
+                withdrawalState = WithdrawalState.NOT_ENROLLED,
+            ),
+        )
         mainDispatcher.scheduler.advanceUntilIdle()
 
         // A finishes now: the controller returns Superseded WITHOUT touching its own state.
@@ -475,7 +497,7 @@ class VoiceSharingSettingsViewModelTest {
 
         // The account switches BEFORE the queued action ever runs.
         session = 2L
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         mainDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals(
@@ -567,8 +589,8 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue("deletion in flight shows the REQUEST state", vm.state.value.deletionRequested)
         assertFalse("pending deletion is not settled success", vm.state.value.deletionFailed)
 
-        // A null receipt is the controller's Failed path (no processing receipt from the server).
-        deleteGate.release.complete(null)
+        // An unconfirmed deletion is the controller's Failed path.
+        deleteGate.release.complete(false)
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse("a failed deletion is no longer in flight", vm.state.value.deletionRequested)
         assertTrue("a failed deletion stays visible until the next action", vm.state.value.deletionFailed)
@@ -604,7 +626,7 @@ class VoiceSharingSettingsViewModelTest {
 
         // Account switch: a fresh projection for the new session emits through the collector.
         session = 2L
-        setProjection(enrolledProjection().copy(membershipRevision = "rev-B"))
+        setProjection(enrolledProjection().copy(enrollmentEpoch = "epoch-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
 
         assertFalse("account B must not see account A's deletion state", vm.state.value.deletionRequested)
@@ -623,7 +645,7 @@ class VoiceSharingSettingsViewModelTest {
     // ---: deletion lifecycle, conflict keeps the stop, current-session projection.
 
     @Test
-    fun `deletion request-in-flight is distinct from the accepted-but-pending receipt`() = runTest(mainDispatcher) {
+    fun `a deletion in flight is distinct from confirmed deletion`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection())
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
@@ -648,12 +670,12 @@ class VoiceSharingSettingsViewModelTest {
         vm.confirmDelete()
         mainDispatcher.scheduler.advanceUntilIdle()
         assertTrue("the tap is the REQUEST in flight", vm.state.value.deletionRequested)
-        assertFalse("the request in flight is not yet an accepted receipt", vm.state.value.deletionReceiptPending)
 
-        deleteGate.release.complete(DeletionReceipt("req-1", "pending"))
+        deleteGate.release.complete(true)
         mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse("the accepted receipt ends the request-in-flight state", vm.state.value.deletionRequested)
-        assertTrue("an accepted receipt is still PROCESSING, never deleted", vm.state.value.deletionReceiptPending)
+        assertFalse("the confirmed deletion ends the request-in-flight state", vm.state.value.deletionRequested)
+        // Deletion is synchronous, so a confirmed answer is DONE: nothing is left processing.
+        assertFalse("nothing remains pending after a confirmed deletion", vm.state.value.deletionReceiptPending)
         assertFalse(vm.state.value.deletionFailed)
     }
 
@@ -687,9 +709,9 @@ class VoiceSharingSettingsViewModelTest {
 
         // Session switch, THEN A's deletion completes.
         session = 2L
-        setProjection(enrolledProjection().copy(membershipRevision = "rev-B"))
+        setProjection(enrolledProjection().copy(enrollmentEpoch = "epoch-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
-        deleteGate.release.complete(DeletionReceipt("req-1", "pending"))
+        deleteGate.release.complete(true)
         mainDispatcher.scheduler.advanceUntilIdle()
 
         assertFalse("A's late deletion receipt must not set B's presentation", vm.state.value.deletionReceiptPending)
@@ -772,7 +794,7 @@ class VoiceSharingSettingsViewModelTest {
 
         // Account switch, THEN the user confirms the still-open dialog.
         session = 2L
-        setProjection(enrolledProjection().copy(membershipRevision = "rev-B"))
+        setProjection(enrolledProjection().copy(enrollmentEpoch = "epoch-B"))
         mainDispatcher.scheduler.advanceUntilIdle()
         vm.confirmDelete()
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -896,7 +918,7 @@ class VoiceSharingSettingsViewModelTest {
         vm.requestDelete()
         vm.confirmDelete()
         mainDispatcher.scheduler.advanceUntilIdle()
-        deleteGate2.release.complete(null)
+        deleteGate2.release.complete(false)
         mainDispatcher.scheduler.advanceUntilIdle()
         assertTrue("PREMISE: A's deletion failure is visible", vm.state.value.deletionFailed)
 
@@ -928,7 +950,7 @@ class VoiceSharingSettingsViewModelTest {
 
         // The session switches, then a NEW tap B lands before the dispatcher runs anything.
         session = 2L
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-B"))
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         vm.enroll()
         mainDispatcher.scheduler.advanceUntilIdle()
 

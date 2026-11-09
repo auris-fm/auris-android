@@ -33,7 +33,6 @@ class SettingsStopReachesCollectionGateTest {
     }
 
     private fun enrolledProjection() = VoiceSharingAccountProjection(
-        membershipRevision = "rev-1",
         plan = VoiceSharingPlan.FREE,
         voiceSharingEnrolled = true,
         enrollmentEpoch = "epoch-2",

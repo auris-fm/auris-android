@@ -273,10 +273,10 @@ class VoiceSharingSettingsViewModel(
             // or that was superseded while parked must not touch the screen (reviewer 578bb62a).
             if (generation != deletionGeneration || ownerSession() != tappedSession) return@launch
             when (outcome) {
-                is EnrollmentOutcome.DeletionRequested -> {
-                    // 202 = accepted but still processing. Never claimed as deleted.
+                is EnrollmentOutcome.DataDeleted -> {
+                    // Synchronous: the server confirmed the deletion, so it is done, not pending.
                     deletionRequested = false
-                    deletionReceiptPending = true
+                    deletionReceiptPending = false
                     deletionFailed = false
                 }
 
@@ -398,7 +398,7 @@ class VoiceSharingSettingsViewModel(
                 mutableState.value = render(SettingsOperationStatus.FAILED)
             }
 
-            is EnrollmentOutcome.DeletionRequested -> {
+            is EnrollmentOutcome.DataDeleted -> {
                 if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.NONE

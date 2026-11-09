@@ -27,7 +27,6 @@ class LocalWithdrawalIntentTest {
         withdrawal: WithdrawalState = WithdrawalState.ACTIVE,
         epoch: String? = "epoch-1",
     ) = VoiceSharingAccountProjection(
-        membershipRevision = "rev-1",
         plan = VoiceSharingPlan.FREE,
         voiceSharingEnrolled = enrolled,
         enrollmentEpoch = epoch,

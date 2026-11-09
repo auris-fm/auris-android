@@ -37,9 +37,12 @@ class RecordingPublisher(
         val pcm = sealed.pcm
         if (pcm.isEmpty()) return false
         if (pcm.size > MAX_SAMPLES) return false
-        // enrollment_epoch is a required record field: a capture with no epoch has no account to
-        // attribute it to, so it cannot be sent at all.
-        if (sealed.context.issuedAuthority?.enrollmentEpoch.isNullOrBlank()) return false
+        // The account and epoch are required record fields, and they are what makes a recording
+        // attributable: a capture without them cannot be sent, and certainly cannot be owned.
+        val authority = sealed.context.issuedAuthority ?: return false
+        val epoch = authority.enrollmentEpoch ?: return false
+        val account = authority.accountName ?: return false
+        if (epoch.isBlank() || account.isBlank()) return false
 
         val sampleRate = sealed.sampleRateHz.coerceAtLeast(1)
         val byteCount = WAV_HEADER_BYTES + pcm.size * 2L
@@ -55,15 +58,17 @@ class RecordingPublisher(
 
         val record = PlainRecord(
             captureId = sealed.captureId.toString(),
-            enrollmentEpoch = sealed.context.issuedAuthority.enrollmentEpoch,
+            enrollmentEpoch = epoch,
             sessionId = sealed.context.captureSession.toString(),
             platform = platform,
             appVersion = appVersion(),
             build = appBuild(),
+            // Stamped so a queue that outlives a sign-in can tell whose recording this is.
+            account = account,
             // The real grace state at segment start. Not inferred from what the clip contains.
             wakeRequired = sealed.context.wakeRequired,
             audio = audio,
-            models = modelsOf(sealed),
+            models = modelsOf(sealed).toMap(),
             observations = observationsOf(sealed),
             links = emptyMap(),
         )
@@ -84,70 +89,120 @@ class RecordingPublisher(
         sealed.routerInvocationModel?.let { "router" to it.asRecordRef() },
     )
 
-    private fun observationsOf(sealed: SealedCapture): List<StageObservation> {
-        val stages = mutableListOf<StageObservation>()
+    private fun observationsOf(sealed: SealedCapture): Map<String, StageObservation> {
+        // Derived facts used by more than one stage. Read once so the stages cannot disagree about
+        // what happened in this capture.
+        // The stage history is the full record of what happened; the terminal outcome is the last
+        // word. Both are consulted so a capture is described by its observed facts even when the
+        // terminal outcome is not the one that carried them.
+        val history = sealed.stageHistory + listOfNotNull(sealed.outcome)
+        val recognized = history.filterIsInstance<CollectionOutcome.Recognized>().lastOrNull()
+        val notCollected = history.filterIsInstance<CollectionOutcome.NotCollected>().lastOrNull()
+        val routed = history.filterIsInstance<CollectionOutcome.Routed>().lastOrNull()
 
-        // Wake: completed with its decision when the detector ran, otherwise honestly not run.
+        // The ASR result that actually exists, from whichever outcome carried it. A routed or
+        // executed capture still has a transcript and a measured language; dropping them here was
+        // losing the most valuable part of the record.
+        val transcript = recognized?.transcript ?: notCollected?.observedText
+        val sourceLanguage = recognized?.detectedLanguage ?: notCollected?.measuredLanguage
+
+        return linkedMapOf(
+            "bleed" to bleedObservation(),
+            "wake" to wakeObservation(sealed),
+            "asr" to asrObservation(sealed, transcript, sourceLanguage),
+            "translation" to translationObservation(sealed),
+            "routing" to routingObservation(sealed, routed),
+            "execution" to executionObservation(sealed),
+        )
+    }
+
+    /**
+     * The signal filter. This record is only ever published after collection finished, so the
+     * filter let the segment through; the decision it made is not retained anywhere else.
+     */
+    private fun bleedObservation() = StageObservation.completed("decision" to "no_overlap")
+
+    private fun wakeObservation(sealed: SealedCapture): StageObservation {
         val measurement = sealed.wakeMeasurement
-        stages += if (measurement != null) {
-            StageObservation(
-                stage = "wake",
-                state = "completed",
-                fields = buildMap {
-                    if (measurement.score != null) put("score", measurement.score)
-                    if (measurement.threshold != null) put("threshold", measurement.threshold)
-                    put("decision", if (sealed.wakeState == SegmentObservation.WakeState.Detected) "detected" else "rejected")
-                },
+            ?: return StageObservation.notRun("not_measured")
+        return StageObservation.completed(
+            *buildMap<String, Any> {
+                if (measurement.score != null) put("score", measurement.score)
+                if (measurement.threshold != null) put("threshold", measurement.threshold)
+                put("decision", if (sealed.wakeState == SegmentObservation.WakeState.Detected) "detected" else "rejected")
+            }.toList().toTypedArray(),
+        )
+    }
+
+    private fun asrObservation(
+        sealed: SealedCapture,
+        transcript: String?,
+        sourceLanguage: String?,
+    ): StageObservation {
+        val fields = buildMap<String, Any> {
+            transcript?.let { put("text", it) }
+            sourceLanguage?.let { put("source_language", it) }
+        }
+        return when (sealed.outcome) {
+            is CollectionOutcome.AsrFailed -> StageObservation("failed", reason = "recognition_failed")
+
+            is CollectionOutcome.AsrCancelled -> StageObservation("cancelled")
+
+            is CollectionOutcome.Recognized, is CollectionOutcome.Routed, is CollectionOutcome.Executed,
+            is CollectionOutcome.RoutingNone, is CollectionOutcome.NotCollected,
+            -> StageObservation("completed", null, fields)
+
+            null ->
+                if (sealed.asrInvocationModel != null) {
+                    StageObservation("unknown", reason = "observation_unavailable", fields = fields)
+                } else {
+                    StageObservation("not_run", reason = "not_invoked")
+                }
+        }
+    }
+
+    private fun translationObservation(sealed: SealedCapture): StageObservation {
+        val translation = sealed.translation
+            ?: return StageObservation.notRun("not_invoked")
+        if (!translation.producedResult) {
+            return StageObservation.notRun("source_language_target_language")
+        }
+        return StageObservation.completed(
+            *buildMap<String, Any> {
+                translation.translatedText?.let { put("translated_text", it) }
+                translation.targetLanguage?.let { put("target_language", it) }
+            }.toList().toTypedArray(),
+        )
+    }
+
+    private fun routingObservation(sealed: SealedCapture, routed: CollectionOutcome.Routed?): StageObservation {
+        // A wake-positive trim that left no text is the one routing case the spec names.
+        if (sealed.outcome is CollectionOutcome.NotCollected && sealed.outcome.reason == "wake_only") {
+            return StageObservation.notRun("wake_only")
+        }
+        if (routed != null) {
+            return StageObservation.completed("predicted_intent" to routed.intentCategory)
+        }
+        val none = (sealed.stageHistory + listOfNotNull(sealed.outcome))
+            .filterIsInstance<CollectionOutcome.RoutingNone>().lastOrNull()
+        if (none != null) {
+            return StageObservation(
+                "failed",
+                reason = "no_usable_intent",
+                fields = buildMap<String, Any> { none.recognizerReason?.let { put("reason_detail", it) } },
             )
+        }
+        return if (sealed.routerInvocationModel != null) {
+            StageObservation("completed")
         } else {
-            StageObservation(stage = "wake", state = "not_run", reason = "not_measured")
+            StageObservation.notRun("not_invoked")
         }
+    }
 
-        // ASR: the observed language and whether recognition produced text.
-        stages += when (val outcome = sealed.outcome) {
-            is CollectionOutcome.Recognized -> StageObservation(
-                stage = "asr",
-                state = "completed",
-                fields = buildMap {
-                    put("text", outcome.transcript)
-                    outcome.detectedLanguage?.let { put("source_language", it) }
-                },
-            )
-
-            is CollectionOutcome.Routed, is CollectionOutcome.Executed -> StageObservation(stage = "asr", state = "completed")
-
-            is CollectionOutcome.NotCollected -> StageObservation(
-                stage = "asr",
-                state = if (sealed.asrInvocationModel != null) "completed" else "not_run",
-                reason = if (sealed.asrInvocationModel != null) null else "not_invoked",
-                fields = buildMap {
-                    outcome.measuredLanguage?.let { put("source_language", it) }
-                    outcome.observedText?.let { put("text", it) }
-                },
-            )
-
-            is CollectionOutcome.RoutingNone -> StageObservation(stage = "asr", state = "completed")
-
-            is CollectionOutcome.AsrFailed -> StageObservation(stage = "asr", state = "failed", reason = "recognition_failed")
-
-            is CollectionOutcome.AsrCancelled -> StageObservation(stage = "asr", state = "cancelled")
-
-            null -> StageObservation(stage = "asr", state = "unknown")
-        }
-
-        // Routing: a wake-positive trim that left no text is the one case the spec names.
-        stages += when {
-            sealed.routerInvocationModel != null ->
-                StageObservation(stage = "routing", state = "completed")
-
-            // A wake-positive trim that left no text is the one routing case the spec names.
-            sealed.outcome is CollectionOutcome.NotCollected && sealed.outcome.reason == "wake_only" ->
-                StageObservation(stage = "routing", state = "not_run", reason = "wake_only")
-
-            else -> StageObservation(stage = "routing", state = "not_run", reason = "not_invoked")
-        }
-
-        return stages
+    private fun executionObservation(sealed: SealedCapture): StageObservation {
+        val observed = sealed.executionOutcome?.wire
+            ?: return StageObservation.notRun("not_dispatched")
+        return StageObservation.completed("outcome" to observed)
     }
 
     /** Writes a 16 kHz mono PCM16 WAV: a 44-byte RIFF header then the samples. */

@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.DeletionReceipt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountProjection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan
@@ -46,7 +45,6 @@ class EnrollmentControllerTest {
         withdrawal: WithdrawalState = WithdrawalState.NOT_ENROLLED,
         epoch: String? = null,
     ) = VoiceSharingAccountProjection(
-        membershipRevision = revision,
         plan = VoiceSharingPlan.FREE,
         voiceSharingEnrolled = enrolled,
         enrollmentEpoch = epoch,
@@ -58,7 +56,7 @@ class EnrollmentControllerTest {
     private class FakeOperations(
         private val withdrawResult: VoiceSharingMutationResult = VoiceSharingMutationResult.Failure,
         private val enrollResult: VoiceSharingMutationResult = VoiceSharingMutationResult.Failure,
-        private val deletion: DeletionReceipt? = null,
+        private val deletion: Boolean = true,
     ) {
         val calls = mutableListOf<String>()
 
@@ -76,7 +74,7 @@ class EnrollmentControllerTest {
             return withdrawResult
         }
 
-        suspend fun deleteData(): DeletionReceipt? {
+        suspend fun deleteData(): Boolean {
             calls += "delete"
             return deletion
         }
@@ -113,7 +111,7 @@ class EnrollmentControllerTest {
                 VoiceSharingMutationResult.Failure
             },
             withdrawOperation = { VoiceSharingMutationResult.Failure },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
         )
@@ -170,7 +168,7 @@ class EnrollmentControllerTest {
         val subject = EnrollmentController(
             enrollOperation = { VoiceSharingMutationResult.Failure },
             withdrawOperation = { VoiceSharingMutationResult.Failure },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
         )
@@ -243,7 +241,7 @@ class EnrollmentControllerTest {
         val subject = EnrollmentController(
             enrollOperation = { VoiceSharingMutationResult.Failure },
             withdrawOperation = { VoiceSharingMutationResult.Failure },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session.get() },
             underOwnerTransaction = { block ->
@@ -303,7 +301,7 @@ class EnrollmentControllerTest {
                 VoiceSharingMutationResult.Failure
             },
             withdrawOperation = { VoiceSharingMutationResult.Failure },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
         )
@@ -350,7 +348,7 @@ class EnrollmentControllerTest {
                 VoiceSharingMutationResult.Failure
             },
             withdrawOperation = { VoiceSharingMutationResult.Failure },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
         )
@@ -389,7 +387,7 @@ class EnrollmentControllerTest {
                 VoiceSharingMutationResult.Failure
             },
             withdrawOperation = { VoiceSharingMutationResult.Failure },
-            deleteOperation = { null },
+            deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
         )
@@ -473,26 +471,26 @@ class EnrollmentControllerTest {
 
     @Test
     fun `deletion is separate from withdrawal and a 202 is pending not deleted`() = runTest {
-        val operations = FakeOperations(deletion = DeletionReceipt("del-1", "deletion_pending"))
+        val operations = FakeOperations(deletion = true)
         val subject = controller(operations)
 
         val outcome = subject.deleteSharedData()
 
         assertEquals("deletion must not withdraw as a side effect", listOf("delete"), operations.calls)
-        val deletionState = (outcome as? EnrollmentOutcome.DeletionRequested)?.state
+        val deletionState = (outcome as? EnrollmentOutcome.DataDeleted)?.state
         assertEquals(
-            "a 202 means the deletion is PENDING, never that data was deleted",
-            DeletionState.Pending,
+            "deletion is synchronous, so a confirmed answer means the data is gone",
+            DeletionState.Done,
             deletionState,
         )
     }
 
     @Test
-    fun `a deletion that returns no receipt is surfaced as failed rather than assumed`() = runTest {
-        val operations = FakeOperations(deletion = null)
+    fun `a deletion the server did not confirm is surfaced as failed rather than assumed`() = runTest {
+        val operations = FakeOperations(deletion = false)
         val outcome = controller(operations).deleteSharedData()
         assertTrue(
-            "no receipt means the deletion status is unknown; it must not be reported as requested",
+            "an unconfirmed deletion must not be reported as done",
             outcome is EnrollmentOutcome.Failed,
         )
     }
@@ -509,7 +507,7 @@ class EnrollmentControllerTest {
     }
 
     private fun projectionJsonFor(revision: String) = """
-        {"schema_version":1,"membership_revision":"$revision","plan":"free",
+        {"schema_version":1,"plan":"free",
          "voice_sharing_enrolled":false,"enrollment_epoch":null,
          "accepted_disclosure_version":null,"withdrawal_state":"not_enrolled"}
     """.trimIndent()

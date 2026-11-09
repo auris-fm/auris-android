@@ -95,7 +95,6 @@ internal object ProjectionJsonParser {
         reader.beginObject()
 
         var schemaVersion: Double? = null
-        var revision: String? = null
         var plan: String? = null
         var enrolled: Boolean? = null
         var epoch: String? = null
@@ -115,8 +114,6 @@ internal object ProjectionJsonParser {
                     schemaVersion = lexeme.toDouble()
                     if (BigDecimal(lexeme).compareTo(BigDecimal.ONE) != 0) return null
                 }
-
-                "membership_revision" -> revision = reader.nonEmptyStringOrNull() ?: return null
 
                 "plan" -> plan = reader.nonEmptyStringOrNull() ?: return null
 
@@ -153,7 +150,6 @@ internal object ProjectionJsonParser {
         if (!consistent) return null
 
         return VoiceSharingAccountProjection(
-            membershipRevision = revision!!,
             plan = if (plan == "pro") VoiceSharingPlan.PRO else VoiceSharingPlan.FREE,
             voiceSharingEnrolled = enrolled,
             enrollmentEpoch = epoch,
@@ -186,7 +182,6 @@ internal object ProjectionJsonParser {
 
     private val ALLOWED_KEYS = setOf(
         "schema_version",
-        "membership_revision",
         "plan",
         "voice_sharing_enrolled",
         "enrollment_epoch",
@@ -195,9 +190,7 @@ internal object ProjectionJsonParser {
     )
 }
 
-/** Server-issued opaque membership revision: never sorted, equality/current-only usage. */
 data class VoiceSharingAccountProjection(
-    val membershipRevision: String,
     val plan: VoiceSharingPlan,
     val voiceSharingEnrolled: Boolean,
     val enrollmentEpoch: String?,

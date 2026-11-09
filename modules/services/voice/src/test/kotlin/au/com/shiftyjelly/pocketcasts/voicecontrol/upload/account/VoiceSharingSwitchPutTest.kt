@@ -92,14 +92,12 @@ class VoiceSharingSwitchPutTest {
 
     private fun projectionJson(
         enrolled: Boolean,
-        revision: String,
         epoch: String? = if (enrolled) "epoch-1" else null,
         disclosure: String? = if (enrolled) "voice-sharing-v1" else null,
         withdrawal: String = if (enrolled) "active" else "not_enrolled",
     ): String = StringBuilder().apply {
         append("{")
         append("\"schema_version\":1,")
-        append("\"membership_revision\":\"$revision\",")
         append("\"plan\":\"free\",")
         append("\"voice_sharing_enrolled\":$enrolled,")
         append("\"enrollment_epoch\":${epoch?.let { "\"$it\"" } ?: "null"},")
@@ -116,9 +114,9 @@ class VoiceSharingSwitchPutTest {
     /** Stands in for the server's queue so a control can decide what each request gets. */
     private val queue = ConcurrentLinkedQueue<MockResponse>()
 
-    private fun okProjection(enrolled: Boolean, revision: String) = MockResponse()
+    private fun okProjection(enrolled: Boolean, revision: String = "unused") = MockResponse()
         .setResponseCode(200)
-        .setBody(projectionJson(enrolled = enrolled, revision = revision))
+        .setBody(projectionJson(enrolled = enrolled))
 
     private suspend fun seedCurrent(enrolled: Boolean, revision: String) {
         answer(okProjection(enrolled, revision))

@@ -193,6 +193,14 @@ internal class TestOwner(
  * - Per-operation identity: a bounded immutable retry reuses the SAME request_id and the SAME
  *   captured revision; the session token is captured BEFORE the await, so a session ended while
  *   the call is in flight cannot have its response applied.
+||||||| /tmp/mfb
+ * expected_membership_revision (the current revision captured before the call), and
+ * accepted_disclosure_version; withdrawal carries request_id, expected_revision and the
+ * nullable epoch; deletion is a distinct DELETE returning 202 deletion_pending — withdrawal
+ * is never deletion.
+ * - Per-operation identity: a bounded immutable retry reuses the same request_id and the same
+ * captured revision; the session token is captured BEFORE the await, so a session ended while
+ * the call is in flight cannot have its response applied.
  */
 class VoiceSharingAccountOperationsTest {
 
@@ -229,14 +237,12 @@ class VoiceSharingAccountOperationsTest {
     }
 
     private fun projectionJson(
-        revision: String = "rev-1",
         withdrawal: String = "not_enrolled",
         enrolled: Boolean = false,
         epoch: String? = null,
         disclosure: String? = null,
     ): String = buildString {
         append("{\"schema_version\":1,")
-        append("\"membership_revision\":\"$revision\",")
         append("\"plan\":\"free\",")
         append("\"voice_sharing_enrolled\":$enrolled,")
         append("\"enrollment_epoch\":${epoch?.let { "\"$it\"" } ?: "null"},")
@@ -244,8 +250,18 @@ class VoiceSharingAccountOperationsTest {
         append("\"withdrawal_state\":\"$withdrawal\"}")
     }
 
-    private fun enqueueProjection(revision: String = "rev-1") {
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = revision)))
+    private fun enqueueProjection(epoch: String = "epoch-1", enrolled: Boolean = false) {
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                // A withdrawn account still carries the epoch it was enrolled under, without
+                // consent: the seed a test needs when what follows must be the FIRST consent.
+                if (enrolled) {
+                    projectionJson(withdrawal = "active", enrolled = true, epoch = epoch, disclosure = "v3")
+                } else {
+                    projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = epoch, disclosure = null)
+                },
+            ),
+        )
     }
 
     private fun sentAuthHeaders(): List<String> {
@@ -270,7 +286,7 @@ class VoiceSharingAccountOperationsTest {
 
         override suspend fun putVoiceSharing(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
 
-        override suspend fun deleteData(bearer: String?, body: okhttp3.RequestBody): Response<ResponseBody> = fail()
+        override suspend fun deleteData(bearer: String?): Response<ResponseBody> = fail()
     }
 
     @Test
@@ -280,7 +296,7 @@ class VoiceSharingAccountOperationsTest {
         val recorded = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("GET", recorded.method)
         assertTrue(recorded.path!!.startsWith("/api/v1/account/voice-sharing"))
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
+        assertEquals(WithdrawalState.WITHDRAWN, state.projection.value!!.withdrawalState)
     }
 
     @Test
@@ -295,6 +311,13 @@ class VoiceSharingAccountOperationsTest {
         // 2. Enrollment is the switch turned on: an exact body of the desired state plus the
         // Disclosure the user accepted; the last-read revision travels as the If-Match precondition.
         enqueueProjection(revision = "rev-2")
+||||||| /tmp/mfb
+        // 2. Enrollment is the switch turned on: the desired state plus the disclosure the user
+        // accepted. The last request wins, so there is no revision and no precondition to carry.
+        enqueueProjection(revision = "rev-2")
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-2", disclosure = "v3")),
+        )
         assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
@@ -307,7 +330,7 @@ class VoiceSharingAccountOperationsTest {
             posted.body.readUtf8(),
         )
         // The enrollment response (new projection) replaced the GET projection.
-        assertEquals("rev-2", state.projection.value!!.membershipRevision)
+        assertEquals("epoch-2", state.projection.value!!.enrollmentEpoch)
     }
 
     @Test
@@ -320,7 +343,7 @@ class VoiceSharingAccountOperationsTest {
         )
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
-                projectionJson(revision = "rev-1", withdrawal = "withdrawn", enrolled = false, epoch = "epoch-9"),
+                projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-9"),
             ),
         )
         assertTrue(operations.refreshProjection())
@@ -340,26 +363,22 @@ class VoiceSharingAccountOperationsTest {
     }
 
     @Test
-    fun `deletion is a distinct DELETE - 202 deletion_pending parsed, projection untouched`() = runTest {
-        // Seed the current projection first; then the deletion's 202 receipt.
+    fun `deletion is a synchronous DELETE that answers 204 and leaves the projection untouched`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        server.enqueue(
-            MockResponse().setResponseCode(202)
-                .setBody("{\"schema_version\":1,\"deletion_request_id\":\"del-123\",\"status\":\"deletion_pending\"}"),
-        )
+        server.enqueue(MockResponse().setResponseCode(204))
         assertTrue(operations.refreshProjection())
 
-        val receipt = operations.deleteData()
-        assertTrue(receipt != null)
-        assertEquals("del-123", receipt!!.deletionRequestId)
-        assertEquals("deletion_pending", receipt.status)
-        server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
+        assertTrue("a confirmed 204 means the data is deleted", operations.deleteData())
+
+        server.takeRequest(5, TimeUnit.SECONDS)!! // the seeding GET
         val deleted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("DELETE", deleted.method)
         assertTrue(deleted.path!!.startsWith("/api/v1/account/voice-sharing/data"))
-        assertTrue(deleted.body.readUtf8().contains("\"request_id\":"))
-        // Membership projection unchanged by the deletion.
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
+        // No request id and no body: deletion is one synchronous call, not a workflow to follow.
+        assertEquals("", deleted.body.readUtf8())
+
+        // Deletion never touches the membership projection.
+        assertEquals(WithdrawalState.NOT_ENROLLED, state.projection.value!!.withdrawalState)
     }
 
     @Test
@@ -425,6 +444,78 @@ class VoiceSharingAccountOperationsTest {
             "{\"schema_version\":1,\"deletion_request_id\":\"del-4\",\"status\":\"deletion_pending\",\"surprise\":1}",
         )
         assertTrue("an unknown key must not yield a receipt", unknownKey == null)
+||||||| /tmp/mfb
+    fun `deletion receipt cutoff is optional, validated when present, rejected when malformed`() = runTest {
+        val receipt202: suspend (String) -> DeletionReceipt? = { body: String ->
+            server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+            server.enqueue(MockResponse().setResponseCode(202).setBody(body))
+            assertTrue(operations.refreshProjection())
+            val r = operations.deleteData()
+            server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
+            server.takeRequest(5, TimeUnit.SECONDS)!! // drain the DELETE
+            r
+        }
+        // OPTIONAL present + valid RFC3339: accepted and carried.
+        val withCutoff = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-1\",\"cutoff\":\"2026-10-31T06:00:00Z\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(withCutoff != null)
+        assertEquals("2026-10-31T06:00:00Z", requireNotNull(withCutoff).cutoff)
+        // ABSENT: still valid.
+        val withoutCutoff = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-2\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(withoutCutoff != null && withoutCutoff.cutoff == null)
+        // MALFORMED cutoff: a non-instant value is a malformed receipt, never ignored.
+        val malformed = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-3\",\"cutoff\":\"not-a-time\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue("a malformed cutoff must not yield a receipt", malformed == null)
+        // RFC3339Nano fractional seconds and an OFFSET timestamp are real instants: accepted.
+        val nano = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-5\",\"cutoff\":\"2026-10-31T06:00:00.123456789Z\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(nano != null && nano.cutoff == "2026-10-31T06:00:00.123456789Z")
+        val offset = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-6\",\"cutoff\":\"2026-10-31T14:00:00+08:00\",\"status\":\"deletion_pending\"}",
+        )
+        assertTrue(offset != null && offset.cutoff == "2026-10-31T14:00:00+08:00")
+        // JSON null / non-string / EMPTY cutoff values: all malformed, never tolerated.
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-7\",\"cutoff\":null,\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-8\",\"cutoff\":17,\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-9\",\"cutoff\":\"\",\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        // DUPLICATE cutoff member: the strict decoder refuses duplicate keys.
+        assertTrue(
+            receipt202(
+                "{\"schema_version\":1,\"deletion_request_id\":\"del-10\",\"cutoff\":\"2026-10-31T06:00:00Z\",\"cutoff\":\"2026-11-01T06:00:00Z\",\"status\":\"deletion_pending\"}",
+            ) == null,
+        )
+        // UNKNOWN key: still rejected (the strict key set grows only by the ruled member).
+        val unknownKey = receipt202(
+            "{\"schema_version\":1,\"deletion_request_id\":\"del-4\",\"status\":\"deletion_pending\",\"surprise\":1}",
+        )
+        assertTrue("an unknown key must not yield a receipt", unknownKey == null)
+    fun `a deletion the server did not confirm is reported as failure, not assumed`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        server.enqueue(MockResponse().setResponseCode(500).setBody("{}"))
+        assertTrue(operations.refreshProjection())
+        assertFalse("an unconfirmed deletion must not be reported as done", operations.deleteData())
+    }
+    @Test
+    fun `deletion requires a bearer and never sends without one`() = runTest {
+        assertFalse(operations.deleteData())
     }
 
     @Test
@@ -433,6 +524,11 @@ class VoiceSharingAccountOperationsTest {
         // switch accounts BEFORE the ownership is captured. Send A's bearer under A's ownership or
         // refuse — never A's bearer labelled as B's request.
         enqueueProjection("rev-A")
+||||||| /tmp/mfb
+        // Switch accounts BEFORE the ownership is captured. Send A's bearer under A's ownership or
+        // Refuse — never A's bearer labelled as B's request.
+        enqueueProjection("rev-A")
+        enqueueProjection(epoch = "epoch-A")
         assertTrue(operations.refreshProjection())
 
         lateinit var switched: VoiceSharingAccountOperations
@@ -459,7 +555,7 @@ class VoiceSharingAccountOperationsTest {
             onAurisCredentialRefused = { },
         )
 
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = "rev-B-enrolled", withdrawal = "active", enrolled = true, epoch = "epoch-B", disclosure = "v3")))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-B", disclosure = "v3")))
         val outcome = switched.enroll(acceptedDisclosureVersion = "v3")
 
         assertEquals("PREMISE: B owns the account now", "other@example.com", owner.authoritySnapshot().accountName)
@@ -470,12 +566,12 @@ class VoiceSharingAccountOperationsTest {
 
     @Test
     fun `a delayed answer for account A never becomes account B's consent`() = runTest {
-        enqueueProjection("rev-A")
+        enqueueProjection(epoch = "epoch-A")
         assertTrue(operations.refreshProjection())
         // A's enrollment pauses on the wire long enough for a DIFFERENT person to sign in.
         server.enqueue(
             MockResponse().setResponseCode(200)
-                .setBody(projectionJson(revision = "rev-A-enrolled", withdrawal = "active", enrolled = true, epoch = "epoch-A", disclosure = "v3"))
+                .setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-A", disclosure = "v3"))
                 .setHeadersDelay(400, TimeUnit.MILLISECONDS),
         )
         val slow = async { operations.enroll(acceptedDisclosureVersion = "v3") }
@@ -489,16 +585,20 @@ class VoiceSharingAccountOperationsTest {
         // The GET's own answer still stands (B has published nothing to replace it); what must NOT
         // happen is A's ENROLLMENT landing as B's consent evidence.
         assertEquals("rev-A", state.projection.value?.membershipRevision)
+||||||| /tmp/mfb
+        // Happen is A's ENROLLMENT landing as B's consent evidence.
+        assertEquals("rev-A", state.projection.value?.membershipRevision)
+        assertEquals("epoch-A", state.projection.value?.enrollmentEpoch)
         assertFalse("B must NOT inherit A's enrollment as B's consent", state.projection.value?.voiceSharingEnrolled ?: false)
     }
 
     @Test
     fun `a delayed answer for a SIGNED-OUT session never republishes consent`() = runTest {
-        enqueueProjection("rev-A")
+        enqueueProjection(epoch = "epoch-A")
         assertTrue(operations.refreshProjection())
         server.enqueue(
             MockResponse().setResponseCode(200)
-                .setBody(projectionJson(revision = "rev-A-enrolled", withdrawal = "active", enrolled = true, epoch = "epoch-A", disclosure = "v3"))
+                .setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-A", disclosure = "v3"))
                 .setHeadersDelay(400, TimeUnit.MILLISECONDS),
         )
         val slow = async { operations.enroll(acceptedDisclosureVersion = "v3") }
@@ -508,7 +608,7 @@ class VoiceSharingAccountOperationsTest {
         val outcome = slow.await()
 
         assertTrue(outcome is VoiceSharingMutationResult.Failure)
-        assertEquals("rev-A", state.projection.value?.membershipRevision)
+        assertEquals("epoch-A", state.projection.value?.enrollmentEpoch)
         assertFalse("a signed-out session must not regain consent evidence", state.projection.value?.voiceSharingEnrolled ?: false)
     }
 
@@ -518,7 +618,9 @@ class VoiceSharingAccountOperationsTest {
         assertTrue(operations.refreshProjection())
 
         server.enqueue(MockResponse().setResponseCode(503)) // retryable
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = "rev-2")))
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-2", disclosure = "v3")),
+        )
         assertApplied(operations.enroll(acceptedDisclosureVersion = "v3"))
 
         server.takeRequest(5, TimeUnit.SECONDS)!! // the GET
@@ -568,7 +670,7 @@ class VoiceSharingAccountOperationsTest {
         assertTrue(operations.refreshProjection())
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"schema_version\":2}"))
         assertTrue(operations.withdraw() is VoiceSharingMutationResult.Failure)
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
+        assertEquals(WithdrawalState.NOT_ENROLLED, state.projection.value!!.withdrawalState)
     }
 }
 

@@ -88,16 +88,15 @@ class RecordingPublisherTest {
     fun `the measured wake score and threshold and the asr language are recorded`() {
         val q = FolderQueue(tmp.newFolder("q"), 32, {})
         publisher(q).publish(sealed())
-        val observations = metadata(q).getJSONArray("observations")
-        val wake = (0 until observations.length()).map { observations.getJSONObject(it) }
-            .single { it.getString("stage") == "wake" }
+        // observations is an OBJECT keyed by stage, which is what the server validates.
+        val observations = metadata(q).getJSONObject("observations")
+        val wake = observations.getJSONObject("wake")
         assertEquals("completed", wake.getString("state"))
         assertEquals("detected", wake.getString("decision"))
         assertEquals(0.91, wake.getDouble("score"), 1e-9)
         assertEquals(0.55, wake.getDouble("threshold"), 1e-9)
 
-        val asr = (0 until observations.length()).map { observations.getJSONObject(it) }
-            .single { it.getString("stage") == "asr" }
+        val asr = observations.getJSONObject("asr")
         assertEquals("en-US", asr.getString("source_language"))
         assertEquals("skip this ad", asr.getString("text"))
     }
@@ -106,9 +105,8 @@ class RecordingPublisherTest {
     fun `a capture with no wake measurement reports not run rather than inventing a score`() {
         val q = FolderQueue(tmp.newFolder("q"), 32, {})
         publisher(q).publish(sealed(measurement = null))
-        val observations = metadata(q).getJSONArray("observations")
-        val wake = (0 until observations.length()).map { observations.getJSONObject(it) }
-            .single { it.getString("stage") == "wake" }
+        val observations = metadata(q).getJSONObject("observations")
+        val wake = observations.getJSONObject("wake")
         assertEquals("not_run", wake.getString("state"))
         assertFalse("an unmeasured score must not appear", wake.has("score"))
     }

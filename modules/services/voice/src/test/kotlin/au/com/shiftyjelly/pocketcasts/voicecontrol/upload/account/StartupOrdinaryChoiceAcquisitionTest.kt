@@ -61,7 +61,6 @@ class StartupOrdinaryChoiceAcquisitionTest {
 
     private fun projectionJson(): String = buildString {
         append("{\n\"schema_version\":1,")
-        append("\n\"membership_revision\":\"rev-1\",")
         append("\n\"plan\":\"free\",")
         append("\n\"voice_sharing_enrolled\":false,")
         append("\n\"enrollment_epoch\":null,")

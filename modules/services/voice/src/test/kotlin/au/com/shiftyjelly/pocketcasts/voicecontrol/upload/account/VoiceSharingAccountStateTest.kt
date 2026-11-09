@@ -7,7 +7,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 internal fun projectionJson(
-    revision: String = "rev-abc",
     plan: String = "pro",
     enrolled: Boolean = true,
     epoch: String? = "epoch-1",
@@ -18,7 +17,6 @@ internal fun projectionJson(
 ): String = buildString {
     append("{")
     append("\"schema_version\":$schemaVersion,")
-    append("\"membership_revision\":\"$revision\",")
     append("\"plan\":\"$plan\",")
     if ("voice_sharing_enrolled" !in rawOverrides) append("\"voice_sharing_enrolled\":$enrolled,")
     if ("enrollment_epoch" !in rawOverrides) append("\"enrollment_epoch\":${epoch?.let { "\"$it\"" } ?: "null"},")
@@ -34,7 +32,7 @@ internal fun projectionJson(
  * request issuance (not account ID, not async flow observation — a conflating flow must not be
  * the invalidation mechanism), token-scoped authority applies (only the originally issued
  * session token may apply a response), enrollment/withdrawal consistency, and the opaque
- * membership revision exposed for equality only.
+ * projection shape the server actually returns.
  */
 class VoiceSharingAccountStateTest {
 
@@ -45,7 +43,7 @@ class VoiceSharingAccountStateTest {
     @Test
     fun `valid projection body parses into the full projection`() {
         val projection = state().parseProjection(projectionJson())!!
-        assertEquals("rev-abc", projection.membershipRevision)
+        assertEquals(VoiceSharingPlan.PRO, projection.plan)
         assertEquals(VoiceSharingPlan.PRO, projection.plan)
         assertTrue(projection.voiceSharingEnrolled)
         assertEquals("epoch-1", projection.enrollmentEpoch)
@@ -106,9 +104,8 @@ class VoiceSharingAccountStateTest {
     // --- nonempty fields + enrollment/withdrawal consistency ---
 
     @Test
-    fun `empty revision epoch or disclosure fails closed`() {
+    fun `empty epoch or disclosure fails closed`() {
         val st = state()
-        assertNull(st.parseProjection(projectionJson(revision = "")))
         assertNull(st.parseProjection(projectionJson(epoch = "")))
         assertNull(st.parseProjection(projectionJson(disclosure = "")))
     }
@@ -138,8 +135,8 @@ class VoiceSharingAccountStateTest {
 
     @Test
     fun `duplicate top-level keys fail closed`() {
-        val json = "{\"schema_version\":1,\"membership_revision\":\"a\",\"membership_revision\":\"b\"," +
-            "\"plan\":\"pro\",\"voice_sharing_enrolled\":true,\"enrollment_epoch\":\"e\"," +
+        val json = "{\"schema_version\":1,\"plan\":\"pro\",\"plan\":\"free\"," +
+            "\"voice_sharing_enrolled\":true,\"enrollment_epoch\":\"e\"," +
             "\"accepted_disclosure_version\":\"v\",\"withdrawal_state\":\"active\"}"
         assertNull(state().parseProjection(json))
     }
@@ -151,10 +148,10 @@ class VoiceSharingAccountStateTest {
         val st = state()
         assertNull(st.projection.value)
         assertTrue(st.publishJson(projectionJson()))
-        assertEquals("rev-abc", st.projection.value!!.membershipRevision)
+        assertTrue(st.projection.value!!.voiceSharingEnrolled)
         assertEquals(1L, st.publicationCount())
-        assertTrue(st.publishJson(projectionJson(revision = "rev-2")))
-        assertEquals("rev-2", st.projection.value!!.membershipRevision)
+        assertTrue(st.publishJson(projectionJson(epoch = "epoch-2")))
+        assertEquals("epoch-2", st.projection.value!!.enrollmentEpoch)
         assertEquals(2L, st.publicationCount())
     }
 
@@ -171,10 +168,10 @@ class VoiceSharingAccountStateTest {
     fun `publication listener observes both the projection and its loss`() {
         val st = state()
         val seen = mutableListOf<String?>()
-        st.onProjectionListener = { seen += it?.membershipRevision }
+        st.onProjectionListener = { seen += it?.enrollmentEpoch }
         assertTrue(st.publishJson(projectionJson()))
         st.clear()
-        assertEquals(listOf("rev-abc", null), seen)
+        assertEquals(listOf("epoch-1", null), seen)
     }
 
     /** Publication helper used by the controls: parse, then publish (never a raw string). */
@@ -218,12 +215,12 @@ class VoiceSharingAccountStateTest {
     @Test
     fun `legal key escapes are decoded - escaped alias of a duplicate key fails, unique escaped key parses`() {
         val st = state()
-        // The escape decodes to membership_revision, which is also present plainly: duplicate.
-        val dup = """{"schema_version":1,"membership_revision":"a","member\u0073hip_revision":"b","plan":"pro","voice_sharing_enrolled":true,"enrollment_epoch":"e","accepted_disclosure_version":"v","withdrawal_state":"active"}"""
+        // The escape decodes to `plan`, which is also present plainly: duplicate.
+        val dup = """{"schema_version":1,"plan":"pro","pl\u0061n":"free","voice_sharing_enrolled":true,"enrollment_epoch":"e","accepted_disclosure_version":"v","withdrawal_state":"active"}"""
         assertNull(st.parseProjection(dup))
         // A single escaped key is a legal spelling and must parse.
-        val alias = """{"schema_version":1,"member\u0073hip_revision":"rev-esc","plan":"pro","voice_sharing_enrolled":true,"enrollment_epoch":"e","accepted_disclosure_version":"v","withdrawal_state":"active"}"""
-        assertEquals("rev-esc", st.parseProjection(alias)?.membershipRevision)
+        val alias = """{"schema_version":1,"pl\u0061n":"pro","voice_sharing_enrolled":true,"enrollment_epoch":"e","accepted_disclosure_version":"v","withdrawal_state":"active"}"""
+        assertEquals("e", st.parseProjection(alias)?.enrollmentEpoch)
     }
 
     @Test
@@ -245,6 +242,6 @@ class VoiceSharingAccountStateTest {
 
     @Test
     fun `unparseable body never becomes a projection`() {
-        assertNull(state().parseProjection("{\"schema_version\":1,\"membership_revision\":\"a\""))
+        assertNull(state().parseProjection("{\"schema_version\":1,\"plan\":\"pro\""))
     }
 }

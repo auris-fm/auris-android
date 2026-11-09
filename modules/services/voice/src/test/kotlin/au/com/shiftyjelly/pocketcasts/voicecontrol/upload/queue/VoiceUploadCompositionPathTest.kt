@@ -944,7 +944,7 @@ class VoiceUploadCompositionPathTest {
             runDrain(drain)
 
             assertTrue(
-                "an over-cap entry must still upload - the attempt cap is gone (spec 05ff27d0)",
+                "an over-cap entry must still upload - the attempt cap is gone",
                 hits.get() >= 1,
             )
             org.junit.Assert.assertNull(store2.durableCapture(id))

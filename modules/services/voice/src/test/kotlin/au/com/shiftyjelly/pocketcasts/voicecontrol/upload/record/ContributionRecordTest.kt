@@ -148,7 +148,7 @@ class ContributionRecordTest {
      * that is what a persisted record is re-read from.
      */
     @Test
-    fun `rejected_by_bleed round-trips only beside an OBSERVED bleed decision - spec 1e79e5b4`() {
+    fun `rejected_by_bleed round-trips only beside an observed bleed decision`() {
         val node = complete(builder())
             .replaceStage(
                 StageName.Bleed,

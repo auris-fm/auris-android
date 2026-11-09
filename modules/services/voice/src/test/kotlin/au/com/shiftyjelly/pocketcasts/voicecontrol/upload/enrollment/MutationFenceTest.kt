@@ -129,7 +129,7 @@ class MutationFenceTest {
         assertTrue(
             "one of the two lock-order paths hung: the fence reads the owner session while holding " +
                 "its own lock while the scoped apply path takes the locks in the opposite order - " +
-                "that is the reviewer 445faa5c deadlock; the session snapshot must happen BEFORE the " +
+                "snapshotting the session after it is approved is the deadlock; the snapshot must happen BEFORE the " +
                 "fence lock on every path",
             bothFinished,
         )

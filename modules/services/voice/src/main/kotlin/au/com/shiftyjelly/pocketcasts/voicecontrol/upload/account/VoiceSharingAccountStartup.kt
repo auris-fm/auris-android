@@ -36,7 +36,7 @@ class VoiceSharingAccountStartup @Inject constructor(
      *
      * This is deliberate and it is the fix. The router picks the Auris provider only when a cloud
      * base URL is configured and answers with the static `user_<uuid>` bearer otherwise -- the same
-     * fallback defect iOS found in `cloudEdgeTokens` (@ios). For the sharing path there must be no
+     * fallback defect iOS found in `cloudEdgeTokens`. For the sharing path there must be no
      * branch to consult: the account route verifies Auris tokens only, so this path either has one
      * or is refused. `AurisScopedTokenProviding` carries NO fallback branch by construction.
      */

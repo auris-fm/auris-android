@@ -408,7 +408,7 @@ class DirectoryDurabilityTest {
         assertTrue("malformed retry state must not grant a retry", fresh.retryEligible(now).isEmpty())
         assertTrue(fresh.retryEligible(Long.MAX_VALUE / 2).isEmpty())
         assertTrue(
-            "malformed retry state refuses further attempts (reviewer 199ccdee)",
+            "malformed retry state refuses further attempts",
             fresh.recordAttempt(fresh.fence.currentGeneration(), id) == null,
         )
     }
@@ -2363,7 +2363,7 @@ class DirectoryDurabilityTest {
         }
         store.recover()
         assertTrue(
-            "recovery never refuses to serve over a large root (spec 2741a0ca): nothing would ever drain",
+            "recovery never refuses to serve over a large root: nothing would ever drain",
             store.readyEntries().any { it.captureId == id },
         )
 

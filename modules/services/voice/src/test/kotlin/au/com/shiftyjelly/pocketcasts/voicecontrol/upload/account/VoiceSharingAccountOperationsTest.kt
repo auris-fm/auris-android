@@ -299,7 +299,7 @@ class VoiceSharingAccountOperationsTest {
         assertEquals("/api/v1/account/voice-sharing", posted.path)
         assertEquals(listOf("rev-1"), posted.headers.values("If-Match"))
         assertEquals(
-            "the PUT body is exactly the desired state — no request_id, no derived fields (spec e3cfc8ae)",
+            "the PUT body is exactly the desired state — no request_id, no derived fields",
             "{\"enrolled\":true,\"disclosure_version\":\"v3\"}",
             posted.body.readUtf8(),
         )

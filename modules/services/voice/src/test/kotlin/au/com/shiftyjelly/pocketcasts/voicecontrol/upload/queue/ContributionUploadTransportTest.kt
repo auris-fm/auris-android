@@ -394,6 +394,10 @@ class ContributionUploadTransportTest {
         // (quota_exceeded, @cloud dc264066: NO retry_after_s today) must not burn the bounded
         // attempt budget in hours of jittered backoff. When the server names no minimum, the
         // transport supplies the floor itself: seconds until the next UTC midnight.
+||||||| /tmp/mfb
+        // (quota_exceeded, @cloud dc264066: NO retry_after_s today) must not burn the bounded
+        // Attempt budget in hours of jittered backoff. When the server names no minimum, the
+        // Transport supplies the floor itself: seconds until the next UTC midnight.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 429
@@ -413,6 +417,9 @@ class ContributionUploadTransportTest {
         // Spec 0d59b1d5: the retry minimum for quota_exceeded is the LARGER of the next-day
         // floor and the hint. A 120 s hint (the shape @cloud says ships today) must NOT permit
         // a retry before the accounting day rolls.
+||||||| /tmp/mfb
+        // Floor and the hint. A 120 s hint (the shape @cloud says ships today) must NOT permit
+        // A retry before the accounting day rolls.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 429
@@ -441,6 +448,9 @@ class ContributionUploadTransportTest {
     fun `a rate_limited refusal without a hint keeps the plain backoff`() {
         // The day floor is quota-specific (@cloud dc264066): rate limiting resolves on its own
         // backoff and must not be pushed to the next UTC midnight.
+||||||| /tmp/mfb
+        // The day floor is quota-specific (@cloud dc264066): rate limiting resolves on its own
+        // Backoff and must not be pushed to the next UTC midnight.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 429

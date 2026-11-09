@@ -3732,7 +3732,7 @@ class CloudRouteSinkTest {
     }
 
     /**
-     * The delivery-commitment frame CONFIRMS this turn's reservation -- @cloud's arrangement.
+     * The delivery-commitment frame CONFIRMS this turn's reservation -- that is the server's arrangement.
      *
      * WHAT DISTINGUISHES CONFIRMED FROM UNCONFIRMED, and my first two attempts missed it: the playback
      * calls are the SAME either way, because the player is already paused from the RESERVATION, and a

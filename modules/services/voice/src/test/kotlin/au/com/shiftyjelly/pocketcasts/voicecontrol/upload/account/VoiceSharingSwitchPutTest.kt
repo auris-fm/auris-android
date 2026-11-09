@@ -138,7 +138,7 @@ class VoiceSharingSwitchPutTest {
         assertTrue("desired state must be on the wire: $body", body.contains("\"enrolled\":true"))
         assertTrue("the accepted disclosure must be recorded: $body", body.contains("voice-sharing-v1"))
         assertEquals(
-            "the PUT body is EXACT: enrolled + disclosure_version and nothing else (spec e3cfc8ae)",
+            "the PUT body is exactly enrolled + disclosure_version and nothing else",
             "{\"enrolled\":true,\"disclosure_version\":\"voice-sharing-v1\"}",
             body,
         )

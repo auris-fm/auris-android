@@ -309,7 +309,7 @@ class RetryableRefusalRetentionTest {
             """{"schema_version":1,"code":"invalid_request"}""".toByteArray(),
         )
         assertTrue(
-            "400 invalid_request must classify Unservable (retain + stop serving, spec 5c811f83), " +
+            "400 invalid_request must classify Unservable (retain and stop serving), " +
                 "not Terminal (which deletes the recording)",
             invalidRequest is ContributionUploadTransport.Response.Unservable,
         )

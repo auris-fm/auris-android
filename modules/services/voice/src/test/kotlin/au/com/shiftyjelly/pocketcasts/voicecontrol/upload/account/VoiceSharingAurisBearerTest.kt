@@ -31,7 +31,7 @@ import retrofit2.Retrofit
  * fix is selection, not acquisition: [AurisTokenProvider] already mints and refreshes correctly.
  *
  * These controls pin the property that must hold afterwards, and they deliberately assert the
- * NEGATIVE case as hard as the happy one: @cloud's warning was that "the account request uses the
+ * NEGATIVE case as hard as the happy one: the measured warning was that "the account request uses the
  * Auris provider" is satisfiable while still leaving a stale bearer alive across a logout, which
  * would be a worse bug than the one being fixed.
  */

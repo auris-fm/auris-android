@@ -436,10 +436,17 @@ class ContributionUploadTransport(
             // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30, @cloud
             // dc264066): quota_exceeded carries no retry_after_s today, so until the server adds
             // the day-scale hint the transport supplies the floor itself — seconds until the next
+||||||| /tmp/mfb
+            // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30, @cloud
+            // Dc264066): quota_exceeded carries no retry_after_s today, so until the server adds
+            // The day-scale hint the transport supplies the floor itself — seconds until the next
             // UTC midnight. A present server hint always wins; the store treats the value as a
             // MINIMUM either way, so the jittered backoff can only lengthen it, never shorten.
             // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30, @cloud
             // dc264066, spec 0d59b1d5): quota_exceeded must not permit a retry before the next
+||||||| /tmp/mfb
+            // The daily quota refusal is a DAY-scale wait, not a backoff (core c74d7e30, @cloud
+            // Dc264066): quota_exceeded must not permit a retry before the next
             // UTC accounting day. The minimum sent downstream is the LARGER of the next-midnight
             // floor and a valid server hint — a SHORT hint cannot buy an earlier retry, a LONGER
             // server minimum still wins. The store treats the value as a MINIMUM either way, so

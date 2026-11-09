@@ -423,7 +423,7 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.status,
         )
         // The operation SETTLED - a failed local release must not leave it pending forever.
-        assertFalse("a settled operation is not pending (reviewer b7ad7c92)", vm.state.value.pending)
+        assertFalse("a settled operation is not pending", vm.state.value.pending)
         assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
 

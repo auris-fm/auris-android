@@ -538,7 +538,7 @@ class LoopbackHostDriverTest {
     private var lastTransport: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionUploadTransport? = null
 
     /**
-     * PROPOSED fixture-observation contract (pinned only when @cloud confirms): with
+     * PROPOSED fixture-observation contract (pinned only after the server confirms): with
      * AURIS_LOOPBACK_OBSERVE set, GET {base}/loopback/captures/{id} returns HTTP 200 and a JSON
      * object with EXACTLY the fields `capture_id` (string, must equal the requested id),
      * `committed` (boolean) and `response_dropped` (boolean). Parsed with the repository's

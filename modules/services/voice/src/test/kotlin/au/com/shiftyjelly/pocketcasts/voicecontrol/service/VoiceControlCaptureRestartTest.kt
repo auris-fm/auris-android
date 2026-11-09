@@ -94,7 +94,7 @@ import org.robolectric.shadows.ShadowAudioManager
  * `invalidatePendingStart`, `startIfNotRunning` and `captureRestartSignal` already present at the
  * pre-task baseline; 161092964..HEAD changed only the availability-sourced acquisition branch and
  * its logging in VoiceControlService, and OtherAppPlayingCondition is untouched by this task. The
- * sequence pinned here is therefore PRE-EXISTING lifecycle behavior, not a multiturn regression.
+ * sequence pinned here is therefore pre-existing lifecycle behavior, not a multiturn regression.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])

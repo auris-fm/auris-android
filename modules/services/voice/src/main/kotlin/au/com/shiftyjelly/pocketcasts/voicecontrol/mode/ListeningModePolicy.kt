@@ -26,8 +26,8 @@ import kotlinx.coroutines.flow.stateIn
  *
  * The question is why this start happened, not whether the app is visible. Two earlier versions got
  * it wrong in opposite directions: gating on "the app is in the background" made every automatic
- * recovery audible -- an automatic restart is always a background start -- which is the beep fight
- * with another app the owner reported (msg 2fdcdb5b), and dropping that condition cued every
+ * recovery audible -- an automatic restart is always a background start -- so the cue fought with
+ * whatever other app had just released the microphone, and dropping that condition cued every
  * recovery as well, since the foreground never told a first start from a restart.
  *
  * So the caller passes the answer:

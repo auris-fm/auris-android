@@ -79,8 +79,7 @@ import org.robolectric.shadows.AudioDeviceInfoBuilder
 import org.robolectric.shadows.ShadowAudioManager
 
 /**
- * REPRODUCTION of the device-observed stop/restart cycle on the installed multiturn build
- * (owner log, 2026-10-17):
+ * Reproduction of the device-observed stop/restart cycle on the installed multiturn build:
  *
  *   wake hit -> `other_app_playing` blocks briefly -> capture stops / VAD exits -> gate allowed
  *   again during teardown -> engine stopped again -> route Unknown -> external acquisition ->
@@ -91,7 +90,7 @@ import org.robolectric.shadows.ShadowAudioManager
  * VoiceControlGate, AndroidAudioRouteMonitor and RouteAcquisition — with only native boundaries
  * (Oboe hardware, ASR models/engines, notifications) stood in for.
  *
- * Provenance (@spec 3d4098f5 directive): git -S over origin/main..161092964 shows
+ * Provenance: git -S over origin/main..161092964 shows
  * `invalidatePendingStart`, `startIfNotRunning` and `captureRestartSignal` already present at the
  * pre-task baseline; 161092964..HEAD changed only the availability-sourced acquisition branch and
  * its logging in VoiceControlService, and OtherAppPlayingCondition is untouched by this task. The
@@ -320,7 +319,7 @@ class VoiceControlCaptureRestartTest {
             stream.attached = true
             // A successful attach IS the hand-off, observed at the hardware boundary: from here the
             // engine owns the stream, so an explicit close of it is a violation. No production seam
-            // is needed to know this (reviewer 78dbad5d).
+            // is needed to establish that.
             stream.handedOff = true
             stream.handOffCount++
             capturing = true
@@ -332,7 +331,7 @@ class VoiceControlCaptureRestartTest {
             capturing = false
             // NATIVE CONTRACT (jni_bridge.cpp:236-247): stop retires VAD, DELETES gCapture and
             // clears the slot -- even when the stream was never started. The engine tearing down its
-            // own stream is expected, not an acquisition close (reviewer 8832fa78).
+            // own stream is expected, not an acquisition close.
             installed?.let { closeStream(it, caller = "engine_stop_teardown") }
             installed = null
         }
@@ -583,8 +582,7 @@ class VoiceControlCaptureRestartTest {
     }
 
     /**
-     * DIAGNOSTIC (reviewer 7edc70b0, 2a1b535e): attribute every explicit close instead of inferring
-     * it from `closeCount`.
+     * Diagnostic: attribute every explicit close instead of inferring it from `closeCount`.
      *
      * CI failed the pinned test with `open=2 close=1`, which is consistent with two explanations
      * that a count cannot separate: an abandoned acquisition cleaned up by `release()` (correct), or
@@ -642,7 +640,7 @@ class VoiceControlCaptureRestartTest {
 
             // 2. The IDENTIFIED abandoned stream -- the one release closed -- received exactly one
             //    close. Counting release invocations instead would also count idempotent cleanup on
-            //    an empty slot, which is not a stream event at all (reviewer e9349231).
+            //    an empty slot, which is not a stream event at all.
             val abandoned = streams.filter { it.closeCalls.contains("RouteAcquisition.release") }
             assertEquals("exactly one stream was closed by release: $streams", 1, abandoned.size)
             val stream = abandoned.single()
@@ -668,15 +666,14 @@ class VoiceControlCaptureRestartTest {
     }
 
     /**
-     * THE OWNER-REPORTED BUG, AS A CONTROL ON THE SERVICE ITSELF (msg 2fdcdb5b, 2fdcdb6f; reviewer
-     * bc9c5e26).
+     * The owner-reported defect, as a control on the service itself.
      *
-     * Reviewer's finding: a predicate test cannot see this. `onStarted` runs on every fresh engine
-     * start, `clearCaptureState()` marks the engine stopped, and `recoverCapture()` nudges the mode
-     * observer into starting it again -- so the cue decision executes a second time, and any
-     * predicate that looks only at [au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode]
-     * answers exactly as it did for the first start. The bug lives in WHICH start this is, so the
-     * control has to drive a real start, termination and recovery and count the cues.
+     * A predicate test cannot see this. `onStarted` runs on every fresh engine start,
+     * `clearCaptureState()` marks the engine stopped, and `recoverCapture()` nudges the mode observer
+     * into starting it again -- so the cue decision executes a second time, and any predicate that
+     * looks only at [au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode] answers exactly
+     * as it did for the first start. The bug lives in which start this is, so the control has to
+     * drive a real start, termination and recovery and count the cues.
      *
      * The harness is the pinned reproduction below, with one difference that matters: the renderer
      * is a real recording stand-in rather than a mock, because the cue is the subject.
@@ -855,7 +852,7 @@ class VoiceControlCaptureRestartTest {
             // End the lifecycle through the service's OWN teardown rather than reaching into
             // fields: onDestroy -> stopVoiceControl, which cancels modeJob and serviceScope
             // (VoiceControlService:946/968). A throwing teardown FAILS the test -- swallowing it
-            // would let a broken teardown look like an isolated one (reviewer f5fc8083).
+            // would let a broken teardown look like an isolated one.
             try {
                 service.onDestroy()
                 microphoneCapture.stopCapture()

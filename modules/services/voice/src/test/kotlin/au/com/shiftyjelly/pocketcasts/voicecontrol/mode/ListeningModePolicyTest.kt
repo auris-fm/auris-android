@@ -105,10 +105,10 @@ class ListeningModePolicyTest {
 
     @Test
     fun `no cue when capture restarts itself`() {
-        // THE OWNER-REPORTED BUG (msg 2fdcdb5b, 2fdcdb6f): with Amap or YouTube in front, capture
-        // ends, we restart, and the cue plays over the other app's audio -- twice, because we then
-        // lose the microphone again. A predicate that only looks at the mode cannot see this; the
-        // start reason is what distinguishes the first start from the restart.
+        // The owner-reported defect: with a map or video app in front, capture ends, we restart, and
+        // the cue plays over the other app's audio -- twice, because we then lose the microphone
+        // again. A predicate that only looks at the mode cannot see this; the start reason is what
+        // distinguishes the first start from the restart.
         assertFalse(
             "an automatic recovery is us taking the microphone back, which is the moment to stay quiet",
             shouldPlayListeningStartCue(mode = ListeningMode.WakeWord, isAutomaticRecovery = true),

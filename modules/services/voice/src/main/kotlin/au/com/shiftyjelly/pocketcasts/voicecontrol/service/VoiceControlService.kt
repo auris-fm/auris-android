@@ -196,7 +196,7 @@ class VoiceControlService : Service() {
         val response = try {
             voicePlaybackIntentExecutor.execute(intent, turnOutcome)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
+            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY: the sink may already
             // have transferred this turn's hold to the renderer path. Rethrow without releasing and
             // the hold is orphaned — the render handoff below never runs. Release whatever was
             // transferred (a no-op when nothing was), then rethrow so structured concurrency unwinds.
@@ -210,14 +210,14 @@ class VoiceControlService : Service() {
         // Carry the cloud turn's request ID into the renderer for diagnostic join.
         val cloudIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
         val renderRequestId = cloudIntent?.logicalRequestId
-        // THE UTTERANCE'S LANGUAGE drives TTS (spec 54287f13): the reply — including a localized
+        // THE UTTERANCE'S LANGUAGE drives TTS: the reply — including a localized
         // refusal — is spoken in the language the user spoke, not the device locale. Falls back
         // to English when the ASR detected nothing this build understands.
-        // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
-        // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
+        // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice): the sink
+        // reports the resolved language for cloud turns; anything unspoken or
         // local defaults to English, never the raw detected language nor the device locale.
         val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
-        // ACKNOWLEDGED HANDOFF (reviewer 664f82d0): the renderer accepts ownership of the hold by
+        // ACKNOWLEDGED HANDOFF: the renderer accepts ownership of the hold by
         // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
         // service releases the transferred hold here at the actual failure boundary — never leaving
         // it in the map. Cancellation is re-thrown after release so structured concurrency still

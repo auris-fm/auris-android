@@ -85,6 +85,14 @@ object StageReasons {
         // skipped ASR. Invalid on any other stage/state, and invalid when ASR ran (enforced by
         // the builder mapping and the matching intake validator; the bleed stage carries the
         // observation itself).
+||||||| /tmp/mfb
+        // C6f3bdf7: `empty_result` is the explicit observed-empty ASR outcome. It is the ONLY reason
+        // Valid on a COMPLETED stage (handled separately below), because it describes a successful
+        // Recognition that produced no usable text — not a non-completion.
+        // Spec 1e79e5b4 (PR126): `rejected_by_bleed` — an observed bleed decision that ACTUALLY
+        // Skipped ASR. Invalid on any other stage/state, and invalid when ASR ran (enforced by
+        // The builder mapping and the matching intake validator; the bleed stage carries the
+        // Observation itself).
         StageName.Asr to setOf("local_only_action", "rejected_by_wake", "rejected_by_bleed", "provider_error", "outcome_wait_expired", "cancelled_by_user", "observation_unavailable", "empty_result"),
         // 4d10275f: three ways a SEPARATE translation stage can be legitimately skipped while the
         // capture itself succeeded. Each explains a skipped stage; none of them asserts translation

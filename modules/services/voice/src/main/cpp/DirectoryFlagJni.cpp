@@ -1,4 +1,4 @@
-// A compiled AUTHORITY for O_DIRECTORY (reviewer 87e2e450, round 4): the value comes from THIS
+// A compiled AUTHORITY for O_DIRECTORY: the value comes from THIS
 // translation unit's <fcntl.h> as compiled by the NDK for EACH ABI, so it is correct by
 // construction for whichever architecture the library was built for - no per-ABI table, no
 // inference from device capability lists.

@@ -255,6 +255,10 @@ class ContributionStoreTest {
         // SPEC 1e47eba8: BOTH are served. The corrupt entry travels so the server can refuse it; only the
         // valid one is expected to be ACCEPTED. Serving mirrors the ruling - the server is the only judge
         // of "invalid" - so a client-side validation difference can never withhold a real recording.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: both are served. The corrupt entry travels so the server can refuse it; only the
+        // Valid one is expected to be ACCEPTED. Serving mirrors the ruling - the server is the only judge
+        // Of "invalid" - so a client-side validation difference can never withhold a real recording.
         assertEquals(setOf(good, bad), recovered.map { it.captureId }.toSet())
         assertTrue("the valid entry must be among them", recovered.any { it.captureId == good })
         // CHANGED BY SPEC 2741a0ca CORRECTION 2. Recovery no longer takes a local invalid-record verdict:
@@ -1534,6 +1538,10 @@ class ContributionStoreTest {
         // REVIEWER 52ee7e91: a self-close must NOT release the OS lock while its own writer is still
         // running, or a successor acquires and the old writer resumes against it. The release is DEFERRED
         // to the last lease leaving, not skipped.
+||||||| /tmp/mfb
+        // Reviewer 52ee7e91: a self-close must not release the OS lock while its own writer is still
+        // Running, or a successor acquires and the old writer resumes against it. The release is DEFERRED
+        // To the last lease leaving, not skipped.
         val root = tempRoot()
         val successorAcquired = java.util.concurrent.atomic.AtomicReference<Boolean?>(null)
         val probed = java.util.concurrent.CountDownLatch(1)
@@ -1575,6 +1583,10 @@ class ContributionStoreTest {
         // REVIEWER 52ee7e91: nesting must be a DEPTH, not a flag. If an inner enter/leave cleared the
         // thread's depth, a self-close inside the outer operation would treat itself as untouched and
         // release the directory while the outer writer is still running.
+||||||| /tmp/mfb
+        // Reviewer 52ee7e91: nesting must be a depth, not a flag. If an inner enter/leave cleared the
+        // Thread's depth, a self-close inside the outer operation would treat itself as untouched and
+        // Release the directory while the outer writer is still running.
         val root = tempRoot()
         val successorAcquired = java.util.concurrent.atomic.AtomicReference<Boolean?>(null)
         val probed = java.util.concurrent.CountDownLatch(1)
@@ -1608,6 +1620,11 @@ class ContributionStoreTest {
         // operation calls back into the ownership object and needs the lifecycle monitor, while an external
         // close() holds that monitor waiting for the same operation's lease. inFlight can never reach zero,
         // and acquire() cannot return, so neither thread can finish.
+||||||| /tmp/mfb
+        // Reviewer 487d6967's corrected interleaving, and the one that really blocks: an active leased
+        // Operation calls back into the ownership object and needs the lifecycle monitor, while an external
+        // Close() holds that monitor waiting for the same operation's lease. InFlight can never reach zero,
+        // And acquire() cannot return, so neither thread can finish.
         //
         // A polling drain does NOT save this case, which is why the fix is to stop holding the monitor.
         val ownership = FileDirectoryOwnership(ownedDir("reentrant-close"))
@@ -1656,6 +1673,9 @@ class ContributionStoreTest {
     fun `a deferred self-close followed by an external close does not deadlock the last writer`() {
         // REVIEWER 7f1bfeb0: synchronized close() held the lifecycle monitor while awaiting inFlight==0;
         // the last leave() then called synchronized releaseLock() and blocked on that same monitor.
+||||||| /tmp/mfb
+        // REVIEWER 7f1bfeb0: synchronized close() held the lifecycle monitor while awaiting inFlight==0;
+        // The last leave() then called synchronized releaseLock() and blocked on that same monitor.
         val root = tempRoot()
         val writerInside = java.util.concurrent.CountDownLatch(1)
         val releaseWriter = java.util.concurrent.CountDownLatch(1)
@@ -1711,6 +1731,9 @@ class ContributionStoreTest {
     fun `a parked purge blocks close until it finishes and the successor then owns the directory`() {
         // REVIEWER 72a35e19: revokeAndPurge() checked ownership but never entered a lease, so it could pass
         // the check, pause, and finish deleting after close() released the directory to a successor.
+||||||| /tmp/mfb
+        // REVIEWER 72a35e19: revokeAndPurge() checked ownership but never entered a lease, so it could pass
+        // The check, pause, and finish deleting after close() released the directory to a successor.
         val root = tempRoot()
         val parked = java.util.concurrent.CountDownLatch(1)
         val release = java.util.concurrent.CountDownLatch(1)
@@ -1835,6 +1858,10 @@ class ContributionStoreTest {
         // Reviewer c5a00f02: durableCapture() reads and HASHES the WAV, metadata and .digest sidecar, so it
         // is filesystem work, not an in-memory read. It must sit inside the lease like any other surface that
         // touches the directory: a closed owner must not validate bytes out of a successor's namespace.
+||||||| /tmp/mfb
+        // Reviewer c5a00f02: durableCapture() reads and HASHES the WAV, metadata and.digest sidecar, so it
+        // Is filesystem work, not an in-memory read. It must sit inside the lease like any other surface that
+        // Touches the directory: a closed owner must not validate bytes out of a successor's namespace.
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
@@ -1940,6 +1967,13 @@ class ContributionStoreTest {
         // because /dev/fd entries do not resolve to a path on this platform, so the count was always equal
         // and the control was vacuous. This version observes the stream directly: a closed FileInputStream
         // refuses to read, and a leaked one still reads.
+||||||| /tmp/mfb
+        // REVIEWER 9a47123e: "repeating refusals followed by a successful open does not prove descriptors
+        // Were closed; observe close or descriptor counts directly." Right on both counts. My first attempt
+        // Counted /dev/fd entries under the queue root, and a mutant that leaked the descriptor SURVIVED it -
+        // Because /dev/fd entries do not resolve to a path on this platform, so the count was always equal
+        // And the control was vacuous. This version observes the stream directly: a closed FileInputStream
+        // Refuses to read, and a leaked one still reads.
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults()).also { storesForTeardown += it }
         assertNotNull(store.prepare(ID_A, "epoch-epoch", chunks(8), meta(ID_A), "a@x", 7L))
@@ -1964,9 +1998,15 @@ class ContributionStoreTest {
         // real - any refusal that happens with a descriptor open must close it - so the control now drives a
         // refusal that still occurs: an id the store does not know. The descriptor probe is the same one
         // reviewer 9a47123e asked for, because an indirect count proved nothing.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: a corrupt header no longer refuses the capture, so it can no longer create the
+        // Refused-after-open window this control was written to catch. The hazard is unchanged and still
+        // Real - any refusal that happens with a descriptor open must close it - so the control now drives a
+        // Refusal that still occurs: an id the store does not know. The descriptor probe is the same one
+        // Reviewer asked for, because an indirect count proved nothing.
         val corruption = store.durableCaptureRefusingDescriptorForTest(ID_A)
         assertNotNull(
-            "SPEC 1e47eba8: damaged audio still yields a source, so the server can refuse it",
+            "damaged audio still yields a source, so the server can refuse it",
             corruption.capture,
         )
         runCatching { corruption.descriptor?.close() }
@@ -2096,6 +2136,10 @@ class ContributionStoreTest {
         // Reviewer 4e8592ba: openSourceSlots was an instance field, so the "global" claim was false - two
         // stores could each hold the full bound. Every open descriptor anywhere in the process retains
         // device bytes, so the bound must be shared.
+||||||| /tmp/mfb
+        // Reviewer 4e8592ba: openSourceSlots was an instance field, so the "global" claim was false - two
+        // Stores could each hold the full bound. Every open descriptor anywhere in the process retains
+        // Device bytes, so the bound must be shared.
         //
         // The counter is now process-wide, which makes this control HAZARDOUS: anything it fails to close
         // starves every later test in the JVM. It therefore closes what it holds in a finally, and asserts

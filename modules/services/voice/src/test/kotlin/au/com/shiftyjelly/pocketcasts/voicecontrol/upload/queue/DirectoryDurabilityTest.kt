@@ -120,6 +120,10 @@ class DirectoryDurabilityTest {
         // reviewer e4820963 (2): boundS was initialized to retry_initial_s without the local cap, so
         // initial=10/max=2 returned 10s at attempt 1. (3): a huge negative Retry-After could wrap positive;
         // nonpositive means absent.
+||||||| /tmp/mfb
+        // Reviewer e4820963 (2): boundS was initialized to retry_initial_s without the local cap, so
+        // Initial=10/max=2 returned 10s at attempt 1. (3): a huge negative Retry-After could wrap positive;
+        // Nonpositive means absent.
         var now = 2_000_000L
         val root = tmp.newFolder("queue-retry-caps")
         val id = "bebebebe-1111-4222-8333-444444444444"
@@ -160,6 +164,11 @@ class DirectoryDurabilityTest {
         // next-UTC-midnight floor; this control verifies the raised value through the DURABLE
         // boundary — the .retry record — not only transport classification. Pinned 10:00:00Z
         // 2026-11-04: the next midnight is exactly 14 h = 50,400 s away.
+||||||| /tmp/mfb
+        // Spec 0d59b1d5 /: the transport raises a SHORT quota hint to the
+        // Next-UTC-midnight floor; this control verifies the raised value through the DURABLE
+        // Boundary — the.retry record — not only transport classification. Pinned 10:00:00Z
+        // the next midnight is exactly 14 h = 50,400 s away.
         val now = 1_791_194_400_000L
         val floorS = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.secondsUntilNextUtcMidnight(now)
         assertEquals(50_400L, floorS)
@@ -204,6 +213,9 @@ class DirectoryDurabilityTest {
     fun `a FAILED retry-boundary persistence fails CLOSED until recovery resolves it`() {
         // reviewer e4820963 (1): writeText replaced content without sync/atomicity, the catch lied about
         // the original text being untouched, and retryEligible fell back to eligible-now on unknown state.
+||||||| /tmp/mfb
+        // Reviewer e4820963 (1): writeText replaced content without sync/atomicity, the catch lied about
+        // The original text being untouched, and retryEligible fell back to eligible-now on unknown state.
         var now = 3_000_000L
         val root = tmp.newFolder("queue-retry-uncertain")
         val id = "cfcfcfcf-1111-4222-8333-444444444444"
@@ -256,6 +268,9 @@ class DirectoryDurabilityTest {
     fun `a PRE-RENAME failure leaves the intent for a fresh owner to reconcile`() {
         // reviewer 7433e6a9: tmp-sync failure must not forget the just-received server minimum - the
         // intent file stays visible and a fresh owner finishes its barriers before granting eligibility.
+||||||| /tmp/mfb
+        // Reviewer 7433e6a9: tmp-sync failure must not forget the just-received server minimum - the
+        // Intent file stays visible and a fresh owner finishes its barriers before granting eligibility.
         var now = 6_000_000L
         val root = tmp.newFolder("queue-retry-prerename")
         val id = "e1e1e1e1-1111-4222-8333-444444444444"
@@ -297,6 +312,9 @@ class DirectoryDurabilityTest {
     fun `a POST-RENAME orphan record is reconciled and its boundary honored`() {
         // reviewer 7433e6a9: a crash after rename but before the directory barrier leaves a .retry
         // record whose name may not be durable; a fresh owner must sync and honor it, not ignore it.
+||||||| /tmp/mfb
+        // Reviewer 7433e6a9: a crash after rename but before the directory barrier leaves a.retry
+        // Record whose name may not be durable; a fresh owner must sync and honor it, not ignore it.
         var now = 7_000_000L
         val root = tmp.newFolder("queue-retry-postrename")
         val contributions = File(root, "contributions")
@@ -324,6 +342,9 @@ class DirectoryDurabilityTest {
     fun `REPEATED reconciliation failure never grants an earlier retry`() {
         // reviewer 7433e6a9: with the barriers persistently failing, neither the faulted instance nor
         // repeated fresh-owner recoveries may grant an earlier retry - fail closed every time.
+||||||| /tmp/mfb
+        // Reviewer 7433e6a9: with the barriers persistently failing, neither the faulted instance nor
+        // Repeated fresh-owner recoveries may grant an earlier retry - fail closed every time.
         var now = 8_500_000L
         val root = tmp.newFolder("queue-retry-persistent")
         val id = "a3a3a3a3-1111-4222-8333-444444444444"
@@ -387,6 +408,9 @@ class DirectoryDurabilityTest {
     fun `a MALFORMED retry record RETAINS the hold instead of defaulting to eligible-now`() {
         // reviewer 199ccdee: unreadable/malformed EXISTING retry state is UNKNOWN, never absent - the
         // entry must be withheld from recovery, serving and attempts, not defaulted to eligible-now.
+||||||| /tmp/mfb
+        // Reviewer 199ccdee: unreadable/malformed existing retry state is unknown, never absent - the
+        // Entry must be withheld from recovery, serving and attempts, not defaulted to eligible-now.
         var now = 9_000_000L
         val root = tmp.newFolder("queue-retry-malformed")
         val contributions = File(root, "contributions")
@@ -418,6 +442,10 @@ class DirectoryDurabilityTest {
         // reviewer 199ccdee: a pre-rename failure leaves .attempts.tmp visible; reading the OLDER count
         // record would restore a smaller count and hand back spent retry budget. A fresh owner finishes
         // the intent, and the advanced count is what further attempts build on.
+||||||| /tmp/mfb
+        // Reviewer 199ccdee: a pre-rename failure leaves.attempts.tmp visible; reading the OLDER count
+        // Record would restore a smaller count and hand back spent retry budget. A fresh owner finishes
+        // The intent, and the advanced count is what further attempts build on.
         var now = 9_500_000L
         val root = tmp.newFolder("queue-attempts-intent")
         val id = "c5c5c5c5-1111-4222-8333-444444444444"
@@ -442,6 +470,11 @@ class DirectoryDurabilityTest {
         // and an unwritable sidecar must never stand in front of an upload - so the call SUCCEEDS and the
         // diagnostic count advances in memory. What this control still pins is that no spent budget is
         // handed back: the count moves forward, never back.
+||||||| /tmp/mfb
+        // SPEC 423e9726: a failed count publication no longer refuses the attempt. The count is bookkeeping
+        // And an unwritable sidecar must never stand in front of an upload - so the call SUCCEEDS and the
+        // Diagnostic count advances in memory. What this control still pins is that no spent budget is
+        // Handed back: the count moves forward, never back.
         assertEquals("the count advances even when its publication fails", 2, store.recordAttempt(generation, id))
         now += 10L
 
@@ -459,6 +492,9 @@ class DirectoryDurabilityTest {
     fun `an UNRECONCILED retry intent holds EVERY production entry point, not only retryEligible`() {
         // reviewer 199ccdee: recover() and readyEntries() exposed an entry whose boundary could not be
         // reconciled even though retryEligible excluded it. The readiness hold applies everywhere.
+||||||| /tmp/mfb
+        // Reviewer 199ccdee: recover() and readyEntries() exposed an entry whose boundary could not be
+        // Reconciled even though retryEligible excluded it. The readiness hold applies everywhere.
         var now = 9_900_000L
         val root = tmp.newFolder("queue-retry-hold-everywhere")
         val id = "d6d6d6d6-1111-4222-8333-444444444444"
@@ -504,6 +540,9 @@ class DirectoryDurabilityTest {
     fun `a SAME-INSTANCE count reconciliation advances the next attempt past the pending increment`() {
         // reviewer 45b9d4de: the reconciled record is the trusted count - re-deriving from the stale
         // in-memory copy would republish the pending count instead of advancing it.
+||||||| /tmp/mfb
+        // Reviewer 45b9d4de: the reconciled record is the trusted count - re-deriving from the stale
+        // In-memory copy would republish the pending count instead of advancing it.
         var now = 10_200_000L
         val root = tmp.newFolder("queue-count-same-instance")
         val id = "e7e7e7e7-1111-4222-8333-444444444444"
@@ -526,6 +565,9 @@ class DirectoryDurabilityTest {
         assertEquals(1, store.recordAttempt(generation, id))
         // SPEC 423e9726: the failed publication no longer refuses - the attempt proceeds on its in-memory
         // count and the durable record is rewritten by the next attempt that can write it.
+||||||| /tmp/mfb
+        // SPEC 423e9726: the failed publication no longer refuses - the attempt proceeds on its in-memory
+        // Count and the durable record is rewritten by the next attempt that can write it.
         assertEquals(2, store.recordAttempt(generation, id))
         now += 10L
 
@@ -542,6 +584,13 @@ class DirectoryDurabilityTest {
         // be simulated by an over-bound root, and since spec 2741a0ca a root's size no longer limits name
         // resolution - presence and absence are decided for the specific name asked about. So the control
         // now creates the condition it actually means: an unlistable root.
+||||||| /tmp/mfb
+        // Reviewer 45b9d4de. The hazard is real: reconciliation decides whether a pending attempt-count
+        // Intent exists, and inferring ABSENT from a listing it could not read would let the count proceed
+        // Over an unresolved intent and corrupt it. But the SIZE of the root is not that hazard. It used to
+        // Be simulated by an over-bound root, and since a root's size no longer limits name
+        // Resolution - presence and absence are decided for the specific name asked about. So the control
+        // Now creates the condition it actually means: an unlistable root.
         var now = 10_600_000L
         val root = tmp.newFolder("queue-count-unreadable")
         val contributions = File(root, "contributions")
@@ -626,6 +675,10 @@ class DirectoryDurabilityTest {
         // reviewer 1d29fa1e: reconciliation failure must be distinct from absence - the ownership
         // transaction returns before ANY increment or publication, so the pending intent bytes, the
         // canonical count record and the in-memory count are unchanged across repeated refusals.
+||||||| /tmp/mfb
+        // Reviewer 1d29fa1e: reconciliation failure must be distinct from absence - the ownership
+        // Transaction returns before ANY increment or publication, so the pending intent bytes, the
+        // Canonical count record and the in-memory count are unchanged across repeated refusals.
         var now = 11_000_000L
         val root = tmp.newFolder("queue-count-refusal")
         val contributions = File(root, "contributions")
@@ -650,6 +703,9 @@ class DirectoryDurabilityTest {
         assertEquals(1, store.recordAttempt(generation, id))
         // SPEC 423e9726: the pending intent can no longer be finished (its syncs are faulted from here), but
         // that no longer refuses the attempt - the count is bookkeeping and the in-memory value carries on.
+||||||| /tmp/mfb
+        // SPEC 423e9726: the pending intent can no longer be finished (its syncs are faulted from here), but
+        // That no longer refuses the attempt - the count is bookkeeping and the in-memory value carries on.
         // The exact number is NOT asserted: with the intent unreconcilable it is the in-memory count that
         // advances, and pinning a value here would be pinning an implementation detail, not the invariant.
         assertTrue(
@@ -689,6 +745,9 @@ class DirectoryDurabilityTest {
     fun `retry scheduling survives a RESTART without shortening the boundary`() {
         // reviewer 21176965: nextRetryAtMs was in-memory only and a missing value counted as eligible-now,
         // so a restart bypassed both the local backoff and a received server minimum.
+||||||| /tmp/mfb
+        // Reviewer 21176965: nextRetryAtMs was in-memory only and a missing value counted as eligible-now,
+        // So a restart bypassed both the local backoff and a received server minimum.
         var now = 5_000_000L
         val root = tmp.newFolder("queue-retry-restart")
         val id = "9c9c9c9c-1111-4222-8333-444444444444"
@@ -729,6 +788,9 @@ class DirectoryDurabilityTest {
     fun `retry scheduling saturates extreme values and refuses a zero-attempt entry`() {
         // reviewer 21176965: shift overflow, negative shifts and unchecked clock/floor additions could
         // turn a large server minimum into an immediate or past retry.
+||||||| /tmp/mfb
+        // Reviewer 21176965: shift overflow, negative shifts and unchecked clock/floor additions could
+        // Turn a large server minimum into an immediate or past retry.
         var now = 8_000_000L
         val root = tmp.newFolder("queue-retry-extremes")
         val id = "adadadad-1111-4222-8333-444444444444"
@@ -1270,6 +1332,13 @@ class DirectoryDurabilityTest {
         // measurement, a fresh store purged ZERO captures, reported success, set recovered, and left the
         // user's retained audio on disk after they withdrew sharing - to be resurrected by the next
         // healthy store.
+||||||| /tmp/mfb
+        // Reviewer ec6ce881. A policy-disable observed at startup runs against a store that has seen
+        // Nothing: empty memoryEntries, empty ownedCharges. Purge must therefore discover what to remove by
+        // Listing the directory, not by reading its own index. When discovery rode on the deleted byte
+        // Measurement, a fresh store purged ZERO captures, reported success, set recovered, and left the
+        // User's retained audio on disk after they withdrew sharing - to be resurrected by the next
+        // Healthy store.
         val root = tmp.newFolder("queue-fresh-purge")
         val ids = (1..2).map { java.util.UUID.randomUUID().toString() }
         val seeder = ContributionStore(root, limits())
@@ -1339,6 +1408,13 @@ class DirectoryDurabilityTest {
         // success as ec6ce881, reached by a different path - the user is told their audio was removed
         // while it is still there. An unknown listing must DEFER the purge and keep its intent, never
         // report completion.
+||||||| /tmp/mfb
+        // Reviewer f7700432. The new disk discovery read `listFiles()... ?: emptySet()`, so an unreadable
+        // Directory looked like a proven empty one: revokeAndPurge recorded a completed purge and set
+        // Recovered=true while every retained recording sat untouched on disk. That is the same false
+        // Success as ec6ce881, reached by a different path - the user is told their audio was removed
+        // While it is still there. An unknown listing must DEFER the purge and keep its intent, never
+        // Report completion.
         val root = tmp.newFolder("queue-purge-unknown-listing")
         val dir = File(root, "contributions")
         dir.mkdirs()
@@ -1647,6 +1723,10 @@ class DirectoryDurabilityTest {
         // SPEC 1e47eba8: an unresolved bookkeeping record is no longer a hold (unknown is due), so it can
         // no longer create the state this control needs. An incomplete markerless pair still is a real
         // hold - and it is the state most likely to hold a user's audio on the device - so it is used here.
+||||||| /tmp/mfb
+        // SPEC 1e47eba8: an unresolved bookkeeping record is no longer a hold (unknown is due), so it can
+        // No longer create the state this control needs. An incomplete markerless pair still is a real
+        // Hold - and it is the state most likely to hold a user's audio on the device - so it is used here.
         File(root, "contributions/$id.ready").delete()
         File(root, "contributions/$id.attempts").delete()
         val store = ContributionStore(root, limits())
@@ -2211,6 +2291,9 @@ class DirectoryDurabilityTest {
     fun `direct ADMISSION on a fresh instance over an overflowing ROOT is STILL GRANTED`() {
         // reviewer 92911de9: admission established marker coverage but not root coverage - a fresh store
         // over an existing overflowing contributions directory could admit without any bounded root scan.
+||||||| /tmp/mfb
+        // Reviewer 92911de9: admission established marker coverage but not root coverage - a fresh store
+        // Over an existing overflowing contributions directory could admit without any bounded root scan.
         val root = tmp.newFolder("queue-admit-root-coverage")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2218,7 +2301,7 @@ class DirectoryDurabilityTest {
 
         val store = ContributionStore(root, limits())
 
-        // SPEC a7f6ce81: priced, not refused, for the same reason as marker coverage.
+        // priced, not refused, for the same reason as marker coverage.
         assertNotNull(
             "the bounded root scan must still report unknown coverage, but admission is GRANTED",
             store.admitForTestOrNull(1600, 32),
@@ -2230,6 +2313,10 @@ class DirectoryDurabilityTest {
         // reviewer f4436ced: admission did not establish marker coverage, so a newly constructed store
         // over an existing overflowing marker directory could admit immediately - required precondition
         // under spec 7e9606b, pinned WITHOUT any recover/expiry call.
+||||||| /tmp/mfb
+        // Reviewer f4436ced: admission did not establish marker coverage, so a newly constructed store
+        // Over an existing overflowing marker directory could admit immediately - required precondition
+        // Under spec 7e9606b, pinned WITHOUT any recover/expiry call.
         val root = tmp.newFolder("queue-admit-coverage")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2302,6 +2389,10 @@ class DirectoryDurabilityTest {
         // reviewer 3eec6e62: the disposal-marker directory still used eager markerDir.listFiles(), and
         // `?: return` treated ENUMERATION FAILURE as an empty directory - indistinguishable from genuine
         // absence, so a sweep over a partially-known marker set would silently skip intents it never saw.
+||||||| /tmp/mfb
+        // Reviewer 3eec6e62: the disposal-marker directory still used eager markerDir.listFiles(), and
+        // `?: return` treated enumeration failure as an empty directory - indistinguishable from genuine
+        // Absence, so a sweep over a partially-known marker set would silently skip intents it never saw.
         // Beyond the bound, the retry defers and records the degradation. It deliberately does NOT refuse
         // admission: unseen disposal intents are deletions, not retention (spec contract question pending
         // with @spec, reviewer c571c932).
@@ -2343,6 +2434,10 @@ class DirectoryDurabilityTest {
         // reviewer d1cce25b: the failure path left memoryEntries intact and readyEntries() served them
         // without checking rootEnumerationUnknown, so a store that already held ready entries kept serving
         // them after recovery could not enumerate the root - and the empty-index test could not detect it.
+||||||| /tmp/mfb
+        // Reviewer d1cce25b: the failure path left memoryEntries intact and readyEntries() served them
+        // Without checking rootEnumerationUnknown, so a store that already held ready entries kept serving
+        // Them after recovery could not enumerate the root - and the empty-index test could not detect it.
         val root = tmp.newFolder("queue-failed-recovery-stops-serving")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2355,6 +2450,10 @@ class DirectoryDurabilityTest {
         // CHANGED BY SPEC 2741a0ca / reviewer a4a6b1. This used to push the root past its enumeration bound
         // and require the entry to STOP being served. That refusal was the device defect: an over-bound
         // directory served nothing, so nothing drained and the queue could never fall back under the bound.
+||||||| /tmp/mfb
+        // Changed by / reviewer a4a6b1. This used to push the root past its enumeration bound
+        // And require the entry to STOP being served. That refusal was the device defect: an over-bound
+        // Directory served nothing, so nothing drained and the queue could never fall back under the bound.
         // Recovery no longer consults a traversal bound for DISCOVERY at all, so an over-bound root now
         // serves normally - asserted here - and the sweep decision belongs to genuine unreadability, which
         // the sibling control `a queue root beyond its entry bound defers sweeps` covers.
@@ -2381,6 +2480,10 @@ class DirectoryDurabilityTest {
         // reviewer d1cce25b: reloadUnownedFromDisk, discardCurrentPartials and deleteStaging still called
         // dir.listFiles() eagerly, and expireOlderThan invokes the reload while recovered is still false
         // after a failed recovery - bypassing the recovery bound immediately.
+||||||| /tmp/mfb
+        // Reviewer d1cce25b: reloadUnownedFromDisk, discardCurrentPartials and deleteStaging still called
+        // Dir.listFiles() eagerly, and expireOlderThan invokes the reload while recovered is still false
+        // After a failed recovery - bypassing the recovery bound immediately.
         val root = tmp.newFolder("queue-expire-bypass")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2447,6 +2550,11 @@ class DirectoryDurabilityTest {
         // first deletes it; the second enters holding the stale entry, delete() returns false, and the stat
         // proves absence. Requiring delete()==true AND absence misclassified that as UNKNOWN and marked the
         // id permanently unmeasured, refusing admission over bytes that are provably gone.
+||||||| /tmp/mfb
+        // Reviewer 567c0b94: two callers can enumerate the same file before either enters the monitor. The
+        // First deletes it; the second enters holding the stale entry, delete() returns false, and the stat
+        // Proves absence. Requiring delete()==true and absence misclassified that as unknown and marked the
+        // Id permanently unmeasured, refusing admission over bytes that are provably gone.
         val root = tmp.newFolder("queue-stale-retry")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2550,6 +2658,11 @@ class DirectoryDurabilityTest {
         // like a successful one and free retained bytes. Only a no-follow stat reporting NoSuchFileException
         // proves absence. This exercises the UNKNOWN branch directly: a file that cannot be deleted AND
         // cannot be inspected must stay charged.
+||||||| /tmp/mfb
+        // Reviewer 78c775dc: !exists() returns false for an unreadable path, so a FAILED delete could look
+        // Like a successful one and free retained bytes. Only a no-follow stat reporting NoSuchFileException
+        // Proves absence. This exercises the unknown branch directly: a file that cannot be deleted and
+        // Cannot be inspected must stay charged.
         val root = tmp.newFolder("queue-unknown-absence")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2581,6 +2694,11 @@ class DirectoryDurabilityTest {
         // monitor, and two of its callers run outside it. This holds the monitor in another thread and
         // proves the delete settlement cannot finish while it is held - i.e. there is no window in which a
         // competing owner observes a deleted file whose charge has not been settled.
+||||||| /tmp/mfb
+        // Reviewer 78c775dc: the helper mutated ownedCharges/unmeasuredIds without requiring the ownership
+        // Monitor, and two of its callers run outside it. This holds the monitor in another thread and
+        // Proves the delete settlement cannot finish while it is held - i.e. There is no window in which a
+        // Competing owner observes a deleted file whose charge has not been settled.
         val root = tmp.newFolder("queue-delete-monitor")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2643,6 +2761,10 @@ class DirectoryDurabilityTest {
         // reviewer e4342946: the .part charge had no reverse transition. Once a later sweep deleted the file,
         // the charge and any unknown state stayed forever, permanently consuming capacity and keeping
         // admission refused over bytes that no longer exist. Same store, failure then success.
+||||||| /tmp/mfb
+        // Reviewer e4342946: the.part charge had no reverse transition. Once a later sweep deleted the file,
+        // The charge and any unknown state stayed forever, permanently consuming capacity and keeping
+        // Admission refused over bytes that no longer exist. Same store, failure then success.
         val root = tmp.newFolder("queue-part-charge-release")
         val contributions = File(root, "contributions")
         contributions.mkdirs()
@@ -2707,6 +2829,11 @@ class DirectoryDurabilityTest {
         // recording with an unresettable age went straight into `validate`, which reported null and sent it
         // down INVALID_ON_RECOVERY - deletion of a complete, valid recording. A failed write about AGE must
         // never become a verdict about the RECORDING.
+||||||| /tmp/mfb
+        // Reviewer b796c5e9. `resetUntrustedAgeLocked` returned a boolean that recovery ignored, so a marked
+        // Recording with an unresettable age went straight into `validate`, which reported null and sent it
+        // Down INVALID_ON_RECOVERY - deletion of a complete, valid recording. A failed write about AGE must
+        // Never become a verdict about the RECORDING.
         val root = tmp.newFolder("queue-age-reset-write-failure")
         val id = java.util.UUID.randomUUID().toString()
         val seeder = ContributionStore(root, limits())
@@ -2846,6 +2973,11 @@ class DirectoryDurabilityTest {
         // future value is clock skew. Neither says anything about whether the audio is valid, so neither
         // may destroy or permanently strand a complete recording. The age is reset to now, rewritten,
         // counted, and the seven-day clock runs from the reset.
+||||||| /tmp/mfb
+        // Spec 3e33e306. `.created` is written with no directory sync, so a crash can leave it empty; a
+        // Future value is clock skew. Neither says anything about whether the audio is valid, so neither
+        // May destroy or permanently strand a complete recording. The age is reset to now, rewritten,
+        // Counted, and the seven-day clock runs from the reset.
         for (bad in listOf("0", (System.currentTimeMillis() + 3_600_000L).toString())) {
             val root = tmp.newFolder("queue-age-reset-${bad.take(4)}")
             val id = java.util.UUID.randomUUID().toString()
@@ -2937,6 +3069,8 @@ class DirectoryDurabilityTest {
     @Test
     fun `an UNMEASURABLE capture is priced, not used to refuse admission`() {
         // reviewer e6eeabda / 7340fe2d: a per-capture worst case cannot bound arbitrary retained debris.
+||||||| /tmp/mfb
+        // Reviewer e6eeabda / 7340fe2d: a per-capture worst case cannot bound arbitrary retained debris.
         // Unknown accounting must REFUSE admission until the capture is successfully measured or removed.
         val root = tmp.newFolder("queue-unmeasurable")
         val id = java.util.UUID.randomUUID().toString()

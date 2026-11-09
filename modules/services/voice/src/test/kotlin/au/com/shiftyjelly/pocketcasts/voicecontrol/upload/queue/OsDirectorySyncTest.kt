@@ -105,6 +105,9 @@ class OsDirectorySyncTest {
     fun `a NON-errno CLOSE failure does not replace an earlier fsync failure - and the double-unexpected case preserves the fsync original`() {
         // reviewer f52f1209: close's catch must cover arbitrary throwables too, or a misbehaving
         // injected close implementation would REPLACE the fsync primary.
+||||||| /tmp/mfb
+        // Reviewer f52f1209: close's catch must cover arbitrary throwables too, or a misbehaving
+        // Injected close implementation would REPLACE the fsync primary.
         val os = FakeOs(failFsyncErrno = 5, failCloseUnexpected = IllegalStateException("close misbehaved"))
         try {
             OsDirectorySync(os).sync(newDir("errno-fsync-unexpected-close"))

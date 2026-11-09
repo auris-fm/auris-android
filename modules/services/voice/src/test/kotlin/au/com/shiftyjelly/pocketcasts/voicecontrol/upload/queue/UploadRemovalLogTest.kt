@@ -169,6 +169,12 @@ class UploadRemovalLogTest {
         // for - that a capture failing validation is NAMED in the log with its reason, never silently
         // dropped - still holds and is asserted against the hold line it now emits instead.
         // SPEC 1e47eba8: recovery no longer holds OR deletes - it SERVES the record so the server judges it.
+||||||| /tmp/mfb
+        // Changed by correction 2. Recovery no longer takes a local invalid-record verdict,
+        // So it no longer removes the entry and there is no removal line to assert. What this test exists
+        // For - that a capture failing validation is NAMED in the log with its reason, never silently
+        // Dropped - still holds and is asserted against the hold line it now emits instead.
+        // Spec 1e47eba8: recovery no longer holds or deletes - it serves the record so the server judges it.
         // What must survive from this test's original intent is that the condition is never SILENT: the
         // local verdict is logged with the capture id and an explicit "server decides", and nothing is lost.
         assertTrue(

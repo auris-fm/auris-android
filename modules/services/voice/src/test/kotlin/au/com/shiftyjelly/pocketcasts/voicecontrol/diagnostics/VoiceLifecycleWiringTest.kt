@@ -94,6 +94,10 @@ class VoiceLifecycleWiringTest {
                     // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
                     // non-UUID as `request_id=invalid`, so a placeholder here would assert the
                     // opposite of the contract.
+||||||| /tmp/mfb
+                    // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
+                    // Non-UUID as `request_id=invalid`, so a placeholder here would assert the
+                    // Opposite of the contract.
                     hint = null, logicalRequestId = "b7ce1a5e-1c1b-4a4f-9d1e-3f2c8a6d5e70", isRetry = false, sourceLanguage = "zh",
                 )!!
                 val turn = async { sink.dispatchPrepared(prepared) }

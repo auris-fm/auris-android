@@ -53,7 +53,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     @Suppress("DEPRECATION")
     override suspend fun duck(): VoiceResponse = duckReporting(null)
 
-    // Reviewer 8c77f5aa: the callback is a PARAMETER all the way down — no shared mutable slot.
+    // the callback is a PARAMETER all the way down — no shared mutable slot.
     // Serialized by [duckMutex] because the focus request itself is not reentrant-safe, not to
     // guard a slot: every caller's facts travel inside its own call frame.
     suspend fun duckReporting(onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = duckMutex.withLock { duckInternal(onOutcome) }
@@ -106,6 +106,9 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     override suspend fun resume(expectedEpisodeId: String?): EpisodeOperationResult {
         // THROUGH THE OWNER when the caller has an episode-specific subject. A quote's resume is about
         // the recording the quote came from, so it must not start a replacement.
+||||||| /tmp/mfb
+        // Through the owner when the caller has an episode-specific subject. A quote's resume is about
+        // The recording the quote came from, so it must not start a replacement.
         if (expectedEpisodeId != null) {
             // THE REFUSAL PROPAGATES. Discarding this Boolean made a REFUSED resume indistinguishable
             // from an accepted one, so the caller reported the action as performed. A resume that never

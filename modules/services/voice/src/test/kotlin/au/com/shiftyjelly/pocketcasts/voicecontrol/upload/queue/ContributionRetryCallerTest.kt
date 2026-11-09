@@ -175,6 +175,9 @@ class ContributionRetryCallerTest {
     fun `a REVOCATION inside a gate callback cancels the pickup`() {
         // reviewer 1b926fa0: the purge must land AFTER eligibility and BEFORE claim/execution - inside
         // a gate callback, not before pollOnce.
+||||||| /tmp/mfb
+        // Reviewer 1b926fa0: the purge must land after eligibility and before claim/execution - inside
+        // A gate callback, not before pollOnce.
         var now = 13_000_000L
         val root = tmp.newFolder("caller-revoked")
         val id = UUID.randomUUID().toString()
@@ -209,6 +212,9 @@ class ContributionRetryCallerTest {
     fun `a boundary RE-ARM inside a gate callback makes the pickup refuse`() {
         // reviewer 1b926fa0: a concurrent poll can re-arm the retry boundary between listing and
         // pickup; generation validity alone must not wave the attempt through.
+||||||| /tmp/mfb
+        // Reviewer 1b926fa0: a concurrent poll can re-arm the retry boundary between listing and
+        // Pickup; generation validity alone must not wave the attempt through.
         var now = 13_250_000L
         val root = tmp.newFolder("caller-rearm-race")
         val id = UUID.randomUUID().toString()

@@ -349,6 +349,9 @@ class ContributionStore(
     // The marker/disqualification reconciliation that admission depends on runs once per instance
     // before the first admission, not only at recovery/expiry (spec 7e9606b). It is COUNT-FREE (spec
     // a3ef694f): capacity is decided from complete entries on disk, so nothing here measures bytes.
+||||||| /tmp/mfb
+    // Before the first admission, not only at recovery/expiry (spec 7e9606b). It is count-free (spec
+    // A3ef694f): capacity is decided from complete entries on disk, so nothing here measures bytes.
     private var coverageEstablished = false
 
     /** Ownership-refusal accounting (spec 8adcfd01): durableCapture refusing for sidecar reasons. */
@@ -519,6 +522,8 @@ class ContributionStore(
         val meta = File(dir, "$captureId$SUFFIX_META")
         if (!audio.isFile || !meta.isFile) return null
         // SPEC 1e47eba8: THE PHYSICAL FACTS THAT MAKE A REQUEST POSSIBLE ARE THE ONLY REQUIREMENTS HERE.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: the physical facts that make A request possible are the only requirements here.
         // This function used to refuse on byte-count mismatch, a metadata digest disagreement, a mismatched
         // .digest sibling and a non-canonical record - all local verdicts on whether the recording is
         // "valid". That is the server's call. Refusing here meant the record was visible to the queue and
@@ -636,6 +641,13 @@ class ContributionStore(
         // a record it cannot use, and that refusal deletes it. What must still hold is the BYTE BINDING:
         // the descriptor hashed is the descriptor handed to transport, and the payload is read within
         // maxClipBytes.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: the digest and WAV-header checks here are diagnostic, not a refusal. They used to
+        // Withhold the source - the last place the local-validation gate survived, and the one that made the
+        // New fallback entry pointless because production never got a descriptor to send. The server refuses
+        // A record it cannot use, and that refusal deletes it. What must still hold is the byte binding:
+        // The descriptor hashed is the descriptor handed to transport, and the payload is read within
+        // MaxClipBytes.
         val declaredAudioSha = audioShaOf(record)
         val actualAudioSha = sha256HexBounded(source, limits.maxClipBytes) ?: return null
         if (declaredAudioSha != null && declaredAudioSha != actualAudioSha) {
@@ -913,6 +925,10 @@ class ContributionStore(
         // SPEC a7f6ce81: the unknown-footprint hold is removed from the ATTEMPT path. Attempt
         // accounting does not depend on byte coverage, and withholding attempts is what made an
         // unknown footprint self-sustaining (uploads shrink it). Ownership is still validated.
+||||||| /tmp/mfb
+        // Spec a7f6ce81: the unknown-footprint hold is removed from the attempt path. Attempt
+        // Accounting does not depend on byte coverage, and withholding attempts is what made an
+        // Unknown footprint self-sustaining (uploads shrink it). Ownership is still validated.
         if (!ownership.isValidUnderLock(generation)) {
             null
         } else {
@@ -1582,6 +1598,8 @@ class ContributionStore(
      * Every open source this store has handed down, with the capture it belongs to.
      *
      * REVIEWER 7c2f30e3: pinning only at handoff was wrong, because the WAV is normally still LINKED at
+||||||| /tmp/mfb
+     * : pinning only at handoff was wrong, because the WAV is normally still linked at
      * that moment, so no pin was ever registered and a later purge/unlink added nothing. The store now
      * registers EVERY open source at handoff and accounts its transition whenever the file goes away.
      */
@@ -2246,6 +2264,10 @@ class ContributionStore(
         // SPEC a7f6ce81: the unknown-footprint hold is removed from the ATTEMPT path. Attempt
         // accounting does not depend on byte coverage, and withholding attempts is what made an
         // unknown footprint self-sustaining (uploads shrink it). Ownership is still validated.
+||||||| /tmp/mfb
+        // Spec a7f6ce81: the unknown-footprint hold is removed from the attempt path. Attempt
+        // Accounting does not depend on byte coverage, and withholding attempts is what made an
+        // Unknown footprint self-sustaining (uploads shrink it). Ownership is still validated.
         if (!ownership.isValidUnderLock(generation)) {
             null
         } else {
@@ -2285,6 +2307,13 @@ class ContributionStore(
             // record an attempt through a root-scan failure either (reviewer 6cbb4efa).
             // SPEC a7f6ce81: no unknown-footprint hold here either - the durable attempts sidecar
             // must keep counting while the footprint heals, or eligibility drifts from accounting.
+||||||| /tmp/mfb
+            // Spec 896632f4: unknown coverage of any kind holds attempt accounting - a bump attributed
+            // While root discovery or marker coverage is unknown could contradict an intent nobody has
+            // Seen yet. The gate is the complete owner-coverage predicate, so a held handle cannot
+            // Record an attempt through a root-scan failure either.
+            // SPEC a7f6ce81: no unknown-footprint hold here either - the durable attempts sidecar
+            // Must keep counting while the footprint heals, or eligibility drifts from accounting.
             if (!ownership.isValidUnderLock(generation)) {
                 null
             } else {
@@ -2338,6 +2367,15 @@ class ContributionStore(
                             // in MEMORY (it is what the server's ledger is reconciled against anyway) and
                             // the failure is logged and counted, so it is never silent. The durable record
                             // is rewritten by the next attempt that can write.
+||||||| /tmp/mfb
+                            // An unwritable count is not A reason to withhold the attempt (
+                            // Reviewer adbdc9b4). The count is bookkeeping: it does not decide whether this
+                            // Capture may be sent, and holding it here put an unlisted gate in front of
+                            // Every upload - pickup runs BEFORE the upload callback, so a disk that refuses
+                            // One sidecar write silently stopped the whole queue. The diagnostic count stays
+                            // In MEMORY (it is what the server's ledger is reconciled against anyway) and
+                            // The failure is logged and counted, so it is never silent. The durable record
+                            // Is rewritten by the next attempt that can write.
                             Timber.tag(QUEUE_TAG).i(
                                 "voice-upload attempts: count-persist-failed capture=%s reason=%s action=send",
                                 captureId,
@@ -2499,6 +2537,14 @@ class ContributionStore(
             // capture during the very withdrawal that is meant to dispose of it. Discovery here only
             // MEASURES and CHARGES what is on disk (establishCoverage), which is what the purge needs: an
             // ownership list to delete from, with nothing made servable.
+||||||| /tmp/mfb
+            // RevokeAndPurge deletes only what THIS store's index holds, and a freshly constructed store's
+            // Index is empty - so a policy-disable observed at startup purged nothing and a previous owner's
+            // Audio survived a disable. The fix must not be recoverLocked(): that routine promotes entries
+            // Into the serving index (ready/retryable) and performs recovery mutations, which re-admits a
+            // Capture during the very withdrawal that is meant to dispose of it. Discovery here only
+            // Measures and charges what is on disk (establishCoverage), which is what the purge needs: an
+            // Ownership list to delete from, with nothing made servable.
             revokeAndPurgeLocked(reason, discoverBeforeDelete = true)
         } finally {
             leaveOperation()

@@ -145,6 +145,8 @@ object RecordValidator {
         val models = validateModels(fields["models"]) ?: return reject("models invalid")
         val observations = validateObservations(fields["observations"]) ?: return reject("observations invalid")
         // spec 1e79e5b4: `rejected_by_bleed` is valid ONLY as asr/not_run AND only beside an
+||||||| /tmp/mfb
+        // Spec 1e79e5b4: `rejected_by_bleed` is valid only as asr/not_run and only beside an
         // OBSERVED bleed decision (bleed completed with decision overlap/no_overlap/uncertain)
         // — the bleed stage itself carries the observation. A record whose bleed stage ran is
         // also an ASR that ran ( Recognized/etc. ), which contradicts the skip.

@@ -201,7 +201,7 @@ class OsDirectorySyncWiringTest {
 
     @Test
     fun `the production binding NEVER infers the flag from the device capability list - mixed discriminator`() {
-        // Spec 220cdb5f / reviewer round 4: under Robolectric, Build.SUPPORTED_ABIS is POPULATED
+        //  / reviewer round 4: under Robolectric, Build.SUPPORTED_ABIS is POPULATED
         // (device capabilities "exist"), yet an authority that resolves to null must still make the
         // platform report UNSUPPORTED. A SUPPORTED_ABIS-based selector (the removed first-entry or
         // any-entry approach) would return a non-null ARM flag here and fail this control.

@@ -174,7 +174,7 @@ class AudioFeedbackRenderer(
     /**
      * Renders one response and returns whether it ACCEPTED OWNERSHIP of any transferred output hold.
      * True means the renderer will release the hold at its own terminal; false means the caller must
-     * release (the renderer cannot or will not play this response). Reviewer 664f82d0: map insertion
+     * release (the renderer cannot or will not play this response).: map insertion
      * alone is not acknowledgement.
      */
     fun render(response: VoiceResponse, language: String = "en", requestId: String? = null): Boolean {
@@ -418,7 +418,7 @@ class AudioFeedbackRenderer(
             // covers with a heartbeat, and the reason this cannot rest on the submission note alone.
             //
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
-            // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
+            // accepted them at so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
             coverEarconUntilConsumed(id, admitted)
         }
@@ -818,7 +818,7 @@ class AudioFeedbackRenderer(
         }
         // Surfaces TtsPlaybackIncompleteException (or any other failure) to the caller.
         utterance.join()
-        // REVIEWER 4356625551: false means the engine never synthesized (uninitialized, refused
+        // false means the engine never synthesized (uninitialized, refused
         // queue, onError) -- the caller must not count the reply as delivered.
         synthesized
     }

@@ -117,7 +117,7 @@ class LfmIntentRouter internal constructor(
                 monoMs = monoMs,
                 // THE ADMITTED UTTERANCE IDENTITY, passed in by the engine -- never a second mint here.
                 // Carried to the export so a routing record pairs with its turn by ONE identity
-                // (spec 3b1def9), and to the log line the support bundle exports.
+                // and to the log line the support bundle exports.
                 requestId = logicalRequestId,
                 transcript = input.routerTranscript,
             )

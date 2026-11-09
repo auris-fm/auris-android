@@ -98,7 +98,7 @@ class FileWithdrawalIntentPersistenceTest {
 
     @Test
     fun `a stop whose atomic write fails does NOT leave the previous permitted marker behind`() {
-        // Reviewer 60647af3. The rename used to fail silently and the caller believed the stop landed.
+        // . The rename used to fail silently and the caller believed the stop landed.
         // The dangerous sequence: a permitted marker is on disk, the user stops, the rename fails, and
         // reading back still says PERMITTED - so collection resumes on the next launch.
         val subject = persistence()

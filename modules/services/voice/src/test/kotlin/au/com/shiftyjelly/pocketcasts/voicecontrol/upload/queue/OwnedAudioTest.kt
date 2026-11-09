@@ -158,6 +158,11 @@ class OwnedAudioTest {
         // making the source terminal. The borrow's later close only completes a deferred close when
         // terminal is true, so the descriptor, slot and lease stayed held forever - and new borrows
         // stayed admissible after the timeout. The timeout transition must itself be terminal.
+||||||| /tmp/mfb
+        // Reviewer ade65c96: settle() that times out with a live borrow returned "unresolved" WITHOUT
+        // Making the source terminal. The borrow's later close only completes a deferred close when
+        // Terminal is true, so the descriptor, slot and lease stayed held forever - and new borrows
+        // Stayed admissible after the timeout. The timeout transition must itself be terminal.
         var descriptorClosed = 0
         var leaseClosed = 0
         val file = temp.newFile("clip-timeout.recording.wav").apply { writeBytes(payload) }
@@ -222,6 +227,12 @@ class OwnedAudioTest {
         // finished, the attempt has NOT settled, and a retry/redirect asks for a second body while the call
         // is still in flight. Cancelling there must refuse admission - and must not rewind the file position
         // of a body that is legitimately still running.
+||||||| /tmp/mfb
+        // Reviewer 6456b2a5: "after settle, no replay" was the WRONG window. Settle() makes the source
+        // Terminal, so it proves nothing about cancellation. The required window is the LIVE one: a body has
+        // Finished, the attempt has NOT settled, and a retry/redirect asks for a second body while the call
+        // Is still in flight. Cancelling there must refuse admission - and must not rewind the file position
+        // Of a body that is legitimately still running.
         val file = temp.newFile("audio.wav").also { it.writeBytes(byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)) }
         val audio = OwnedAudio(FileInputStream(file), file.length(), "sha-of-test-bytes")
         try {
@@ -279,7 +290,7 @@ class OwnedAudioTest {
 
     @Test
     fun `a sequential replay after a first body sends the SAME bytes, and a cancelled replay is refused`() {
-        // Reviewer 6456b2a5: the retry path. `isOneShot=false` with `retryOnConnectionFailure` enabled means
+        // the retry path. `isOneShot=false` with `retryOnConnectionFailure` enabled means
         // OkHttp CAN ask for the body a second time after the first attempt was cut short, so a body must be
         // replayable from byte 0 - and must stop being replayable the moment the attempt is withdrawn.
         // Driving OkHttp's internal retry directly is not deterministic, so the CONTRACT the retry relies on

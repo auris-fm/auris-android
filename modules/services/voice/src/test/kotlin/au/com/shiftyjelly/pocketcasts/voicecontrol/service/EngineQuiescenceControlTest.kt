@@ -21,7 +21,7 @@ import org.junit.Test
 /**
  * ENGINE QUIESCENCE CONTROL.
  *
- * Reviewer 9294defb: the teardown's 8-round join loop "unconditionally proceeds to release even if
+ * the teardown's 8-round join loop "unconditionally proceeds to release even if
  * unseen unfinished jobs remain", `return@repeat` skipped only an iteration, and a failed final stop
  * was logged and ignored. Those are properties of a decision, so the decision is a value type
  * ([EngineQuiescence]) that this control executes — source-text presence mutants cannot establish
@@ -73,6 +73,9 @@ class EngineQuiescenceControlTest {
     fun `a throwing join fails closed instead of escaping as an exception`() = runBlocking {
         // Reviewer bdb914a6: a join that throws has NOT proven the job finished. It must become a
         // verdict, not an exception thrown at the caller.
+||||||| /tmp/mfb
+        // Reviewer bdb914a6: a join that throws has NOT proven the job finished. It must become a
+        // Verdict, not an exception thrown at the caller.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         var released = false
         try {
@@ -95,6 +98,10 @@ class EngineQuiescenceControlTest {
         // Reviewer 6ce4ad78: the previous version created jobs that completed immediately, so the
         // set could spuriously look settled. These jobs are HELD open: a pool per round, each one
         // added by unfinished() and never finished, with bounded waits and cleanup.
+||||||| /tmp/mfb
+        // Reviewer 6ce4ad78: the previous version created jobs that completed immediately, so the
+        // Set could spuriously look settled. These jobs are HELD open: a pool per round, each one
+        // Added by unfinished() and never finished, with bounded waits and cleanup.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val gates = mutableListOf<CompletableDeferred<Unit>>()
         var released = false
@@ -127,6 +134,9 @@ class EngineQuiescenceControlTest {
     fun `a job the engine cancelled is expected shutdown, not a held failure`() = runBlocking {
         // Reviewer 47a3a267: the teardown cancels these very jobs. Treating every cancelled job as
         // abnormal marked an ordinary shutdown as Held.
+||||||| /tmp/mfb
+        // Reviewer 47a3a267: the teardown cancels these very jobs. Treating every cancelled job as
+        // Abnormal marked an ordinary shutdown as Held.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
@@ -150,6 +160,9 @@ class EngineQuiescenceControlTest {
     fun `an already pruned job is judged from the captured set, not the live list`() = runBlocking {
         // Reviewer 47a3a267: judging from the LIVE list means the same shutdown is classified Held
         // or Settled purely on prune timing. The captured jobs must be the evidence.
+||||||| /tmp/mfb
+        // Reviewer 47a3a267: judging from the LIVE list means the same shutdown is classified Held
+        // Or Settled purely on prune timing. The captured jobs must be the evidence.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val failedJob = scope.launch(Dispatchers.IO) { runCatching { throw IllegalStateException("engine died") } }
@@ -182,6 +195,9 @@ class EngineQuiescenceControlTest {
     fun `an expected cancellation is not a failure`() = runBlocking {
         // Reviewer 51baa020: a job this teardown cancelled records a CancellationException. Passing
         // recordedCause through unchanged would classify our own clean cancellation as a failure.
+||||||| /tmp/mfb
+        // Reviewer 51baa020: a job this teardown cancelled records a CancellationException. Passing
+        // RecordedCause through unchanged would classify our own clean cancellation as a failure.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
@@ -205,6 +221,11 @@ class EngineQuiescenceControlTest {
         // the job unconditionally meant a cleanup path that threw AFTER we cancelled it had its
         // throwable recorded and then discarded — a genuine failure reported as a clean stop. Only a
         // bare cancellation is expected; a cancellation carrying a cause is a wrapper around it.
+||||||| /tmp/mfb
+        // Reviewer 9f873b94: this control previously asserted the OPPOSITE and was wrong. Exempting
+        // The job unconditionally meant a cleanup path that threw AFTER we cancelled it had its
+        // Throwable recorded and then discarded — a genuine failure reported as a clean stop. Only a
+        // Bare cancellation is expected; a cancellation carrying a cause is a wrapper around it.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
@@ -227,6 +248,9 @@ class EngineQuiescenceControlTest {
     fun `a job that failed before the stop keeps its failure, not the engine's cancellation`() = runBlocking {
         // Reviewer 1ff17ee6: the teardown references this job too, so relabelling it expected
         // shutdown would hide a genuine engine failure.
+||||||| /tmp/mfb
+        // Reviewer 1ff17ee6: the teardown references this job too, so relabelling it expected
+        // Shutdown would hide a genuine engine failure.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val failed = scope.launch(Dispatchers.IO) { runCatching { throw IllegalStateException("failed before stop") } }
@@ -248,6 +272,9 @@ class EngineQuiescenceControlTest {
     fun `a cleanup failure recorded at registration is not lost`() = runBlocking {
         // Reviewer 1ff17ee6: cleanup can fail after the cancellation was requested. The outcome is
         // captured at registration, so a failure that completed before the snapshot is still seen.
+||||||| /tmp/mfb
+        // Reviewer 1ff17ee6: cleanup can fail after the cancellation was requested. The outcome is
+        // Captured at registration, so a failure that completed before the snapshot is still seen.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
@@ -269,6 +296,9 @@ class EngineQuiescenceControlTest {
     fun `only a cancellation the engine did not initiate counts as a failure`() = runBlocking {
         // Reviewer 47a3a267: the teardown cancels these jobs itself, so blanket-treating every
         // cancelled job as abnormal reported a normal shutdown as Held.
+||||||| /tmp/mfb
+        // Reviewer 47a3a267: the teardown cancels these jobs itself, so blanket-treating every
+        // Cancelled job as abnormal reported a normal shutdown as Held.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val engineCancelled = scope.launch(Dispatchers.IO) { awaitCancellation() }
@@ -295,6 +325,9 @@ class EngineQuiescenceControlTest {
     fun `a job that finished abnormally fails closed even though join returned`() = runBlocking {
         // Reviewer 28b32255: awaiting a Job reports nothing about success, so a finished-but-failed
         // engine job must not be mistaken for a settled engine.
+||||||| /tmp/mfb
+        // Reviewer 28b32255: awaiting a Job reports nothing about success, so a finished-but-failed
+        // Engine job must not be mistaken for a settled engine.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         var released = false
         try {

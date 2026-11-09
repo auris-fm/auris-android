@@ -194,6 +194,12 @@ class ContributionUploadAssemblyTest {
         // give it an upload SOURCE - production goes through durableCapture(), which still returned null on
         // a digest mismatch, and the descriptor validation refused audio integrity too. So the record would
         // have been served and then never sent, which is the same hold one layer lower.
+||||||| /tmp/mfb
+        // REVIEWER ba9777b2, and the correction is theirs: my previous control copied ids out of
+        // ReadyEntries() into a list and called nothing. Making the record VISIBLE to the queue does not
+        // Give it an upload SOURCE - production goes through durableCapture(), which still returned null on
+        // A digest mismatch, and the descriptor validation refused audio integrity too. So the record would
+        // Have been served and then never sent, which is the same hold one layer lower.
         //
         // This drives the whole real path: the production store -> durableCapture -> the assembly's own
         // multipart POST to a local HTTP server -> a terminal refusal (422 integrity_mismatch, which the
@@ -215,7 +221,7 @@ class ContributionUploadAssemblyTest {
 
         val capture = store.durableCapture(fixture.id)
         val owned = requireNotNull(capture?.owned) {
-            "SPEC 1e47eba8: a locally-invalid record must still yield an upload SOURCE, " +
+            "a locally-invalid record must still yield an upload SOURCE, " +
                 "or it is served and never sent"
         }
         val handed = mutableMapOf(
@@ -248,6 +254,9 @@ class ContributionUploadAssemblyTest {
     fun `the attempt settles the capture's descriptor on both an acceptance and a refusal`() {
         // Reviewer 9a47123e: captureFor built a Capture and dropped the owned descriptor, leaking one per
         // successful capture. This drives the REAL seam and observes the descriptor's own fate.
+||||||| /tmp/mfb
+        // Reviewer 9a47123e: captureFor built a Capture and dropped the owned descriptor, leaking one per
+        // Successful capture. This drives the REAL seam and observes the descriptor's own fate.
         for ((label, status) in listOf("accepted" to 201, "refused" to 500)) {
             var now = 30_000_000L
             val store = newStore { now }
@@ -296,6 +305,12 @@ class ContributionUploadAssemblyTest {
         //   - a probe taken MID-BODY is refused by activeBorrows > 0 (exclusive borrowing), not by
         //     revocation;
         //   - a probe taken AFTER poll() is refused by settle(), not by revocation.
+||||||| /tmp/mfb
+        // Reviewer 2fc378c6, and this supersedes two earlier attempts of mine that both passed against the
+        // Mutant and were therefore worthless:
+        // - a probe taken mid-body is refused by activeBorrows > 0 (exclusive borrowing), not by
+        // Revocation;
+        // - a probe taken AFTER poll() is refused by settle(), not by revocation.
         // The window that decides whether the binding is load-bearing is exactly this one: the first
         // body's borrow has EXITED, the descriptor is still OPEN, the call has NOT returned, and a retry
         // asks for a second body. Only the source's cancellation flag can refuse it there.
@@ -448,6 +463,11 @@ class ContributionUploadAssemblyTest {
             // borrow must complete the deferred close - slot, descriptor, directory lease - with NO
             // further settle/awaitSettlement/close call. (This test's earlier finally called real.close()
             // here, which repaired the leak and made the control vacuous.)
+||||||| /tmp/mfb
+            // Reviewer ade65c96: the timed-out settle is itself the terminal transition. Releasing the
+            // Borrow must complete the deferred close - slot, descriptor, directory lease - with NO
+            // Further settle/awaitSettlement/close call. (This test's earlier finally called real.close()
+            // Here, which repaired the leak and made the control vacuous.)
             borrow.close()
             assertEquals(
                 "the timed-out attempt's source never returned its slot after the last borrow exited",
@@ -557,6 +577,9 @@ class ContributionUploadAssemblyTest {
     fun `an invalid_request refusal over real HTTP deletes the entry at once`() {
         // Spec 1a0d3ffb (amending 5c811f83): a REQUEST rejection can never be served, so the entry
         // is deleted at once through the store's reconciled purge - the queue must always drain.
+||||||| /tmp/mfb
+        // Spec 1a0d3ffb (amending 5c811f83): a REQUEST rejection can never be served, so the entry
+        // Is deleted at once through the store's reconciled purge - the queue must always drain.
         // This is the real-HTTP pin for that semantics on the assembled path.
         var now = 30_000_000L
         val store = newStore { now }

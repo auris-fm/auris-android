@@ -130,6 +130,9 @@ class ContributionUploadTransport(
         /**
          * LAUNCH OWNERSHIP VALIDATION at the transport's final pre-execution boundary (reviewer
          * 0081c95f): runs AFTER request construction, immediately BEFORE registration/transmission -
+||||||| /tmp/mfb
+         * launch ownership validation at the transport's final pre-execution boundary (reviewer
+         * : runs after request construction, immediately before registration/transmission -
          * inside the same seam the admission control observes. A false verdict refuses locally:
          * zero bytes, zero registration, and the caller retains. The caller-side check alone
          * cannot close the acquisition→launch window; this one runs at the network edge.
@@ -364,6 +367,12 @@ class ContributionUploadTransport(
                     // this borrow exiting and the call/attempt settling: a retry (OkHttp re-invokes
                     // writeTo after a cut-short body) arrives HERE, with no writer running and the
                     // descriptor still open. parked interval only; a no-op in production.
+||||||| /tmp/mfb
+                    // REVIEWER 2fc378c6: this is the interval that decides whether source cancellation is
+                    // Load-bearing. Exclusive borrowing protects an active writer, but not the gap between
+                    // This borrow exiting and the call/attempt settling: a retry (OkHttp re-invokes
+                    // WriteTo after a cut-short body) arrives HERE, with no writer running and the
+                    // Descriptor still open. Parked interval only; a no-op in production.
                     onAfterFirstBodyExitForTest?.invoke()
                 }
             }

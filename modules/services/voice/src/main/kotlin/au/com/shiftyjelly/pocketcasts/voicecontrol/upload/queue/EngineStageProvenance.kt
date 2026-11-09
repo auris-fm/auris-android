@@ -209,6 +209,9 @@ object EngineStageProvenance {
 
                 // SPEC 21b5d822 (option b): EVERY observed execution carries `outcome` from the wire
                 // vocabulary, and failed/cancelled stages ALSO keep their `reason`. Recording only
+||||||| /tmp/mfb
+                // Spec 21b5d822 (option b): every observed execution carries `outcome` from the wire
+                // Vocabulary, and failed/cancelled stages ALSO keep their `reason`. Recording only
                 // `reason` left `outcome` absent for three of the four vocabulary values, so a
                 // consumer reading `outcome` saw nothing for a failed, refused or cancelled action.
                 // Vocabulary for `reason` is StageReasons.Execution; for `outcome`, EXECUTION_OUTCOMES.

@@ -334,6 +334,8 @@ class PlaybackCrossCorrelatorPositionTest {
     }
 
 // REVIEWER 4356625095 BOUNDARY: a real VAD segment is at least 41 x 1024 = 41 984 samples while
+||||||| /tmp/mfb
+// reviewer 4356625095 boundary: a real vad segment is at least 41 x 1024 = 41 984 samples while
 // the recorder's reference buffer is 2 s = 32 000 samples, so a reference-shorter-than-segment
 // bail-out would skip correlation for EVERY real segment and let the device's own answer audio
 // be transcribed and executed. The analysis window must be BOUNDED to the reference length, not

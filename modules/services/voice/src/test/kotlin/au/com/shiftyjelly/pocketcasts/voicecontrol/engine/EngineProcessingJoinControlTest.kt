@@ -158,6 +158,10 @@ class EngineProcessingJoinControlTest {
         // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
         // failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
         // expected shutdown and hide it from the quiescence verdict.
+||||||| /tmp/mfb
+        // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
+        // Failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
+        // Expected shutdown and hide it from the quiescence verdict.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val died = CompletableDeferred<Unit>()
         `when`(processor.startProcessing()).thenReturn(
@@ -201,6 +205,10 @@ class EngineProcessingJoinControlTest {
         // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
         // it flaky. So BOTH completions are held: capture distinct identities, assert exact
         // retention while both are held, then release each one and assert it prunes on its own.
+||||||| /tmp/mfb
+        // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
+        // It flaky. So BOTH completions are held: capture distinct identities, assert exact
+        // Retention while both are held, then release each one and assert it prunes on its own.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val holdFirst = CompletableDeferred<Unit>()
         val holdSecond = CompletableDeferred<Unit>()
@@ -280,6 +288,11 @@ class EngineProcessingJoinControlTest {
         // in the test, so it proved nothing about production. This version holds the REAL processing
         // flow — the one the engine's own launch collects — so the join under test is over the
         // production job, and the barrier is that job's actual finalization.
+||||||| /tmp/mfb
+        // Reviewer 26883305: the previous version held a SIBLING job in the test scope and joined it
+        // In the test, so it proved nothing about production. This version holds the REAL processing
+        // Flow — the one the engine's own launch collects — so the join under test is over the
+        // Production job, and the barrier is that job's actual finalization.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val heldFlow = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
         val flowStarted = CompletableDeferred<Unit>()

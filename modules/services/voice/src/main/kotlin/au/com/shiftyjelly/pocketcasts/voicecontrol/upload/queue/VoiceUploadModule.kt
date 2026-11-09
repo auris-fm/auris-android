@@ -67,6 +67,10 @@ object VoiceUploadModule {
         // Spec 64ce2de6: the android.system.Os platform adapter is bound HERE, at the Android
         // construction boundary, so every durable publication in production uses the documented
         // open(O_DIRECTORY)/fsync/close surface. Unit tests construct the store directly with the
+||||||| /tmp/mfb
+        // Spec 64ce2de6: the android.system.Os platform adapter is bound HERE, at the Android
+        // Construction boundary, so every durable publication in production uses the documented
+        // Open(O_DIRECTORY)/fsync/close surface. Unit tests construct the store directly with the
         // JVM-runnable default or their own injected barrier. There is NO unsupported-runtime
         // success fallback: an unsupported platform propagates a failure, never a claimed sync.
         directorySync = directorySyncOverride ?: DirectorySync.PRODUCTION,
@@ -78,6 +82,10 @@ object VoiceUploadModule {
         // DURABLE RESUME, ONCE PER PROCESS (on-device finding 2026-11-07, spec decision after
         // reviewer 032a8639): recovery happens HERE, at singleton creation, BEFORE any capture
         // preparation can begin in this process. recover() re-enumerates the durable queue from
+||||||| /tmp/mfb
+        // Durable resume, once per process (on-device finding, spec decision after
+        // Reviewer 032a8639): recovery happens here, at singleton creation, before any capture
+        // Preparation can begin in this process. Recover() re-enumerates the durable queue from
         // VALIDATED disk state (the 44 old-schema entries the pre-wiring build stranded will be
         // record-check-deleted on this first recovery) - and because it precedes every preparation,
         // its destructive debris sweep can never race a live `.part` write. Recovering per drain

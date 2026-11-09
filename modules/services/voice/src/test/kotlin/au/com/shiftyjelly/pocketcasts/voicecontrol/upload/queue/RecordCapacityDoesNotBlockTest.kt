@@ -12,6 +12,8 @@ import org.junit.rules.TemporaryFolder
 
 /**
  * SPEC a3ef694f: capacity is a pure RECORD COUNT bounded by `limits.maxQueueRecords` (default 32).
+||||||| /tmp/mfb
+ * : capacity is a pure record count bounded by `limits.maxQueueRecords` (default 32).
  *
  * The defect this pins: a full queue must never be mistaken for a blocked one. A queue at its record
  * bound still serves due entries to the drain, and a fresh clip is still admitted while the queue only
@@ -399,6 +401,9 @@ class RecordCapacityDoesNotBlockTest {
     fun `an over-bound listing is still DISCOVERED, only its sweep is skipped`() {
         // REVIEWER a4a6b1 / spec 2741a0ca. Discovery and the destructive sweep were entangled: recovery
         // returned emptyList() when the bounded listing refused, so an over-bound directory served NOTHING.
+||||||| /tmp/mfb
+        // REVIEWER a4a6b1 /. Discovery and the destructive sweep were entangled: recovery
+        // Returned emptyList() when the bounded listing refused, so an over-bound directory served NOTHING.
         // A bound that exists to protect a DELETE is not a bound on DISCOVERY.
         //
         // Two earlier versions of this control were THEATRE and both passed against the defect:
@@ -599,6 +604,12 @@ class RecordCapacityDoesNotBlockTest {
         // sidecar stopped the whole queue. The count is diagnostic - it does not decide whether the capture
         // may be sent - so the failure is logged and counted, the in-memory count carries on, and the clip
         // still goes. The `.attempts` path is made unwritable by turning it into a directory.
+||||||| /tmp/mfb
+        // SPEC 423e9726 /. The attempt-count sidecar was the last bookkeeping gate: its
+        // Write failure threw out of pickup, and pickup runs BEFORE the upload callback, so one unwritable
+        // Sidecar stopped the whole queue. The count is diagnostic - it does not decide whether the capture
+        // May be sent - so the failure is logged and counted, the in-memory count carries on, and the clip
+        // Still goes. The `.attempts` path is made unwritable by turning it into a directory.
         val now = System.currentTimeMillis()
         val root = tmp.newFolder("count-write-failure-still-sends")
         val dir = queueDir(root)
@@ -654,6 +665,10 @@ class RecordCapacityDoesNotBlockTest {
             // SPEC 1e47eba8: the record must be SERVED, not merely retained. My first fix left it held for
             // seven days, which is a gate the allowed list does not contain AND defeats the ruling - a clip
             // that is never sent is never refused, so the designated cleanup path never runs.
+||||||| /tmp/mfb
+            // Spec 1e47eba8: the record must be served, not merely retained. My first fix left it held for
+            // Seven days, which is a gate the allowed list does not contain AND defeats the ruling - a clip
+            // That is never sent is never refused, so the designated cleanup path never runs.
             val recovered = store.recover()
             assertTrue(
                 "a locally-invalid record must be SERVED so the server can judge it (recovered=${recovered.map { it.captureId }})",
@@ -677,6 +692,9 @@ class RecordCapacityDoesNotBlockTest {
     fun `a digest-mismatched record REACHES TRANSPORT, and a final refusal deletes it`() {
         // SPEC 1e47eba8, the control asked for by name. The server is the only judge of "invalid": a record
         // whose digest does not match must still travel, and the server's FINAL refusal is what removes it.
+||||||| /tmp/mfb
+        // SPEC 1e47eba8, the control asked for by name. The server is the only judge of "invalid": a record
+        // Whose digest does not match must still travel, and the server's FINAL refusal is what removes it.
         // This is the whole point of demoting local validation from verdict to evidence - if the clip never
         // travels, a client-side hashing bug strands a real recording forever with no path to resolution.
         val now = System.currentTimeMillis()

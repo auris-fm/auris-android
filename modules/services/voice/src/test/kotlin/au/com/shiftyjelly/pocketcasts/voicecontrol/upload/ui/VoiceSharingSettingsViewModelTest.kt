@@ -236,7 +236,7 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals("the failure must be surfaced honestly", SettingsOperationStatus.FAILED, failed.status)
     }
 
-    // --- Reviewer ae7922f9: re-enrollment must release the durable stop through the outcome fence.
+    // ---: re-enrollment must release the durable stop through the outcome fence.
 
     @Test
     fun `a successful re-enrollment releases the durable local stop`() = runTest(mainDispatcher) {
@@ -279,7 +279,7 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue("the durable stop survives a failed enrollment", persistence.stopped)
     }
 
-    // --- Reviewer ae7922f9: failure identity is durable UI state, not transient render input.
+    // ---: failure identity is durable UI state, not transient render input.
 
     @Test
     fun `the failure copy survives unrelated projection updates until the next action`() = runTest(mainDispatcher) {
@@ -303,7 +303,7 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals("the failure must still name the enrollment", FailedOperation.ENROLL, vm.state.value.failedOperation)
     }
 
-    // --- Reviewer ae7922f9: pending is labeled by ITS operation, not a hard-coded withdrawal.
+    // ---: pending is labeled by ITS operation, not a hard-coded withdrawal.
 
     @Test
     fun `pending is labeled by its operation - enrollment pending is not withdrawal pending`() = runTest(mainDispatcher) {
@@ -333,7 +333,7 @@ class VoiceSharingSettingsViewModelTest {
         )
     }
 
-    // --- Reviewer a2136dd9: a stale outcome must not mutate the CURRENT action's presentation.
+    // ---: a stale outcome must not mutate the CURRENT action's presentation.
 
     @Test
     fun `a superseded outcome does not disturb the current action's pending label`() = runTest(mainDispatcher) {
@@ -373,6 +373,8 @@ class VoiceSharingSettingsViewModelTest {
     }
 
     // --- Reviewer a2136dd9: the failure presentation retires at the OWNER-SESSION boundary.
+||||||| /tmp/mfb
+    // --- Reviewer a2136dd9: the failure presentation retires at the owner-session boundary.
 
     @Test
     fun `an account session change retires the failure presentation`() = runTest(mainDispatcher) {
@@ -401,7 +403,7 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals(FailedOperation.NONE, vm.state.value.failedOperation)
     }
 
-    // --- Reviewer a2136dd9: a failed LOCAL stop release is distinct from a server rejection.
+    // ---: a failed LOCAL stop release is distinct from a server rejection.
 
     @Test
     fun `a failed local stop release surfaces distinctly and keeps the stop`() = runTest(mainDispatcher) {
@@ -427,7 +429,7 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
 
-    // --- Reviewer 66ae7752: a session switch must not leave the stale action pending on the NEW account.
+    // ---: a session switch must not leave the stale action pending on the NEW account.
 
     @Test
     fun `an account switch does not leave the stale action pending on the new account`() = runTest(mainDispatcher) {
@@ -458,7 +460,7 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue("the setting must remain available on account B", vm.state.value.settingAvailable)
     }
 
-    // --- Reviewer 66ae7752: a queued tap from a dead session must never issue against the NEW account.
+    // ---: a queued tap from a dead session must never issue against the NEW account.
 
     @Test
     fun `a tap issued under a session that changed before it runs never reaches the new account`() = runTest(mainDispatcher) {
@@ -618,7 +620,7 @@ class VoiceSharingSettingsViewModelTest {
         assertTrue(vm.state.value.projectionObserved)
     }
 
-    // --- Reviewer 578bb62a: deletion lifecycle, conflict keeps the stop, current-session projection.
+    // ---: deletion lifecycle, conflict keeps the stop, current-session projection.
 
     @Test
     fun `a withdrawal conflict keeps the local stop and reconciles through the fence`() = runTest(mainDispatcher) {
@@ -931,7 +933,7 @@ class VoiceSharingSettingsViewModelTest {
     private val withdrawGate2 = Gate()
     private val deleteGate2 = ReceiptGate()
 
-    // --- Reviewer b7ad7c92: a retired tap must have NO presentation effects on a newer action.
+    // ---: a retired tap must have NO presentation effects on a newer action.
 
     @Test
     fun `a retired stale tap does not clear a newer action's pending presentation`() = runTest(mainDispatcher) {

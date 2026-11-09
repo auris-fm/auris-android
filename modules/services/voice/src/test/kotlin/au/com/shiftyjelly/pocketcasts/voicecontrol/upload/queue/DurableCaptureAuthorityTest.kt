@@ -307,6 +307,9 @@ class DurableCaptureAuthorityTest {
 
         // SPEC 1e47eba8: the substitution is still DETECTED (the digest no longer matches what the store
         // published, and the same decision is logged), but it is the server's refusal that removes it.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: the substitution is still detected (the digest no longer matches what the store
+        // Published, and the same decision is logged), but it is the server's refusal that removes it.
         assertNotNull(
             "a substituted record must still reach the server for judgement",
             store.durableCapture(id),
@@ -342,6 +345,11 @@ class DurableCaptureAuthorityTest {
         // and refuses, and its refusal deletes the entry; refusing locally meant the record was never sent,
         // so the server never judged it and the recording aged out unrefused. What must still hold is that
         // the damage is OBSERVED and reported rather than sent silently - the diagnosis survives the gate.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: this no longer refuses the source. A damaged header is damage the server detects
+        // And refuses, and its refusal deletes the entry; refusing locally meant the record was never sent,
+        // So the server never judged it and the recording aged out unrefused. What must still hold is that
+        // The damage is OBSERVED and reported rather than sent silently - the diagnosis survives the gate.
         assertNotNull(
             "damaged audio must still yield a source so the server can refuse it",
             store.durableCapture(id),
@@ -363,6 +371,9 @@ class DurableCaptureAuthorityTest {
 
         // SPEC 1e47eba8: same as the header case - the payload digest disagreement is DETECTED here but the
         // verdict belongs to the server. The source is handed down so the record can actually be refused.
+||||||| /tmp/mfb
+        // Spec 1e47eba8: same as the header case - the payload digest disagreement is detected here but the
+        // Verdict belongs to the server. The source is handed down so the record can actually be refused.
         assertNotNull(
             "a mutated payload must still reach the server, which is what refuses it",
             store.durableCapture(id),

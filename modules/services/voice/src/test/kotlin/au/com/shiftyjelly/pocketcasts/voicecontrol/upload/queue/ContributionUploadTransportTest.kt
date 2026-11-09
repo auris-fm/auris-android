@@ -419,6 +419,9 @@ class ContributionUploadTransportTest {
         // a retry before the accounting day rolls.
 ||||||| /tmp/mfb
         // Floor and the hint. A 120 s hint (the shape @cloud says ships today) must NOT permit
+||||||| /tmp/mfb
+        // Spec 0d59b1d5: the retry minimum for quota_exceeded is the LARGER of the next-day
+        // Floor and the hint. A 120 s hint (the shape the server ships today) must NOT permit
         // A retry before the accounting day rolls.
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
@@ -494,6 +497,11 @@ class ContributionUploadTransportTest {
         // the exception's own message - which can carry a URL, a host address, a bearer value or
         // server-supplied body text. This plants exactly such a message on the path and asserts none of it
         // survives into the log.
+||||||| /tmp/mfb
+        // Reviewer 459074a8: the cause must be the exception class plus a fixed allowlisted category, never
+        // The exception's own message - which can carry a URL, a host address, a bearer value or
+        // Server-supplied body text. This plants exactly such a message on the path and asserts none of it
+        // Survives into the log.
         val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
         val tree = object : timber.log.Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {

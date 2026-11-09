@@ -96,6 +96,9 @@ class VoiceUploadCompositionPathTest {
     // `moduleStartup()` above builds the REAL startup object (production state/credentials/coordinator/
     // binding); only its constructor inputs differ from the app's (no account signed in, retrofit never
     // called on this path).
+||||||| /tmp/mfb
+    // Binding); only its constructor inputs differ from the app's (no account signed in, retrofit never
+    // Called on this path).
 
     /**
      * Mirrors VoiceObservationModule.provideCollectionTx over the SAME startup/owner (one shared
@@ -785,6 +788,15 @@ class VoiceUploadCompositionPathTest {
             // SPEC 1e47eba8, one step further than my previous fix. I had corrected this to "retained but
             // not served", which is still a local hold - and a hold is a gate the allowed list does not
             // contain. A record from the previous schema must actually REACH the server so it can judge it.
+||||||| /tmp/mfb
+            // It. "Invalid record" is the SERVER's final refusal, not ours: deleting locally means any
+            // Client-side validation difference - exactly this case, a record from the previous schema -
+            // Silently destroys a real recording the user can never recover. A wrongly-sent clip costs a
+            // Rejected upload; a wrongly-deleted clip costs the recording. So the entry is retained and
+            // Simply not served by this build, and it expires under the ordinary seven-day rule.
+            // SPEC 1e47eba8, one step further than my previous fix. I had corrected this to "retained but
+            // Not served", which is still a local hold - and a hold is a gate the allowed list does not
+            // Contain. A record from the previous schema must actually REACH the server so it can judge it.
             // If this build's validation is the thing that is wrong, withholding the clip means it is never
             // refused, never cleaned up, and the user's recording is simply lost on the device after seven
             // days. Sending it costs one rejected request.
@@ -1052,6 +1064,18 @@ class VoiceUploadCompositionPathTest {
             // is OFFERED to the server instead of being decided locally. The all-sidecars-go invariant is
             // still covered where a delete legitimately happens (accepted by the server, final refusal,
             // seven days, sharing off); asserting it here would be asserting a deletion that must not occur.
+||||||| /tmp/mfb
+            // Changed by correction 2. This control exists to prove that when an entry is
+            // Deleted, every sidecar goes with it. Correction 2 removes the local delete for a record this
+            // Build cannot validate, so there is no deletion here to have residue - the entry is retained
+            // For the server to judge. Kept as a retention control so the behaviour stays pinned; the
+            // All-sidecars-go invariant is still covered where a delete legitimately happens (accepted,
+            // Final refusal, seven days, sharing off).
+            // SPEC 1e47eba8: correction 2 no longer deletes a record this build cannot validate, so this
+            // Fixture no longer produces a deletion to inspect - it now proves the opposite, that the entry
+            // Is OFFERED to the server instead of being decided locally. The all-sidecars-go invariant is
+            // Still covered where a delete legitimately happens (accepted by the server, final refusal,
+            // Seven days, sharing off); asserting it here would be asserting a deletion that must not occur.
             org.junit.Assert.assertTrue(
                 "an old-schema entry must be OFFERED to the server, not decided locally",
                 hits.get() >= 1,

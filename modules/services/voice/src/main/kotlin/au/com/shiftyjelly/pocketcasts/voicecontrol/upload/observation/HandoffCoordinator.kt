@@ -17,7 +17,7 @@ import java.util.UUID
  * observer context, never upward.
  */
 class HandoffCoordinator(
-    /** THE collection fence: order collectionFence → owner → observer → sink (a38421f6 b1/b4). */
+    /** THE collection fence: order collectionFence → owner → observer → sink. */
     private val collectionTx: CollectionAuthorityTransaction,
     /** Coherent ORIGINAL-authority validation executed INSIDE the same collection transaction. */
     private val validateIssuedLocked: (IssuedAuthority) -> Boolean,

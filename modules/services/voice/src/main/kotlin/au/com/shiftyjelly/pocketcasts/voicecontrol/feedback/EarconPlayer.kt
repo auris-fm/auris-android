@@ -102,7 +102,7 @@ class EarconPlayer(
     // because the cases ran THIS copy. A test seam must route through the mechanism, not restate it.
     internal fun <T> submitForTest(block: () -> T): T = onPlayerThread(block)
 
-    /** Test seam (4d1e5946): install a real clip so submit()/play() take an actual accepted write. */
+    /** Test seam: install a real clip so submit()/play() take an actual accepted write. */
     internal fun installClipForTest(id: EarconId, samples: ShortArray, sampleRateHz: Int) {
         val ctor = EarconClip::class.java.getDeclaredConstructor(
             EarconPlayer::class.java,
@@ -119,7 +119,7 @@ class EarconPlayer(
 
     // Replaces the worker with [service], so a test controls when it is shut down.
 
-    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran (35f7e2d8). */
+    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran. */
     internal fun acceptedFrontierForTest(): Int = synchronized(executorLock) { acceptedFramesTotal }
 
     internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {

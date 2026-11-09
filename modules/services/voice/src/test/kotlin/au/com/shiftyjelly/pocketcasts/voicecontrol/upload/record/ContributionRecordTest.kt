@@ -277,7 +277,7 @@ class ContributionRecordTest {
     }
 
     @Test
-    fun `4d10275f - translation skip reasons are valid only at translation plus not_run`() {
+    fun `translation skip reasons are valid only at translation plus not_run`() {
         val skips = listOf(
             "source_language_unavailable",
             "backend_handles_translation",
@@ -372,6 +372,13 @@ class ContributionRecordTest {
         // from the recovery validator because the two are independent authorities: a record can be
         // built here and read back there, and a rule enforced in only one of them is a rule with a
         // hole on the other path.
+||||||| /tmp/mfb
+    fun `f8cac147 - no completed stage may carry a reason, except ASR empty_result`() {
+        // The builder's half of the completed-stage reason rule. Proven separately
+        // From the recovery validator because the two are independent authorities: a record can be
+        // Built here and read back there, and a rule enforced in only one of them is a rule with a
+        // Hole on the other path.
+    fun `no completed stage may carry a reason, except ASR empty_result`() {
         val completedReasonFor = mapOf(
             StageName.Wake to "no_wake_detected",
             StageName.Bleed to "no_playback_reference",

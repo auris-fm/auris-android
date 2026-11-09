@@ -32,6 +32,7 @@ class RecordingPublisherTest {
         asrModel: ModelRef? = ModelRef.Named("whisper", "base"),
         pcm: ShortArray = ShortArray(1_600) { 7 },
         epoch: String? = "epoch-1",
+        sampleRateHz: Int = 16_000,
         stageHistory: List<CollectionOutcome> = emptyList(),
         translation: TranslationProvenance? = null,
         executionOutcome: ExecutionOutcome? = null,
@@ -47,7 +48,7 @@ class RecordingPublisherTest {
                 issuedAuthority = epoch?.let { IssuedAuthority("a@b.c", 1L, 1L, it, "voice-sharing-v1") },
             ),
             pcm = pcm,
-            sampleRateHz = 16_000,
+            sampleRateHz = sampleRateHz,
             wakeState = wakeState,
             wakeMeasurement = measurement,
             outcome = outcome,
@@ -245,5 +246,14 @@ class RecordingPublisherTest {
         val translation = metadata(q).getJSONObject("observations").getJSONObject("translation")
         assertEquals("failed", translation.getString("state"))
         assertEquals("translator_unavailable", translation.getString("reason"))
+    }
+
+    @Test
+    fun `a capture at a rate the server refuses is not published`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        // The server accepts only 16 kHz. Sending another rate would earn a 400, and the uploader's
+        // answer to a 400 is to delete the recording, so it must never be queued.
+        assertFalse(publisher(q).publish(sealed(sampleRateHz = 8_000)))
+        assertEquals(0, q.count())
     }
 }

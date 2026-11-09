@@ -45,7 +45,11 @@ class RecordingPublisher(
         val account = authority.accountName ?: return false
         if (epoch.isBlank() || account.isBlank()) return false
 
-        val sampleRate = sealed.sampleRateHz.coerceAtLeast(1)
+        // The server refuses any rate but 16 kHz, and a refusal means the recording is deleted.
+        // The capture pipeline is 16 kHz mono; a capture that somehow is not cannot be described
+        // honestly, so it is not published at all rather than sent to be discarded.
+        val sampleRate = sealed.sampleRateHz
+        if (sampleRate != SERVER_SAMPLE_RATE_HZ) return false
         val byteCount = WAV_HEADER_BYTES + pcm.size * 2L
         val audio = AudioDescription(
             byteCount = byteCount,
@@ -300,6 +304,9 @@ class RecordingPublisher(
 
     companion object {
         /** The engine's own reasons for a capture it did not collect. */
+        // The only rate the server accepts; anything else is a refusal, which loses the recording.
+        const val SERVER_SAMPLE_RATE_HZ = 16_000
+
         const val REASON_BLEED = "bleed"
         const val REASON_REJECTED_BY_WAKE = "rejected_by_wake"
         const val REASON_WAKE_ONLY = "wake_only"

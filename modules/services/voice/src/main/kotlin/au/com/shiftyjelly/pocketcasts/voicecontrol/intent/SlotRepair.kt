@@ -6,6 +6,7 @@ object SlotRepair {
         utterance: String,
         tool: String,
         action: String,
+        textLanguage: String? = null,
     ): ToolCall? {
         if (tool.isEmpty()) return null
         if (tool == "no_match") {
@@ -16,7 +17,9 @@ object SlotRepair {
         // can install a magnitude or a default. This runs first deliberately: the later steps fill
         // a missing delta from the utterance and lean on the sink's configured interval, both of
         // which would turn an unresolved request into an immediate seek at some invented distance.
-        if (hasUnresolvedAmountOrTiming(utterance) && isExecuteOrNumericTarget(tool, action)) {
+        if (hasUnresolvedAmountOrTiming(utterance, textLanguage) &&
+            (isExecuteOrNumericTarget(tool, action) || hasUndecidedLanguageWord(utterance, textLanguage))
+        ) {
             return null
         }
 
@@ -46,6 +49,59 @@ object SlotRepair {
 
     /** Maximum repaired relative delta (1 hour). Larger amounts return null (no repaired call). */
     private const val MAX_REPAIR_SECONDS = 3600
+
+    /**
+     * Whether "once" introduces an execution condition rather than naming the number eleven.
+     *
+     * The word differs by language, so the language of the text being repaired decides first. In
+     * a Spanish utterance it is the numeral and never a condition. In English, or when the
+     * language is unknown, it is a condition when it opens the utterance or a clause and is
+     * followed by a subject rather than a repetition or beneficiary phrase: "once this episode
+     * ends" is a condition, "rewind ten seconds once please" is a count.
+     *
+     * Unknown language resolves toward deferring, which is the side that neither seeks at an
+     * unstated distance nor runs an action before its event.
+     */
+    private fun isOnceCondition(text: String, textLanguage: String?): Boolean {
+        // Spanish has its own conjunction for "once … que", which is a condition like its English
+        // counterpart, and "once" on its own there is only ever the number eleven.
+        if (SPANISH_ONCE_CLAUSE_REGEX.containsMatchIn(text)) return true
+        if (baseLanguage(textLanguage) == "es") return false
+        val match = ONCE_REGEX.find(text) ?: return false
+        val lang = baseLanguage(textLanguage)
+        val followed = text.substring(match.range.last + 1).trimStart(' ', ',')
+        if (followed.isEmpty()) return false
+        // With no language to go on, keep the conservative reading rather than guessing that a
+        // bare numeral was meant. The fixture that pins this is a Spanish volume request whose
+        // text language was not recorded.
+        if (lang == null && !ENGLISH_CLAUSE_EVIDENCE_REGEX.containsMatchIn(text)) return true
+        // A repetition or beneficiary phrase does not make a clause.
+        if (ONCE_NON_CLAUSE_REGEX.containsMatchIn(followed)) return false
+        return true
+    }
+
+    private fun baseLanguage(textLanguage: String?): String? = textLanguage?.trim()?.lowercase()?.substringBefore('-')?.takeIf { it.isNotEmpty() }
+
+    private val ONCE_REGEX = Regex("""\bonce\b""", RegexOption.IGNORE_CASE)
+    private val ENGLISH_CLAUSE_EVIDENCE_REGEX = Regex(
+        """\b(this|that|it|the|you|i|we|he|she|they|both|\w+\s+(?:is|are|was|were|finishes|ends|fades|elapses?|stops|completes))\b""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val SPANISH_ONCE_CLAUSE_REGEX = Regex("""\buna\s+vez\s+que\b""", RegexOption.IGNORE_CASE)
+    private val ONCE_NON_CLAUSE_REGEX = Regex(
+        """^(?:please|again|more|another|or\s+twice|or\s+two|and|for\b|to\b)\b""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /**
+     * Whether a language-dependent word decided this utterance.
+     *
+     * A duration or insertion point is normally left alone because its number is complete on its
+     * own. That reasoning fails when the same words could be a count or a condition, which only
+     * the language can settle: an unknown-language "once" is unsafe to read as a volume level, so
+     * the guard applies there even for an action it otherwise exempts.
+     */
+    private fun hasUndecidedLanguageWord(utterance: String, textLanguage: String?): Boolean = baseLanguage(textLanguage) == null && ONCE_REGEX.containsMatchIn(utterance.lowercase())
 
     /**
      * Actions whose single numeric target is a seek distance or a chapter position.
@@ -87,14 +143,18 @@ object SlotRepair {
      * Detection is per language rather than English-only: the shared fixtures exercise Chinese,
      * Japanese and Spanish, where the wording carries no English token to match.
      */
-    internal fun hasUnresolvedAmountOrTiming(utterance: String): Boolean {
+    internal fun hasUnresolvedAmountOrTiming(
+        utterance: String,
+        textLanguage: String? = null,
+    ): Boolean {
         if (utterance.isBlank()) return false
         // A quoted span names a chapter, bookmark or playlist. Its wording is a title, not a
         // description of when to act, so it is removed before any condition is looked for.
         val text = QUOTED_SPAN_REGEX.replace(utterance.lowercase(), " ")
         return UNRESOLVED_AMOUNT_REGEX.containsMatchIn(text) ||
             UNRESOLVED_BOUND_REGEX.containsMatchIn(text) ||
-            UNRESOLVED_CONDITION_REGEX.containsMatchIn(text)
+            UNRESOLVED_CONDITION_REGEX.containsMatchIn(text) ||
+            isOnceCondition(text, textLanguage)
     }
 
     // Two quantities offered as alternatives. The amount words are matched on both sides of the

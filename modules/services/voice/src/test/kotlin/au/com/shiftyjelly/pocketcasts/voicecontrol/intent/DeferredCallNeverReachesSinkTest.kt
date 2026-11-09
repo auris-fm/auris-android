@@ -18,13 +18,14 @@ import org.robolectric.RobolectricTestRunner
 class DeferredCallNeverReachesSinkTest {
     private val mapper = ToolCallMapper()
 
-    private fun deferred(utterance: String, params: String): Boolean {
+    private fun deferred(utterance: String, params: String, textLanguage: String? = null): Boolean {
         val raw = "<|tool_call_start|>[playback(action='seek_relative'$params)]<|tool_call_end|>"
         val repaired = SlotRepair.repair(
             raw = raw,
             utterance = utterance,
             tool = "playback",
             action = "seek_relative",
+            textLanguage = textLanguage,
         ) ?: return true
         // Anything repair still returns must not become a sink call either.
         return mapper.map(repaired) == null
@@ -107,7 +108,17 @@ class DeferredCallNeverReachesSinkTest {
             "retrocede once segundos",
             "retrocede exactamente once segundos",
         ).forEach { utterance ->
-            assert(!deferred(utterance, ", delta_seconds=-11")) { "$utterance was read as a condition" }
+            assert(!deferred(utterance, ", delta_seconds=-11", textLanguage = "es")) {
+                "$utterance was read as a condition"
+            }
+        }
+        // Without a language the same words stay unresolved: neither reading is safe to assume.
+        assert(deferred("retrocede once segundos", ", delta_seconds=-11")) {
+            "an unknown language was read as the number"
+        }
+        // The Spanish conjunction is a condition regardless of the number reading.
+        assert(deferred("una vez que termine este episodio, retrocede diez segundos", ", delta_seconds=-10", textLanguage = "es")) {
+            "the Spanish conjunction was read as a number"
         }
     }
 

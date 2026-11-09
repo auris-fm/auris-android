@@ -754,6 +754,22 @@ class VoiceControlCaptureRestartTest {
                 2,
                 cues.get(),
             )
+
+            // The re-enabled session behaves like any other user-started one: an automatic recovery
+            // inside it must stay silent, so the re-enable's cue stays the last one heard.
+            harness.otherAppRule.block("other_app_playing")
+            awaitState("teardown after re-enable", probe = { "vadStop=${harness.hardware.vadStopCount} cues=${cues.get()}" }) {
+                harness.hardware.vadStopCount >= 3
+            }
+            harness.otherAppRule.allow()
+            awaitState("recovery after re-enable", probe = { "attach=${harness.hardware.attachCount} cues=${cues.get()}" }) {
+                harness.hardware.attachCount >= 4
+            }
+            assertEquals(
+                "a recovery inside the re-enabled session must not cue either",
+                2,
+                cues.get(),
+            )
         }
     }
 

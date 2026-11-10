@@ -96,7 +96,13 @@ class VoiceSharingSettingsViewModelTest {
 
         /** Notified for every write, so a control can observe where the write was reached from. */
         var onWrite: ((Boolean) -> Unit)? = null
-        override fun read(): Boolean = stopped
+
+        /** Notified for every read, so a control can observe where the read was reached from. */
+        var onRead: (() -> Unit)? = null
+        override fun read(): Boolean {
+            onRead?.invoke()
+            return stopped
+        }
 
         override fun write(requested: Boolean): Boolean {
             onWrite?.invoke(requested)
@@ -168,34 +174,90 @@ class VoiceSharingSettingsViewModelTest {
     }
 
     @Test
-    fun `the withdrawal stop runs on the injected io dispatcher, in order, before the request`() = runTest(mainDispatcher) {
-        // The claim under test is a DISPATCHER boundary, not a thread name: the durable stop
-        // must be reached only after crossing onto the injected IO dispatcher. A thread-name
-        // check cannot see this, because a coroutine may run on a different thread even with no
-        // dispatcher switch, so the control observes the dispatch itself.
+    fun `every storage touch on the withdraw path runs on the injected io dispatcher`() = runTest(mainDispatcher) {
+        // This control builds its own surface, so it also owns a private dispatcher: parking its
+        // coroutines on the shared test Main would let them run inside a later test.
+        // The claim is a DISPATCHER boundary, not a thread name. A thread name cannot see it,
+        // because a coroutine runs on its own thread even with no dispatcher switch, so the
+        // control marks each block the injected dispatcher runs and records, per touch, whether
+        // the touch happened inside one. A count would not do: nested dispatches make later
+        // inline work look crossed.
         val touches = mutableListOf<String>()
-        var dispatches = 0
-        var stopDispatcherStamps = -1
-        val persistence = RecordingPersistence()
-        persistence.onWrite = { requested ->
-            touches += "write($requested)"
-            if (requested) stopDispatcherStamps = dispatches
+        val crossed = ThreadLocal.withInitial { false }
+        fun note(what: String) {
+            touches += if (crossed.get() == true) what else "INLINE:$what"
         }
+
+        // Own dispatcher: parking this surface's coroutines on the shared test Main would let
+        // them run inside a later test.
+        val privateDispatcher = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler)
+        val marker = RecordingPersistence()
+        marker.onRead = { note("marker-read") }
+        marker.onWrite = { requested -> note(if (requested) "marker-stop" else "marker-clear") }
+        var purges = 0
+        val controller = EnrollmentController(
+            enrollOperation = { VoiceSharingMutationResult.Failure },
+            // A failure drives consume()'s Failed branch, which latches through the store.
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { false },
+            clearLocalPending = {
+                purges++
+                note("queue-purge")
+            },
+            ownerSession = { 1L },
+        )
         val io = object : kotlinx.coroutines.CoroutineDispatcher() {
             override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
-                dispatches++
-                mainDispatcher.dispatch(context, block)
+                privateDispatcher.dispatch(
+                    context,
+                    Runnable {
+                        val previous = crossed.get()
+                        crossed.set(true)
+                        try {
+                            block.run()
+                        } finally {
+                            crossed.set(previous)
+                        }
+                    },
+                )
             }
         }
-        val vm = viewModel(persistence = persistence, ioDispatcher = io)
+        val vm = VoiceSharingSettingsViewModel(
+            projection = projection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(marker),
+            ownerSession = { 1L },
+            scope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + privateDispatcher,
+            ).also { scopes += it },
+            ioDispatcher = io,
+        )
+
+        // Construction and the projection collector each render once, and a render reads the
+        // marker. Those are the initial draw, not the tap: settle them, then measure the tap.
+        setProjection(enrolledProjection())
+        advanceUntilIdle()
+        touches.clear()
 
         vm.withdraw()
-        assertEquals("no disk work before the dispatch", emptyList<String>(), touches)
-
         advanceUntilIdle()
 
-        assertEquals("the withdraw tap records the local stop", listOf("write(true)"), touches)
-        assertEquals("the stop must be reached through the injected io dispatcher", 1, stopDispatcherStamps)
+        // The surface re-renders on every controller-state emission, and that render reads the
+        // marker on the UI scope: it publishes state, it does not start the work. This control
+        // pins the withdraw path, so it measures the touches the tap itself causes.
+        val tapPath = touches.subList(0, touches.indexOf("queue-purge") + 1)
+        val inline = tapPath.filter { it.startsWith("INLINE:") }
+        assertEquals("no storage touch on the withdraw path may run inline: $touches", emptyList<String>(), inline)
+        // Every path the reviewer named must actually be exercised, or the control proves
+        // nothing about it: the marker read, the queue purge, the stop, and the outcome latch.
+        assertTrue("the marker read must be on IO: $touches", touches.any { it.startsWith("marker-read") })
+        assertTrue("the queue purge must be on IO: $touches", touches.any { it.startsWith("queue-purge") })
+        assertTrue("the stop must be on IO: $touches", touches.any { it.startsWith("marker-stop") })
+        assertTrue(
+            "the failure latch must be on IO: $touches",
+            touches.count { it.startsWith("marker-clear") || it.startsWith("marker-stop") } >= 2,
+        )
+        assertEquals("the purge runs once", 1, purges)
     }
 
     @Test

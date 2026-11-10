@@ -323,10 +323,10 @@ class VoiceSharingSettingsViewModel(
         // Same tap-time session capture as enroll() (reviewer 66ae7752). The LOCAL stop is still
         // recorded first: stopping collection on the old account is correct the instant of the tap.
         val tappedSession = ownerSession()
-        mutableState.value = render()
         scope.launch {
-            // The rendered state above only reads in-memory fields; everything durable moves off
-            // the caller's thread. `render()` is re-emitted on main once these reads settle.
+            // A render reads the durable marker, so the tap's own emission is computed off the
+            // caller's thread too; only the finished state is published to main.
+            mutableState.value = withContext(ioDispatcher) { render() }
             withContext(ioDispatcher) {
                 withdrawalIntent.recordWithdrawalRequested()
                 // Stopping collection must reach a request already being sent. Cancelling here, at
@@ -338,7 +338,9 @@ class VoiceSharingSettingsViewModel(
                 retireTapPresentation(generation)
                 return@launch
             }
-            consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW, generation)
+            withContext(ioDispatcher) {
+                consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW, generation)
+            }
         }
     }
 

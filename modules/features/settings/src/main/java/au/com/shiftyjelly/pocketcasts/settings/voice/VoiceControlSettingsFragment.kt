@@ -282,7 +282,11 @@ private fun VoiceControlSettingsPage(
             item {
                 SettingRow(
                     primaryText = WAKE_WORD_MODEL_LABEL,
-                    secondaryText = wakeWordModelText(wakeWordReady),
+                    secondaryText = wakeWordModelText(
+                        detectorReady = wakeWordReady,
+                        ready = stringResource(LR.string.voice_control_model_ready),
+                        unavailable = stringResource(LR.string.voice_control_model_unavailable),
+                    ),
                     toggle = SettingRowToggle.None,
                     indent = false,
                 )
@@ -297,7 +301,7 @@ private fun VoiceControlSettingsPage(
             }
             item {
                 SettingRow(
-                    primaryText = "Status",
+                    primaryText = stringResource(LR.string.voice_control_model_status_label),
                     secondaryText = statusText,
                     toggle = SettingRowToggle.None,
                     indent = false,
@@ -391,7 +395,7 @@ internal enum class RecognitionBackend(val displayName: String) {
  * The wake word model's row. Readiness is the detector's own load result -- not an assumption that
  * bundled assets mean Ready, which would hide a detector that failed to initialize.
  */
-internal fun wakeWordModelText(detectorReady: Boolean): String = if (detectorReady) "Ready" else "Unavailable"
+internal fun wakeWordModelText(detectorReady: Boolean, ready: String, unavailable: String): String = if (detectorReady) ready else unavailable
 
 /** The rows the recognition section renders. */
 internal data class RecognitionRows(

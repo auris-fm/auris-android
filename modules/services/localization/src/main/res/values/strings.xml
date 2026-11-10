@@ -1813,6 +1813,9 @@
     <string name="voice_sharing_delete_pending">Deletion requested. Auris is still processing it.</string>
     <string name="voice_sharing_delete_failed">The deletion request did not go through.</string>
     <string name="voice_sharing_delete_dismiss">Keep recordings</string>
+    <string name="voice_control_model_status_label">Status</string>
+    <string name="voice_control_model_ready">Ready</string>
+    <string name="voice_control_model_unavailable">Unavailable</string>
     <string name="settings_title_playback">General</string>
     <string name="settings_title_signin" translatable="false">@string/sign_in</string>
     <string name="settings_title_signout" translatable="false">@string/sign_out</string>

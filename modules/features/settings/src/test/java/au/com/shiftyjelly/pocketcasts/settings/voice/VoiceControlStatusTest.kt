@@ -317,11 +317,11 @@ class VoiceControlModelRowsTest {
     fun `wake word readiness comes from the detector, not from a bundled-asset assumption`() {
         assertEquals(
             "Ready",
-            wakeWordModelText(detectorReady = true),
+            wakeWordModelText(detectorReady = true, ready = "Ready", unavailable = "Unavailable"),
         )
         assertEquals(
             "Unavailable",
-            wakeWordModelText(detectorReady = false),
+            wakeWordModelText(detectorReady = false, ready = "Ready", unavailable = "Unavailable"),
         )
     }
 

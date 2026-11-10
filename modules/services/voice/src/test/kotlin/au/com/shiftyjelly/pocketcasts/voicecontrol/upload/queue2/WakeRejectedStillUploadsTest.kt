@@ -62,6 +62,16 @@ class WakeRejectedStillUploadsTest {
         assertEquals(true, publisher(queue).publish(wakeRejected()))
         assertEquals("a wake-negative recording must still be queued", 1, queue.count())
 
+        // Everything downstream of the refusal says so, rather than claiming it merely was not
+        // invoked: a reader of the record should be able to see that the wake word stopped it.
+        val recorded = queue.recordings().single()
+        val observations = org.json.JSONObject(recorded.metadata.readText()).getJSONObject("observations")
+        for (stage in listOf("asr", "translation", "routing", "execution")) {
+            val entry = observations.getJSONObject(stage)
+            assertEquals("$stage must not claim it ran", "not_run", entry.getString("state"))
+            assertEquals("$stage must carry the refusal reason", "rejected_by_wake", entry.getString("reason"))
+        }
+
         // And the loop must actually send it: the gate is about entitlement, not the wake result.
         val sent = mutableListOf<String>()
         val loop = UploaderLoop(

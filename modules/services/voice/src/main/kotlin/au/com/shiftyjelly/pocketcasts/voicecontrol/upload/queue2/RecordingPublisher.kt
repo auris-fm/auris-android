@@ -167,6 +167,16 @@ class RecordingPublisher(
         )
     }
 
+    /**
+     * Why the capture was refused before recognition, if it was.
+     *
+     * Every stage downstream of the refusal is `not_run` for that reason rather than for its own,
+     * so they share one lookup instead of each deciding separately which reasons count.
+     */
+    private fun refusalReasonBeforeAsr(sealed: SealedCapture): String? = sealed.stageHistory.filterIsInstance<CollectionOutcome.NotCollected>()
+        .map { it.reason }
+        .lastOrNull { it == REASON_BLEED || it == REASON_REJECTED_BY_WAKE || it == REASON_WAKE_ONLY }
+
     private fun asrObservation(
         sealed: SealedCapture,
         transcript: String?,
@@ -178,9 +188,7 @@ class RecordingPublisher(
         }
         // A capture refused before recognition never reached ASR. Marking it completed would claim
         // a run that did not happen, so the refusal reason decides the state.
-        val refusalReason = sealed.stageHistory.filterIsInstance<CollectionOutcome.NotCollected>()
-            .map { it.reason }
-            .lastOrNull { it == REASON_BLEED || it == REASON_REJECTED_BY_WAKE || it == REASON_WAKE_ONLY }
+        val refusalReason = refusalReasonBeforeAsr(sealed)
         if (refusalReason != null && sealed.asrInvocationModel == null) {
             return StageObservation("not_run", reason = refusalReason)
         }
@@ -205,7 +213,12 @@ class RecordingPublisher(
 
     private fun translationObservation(sealed: SealedCapture): StageObservation {
         val translation = sealed.translation
-            ?: return StageObservation.notRun(REASON_NOT_INVOKED)
+            ?: return StageObservation.notRun(
+                // When the capture was refused before recognition, translation was never reached
+                // for that reason, not merely "not invoked": naming the refusal is what tells a
+                // reader why nothing downstream ran.
+                refusalReasonBeforeAsr(sealed) ?: REASON_NOT_INVOKED,
+            )
         // A stage that ran and failed is a failure, not a skip. Conflating them would report a
         // broken translator as "the languages were already the same".
         translation.failedWith?.let { return StageObservation("failed", reason = it) }
@@ -226,6 +239,8 @@ class RecordingPublisher(
         if (sealed.outcome is CollectionOutcome.NotCollected && sealed.outcome.reason == REASON_WAKE_ONLY) {
             return StageObservation.notRun(REASON_WAKE_ONLY)
         }
+        // Refused before recognition means routing was never reached, and the refusal is why.
+        refusalReasonBeforeAsr(sealed)?.let { return StageObservation.notRun(it) }
         if (routed != null) {
             return StageObservation.completed("predicted_intent" to routed.intentCategory)
         }
@@ -245,7 +260,11 @@ class RecordingPublisher(
 
     private fun executionObservation(sealed: SealedCapture): StageObservation {
         val observed = sealed.executionOutcome
-            ?: return StageObservation.notRun("not_dispatched")
+            ?: return StageObservation.notRun(
+                // Nothing was dispatched, and if a refusal stopped the pipeline that refusal is
+                // the reason: saying only "not dispatched" hides why from anyone reading it.
+                refusalReasonBeforeAsr(sealed) ?: "not_dispatched",
+            )
         // The spec fixes state, outcome and reason together. A failure and a refusal are different
         // facts about the action, and a user cancel is not a failure at all.
         return when (observed) {

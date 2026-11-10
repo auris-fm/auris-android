@@ -28,6 +28,16 @@ class RecordingUploader(
     private val endpoint: String,
     private val client: OkHttpClient,
     private val authorization: suspend () -> String?,
+    /**
+     * Whether the recording may still be sent, re-read after the credential arrives.
+     *
+     * Acquiring a token can take a network round trip, and the user's answer can change during it.
+     * The loop checked these facts before calling, but that check is a snapshot: if sharing was
+     * withdrawn while the token was being obtained, sending on that stale answer would upload data
+     * the user has just withdrawn. So the same facts are asked again here, and a refusal leaves the
+     * recording unsent for the loop to delete.
+     */
+    private val eligible: (FolderQueue.Recording) -> Boolean = { true },
 ) {
     /**
      * The call currently in flight, so it can be cancelled from outside this coroutine.
@@ -51,6 +61,9 @@ class RecordingUploader(
         // a new one; only a real failure to obtain one returns null, and that is a retry, not a
         // recording that sits unmoving forever behind a cache entry nobody refreshes.
         val bearer = authorization() ?: return null
+        // Re-checked after acquisition and before a call exists, so a withdrawal that lands during
+        // acquisition cannot slip out: there is nothing in flight to cancel yet, and this sees it.
+        if (!eligible(recording)) return null
         val metadata: ByteArray = recording.metadata.readBytes()
         val audioBytes: ByteArray = recording.audio.readBytes()
         if (metadata.size > PlainRecordLimits.MAX_METADATA_BYTES) return null

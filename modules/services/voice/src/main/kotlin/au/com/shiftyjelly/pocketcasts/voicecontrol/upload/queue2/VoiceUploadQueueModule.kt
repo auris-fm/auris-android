@@ -101,19 +101,38 @@ object VoiceUploadQueueModule {
         // Resolved against the same gateway origin the account routes use, so the endpoint is never
         // guessed. A blank endpoint simply cannot produce a request.
         val endpoint = retrofit.get().baseUrl().resolve("/api/v1/voice-recordings").toString()
-        // One instance, so the loop can cancel exactly the call the sender started.
-        val uploader = RecordingUploader(
+
+        // Read fresh on every pass. A queued recording carries the account and epoch it was
+        // captured under; both can be superseded before the queue drains, and sending then would
+        // upload data the user withdrew, or hand it to a different account. The same gate answers
+        // twice: once for the loop, and once in the sender after the credential arrives, because
+        // acquisition can take long enough for the user's answer to change.
+        val gate = AccountPreSendGate(
+            currentAccount = { collectionTx.coherentAuthority().accountName },
+            currentEpoch = {
+                val account = collectionTx.coherentAuthority().accountName
+                savedSharingChoice.enrolledChoiceFor(account)?.epoch
+            },
+            // The saved choice is the durable record of what the user decided, so switching
+            // sharing off stops the queue on the next pass rather than at the next sign-in.
+            sharingEnabled = {
+                // The local intent is consulted as well as the saved choice, because a stop
+                // whose write failed is still a stop: the saved record can still say enrolled
+                // after the user has asked to stop.
+                if (!withdrawalIntent.collectionPermittedByLocalIntent()) {
+                    false
+                } else {
+                    val account = collectionTx.coherentAuthority().accountName
+                    savedSharingChoice.enrolledChoiceFor(account) != null
+                }
+            },
+        )
+
+        val uploader = buildUploader(
             endpoint = endpoint,
-            // The whole call is bounded by the client, and cancelling the call is what releases
-            // a stalled write: interrupting the coroutine cannot, because the write never
-            // returns to be interrupted.
-            client = rawClient.newBuilder()
-                .callTimeout(RecordingUploader.CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-                .build(),
-            // Fail-closed: no token means no request is built, so nothing is ever sent under a
-            // credential that is not this account's. Unlike a cache peek, this asks for a token,
-            // so an entry that has expired is replaced rather than waited on forever.
-            authorization = { aurisToken.currentToken() },
+            client = rawClient,
+            token = { aurisToken.currentToken() },
+            eligible = { recording -> gate.verdictFor(recording) is GateVerdict.Send },
         )
         return UploaderLoop(
             queue = queue,
@@ -124,35 +143,35 @@ object VoiceUploadQueueModule {
                 // recording stays queued and the next pass tries again.
                 runCatching { aurisToken.refreshToken() }
             },
-            // Read fresh on every pass. A queued recording carries the account and epoch it was
-            // captured under; both can be superseded before the queue drains, and sending then
-            // would upload data the user withdrew, or hand it to a different account.
-            gate = AccountPreSendGate(
-                currentAccount = { collectionTx.coherentAuthority().accountName },
-                currentEpoch = {
-                    val account = collectionTx.coherentAuthority().accountName
-                    savedSharingChoice.enrolledChoiceFor(account)?.epoch
-                },
-                // The saved choice is the durable record of what the user decided, so switching
-                // sharing off stops the queue on the next pass rather than at the next sign-in.
-                sharingEnabled = {
-                    // The local intent is consulted as well as the saved choice, because a stop
-                    // whose write failed is still a stop: the saved record can still say enrolled
-                    // after the user has asked to stop.
-                    if (!withdrawalIntent.collectionPermittedByLocalIntent()) {
-                        false
-                    } else {
-                        val account = collectionTx.coherentAuthority().accountName
-                        savedSharingChoice.enrolledChoiceFor(account) != null
-                    }
-                },
-            ),
+            gate = gate,
             // Logged through the same buffer that records the queue root's removal, which is
             // known to reach the device log. Timber is planted only in debug builds, so a
             // diagnostic that has to survive a release build cannot depend on it.
             log = { message -> LogBuffer.i("VoiceUploadQueue2", message) },
         )
     }
+
+    /**
+     * The single place a sender is built, so a control can exercise the same wiring the app uses.
+     *
+     * The credential is asked for rather than peeked: an expired cache entry would otherwise never
+     * be replaced, and every queued recording would wait on it indefinitely.
+     */
+    internal fun buildUploader(
+        endpoint: String,
+        client: OkHttpClient,
+        token: suspend () -> String?,
+        eligible: (FolderQueue.Recording) -> Boolean,
+    ): RecordingUploader = RecordingUploader(
+        endpoint = endpoint,
+        // The whole call is bounded by the client, and cancelling the call is what releases a
+        // stalled write: interrupting the coroutine cannot, because the write never returns.
+        client = client.newBuilder()
+            .callTimeout(RecordingUploader.CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build(),
+        authorization = token,
+        eligible = eligible,
+    )
 }
 
 /**

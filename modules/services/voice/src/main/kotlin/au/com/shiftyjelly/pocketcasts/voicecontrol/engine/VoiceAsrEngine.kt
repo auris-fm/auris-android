@@ -40,7 +40,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
-import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
@@ -637,15 +636,6 @@ class VoiceAsrEngine @Inject constructor(
                 threshold = wwResult.threshold.takeUnless { it.isNaN() }?.toDouble(),
             ),
             framesProvider = { segment.frames.map { it.samples } to (segment.frames.firstOrNull()?.sampleRateHz ?: 16000) },
-        )
-
-        // Debug instrumentation: behind WAKE_WORD_DEBUG_CAPTURE, dump every
-        // VAD segment (raw WAV + log-Mel PNG) named by timestamp + score.
-        WakeWordSegmentCapture.capture(
-            context,
-            floatSamples,
-            segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
-            wwResult.confidence,
         )
 
         val mode = currentMode

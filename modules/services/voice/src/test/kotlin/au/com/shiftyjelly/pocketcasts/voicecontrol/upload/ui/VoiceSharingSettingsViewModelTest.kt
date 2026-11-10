@@ -1286,4 +1286,78 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.enrolled,
         )
     }
+
+    /**
+     * A read issued BEFORE the stop, completing AFTER it, must not repaint enrolled.
+     *
+     * The injected read snapshots the store at entry and only returns once its own gate completes,
+     * which is exactly the shape of a real IO read that ran before the write and sat in a queue
+     * behind the withdrawal. Completion order is driven by the gates, so the older read's
+     * acceptance deterministically lands after the newer one's -- and without the generation
+     * check it overwrites the cache with its pre-stop value and repaints enrolled.
+     */
+    @Test
+    fun `a read issued before the stop completing after it is rejected by the fence`() = runTest(mainDispatcher) {
+        val io = GatedDispatcher()
+        val parked = mutableListOf<CompletableDeferred<Unit>>()
+        val markerRead: suspend () -> Boolean = {
+            val snapshot = persistenceFlag.stopped
+            val gate = CompletableDeferred<Unit>()
+            parked += gate
+            gate.await()
+            !snapshot
+        }
+        setProjection(enrolledProjection())
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { 1L },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            projection = projection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { 1L },
+            ioDispatcher = io,
+            markerRead = markerRead,
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
+        assertEquals("PREMISE: both init collector refreshes are parked", 2, parked.size)
+
+        // The withdrawal parks its opened read, then holds the stop write on the gated dispatcher.
+        vm.withdraw()
+        mainDispatcher.scheduler.runCurrent()
+        assertEquals("PREMISE: the withdrawal's first read is parked", 3, parked.size)
+
+        // Its opened read (issued third) completes first: pre-stop value, accepted while true is
+        // still the truth, then the stop write is held by the gate and runs here.
+        parked[2].complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("PREMISE: the stop write is held on the gate", io.hasTasks)
+        while (io.hasTasks) {
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
+        assertTrue(persistenceFlag.stopped)
+
+        // The closed read (issued fourth) completes: the stop's value, accepted and published.
+        assertEquals(4, parked.size)
+        parked[3].complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
+
+        // One of the reads parked since before the stop completes last. Its generation is older
+        // than the accepted closed read, so the fence must reject it.
+        parked[0].complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse(
+            "a pre-stop read completing after the stop must not repaint enrolled",
+            vm.state.value.enrolled,
+        )
+    }
 }

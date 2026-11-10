@@ -122,6 +122,12 @@ class VoiceSharingSettingsViewModel(
      * frame a user is waiting on.
      */
     private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * The durable marker read itself, injectable so a control can park a read's completion while a
+     * newer one lands -- the out-of-order acceptance the fence exists for. Null in production,
+     * which reads the store directly on [ioDispatcher].
+     */
+    private val markerRead: (suspend () -> Boolean)? = null,
 ) {
 
     // DURABLE UI STATE, not transient render inputs (reviewer ae7922f9): the combine collector
@@ -409,7 +415,8 @@ class VoiceSharingSettingsViewModel(
      */
     private suspend fun readMarkerFenced(): Pair<Long, Boolean> {
         val generation = ++markerReadGeneration
-        val marker = withContext(ioDispatcher) { withdrawalIntent.collectionPermittedByLocalIntent() }
+        val marker = markerRead?.invoke()
+            ?: withContext(ioDispatcher) { withdrawalIntent.collectionPermittedByLocalIntent() }
         return generation to marker
     }
 

@@ -17,6 +17,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PredictedIntentName
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
@@ -933,36 +934,12 @@ class VoiceAsrEngine @Inject constructor(
     }
 
     /**
-     * Allowlisted intent category (plan Task 4): coarse family only, never raw payloads.
+     * The name this intent publishes as `routing.predicted_intent` (plan Task 4).
      *
-     * Keyed on the sealed intent TYPE, never on any field of it: a cloud route's request text is
-     * free-form content, so naming a folder after it would put the utterance into the record.
+     * The upload spec fixes the value as `<tool>.<action>` from the Voice Intents tool schema, or
+     * `cloud_route` alone, derived from the intent's type and action and never from its arguments.
      */
-    internal fun intentCategory(intent: VoiceIntent): String = when (intent) {
-        is VoiceIntent.Playback -> "playback"
-
-        is VoiceIntent.Effects -> "effects"
-
-        is VoiceIntent.Volume -> "volume"
-
-        is VoiceIntent.Sleep -> "sleep"
-
-        is VoiceIntent.Chapter -> "chapter"
-
-        is VoiceIntent.Bookmark -> "bookmark"
-
-        is VoiceIntent.Queue -> "queue"
-
-        // Both query families answer a question rather than act; they stay distinct in the record
-        // Because "what did the app do" differs by family, and a catch-all would merge them.
-        is VoiceIntent.PlaybackQuery -> "query"
-
-        is VoiceIntent.StatsQuery -> "stats"
-
-        is VoiceIntent.CloudRoute -> "cloud"
-        // No catch-all: the sealed hierarchy makes this when exhaustive, so a new intent family
-        // Fails the build instead of silently joining a shared "other" in the record.
-    }
+    internal fun intentCategory(intent: VoiceIntent): String = PredictedIntentName.of(intent)
 
     private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, capture: CaptureContext?, admittedId: String) {
         val recognizer = intentRecognizer

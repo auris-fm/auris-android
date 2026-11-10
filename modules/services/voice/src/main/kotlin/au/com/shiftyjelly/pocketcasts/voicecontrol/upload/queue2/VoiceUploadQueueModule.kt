@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 
 import android.content.Context
+import androidx.work.WorkManager
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.servers.di.Raw
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
@@ -58,13 +59,12 @@ object VoiceUploadQueueModule {
     @Singleton
     fun provideLegacyQueueRemoval(
         @ApplicationContext context: Context,
-        workManager: dagger.Lazy<androidx.work.WorkManager>,
     ): LegacyQueueRemoval = LegacyQueueRemoval(
         filesDir = context.filesDir,
         // The previous path enqueued a unique periodic job that outlives the class it named, so it
         // fails with a missing-class error on every run for a path that no longer exists.
         cancelLegacyWork = {
-            runCatching { workManager.get().cancelUniqueWork(LEGACY_DRAIN_WORK) }
+            runCatching { WorkManager.getInstance(context).cancelUniqueWork(LEGACY_DRAIN_WORK) }
         },
     )
 
@@ -110,9 +110,10 @@ object VoiceUploadQueueModule {
             client = rawClient.newBuilder()
                 .callTimeout(RecordingUploader.CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
                 .build(),
-            // Fail-closed: no cached Auris token means no attempt. The recording is retained
-            // and retried, never sent under a different credential.
-            authorization = { aurisToken.peekCurrentToken() },
+            // Fail-closed: no token means no request is built, so nothing is ever sent under a
+            // credential that is not this account's. Unlike a cache peek, this asks for a token,
+            // so an entry that has expired is replaced rather than waited on forever.
+            authorization = { aurisToken.currentToken() },
         )
         return UploaderLoop(
             queue = queue,
@@ -146,7 +147,10 @@ object VoiceUploadQueueModule {
                     }
                 },
             ),
-            log = { Timber.tag(TAG).i(it) },
+            // Logged through the same buffer that records the queue root's removal, which is
+            // known to reach the device log. Timber is planted only in debug builds, so a
+            // diagnostic that has to survive a release build cannot depend on it.
+            log = { message -> LogBuffer.i("VoiceUploadQueue2", message) },
         )
     }
 }

@@ -27,7 +27,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 class RecordingUploader(
     private val endpoint: String,
     private val client: OkHttpClient,
-    private val authorization: () -> String?,
+    private val authorization: suspend () -> String?,
 ) {
     /**
      * The call currently in flight, so it can be cancelled from outside this coroutine.
@@ -46,6 +46,10 @@ class RecordingUploader(
     }
 
     suspend fun send(recording: FolderQueue.Recording): Int? {
+        // Absent and expired are the same fact here: there is no usable credential. Asking for a
+        // token goes through the normal acquisition path, which serves a fresh cached one or mints
+        // a new one; only a real failure to obtain one returns null, and that is a retry, not a
+        // recording that sits unmoving forever behind a cache entry nobody refreshes.
         val bearer = authorization() ?: return null
         val metadata: ByteArray = recording.metadata.readBytes()
         val audioBytes: ByteArray = recording.audio.readBytes()

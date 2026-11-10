@@ -285,11 +285,12 @@ class VoiceSharingSettingsViewModelTest {
         val mainDispatcher = mainExecutor.asCoroutineDispatcher()
         val writes = java.util.Collections.synchronizedList(mutableListOf<String>())
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher)
-        val enrollGate = Gate()
-        enrollGate.result = VoiceSharingMutationResult.Failure
+        // The withdrawal needs a result to settle on, or it parks forever and nothing is observed.
+        val withdrawGate = Gate()
+        withdrawGate.result = VoiceSharingMutationResult.Failure
         val vm = try {
             viewModel(
-                enrollGate = enrollGate,
+                withdrawGate = withdrawGate,
                 scope = scope,
                 ioDispatcher = ioExecutor.asCoroutineDispatcher(),
             )
@@ -310,8 +311,15 @@ class VoiceSharingSettingsViewModelTest {
                 issued.countDown()
             }
             assertTrue("the tap is issued", issued.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            awaitTrue(10_000) { vm.state.value.pendingOperation == PendingOperation.WITHDRAW }
+            withdrawGate.release.complete(Unit)
+            // Wait for the withdrawal to reach its SETTLED presentation, not for a fixed window:
+            // a sleep would record whatever happened to land and could miss the outcome publish.
             awaitTrue(10_000) { vm.state.value.pendingOperation != PendingOperation.NONE }
-            Thread.sleep(100)
+            assertTrue(
+                "the withdrawal must settle during the observation window",
+                awaitTrue(10_000) { !vm.state.value.pending },
+            )
             watch.cancel()
 
             assertTrue("the surface must publish state: $writes", writes.isNotEmpty())

@@ -30,6 +30,16 @@ class WebSocketCloudTurnTransport(
     private val observer: CloudTurnTransportObserver? = null,
 ) : CloudTurnTransport {
 
+    /**
+     * Dial the route socket.
+     *
+     * The default is a plain dial. A turn adopting an early connection supplies one instead, which
+     * is what lets the socket outlive the collection that will consume it.
+     */
+    internal var dial: (Request, WebSocketListener) -> WebSocket = { request, listener ->
+        okHttpClient.newWebSocket(request, listener)
+    }
+
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
         // Use a large bounded channel (4096 events) so the WebSocket listener can
         // buffer frames without silently dropping them. With an unbounded channel,
@@ -166,7 +176,10 @@ class WebSocketCloudTurnTransport(
             }
         }
 
-        val socket = okHttpClient.newWebSocket(request, listener)
+        // The dial is funnelled through a seam so a turn can adopt a socket another coroutine
+        // opened. Without one, a socket that must outlive the call that opened it has nowhere to
+        // live: callbackFlow dials and closes within a single collection.
+        val socket = dial(request, listener)
 
         // Launch collection BEFORE awaitClose so it runs concurrently with the
         // socket being open. awaitClose suspends until the callbackFlow is

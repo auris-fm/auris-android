@@ -204,6 +204,25 @@ class IntentCategoryCoverageTest {
         assertEquals(null, predictedIntentFor(VoiceIntent.StatsQuery.QueueTotal))
     }
 
+    @Test
+    fun `the pre-alignment action name still routes`() {
+        // Android asked the on-device model for `query_effects` before the canonical schema was
+        // aligned. The model emits free text and nothing constrains its vocabulary, so whether it
+        // says `query` or `query_effects` depends on weights this repo does not contain. Accepting
+        // both keeps the command working either way, and the published name is derived from the
+        // INTENT, so both spellings file as the one canonical name.
+        val mapper = ToolCallMapper()
+        listOf("query", "query_effects").forEach { action ->
+            val intent = mapper.map(ToolCall(name = "effects", action = action, params = emptyMap()))
+            assertNotNull("'effects.$action' must still route", intent)
+            assertEquals(
+                "'effects.$action' must publish the canonical name",
+                "effects.query",
+                predictedIntentFor(intent!!),
+            )
+        }
+    }
+
     /**
      * Every routable intent leaf, listed explicitly. A family that gains an action fails the count
      * assertion above until the leaf is added here and given a name -- which is the point: the

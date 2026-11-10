@@ -68,7 +68,12 @@ class ToolCallMapper @Inject constructor() {
             VoiceIntent.Effects.SetVolumeBoost(enabled)
         }
 
-        "query" -> VoiceIntent.Effects.QueryEffects
+        // `query_effects` is the name Android shipped to the on-device model before it was
+        // aligned with the canonical schema. The model's vocabulary lives in its weights, not in
+        // anything this repo controls, so a build whose model emits the old name would silently
+        // stop routing "what effects are on?". Accepting both costs nothing: the published name is
+        // derived from the INTENT, so either spelling still reports `effects.query`.
+        "query", "query_effects" -> VoiceIntent.Effects.QueryEffects
 
         else -> null
     }

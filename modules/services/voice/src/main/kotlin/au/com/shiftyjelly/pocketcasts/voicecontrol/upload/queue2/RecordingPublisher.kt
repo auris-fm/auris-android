@@ -247,9 +247,17 @@ class RecordingPublisher(
         refusalReasonBeforeAsr(sealed)?.let { return StageObservation.notRun(it) }
         // The router was attempted and never ran. A fault, not a non-match, so it must not be
         // reported as "never invoked": that reads as a benign skip and hides a broken capability.
+        // A fault reported by the router itself is `failed`; a turn that never reached routing at
+        // all is `not_run` with the reason that stopped it, since nothing was attempted.
         (sealed.stageHistory + listOfNotNull(sealed.outcome))
             .filterIsInstance<CollectionOutcome.RoutingFailed>().lastOrNull()
-            ?.let { return StageObservation("failed", reason = it.reason) }
+            ?.let {
+                return if (it.reason == NO_HANDLER) {
+                    StageObservation.notRun(it.reason)
+                } else {
+                    StageObservation("failed", reason = it.reason)
+                }
+            }
         if (routed != null) {
             return StageObservation.completed("predicted_intent" to routed.intentCategory)
         }
@@ -260,14 +268,15 @@ class RecordingPublisher(
             // the pipeline recorded with a guess.
             return StageObservation("failed", reason = none.recognizerReason ?: "no_usable_intent")
         }
+        // Order matters: the expiry is checked FIRST. The engine notes the router's identity
+        // before it awaits recognition, so an invocation model can be present on a capture whose
+        // routing result never arrived. No reported result means the result is unknown, whatever
+        // the model says, and reading `completed` there would claim an answer nobody received.
         return when {
-            sealed.routerInvocationModel != null -> StageObservation("completed")
-
-            // The bounded wait expired before routing reported, so the result is genuinely not
-            // known rather than known to be absent. Recording a skip here would state as a fact
-            // something the pipeline never established.
             sealed.cause == SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED ->
                 StageObservation("unknown", reason = REASON_FINALIZED_BEFORE_RESULT)
+
+            sealed.routerInvocationModel != null -> StageObservation("completed")
 
             // No invocation and no failure: nothing reached routing at all.
             else -> StageObservation.notRun(REASON_NOT_INVOKED)
@@ -348,6 +357,8 @@ class RecordingPublisher(
 
         const val REASON_NOT_MEASURED = "not_measured"
         const val REASON_NOT_INVOKED = "not_invoked"
+
+        private const val NO_HANDLER = "no_handler"
 
         /** The bounded wait sealed the capture before routing reported a result. */
         const val REASON_FINALIZED_BEFORE_RESULT = "finalized_before_result"

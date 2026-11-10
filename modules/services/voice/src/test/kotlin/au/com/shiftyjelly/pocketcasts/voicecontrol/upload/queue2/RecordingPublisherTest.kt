@@ -289,6 +289,26 @@ class RecordingPublisherTest {
     }
 
     @Test
+    fun `a router that was invoked but never reported before expiry is unknown, not completed`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        val id = UUID.randomUUID()
+        // The engine notes the router identity BEFORE awaiting recognition, so a model can be
+        // present on a capture whose routing result never arrived. Reporting completed here would
+        // claim an answer that nobody received.
+        publisher(q).publish(
+            sealed(
+                outcome = CollectionOutcome.Recognized(id, "play", "en"),
+                stageHistory = listOf(CollectionOutcome.Recognized(id, "play", "en")),
+                routerModel = ModelRef.Named("qwen2.5-0.5b-instruct", "abc123"),
+                cause = SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED,
+            ),
+        )
+        val routing = metadata(q).getJSONObject("observations").getJSONObject("routing")
+        assertEquals("unknown", routing.getString("state"))
+        assertEquals("finalized_before_result", routing.getString("reason"))
+    }
+
+    @Test
     fun `a capture with no handler wired records why nothing was routed`() {
         val q = FolderQueue(tmp.newFolder("q"), 32, {})
         val id = UUID.randomUUID()
@@ -299,7 +319,8 @@ class RecordingPublisherTest {
             ),
         )
         val routing = metadata(q).getJSONObject("observations").getJSONObject("routing")
-        assertEquals("failed", routing.getString("state"))
+        // Nothing reached routing, so this is a stated non-attempt rather than a fault.
+        assertEquals("not_run", routing.getString("state"))
         assertEquals("no_handler", routing.getString("reason"))
     }
 

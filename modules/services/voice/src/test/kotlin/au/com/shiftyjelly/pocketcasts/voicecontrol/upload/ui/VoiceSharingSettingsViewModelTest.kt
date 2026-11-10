@@ -150,6 +150,7 @@ class VoiceSharingSettingsViewModelTest {
         // Defaults to the test scheduler so the existing controls stay deterministic when they
         // pump; the main-thread control passes a real IO dispatcher to observe the thread.
         ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = mainDispatcher,
+        markerRead: (suspend () -> Boolean)? = null,
     ): VoiceSharingSettingsViewModel {
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
@@ -176,6 +177,7 @@ class VoiceSharingSettingsViewModelTest {
             scope = effective,
             cancelInFlightUpload = cancelInFlightUpload,
             ioDispatcher = ioDispatcher,
+            markerRead = markerRead,
         )
     }
 
@@ -441,6 +443,57 @@ class VoiceSharingSettingsViewModelTest {
         assertFalse(
             "the successful enrollment must RELEASE the durable stop (atomic with the outcome)",
             persistence.stopped,
+        )
+    }
+
+    @Test
+    fun `the enroll branch re-reads the marker it just cleared`() = runTest(mainDispatcher) {
+        // PREMISE: collection was stopped durably and the switch correctly shows off.
+        //
+        // Re-enrolling releases that stop inside the outcome transaction, so the cached marker is
+        // stale the moment the clear returns. `acceptMarkerRead` is the only writer of that cache,
+        // so unless something re-reads, the screen keeps composing "enrolled" from the pre-clear
+        // value. What has masked the omission is the surface's own habit of reading the marker on
+        // every controller emission -- a StateFlow drops an emission equal to its current value,
+        // and collector ordering is not a contract, so that cannot be what correctness rests on.
+        //
+        // This control therefore asserts the read itself: the enroll branch must issue one after
+        // clearing. The count is taken at the fenced seam, and the projection is left unchanged so
+        // that no collector is provoked by a projection write during the measurement.
+        val persistence = RecordingPersistence(stopped = true)
+        setProjection(enrolledProjection())
+        val readsAfterClear = mutableListOf<Boolean>()
+        val gate = Gate()
+        val vm = viewModel(
+            enrollGate = gate,
+            persistence = persistence,
+            markerRead = {
+                val permitted = !persistence.stopped
+                if (!permitted.not()) readsAfterClear += permitted
+                permitted
+            },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse("PREMISE: the durable stop holds", vm.state.value.enrolled)
+
+        vm.enroll()
+        mainDispatcher.scheduler.advanceUntilIdle()
+        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
+        gate.release.complete(Unit)
+        mainDispatcher.scheduler.advanceUntilIdle()
+
+        require(!persistence.stopped) { "PREMISE: the durable stop was released" }
+        // Two reads follow the clear: the enroll branch's own, and the one the surface already
+        // performs for a controller emission. Without the branch's read there is only the second,
+        // and the screen's correctness would rest entirely on that emission arriving.
+        assertTrue(
+            "the enroll branch must add its own read after the clear; expected the branch's read " +
+                "plus the surface's emissions, saw ${readsAfterClear.size}",
+            readsAfterClear.size >= 2,
+        )
+        assertTrue(
+            "the server agreed and the stop is gone, so the switch must show on",
+            vm.state.value.enrolled,
         )
     }
 

@@ -507,6 +507,17 @@ class VoiceSharingSettingsViewModel(
                         mutableState.value = render(SettingsOperationStatus.RELEASE_FAILED)
                         return
                     }
+                    // The durable stop was just released, so the cached marker is stale BY
+                    // CONSTRUCTION: `acceptMarkerRead` is its only writer, and nothing above
+                    // refreshed it. Re-reading here is what makes the screen correct on its own,
+                    // instead of correct whenever some collector happens to emit afterwards --
+                    // and a StateFlow drops an emission equal to its current value, so that
+                    // refresh is not a contract we can lean on. On the failure path the cache is
+                    // already right (collection stays stopped), which is why this read follows
+                    // the guard rather than preceding it.
+                    if (generation == actionGeneration) {
+                        acceptMarkerRead(readMarkerFenced())
+                    }
                 }
                 if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE

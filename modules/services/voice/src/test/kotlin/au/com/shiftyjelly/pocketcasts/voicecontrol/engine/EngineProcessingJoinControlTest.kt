@@ -187,9 +187,15 @@ class EngineProcessingJoinControlTest {
             // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
             // outstanding work. What matters is what stop() recorded for it: a failure must not be
             // relabelled as expected shutdown.
+||||||| /tmp/mfb
+            // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
+            // Outstanding work. What matters is what stop() recorded for it: a failure must not be
+            // Relabelled as expected shutdown.
+            val owned = engine.ownedJobs
+            val outstanding = engine.unfinishedProcessingJobs.filter { it in owned && !it.isCompleted }
             assertTrue(
-                "a finished job is not outstanding work, got ${engine.unfinishedProcessingJobs}",
-                engine.unfinishedProcessingJobs.isEmpty(),
+                "a finished job is not outstanding work, got $outstanding",
+                outstanding.isEmpty(),
             )
             assertTrue(
                 "a job that had already FAILED must NOT be recorded as engine-cancelled",

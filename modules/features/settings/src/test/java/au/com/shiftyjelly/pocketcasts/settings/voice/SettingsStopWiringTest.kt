@@ -157,18 +157,29 @@ class SettingsStopWiringTest {
 
     @Test
     fun `the toggle reads the durable stop, not only the server projection`() {
+        // The durable stop is consulted through the fenced cache now: `isEnrolled` composes the
+        // cached marker with the projection, and the marker is only ever written by the single
+        // acceptor whose reads call `collectionPermittedByLocalIntent()`. Asserting the direct call
+        // inside isEnrolled would reward the old shape, which read the file on Main per render.
         val source = viewModelSource()
         val initIndex = source.indexOf("private fun isEnrolled(")
         assertTrue("the enrolled read must be findable", initIndex >= 0)
         val initBlock = source.substring(initIndex, minOf(source.length, initIndex + 900))
         assertTrue(
-            "the initial state must consult the durable stop: reading the server projection " +
-                "alone shows 'sharing on' to a user whose collection is actually stopped",
-            initBlock.contains("collectionPermittedByLocalIntent"),
+            "the toggle must compose the durable marker into the enrolled value: reading the " +
+                "server projection alone shows 'sharing on' to a user whose collection is actually stopped",
+            initBlock.contains("lastRenderedMarker"),
         )
         assertTrue(
             "the durable stop must gate the projection rather than replace it",
             initBlock.contains("voiceSharingEnrolled"),
+        )
+        val acceptIndex = source.indexOf("private fun acceptMarkerRead(")
+        assertTrue("the marker's single writer must exist", acceptIndex >= 0)
+        val fencedIndex = source.indexOf("collectionPermittedByLocalIntent()")
+        assertTrue(
+            "the durable stop must still be the thing the marker is read from",
+            fencedIndex >= 0,
         )
     }
 

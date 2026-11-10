@@ -169,6 +169,11 @@ class VoiceSharingSettingsViewModel(
     // Must already be initialized (reviewer-turned-self-inflicted NPE: Kotlin initializes in
     // Declaration order, and a null field under a non-null type fails the intrinsic check).
     private var lastRenderedEnrolled: Boolean = isEnrolled()
+||||||| /tmp/mfb
+    private var lastRenderedEnrolled: Boolean = isEnrolled()
+
+    private var lastRenderedMarker: Boolean = withdrawalIntent.collectionPermittedByLocalIntent()
+    private var markerReadGeneration = 0L
     private val mutableState = MutableStateFlow(render())
     val state: StateFlow<VoiceSharingSettingsUiState> = mutableState.asStateFlow()
 
@@ -352,9 +357,10 @@ class VoiceSharingSettingsViewModel(
             // checks sit in front of it because the repaint they prevent is cheap to rule out
             // here; a control that removed them could not see the difference, since this same
             // withdrawal publishes again further down and lands back on the newer presentation.
-            val openedEnrolled = withContext(ioDispatcher) { readRenderInputs() }
+            val openedRead = readMarkerFenced()
+            acceptMarkerRead(openedRead)
             if (generation != actionGeneration) return@launch
-            mutableState.value = renderFrom(openedEnrolled)
+            mutableState.value = renderFrom(isEnrolled())
             withContext(ioDispatcher) {
                 withdrawalIntent.recordWithdrawalRequested()
                 // Stopping collection must reach a request already being sent. Cancelling here, at
@@ -363,16 +369,17 @@ class VoiceSharingSettingsViewModel(
             }
             // Re-checked on main AFTER the IO suspension: a tap that arrived meanwhile owns the
             // screen, and this one must not overwrite it.
-            val closedEnrolled = withContext(ioDispatcher) { readRenderInputs() }
+            acceptMarkerRead(readMarkerFenced())
             if (generation != actionGeneration) return@launch
             if (ownerSession() != tappedSession) {
-                retireTapPresentation(generation, closedEnrolled)
+                retireTapPresentation(generation, isEnrolled())
                 return@launch
             }
-            mutableState.value = renderFrom(closedEnrolled)
+            mutableState.value = renderFrom(isEnrolled())
             val outcome = withContext(ioDispatcher) { enrollmentController.withdraw() }
             if (ownerSession() != tappedSession) {
-                retireTapPresentation(generation, withContext(ioDispatcher) { readRenderInputs() })
+                acceptMarkerRead(readMarkerFenced())
+                retireTapPresentation(generation, isEnrolled())
                 return@launch
             }
             applyWithdrawalOutcome(outcome, generation)
@@ -388,16 +395,31 @@ class VoiceSharingSettingsViewModel(
      * screen (or by this screen's own earlier write) shows up on the next event.
      */
     private fun refreshEnrolled() {
-        scope.launch {
-            val enrolled = withContext(ioDispatcher) { readRenderInputs() }
-            if (enrolled != lastRenderedEnrolled) {
-                lastRenderedEnrolled = enrolled
-                mutableState.value = renderFrom(enrolled)
-            }
-        }
+        scope.launch { acceptMarkerRead(readMarkerFenced()) }
     }
 
-    private fun readRenderInputs(): Boolean = isEnrolled()
+    /**
+     * Issues a marker read whose result is accepted only while it is the newest one.
+     *
+     * Every read of the durable marker goes through here, the withdrawal paths included: an older
+     * read completing after a stop (or after a newer read) must not repaint the screen with the
+     * value it fetched. The generation is issued on Main before the IO hop, so ordering follows
+     * issue order, and acceptance happens in one place -- `acceptMarkerRead` -- which is the only
+     * code that writes [lastRenderedMarker].
+     */
+    private suspend fun readMarkerFenced(): Pair<Long, Boolean> {
+        val generation = ++markerReadGeneration
+        val marker = withContext(ioDispatcher) { withdrawalIntent.collectionPermittedByLocalIntent() }
+        return generation to marker
+    }
+
+    /** The single writer of [lastRenderedMarker]; a superseded read updates nothing. */
+    private fun acceptMarkerRead(read: Pair<Long, Boolean>) {
+        val (generation, marker) = read
+        if (generation != markerReadGeneration) return
+        lastRenderedMarker = marker
+        mutableState.value = render()
+    }
 
     /**
      * The main-thread half of a withdrawal outcome.
@@ -415,11 +437,11 @@ class VoiceSharingSettingsViewModel(
                     enrollmentController.applyForOutcome(outcome) { withdrawalIntent.onServerAgrees() }
                 }
                 // Capture, re-check on main, then publish.
-                val enrolled = withContext(ioDispatcher) { readRenderInputs() }
+                acceptMarkerRead(readMarkerFenced())
                 if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.NONE
-                mutableState.value = renderFrom(enrolled)
+                mutableState.value = renderFrom(isEnrolled())
             }
 
             is EnrollmentOutcome.Failed, is EnrollmentOutcome.Refused -> {
@@ -427,12 +449,12 @@ class VoiceSharingSettingsViewModel(
                 withContext(ioDispatcher) {
                     enrollmentController.applyForOutcome(outcome) { withdrawalIntent.onWithdrawalFailed() }
                 }
-                val enrolled = withContext(ioDispatcher) { readRenderInputs() }
+                acceptMarkerRead(readMarkerFenced())
                 if (generation != actionGeneration) return
                 lastFailedOperation = FailedOperation.WITHDRAW
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.FAILED
-                mutableState.value = renderFrom(enrolled)
+                mutableState.value = renderFrom(isEnrolled())
             }
 
             is EnrollmentOutcome.DataDeleted,
@@ -639,7 +661,7 @@ class VoiceSharingSettingsViewModel(
         val p = currentProjection() ?: return false
         return p.voiceSharingEnrolled &&
             p.withdrawalState == WithdrawalState.ACTIVE &&
-            withdrawalIntent.collectionPermittedByLocalIntent()
+            lastRenderedMarker
     }
 
     /**

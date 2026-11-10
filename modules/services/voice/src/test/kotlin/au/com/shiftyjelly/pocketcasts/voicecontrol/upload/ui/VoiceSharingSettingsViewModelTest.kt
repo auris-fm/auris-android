@@ -8,7 +8,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentC
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentDisclosure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -17,6 +19,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -101,6 +104,7 @@ class VoiceSharingSettingsViewModelTest {
 
         /** Notified for every read, so a control can observe where the read was reached from. */
         var onRead: (() -> Unit)? = null
+
         override fun read(): Boolean {
             onRead?.invoke()
             return stopped
@@ -1154,5 +1158,132 @@ class VoiceSharingSettingsViewModelTest {
         mainDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals("withdrawing must reach a request already on the wire", 1, cancelled)
+    }
+
+    /**
+     * An IO dispatcher whose tasks run only when the test runs them, in any order.
+     *
+     * The stale-read control needs a read that fetched its value BEFORE the durable stop but is
+     * accepted AFTER a fresher read -- an ordering the FIFO test scheduler cannot produce, and real
+     * IO cannot guarantee. Holding the tasks explicitly makes the interleaving exact.
+     */
+    private class GatedDispatcher : CoroutineDispatcher() {
+        private val queue = mutableListOf<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            queue += block
+        }
+
+        /** Runs the oldest held task. */
+        fun runOldest() {
+            check(queue.isNotEmpty()) { "no gated IO task is waiting" }
+            queue.removeAt(0).run()
+        }
+
+        /** Runs the newest held task, leaving older ones parked. */
+        fun runNewest() {
+            check(queue.isNotEmpty()) { "no gated IO task is waiting" }
+            queue.removeAt(queue.lastIndex).run()
+        }
+
+        val hasTasks: Boolean get() = queue.isNotEmpty()
+    }
+
+    /**
+     * A projection going unenrolled must retire the published membership with no IO completion.
+     *
+     * The cache holds only the durable marker; the projection conjuncts are composed fresh at
+     * render time. A version that cached the whole `isEnrolled()` conjunction published stale
+     * `enrolled=true` here until its IO refresh landed.
+     */
+    @Test
+    fun `an unenrolling projection retires the published value with no io completion`() = runTest(mainDispatcher) {
+        val io = GatedDispatcher()
+        setProjection(enrolledProjection())
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { 1L },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            projection = projection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { 1L },
+            ioDispatcher = io,
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertTrue("PREMISE: enrolled under an enrolled projection", vm.state.value.enrolled)
+
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
+        // No gated IO task is run: the retirement must come from the synchronous publish alone.
+        mainDispatcher.scheduler.runCurrent()
+        assertFalse(
+            "the unenrolled projection must be visible without waiting for any marker read",
+            vm.state.value.enrolled,
+        )
+    }
+
+    /**
+     * The withdrawal's fresh reads must update the cache the collectors render from.
+     *
+     * The reviewer's scenario: a withdrawal publishes fresh values while an older refresh read is
+     * still out; if those fresh values bypass the cache, the next collector-driven render composes
+     * from the stale cache and repaints enrolled after the user stopped. The fenced read makes the
+     * withdrawal's own reads the newest issued ones, so they are exactly the values the cache
+     * keeps, and a cache-driven render after the stop says not enrolled.
+     */
+    @Test
+    fun `the cache a collector render composes from reflects the withdrawal's stop`() = runTest(mainDispatcher) {
+        val io = GatedDispatcher()
+        setProjection(enrolledProjection())
+        lateinit var vm: VoiceSharingSettingsViewModel
+        val controller = EnrollmentController(
+            enrollOperation = { enrollGate.await() },
+            withdrawOperation = { withdrawGate.await() },
+            deleteOperation = { deleteGate.await() },
+            clearLocalPending = {},
+            ownerSession = { 1L },
+        )
+        vm = VoiceSharingSettingsViewModel(
+            projection = projection,
+            enrollmentController = controller,
+            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
+            ownerSession = { 1L },
+            ioDispatcher = io,
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
+        // Settle the construction-time collector refreshes so the only gated work left belongs to
+        // the withdrawal.
+        while (io.hasTasks) {
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
+        assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
+
+        // Withdrawal runs to its suspension on the controller gate: stop written, fresh reads
+        // accepted, published state retired.
+        vm.withdraw()
+        // Each cycle: the launch body runs and suspends on its gated read, the read executes, and
+        // the body resumes on Main to accept the value.
+        repeat(3) {
+            mainDispatcher.scheduler.runCurrent()
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
+        assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
+
+        // A collector event re-renders from the cache with no IO in between.
+        setProjection(enrolledProjection().copy(enrollmentEpoch = "epoch-3"))
+        mainDispatcher.scheduler.runCurrent()
+        assertFalse(
+            "the cache-driven render must reflect the stop",
+            vm.state.value.enrolled,
+        )
     }
 }

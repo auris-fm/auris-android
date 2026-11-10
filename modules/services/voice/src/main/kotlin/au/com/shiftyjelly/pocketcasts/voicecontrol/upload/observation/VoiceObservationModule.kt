@@ -92,7 +92,7 @@ object VoiceObservationModule {
     @Singleton
     fun provideRetentionSink(
         budget: CollectionBudget,
-        publisher: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.RecordingPublisher,
+        publisher: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher,
     ): ContributionRetentionSink = ContributionRetentionSink(budget).apply {
         onReadyForPublication = { sealed -> publisher.publish(sealed) }
     }
@@ -100,9 +100,9 @@ object VoiceObservationModule {
     @Provides
     @Singleton
     fun provideRecordingPublisher(
-        queue: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.FolderQueue,
+        queue: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.FolderQueue,
         settings: au.com.shiftyjelly.pocketcasts.preferences.Settings,
-    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.RecordingPublisher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.RecordingPublisher(
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher(
         queue = queue,
         // Real binary provenance: the record names the build that produced it.
         appVersion = { settings.getVersion() },

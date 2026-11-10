@@ -3,8 +3,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.FolderQueue
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.UploaderLoop
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.FolderQueue
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploaderLoop
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn

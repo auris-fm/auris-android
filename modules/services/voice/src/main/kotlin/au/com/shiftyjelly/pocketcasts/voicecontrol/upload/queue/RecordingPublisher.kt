@@ -1,4 +1,4 @@
-package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
+package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome

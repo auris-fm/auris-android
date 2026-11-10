@@ -1,4 +1,4 @@
-package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
+package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import android.content.Context
 import androidx.work.WorkManager

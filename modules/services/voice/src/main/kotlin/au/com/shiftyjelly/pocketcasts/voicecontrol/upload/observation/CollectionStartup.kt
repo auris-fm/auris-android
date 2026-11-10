@@ -1,8 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.LegacyQueueRemoval
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2.UploaderLoop
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.LegacyQueueRemoval
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploaderLoop
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope

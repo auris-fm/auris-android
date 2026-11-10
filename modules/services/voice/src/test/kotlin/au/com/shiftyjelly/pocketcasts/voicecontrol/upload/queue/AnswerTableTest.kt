@@ -1,4 +1,4 @@
-package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
+package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import org.junit.Assert.assertEquals
 import org.junit.Test

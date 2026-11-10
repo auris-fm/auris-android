@@ -1,4 +1,4 @@
-package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
+package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext

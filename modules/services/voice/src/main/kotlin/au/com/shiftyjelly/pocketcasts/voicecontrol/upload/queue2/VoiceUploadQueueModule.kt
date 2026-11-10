@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 import android.content.Context
 import androidx.work.WorkManager
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.servers.di.Raw
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
@@ -131,7 +132,7 @@ object VoiceUploadQueueModule {
         val uploader = buildUploader(
             endpoint = endpoint,
             client = rawClient,
-            token = { aurisToken.currentToken() },
+            tokenSource = aurisToken,
             eligible = { recording -> gate.verdictFor(recording) is GateVerdict.Send },
         )
         return UploaderLoop(
@@ -160,7 +161,7 @@ object VoiceUploadQueueModule {
     internal fun buildUploader(
         endpoint: String,
         client: OkHttpClient,
-        token: suspend () -> String?,
+        tokenSource: CloudTokenProviding,
         eligible: (FolderQueue.Recording) -> Boolean,
     ): RecordingUploader = RecordingUploader(
         endpoint = endpoint,
@@ -169,7 +170,10 @@ object VoiceUploadQueueModule {
         client = client.newBuilder()
             .callTimeout(RecordingUploader.CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
             .build(),
-        authorization = token,
+        // How a credential is obtained is decided here, once, so there is no second place that
+        // could choose differently: asking serves a fresh cached token or obtains a new one, while
+        // peeking would leave an expired entry in place forever and stall every queued recording.
+        authorization = { tokenSource.currentToken() },
         eligible = eligible,
     )
 }

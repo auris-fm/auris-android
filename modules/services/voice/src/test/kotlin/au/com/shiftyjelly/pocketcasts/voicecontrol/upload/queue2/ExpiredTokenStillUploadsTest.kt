@@ -1,7 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue2
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -10,63 +15,56 @@ import org.junit.rules.TemporaryFolder
 /**
  * A recording waits for a token, not for a cache entry nobody refreshes.
  *
- * The uploader used to read the token cache and skip the recording when it was empty. An expired
- * entry leaves that cache empty, and nothing in the loop would ever refill it, so every queued
- * recording would sit there indefinitely while the loop reported nothing. A stall of that shape is
- * exactly what the contract forbids. Asking for a token instead means an expired entry is replaced
- * the same way a rejected one is.
+ * The uploader used to read the token cache and skip the recording when the cache was empty. An
+ * expired entry leaves that cache empty, and nothing in the loop would ever refill it, so every
+ * queued recording would sit there indefinitely while the loop looked idle - the stall the contract
+ * forbids. The sender is built by the same function the app uses, so reverting that function to a
+ * cache peek turns this red.
  */
 class ExpiredTokenStillUploadsTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
     @Test
-    fun `an expired cached token is refreshed and the recording reaches the wire`() = runBlocking {
-        val queue = FolderQueue(tmp.newFolder("q"), 32, {})
+    fun `an expired cached token is refreshed and the recording reaches the server`() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(201))
+        server.start()
+        try {
+            val queue = FolderQueue(tmp.newFolder("q"), 32, {})
+            queue.publish(
+                captureId = UUID.randomUUID().toString(),
+                audioWriter = { it.writeBytes(ByteArray(8)) },
+                metadataBytes = """{"account":"a@b.c","enrollment_epoch":"e"}""".toByteArray(),
+                nowMs = 1_000L,
+            )
 
-        // Publish one real recording so the loop has something to send.
-        queue.publish(
-            captureId = UUID.randomUUID().toString(),
-            audioWriter = { it.writeBytes(ByteArray(8)) },
-            metadataBytes = """{"account":"a@b.c","enrollment_epoch":"e"}""".toByteArray(),
-            nowMs = 1_000L,
-        )
-        assertEquals(1, queue.count())
-
-        // The cache starts expired: asking the cache yields nothing, which is what the loop used
-        // to treat as "no attempt".
-        // A cache that starts expired: a peek yields nothing until something asks for a token.
-        val cache = java.util.concurrent.atomic.AtomicReference<String?>(null)
-        val fetches = java.util.concurrent.atomic.AtomicInteger(0)
-        val token: suspend () -> String? = suspend {
-            cache.get() ?: "fresh".also {
-                fetches.incrementAndGet()
-                cache.set(it)
-            }
-        }
-
-        val sent = mutableListOf<String>()
-        val loop = UploaderLoop(
-            queue = queue,
-            send = { recording ->
-                // Same shape as the real sender: ask for a token, then send.
-                val bearer = token()
-                if (bearer == null) {
-                    null
-                } else {
-                    sent.add(recording.captureId)
-                    201
+            // A cache holding only an expired entry: it yields nothing until something asks the
+            // source for a token, which is the distinction this control pins.
+            val cached = java.util.concurrent.atomic.AtomicReference<String?>(null)
+            val acquisitions = AtomicInteger(0)
+            val source = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = cached.get() ?: "fresh".also {
+                    acquisitions.incrementAndGet()
+                    cached.set(it)
                 }
-            },
-            refreshSignIn = {},
-            now = { 10_000L },
-        )
+            }
 
-        val result = loop.runOnce()
+            val uploader = VoiceUploadQueueModule.buildUploader(
+                endpoint = server.url("/api/v1/voice-recordings").toString(),
+                client = OkHttpClient(),
+                tokenSource = source,
+                eligible = { true },
+            )
 
-        assertEquals("an expired cache entry must be replaced, not waited on", 1, fetches.get())
-        assertEquals("and the recording must actually reach the wire", 1, sent.size)
-        assertEquals(1, result.accepted)
-        assertEquals(0, queue.count())
+            val answer = uploader.send(queue.recordings().single())
+
+            assertEquals(201, answer)
+            assertEquals("the expired entry must be replaced, not waited on", 1, acquisitions.get())
+            assertEquals("and the request must actually reach the server", 1, server.requestCount)
+            // Deletion is the loop's decision on seeing the answer, not the sender's.
+        } finally {
+            server.shutdown()
+        }
     }
 }

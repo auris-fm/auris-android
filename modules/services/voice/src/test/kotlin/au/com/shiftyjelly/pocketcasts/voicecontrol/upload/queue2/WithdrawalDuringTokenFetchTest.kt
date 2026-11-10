@@ -49,10 +49,12 @@ class WithdrawalDuringTokenFetchTest {
             val uploader = VoiceUploadQueueModule.buildUploader(
                 endpoint = server.url("/api/v1/voice-recordings").toString(),
                 client = OkHttpClient(),
-                token = {
-                    fetching.complete(Unit)
-                    release.await()
-                    "a-token"
+                tokenSource = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+                    override suspend fun currentToken(): String {
+                        fetching.complete(Unit)
+                        release.await()
+                        return "a-token"
+                    }
                 },
                 eligible = { sharingOn.get() },
             )

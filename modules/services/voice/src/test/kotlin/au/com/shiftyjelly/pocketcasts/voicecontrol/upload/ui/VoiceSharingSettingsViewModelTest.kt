@@ -11,9 +11,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Withdrawal
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -91,8 +93,13 @@ class VoiceSharingSettingsViewModelTest {
     ) : WithdrawalIntentPersistence {
         /** Every durable write, in order: the tap's stop, then any fenced reconciliation. */
         val writes = mutableListOf<Boolean>()
+
+        /** Notified for every write, so a control can observe where the write was reached from. */
+        var onWrite: ((Boolean) -> Unit)? = null
         override fun read(): Boolean = stopped
+
         override fun write(requested: Boolean): Boolean {
+            onWrite?.invoke(requested)
             writes += requested
             if (!requested && failClear) return false
             stopped = requested
@@ -128,6 +135,9 @@ class VoiceSharingSettingsViewModelTest {
         onEnrollIssue: (() -> Unit)? = null,
         onWithdrawIssue: (() -> Unit)? = null,
         cancelInFlightUpload: () -> Unit = {},
+        // Defaults to the test scheduler so the existing controls stay deterministic when they
+        // pump; the main-thread control passes a real IO dispatcher to observe the thread.
+        ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = mainDispatcher,
     ): VoiceSharingSettingsViewModel {
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
@@ -153,7 +163,39 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = ownerSession,
             scope = effective,
             cancelInFlightUpload = cancelInFlightUpload,
+            ioDispatcher = ioDispatcher,
         )
+    }
+
+    @Test
+    fun `the withdrawal stop runs on the injected io dispatcher, in order, before the request`() = runTest(mainDispatcher) {
+        // The claim under test is a DISPATCHER boundary, not a thread name: the durable stop
+        // must be reached only after crossing onto the injected IO dispatcher. A thread-name
+        // check cannot see this, because a coroutine may run on a different thread even with no
+        // dispatcher switch, so the control observes the dispatch itself.
+        val touches = mutableListOf<String>()
+        var dispatches = 0
+        var stopDispatcherStamps = -1
+        val persistence = RecordingPersistence()
+        persistence.onWrite = { requested ->
+            touches += "write($requested)"
+            if (requested) stopDispatcherStamps = dispatches
+        }
+        val io = object : kotlinx.coroutines.CoroutineDispatcher() {
+            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                dispatches++
+                mainDispatcher.dispatch(context, block)
+            }
+        }
+        val vm = viewModel(persistence = persistence, ioDispatcher = io)
+
+        vm.withdraw()
+        assertEquals("no disk work before the dispatch", emptyList<String>(), touches)
+
+        advanceUntilIdle()
+
+        assertEquals("the withdraw tap records the local stop", listOf("write(true)"), touches)
+        assertEquals("the stop must be reached through the injected io dispatcher", 1, stopDispatcherStamps)
     }
 
     @Test
@@ -677,7 +719,6 @@ class VoiceSharingSettingsViewModelTest {
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse("the confirmed deletion ends the request-in-flight state", vm.state.value.deletionRequested)
         // Deletion is synchronous, so a confirmed answer is DONE: nothing is left processing.
-        assertFalse("nothing remains pending after a confirmed deletion", vm.state.value.deletionReceiptPending)
         assertFalse(vm.state.value.deletionFailed)
     }
 
@@ -716,7 +757,6 @@ class VoiceSharingSettingsViewModelTest {
         deleteGate.release.complete(true)
         mainDispatcher.scheduler.advanceUntilIdle()
 
-        assertFalse("A's late deletion receipt must not set B's presentation", vm.state.value.deletionReceiptPending)
         assertFalse(vm.state.value.deletionRequested)
         assertFalse(vm.state.value.deletionFailed)
     }
@@ -929,7 +969,6 @@ class VoiceSharingSettingsViewModelTest {
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse("B's enroll must not preserve A's deletion failure", vm.state.value.deletionFailed)
         assertFalse(vm.state.value.deletionRequested)
-        assertFalse(vm.state.value.deletionReceiptPending)
     }
 
     private val enrollGate2 = Gate()
@@ -974,6 +1013,9 @@ class VoiceSharingSettingsViewModelTest {
         val vm = viewModel(cancelInFlightUpload = { cancelled++ })
 
         vm.withdraw()
+        // The cancel still happens for the tap itself, ahead of the withdrawal request; it just
+        // no longer runs on the caller's thread, so the tap's work has to be pumped.
+        mainDispatcher.scheduler.advanceUntilIdle()
 
         assertEquals("withdrawing must reach a request already on the wire", 1, cancelled)
     }

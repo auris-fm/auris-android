@@ -72,9 +72,8 @@ class VoiceSharingSettingsRowCopyTest {
     fun `deletion states map honestly and none claim deleted`() {
         val s = resolver()
         val requested = VoiceSharingSettingsRowCopy.deleteSecondary(state().copy(deletionRequested = true), s)
-        val receipt = VoiceSharingSettingsRowCopy.deleteSecondary(state().copy(deletionReceiptPending = true), s)
         val failed = VoiceSharingSettingsRowCopy.deleteSecondary(state().copy(deletionFailed = true), s)
-        assertEquals("request in flight shows processing copy", requested, receipt)
+        assertEquals("request in flight shows the processing copy", s(au.com.shiftyjelly.pocketcasts.localization.R.string.voice_sharing_delete_pending), requested)
         assertEquals("a failed deletion shows the failed copy, distinct from processing", failed != requested, true)
         assertEquals("no deletion state means done", "", VoiceSharingSettingsRowCopy.deleteSecondary(state(), s))
     }

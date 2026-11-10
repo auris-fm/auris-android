@@ -199,7 +199,9 @@ class VoiceControlSettingsFragment : BaseFragment() {
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { voiceSharingSettings.dismissDelete() }) { Text("Cancel") }
+                        TextButton(onClick = { voiceSharingSettings.dismissDelete() }) {
+                            Text(stringResource(LR.string.voice_sharing_delete_dismiss))
+                        }
                     },
                 )
             }

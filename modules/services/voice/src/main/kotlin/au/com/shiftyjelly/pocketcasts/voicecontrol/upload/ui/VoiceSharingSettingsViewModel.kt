@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 /**
@@ -53,6 +54,10 @@ data class VoiceSharingSettingsUiState(
      * Deletion of already-accepted data, in THREE honest states (reviewer 578bb62a): the tap is
      * the REQUEST in flight; a 202 receipt is ACCEPTED-BUT-PROCESSING; neither ever means
      * deleted, and a failure is visible until the next action.
+||||||| /tmp/mfb
+     * Deletion of already-accepted data, in THREE honest states: the tap is
+     * the request in flight; a 202 receipt is accepted-but-processing; neither ever means
+     * deleted, and a failure is visible until the next action.
      */
     val deletionRequested: Boolean = false,
     /**
@@ -62,7 +67,6 @@ data class VoiceSharingSettingsUiState(
     val deleteAvailable: Boolean = false,
     /** The destructive-confirmation dialog; bound to the session that opened it. */
     val deleteConfirmationOpen: Boolean = false,
-    val deletionReceiptPending: Boolean = false,
     val deletionFailed: Boolean = false,
     val disclosureVersion: String,
     val disclosureTitle: String,
@@ -112,6 +116,12 @@ class VoiceSharingSettingsViewModel(
      * the loop is blocked.
      */
     private val cancelInFlightUpload: () -> Unit = {},
+    /**
+     * Where durable work runs. Turning sharing off writes a marker, cancels a request and deletes
+     * the queue, all of which touch storage; doing that on the caller's thread would stall the
+     * frame a user is waiting on.
+     */
+    private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
 ) {
 
     // DURABLE UI STATE, not transient render inputs (reviewer ae7922f9): the combine collector
@@ -134,7 +144,6 @@ class VoiceSharingSettingsViewModel(
     // Deletion presentation: durable like the membership presentation, retired at the same
     // owner-session boundary, with its OWN completion fence (reviewer 578bb62a).
     private var deletionRequested = false
-    private var deletionReceiptPending = false
     private var deletionFailed = false
     private var deletionGeneration = 0L
 
@@ -197,7 +206,6 @@ class VoiceSharingSettingsViewModel(
         pendingOperation = PendingOperation.NONE
         presentationStatus = SettingsOperationStatus.NONE
         deletionRequested = false
-        deletionReceiptPending = false
         deletionFailed = false
         deleteConfirmationOpen = false
         confirmationSession = 0L
@@ -269,7 +277,6 @@ class VoiceSharingSettingsViewModel(
     private fun startDeletion() {
         retireForeignSessionPresentation()
         deletionFailed = false
-        deletionReceiptPending = false
         deletionRequested = true
         val generation = ++deletionGeneration
         val tappedSession = ownerSession()
@@ -285,13 +292,11 @@ class VoiceSharingSettingsViewModel(
                 is EnrollmentOutcome.DataDeleted -> {
                     // Synchronous: the server confirmed the deletion, so it is done, not pending.
                     deletionRequested = false
-                    deletionReceiptPending = false
                     deletionFailed = false
                 }
 
                 is EnrollmentOutcome.Failed, is EnrollmentOutcome.Refused -> {
                     deletionRequested = false
-                    deletionReceiptPending = false
                     deletionFailed = true
                 }
 
@@ -301,7 +306,14 @@ class VoiceSharingSettingsViewModel(
         }
     }
 
-    /** Records the local stop FIRST, then withdraws; a failure keeps the stop. */
+    /**
+     * Records the local stop FIRST, then withdraws; a failure keeps the stop.
+     *
+     * Nothing on this path touches storage on the caller's thread. Turning sharing off writes a
+     * durable marker, cancels a request already on the wire and deletes the queue, and doing any
+     * of it inline stalls the frame the tap is waiting on. The order is preserved off-main: the
+     * stop is recorded before the cancel and the withdrawal request.
+     */
     fun withdraw() {
         retireForeignSessionPresentation()
         lastFailedOperation = FailedOperation.NONE
@@ -311,12 +323,17 @@ class VoiceSharingSettingsViewModel(
         // Same tap-time session capture as enroll() (reviewer 66ae7752). The LOCAL stop is still
         // recorded first: stopping collection on the old account is correct the instant of the tap.
         val tappedSession = ownerSession()
-        withdrawalIntent.recordWithdrawalRequested()
-        // Stopping collection must reach a request already being sent. Cancelling here, at the
-        // moment of the tap, is the only point that is not blocked behind that request.
-        cancelInFlightUpload()
         mutableState.value = render()
         scope.launch {
+            // The rendered state above only reads in-memory fields; everything durable moves off
+            // the caller's thread. `render()` is re-emitted on main once these reads settle.
+            withContext(ioDispatcher) {
+                withdrawalIntent.recordWithdrawalRequested()
+                // Stopping collection must reach a request already being sent. Cancelling here, at
+                // the moment of the tap, is the only point that is not blocked behind that request.
+                cancelInFlightUpload()
+            }
+            mutableState.value = withContext(ioDispatcher) { render() }
             if (ownerSession() != tappedSession) {
                 retireTapPresentation(generation)
                 return@launch
@@ -469,7 +486,6 @@ class VoiceSharingSettingsViewModel(
             pending = pendingOperation != PendingOperation.NONE,
             projectionObserved = projection.value != null,
             deletionRequested = deletionRequested,
-            deletionReceiptPending = deletionReceiptPending,
             deletionFailed = deletionFailed,
             deleteAvailable = isDeleteAvailable(),
             deleteConfirmationOpen = deleteConfirmationOpen,

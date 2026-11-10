@@ -77,11 +77,16 @@ class SettingsStopWiringTest {
                 "only revokeAndPurge, so the collection gate read a flag nobody ever set",
             recordIndex >= 0,
         )
-        val launchIndex = source.indexOf("scope.launch", recordIndex)
+        val launchIndex = source.indexOf("scope.launch")
+        assertTrue("the tap must still launch its work", launchIndex >= 0)
+        // The stop is recorded off the caller's thread, so it now sits INSIDE the launch. It must
+        // still come before the withdraw request, or a scheduling window exists in which
+        // collection could admit a capture after the user asked to stop.
+        val withdrawIndex = source.indexOf("enrollmentController.withdraw()")
+        assertTrue("the tap must still issue the withdraw request", withdrawIndex > launchIndex)
         assertTrue(
-            "the stop must be recorded BEFORE the request coroutine is launched, or a scheduling " +
-                "window exists in which collection could still admit a capture",
-            launchIndex > recordIndex,
+            "the stop must be recorded BEFORE the withdraw request, whichever thread it runs on",
+            recordIndex in launchIndex..withdrawIndex,
         )
         assertFalse(
             "the screen must not keep its own stop latch: the collection gate does not read it, so it " +

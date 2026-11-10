@@ -220,6 +220,12 @@ class IntentCategoryCoverageTest {
                 "effects.query",
                 predictedIntentFor(intent!!),
             )
+            // The param table is consulted BEFORE the mapper, so an alias missing from it would
+            // strip slots silently. Every alias the mapper accepts must also be declared there.
+            assertTrue(
+                "'effects.$action' must be declared in the slot table too",
+                SlotRepair.ACTION_PARAMS.containsKey("effects" to action),
+            )
         }
     }
 

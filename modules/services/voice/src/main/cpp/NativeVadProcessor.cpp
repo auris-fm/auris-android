@@ -156,6 +156,32 @@ int32_t NativeVadProcessor::getSpeechPcmRange(int16_t* outBuffer, int32_t offset
     return count;
 }
 
+int32_t NativeVadProcessor::getInProgressSampleCount() {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    // The active flag is a redundant guard: finalisation clears mSpeechBuffer under this same lock,
+    // so a finished utterance reports 0 either way. It is kept as defence in depth, NOT as the
+    // mechanism -- a mutation removing it leaves the test green, because the clear already does the
+    // work. The clear is what the control actually covers.
+    if (!mSpeechActive) {
+        return 0;
+    }
+    return static_cast<int32_t>(mSpeechBuffer.size());
+}
+
+int32_t NativeVadProcessor::getInProgressPcm(int16_t* outBuffer, int32_t maxSamples) {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    if (!mSpeechActive || outBuffer == nullptr || maxSamples <= 0) {
+        return 0;
+    }
+    const int32_t available = static_cast<int32_t>(mSpeechBuffer.size());
+    const int32_t count = (maxSamples < available) ? maxSamples : available;
+    if (count <= 0) {
+        return 0;
+    }
+    std::memcpy(outBuffer, mSpeechBuffer.data(), static_cast<size_t>(count) * sizeof(int16_t));
+    return count;
+}
+
 int32_t NativeVadProcessor::getSpeechEndSample() {
     std::lock_guard<std::mutex> lock(mSpeechMutex);
     return mSnapshotSpeechEndSample;
@@ -338,14 +364,20 @@ void NativeVadProcessor::runLoop() {
             if (!mSpeechActive) {
                 mSpeechOnsetSample = mContextCount * kVadFrameSize;
 
-                // Flush pre-speech context into speech buffer.
-                flushContextIntoSpeech(mSpeechBuffer, mSpeechFrames,
-                    mContextBuffer, mContextHead, mContextCount,
-                    kMaxContextFrames, kVadFrameSize);
-                mContextCount = 0;
-                mContextHead = 0;
-
-                mSpeechActive = true;
+                // Onset, context flush, the active flag and this frame's append all happen under
+                // one lock. A reader can take a partial copy while speech is running, and it must
+                // never observe a half-built utterance -- an empty buffer that claims to be active,
+                // or a vector reallocating underneath it.
+                {
+                    std::lock_guard<std::mutex> lock(mSpeechMutex);
+                    // Flush pre-speech context into speech buffer.
+                    flushContextIntoSpeech(mSpeechBuffer, mSpeechFrames,
+                        mContextBuffer, mContextHead, mContextCount,
+                        kMaxContextFrames, kVadFrameSize);
+                    mContextCount = 0;
+                    mContextHead = 0;
+                    mSpeechActive = true;
+                }
 
                 // Signal speech started.
                 std::lock_guard<std::mutex> lock(mEventMutex);
@@ -354,8 +386,12 @@ void NativeVadProcessor::runLoop() {
                 mEventCv.notify_one();
             }
 
-            // Accumulate current frame.
-            mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
+            // Accumulate current frame. Under the lock because the in-progress snapshot reads this
+            // buffer while speech is running.
+            {
+                std::lock_guard<std::mutex> lock(mSpeechMutex);
+                mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
+            }
             mSpeechFrames++;
 
             // The end of the last frame classified as speech, in the segment's own coordinates:
@@ -377,7 +413,10 @@ void NativeVadProcessor::runLoop() {
 
             if (mConsecutiveSilentFrames < kSilenceTimeoutFrames) {
                 // Micro-pause bridging: accumulate silent frames as part of speech.
-                mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
+                {
+                    std::lock_guard<std::mutex> lock(mSpeechMutex);
+                    mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
+                }
                 mSpeechFrames++;
             } else {
                 // Silence timeout reached — enter drain phase.
@@ -396,7 +435,10 @@ void NativeVadProcessor::runLoop() {
                 }
 
                 mDrainRemaining--;
-                mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
+                {
+                    std::lock_guard<std::mutex> lock(mSpeechMutex);
+                    mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
+                }
                 mSpeechFrames++;
 
                 if (mDrainRemaining <= 0) {

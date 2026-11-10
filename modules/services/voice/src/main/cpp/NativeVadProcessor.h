@@ -35,6 +35,25 @@ public:
 
     /** Copies min(outMax, size-offset) samples from snapshot [offset, ...) into outBuffer. */
     int32_t getSpeechPcmRange(int16_t* outBuffer, int32_t offset, int32_t outMax);
+
+    /**
+     * How many samples of the IN-PROGRESS utterance are available right now.
+     *
+     * Separate from getSpeechPcmSize(), which only describes a finalized segment. Wake detection
+     * only ever scores the first two seconds after onset, so a caller that gets this many samples
+     * can score the wake word before the utterance ends without changing the answer.
+     *
+     * Returns 0 when no utterance is in progress.
+     */
+    int32_t getInProgressSampleCount();
+
+    /**
+     * Copy up to maxSamples of the in-progress utterance, starting at its onset.
+     *
+     * Returns the number copied, or 0 when no utterance is in progress. Taken under the same lock
+     * as the finalization snapshot, so a concurrent segment end cannot tear the copy.
+     */
+    int32_t getInProgressPcm(int16_t* outBuffer, int32_t maxSamples);
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
 

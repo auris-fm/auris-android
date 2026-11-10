@@ -57,6 +57,25 @@ target_compile_options(vad_segment_test PRIVATE -Wall -Wextra -O1 -g)
 
 target_link_libraries(vad_segment_test PRIVATE Threads::Threads)
 
+# The in-progress utterance snapshot: what the client can read while the user is still speaking.
+# Same shape as vad_segment_test, because both drive the real frame loop through a scripted capture.
+add_executable(vad_in_progress_test
+    VadInProgressSnapshotTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_in_progress_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+target_compile_options(vad_in_progress_test PRIVATE -Wall -Wextra -O1 -g)
+
+target_link_libraries(vad_in_progress_test PRIVATE Threads::Threads)
+
 # The JNI processor lifetime guard is header-only and templated on the processor type, so this
 # target needs only the production header — no Oboe, no JNI, no NativeVadProcessor.cpp.
 add_executable(vad_handle_test

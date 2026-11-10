@@ -339,6 +339,47 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     return result;
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressPcmSize(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    NativeVadProcessor* processor = gVadProcessor.acquire();
+    if (processor == nullptr) {
+        return 0;
+    }
+    const int result = processor->getInProgressSampleCount();
+    gVadProcessor.release();
+    return result;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressPcm(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jshortArray jBuffer)
+{
+    NativeVadProcessor* processor = gVadProcessor.acquire();
+    if (processor == nullptr) {
+        return 0;
+    }
+
+    jsize capacity = env->GetArrayLength(jBuffer);
+    jshort* elements = env->GetShortArrayElements(jBuffer, nullptr);
+    if (elements == nullptr) {
+        gVadProcessor.release();
+        return 0;
+    }
+
+    int32_t copied = processor->getInProgressPcm(
+        reinterpret_cast<int16_t*>(elements),
+        static_cast<int32_t>(capacity));
+
+    env->ReleaseShortArrayElements(jBuffer, elements, 0); // copy back
+    gVadProcessor.release();
+    return static_cast<jint>(copied);
+}
+
 // Frames the VAD has consumed from capture since start. Exposed so a test can assert captured audio
 // reaches the VAD, which a liveness check alone cannot show while no speech event fires.
 extern "C" JNIEXPORT jlong JNICALL

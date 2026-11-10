@@ -89,6 +89,16 @@ internal object OboeNative {
     /** Ranged copy-out: fills [out] from native speech at offset [fromSample]; returns written. */
     external fun nativeGetSpeechPcmRange(out: ShortArray, fromSample: Int): Int
     external fun nativeGetSpeechPcmSize(): Int
+
+    /**
+     * Samples of the utterance still in progress, and a copy of them from its onset.
+     *
+     * Wake detection only scores the first two seconds after onset, so samples this early are
+     * enough to reach the same verdict the finished segment would, without waiting for the user to
+     * stop speaking. Both return 0 when no utterance is in progress.
+     */
+    external fun nativeGetInProgressPcmSize(): Int
+    external fun nativeGetInProgressPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechOnsetSample(): Int
     external fun nativeGetSpeechEndSample(): Int
 

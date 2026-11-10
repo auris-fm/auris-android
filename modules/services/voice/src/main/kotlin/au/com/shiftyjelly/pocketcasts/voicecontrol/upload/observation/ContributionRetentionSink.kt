@@ -67,6 +67,15 @@ sealed interface CollectionOutcome {
      */
     data class RoutingNone(override val captureId: UUID, val recognizerReason: String?) : CollectionOutcome
 
+    /**
+     * The router was attempted and could not be used at all — it never ran, so nothing was routed.
+     *
+     * Distinct from [RoutingNone], which is a router that ran and reported no usable intent: this
+     * one means the capability was missing or broken, which is a fault rather than a non-match.
+     * NONTERMINAL for the same reason: a later cloud escalation can still supply an outcome.
+     */
+    data class RoutingFailed(override val captureId: UUID, val reason: String) : CollectionOutcome
+
     /** ASR produced a transcript for this capture; language is the ACTUAL detected value or null. */
     data class Recognized(
         override val captureId: UUID,

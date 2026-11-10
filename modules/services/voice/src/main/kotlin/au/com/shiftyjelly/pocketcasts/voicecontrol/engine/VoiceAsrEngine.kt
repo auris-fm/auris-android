@@ -955,7 +955,13 @@ class VoiceAsrEngine @Inject constructor(
 
     private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, capture: CaptureContext?, admittedId: String) {
         val recognizer = intentRecognizer
-        val handler = onIntent ?: return
+        val handler = onIntent ?: run {
+            // No handler is wired, so routing cannot happen for this capture. Recorded as its own
+            // cause: leaving the record's routing unreported would let a misconfigured build look
+            // like a clip that simply had nothing to route.
+            capture?.let { joinOutcome(CollectionOutcome.RoutingFailed(it.captureId, ROUTER_NO_HANDLER)) }
+            return
+        }
         fun routed(category: String, fields: Map<String, String> = emptyMap()) {
             if (capture != null) joinOutcome(CollectionOutcome.Routed(capture.captureId, category, fields))
         }
@@ -963,6 +969,9 @@ class VoiceAsrEngine @Inject constructor(
         val ready = recognizer.ensureReady()
         if (ready.isFailure) {
             Timber.e(ready.exceptionOrNull(), "[VoicePipeline] intent not ready")
+            // The router was attempted and could not be used. A fault, and the one fact that
+            // explains why nothing was routed, so it is joined before returning.
+            capture?.let { joinOutcome(CollectionOutcome.RoutingFailed(it.captureId, ROUTER_UNAVAILABLE)) }
             // The router never ran, which is the same class as the router's own
             // `model_not_loaded`: a turn happened and nothing an answer it. Say
             // so — silence here is the complaint this change exists to remove.
@@ -1341,6 +1350,12 @@ class VoiceAsrEngine @Inject constructor(
 
         /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
         private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
+
+        /** The router could not be loaded, so no attempt at routing was possible. */
+        private const val ROUTER_UNAVAILABLE = "router_unavailable"
+
+        /** Nothing is wired to receive an intent, so a routed intent would have had no destination. */
+        private const val ROUTER_NO_HANDLER = "no_handler"
 
         /**
          * THE SUPPORTED AGGREGATE over one invocation's per-action observations (spec 250ddcc3):

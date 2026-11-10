@@ -36,6 +36,8 @@ class RecordingPublisherTest {
         stageHistory: List<CollectionOutcome> = emptyList(),
         translation: TranslationProvenance? = null,
         executionOutcome: ExecutionOutcome? = null,
+        routerModel: ModelRef? = null,
+        cause: String = SealedCapture.CAUSE_TERMINAL,
     ): SealedCapture {
         val id = outcome?.captureId ?: UUID.randomUUID()
         return SealedCapture(
@@ -55,10 +57,10 @@ class RecordingPublisherTest {
             stageHistory = stageHistory,
             translation = translation,
             asrInvocationModel = asrModel,
-            routerInvocationModel = null,
+            routerInvocationModel = routerModel,
             executionOutcome = executionOutcome,
             allowanceMetadataCap = null,
-            cause = SealedCapture.CAUSE_TERMINAL,
+            cause = cause,
         )
     }
 
@@ -246,6 +248,59 @@ class RecordingPublisherTest {
         val translation = metadata(q).getJSONObject("observations").getJSONObject("translation")
         assertEquals("failed", translation.getString("state"))
         assertEquals("translator_unavailable", translation.getString("reason"))
+    }
+
+    @Test
+    fun `a router that could not be loaded is recorded as failed, not as never invoked`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        val id = UUID.randomUUID()
+        // Recognition completed, then the router could not be loaded: routing did not merely fail
+        // to happen, it was attempted and failed. Reporting "not invoked" would tell a reader the
+        // pipeline never reached routing, which hides a broken capability behind a benign skip.
+        publisher(q).publish(
+            sealed(
+                outcome = CollectionOutcome.RoutingFailed(id, "router_unavailable"),
+                stageHistory = listOf(CollectionOutcome.Recognized(id, "play", "en"), CollectionOutcome.RoutingFailed(id, "router_unavailable")),
+            ),
+        )
+        val routing = metadata(q).getJSONObject("observations").getJSONObject("routing")
+        assertEquals("failed", routing.getString("state"))
+        assertEquals("router_unavailable", routing.getString("reason"))
+    }
+
+    @Test
+    fun `a router that was still pending when the wait expired is unknown, not a skip`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        val id = UUID.randomUUID()
+        // Recognition completed but routing never reported before the bounded wait sealed the
+        // capture. The result is genuinely unknown; claiming "not invoked" would assert the
+        // pipeline never reached routing, which this capture does not establish.
+        publisher(q).publish(
+            sealed(
+                outcome = CollectionOutcome.Recognized(id, "play", "en"),
+                stageHistory = listOf(CollectionOutcome.Recognized(id, "play", "en")),
+                routerModel = null,
+                cause = SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED,
+            ),
+        )
+        val routing = metadata(q).getJSONObject("observations").getJSONObject("routing")
+        assertEquals("unknown", routing.getString("state"))
+        assertEquals("finalized_before_result", routing.getString("reason"))
+    }
+
+    @Test
+    fun `a capture with no handler wired records why nothing was routed`() {
+        val q = FolderQueue(tmp.newFolder("q"), 32, {})
+        val id = UUID.randomUUID()
+        publisher(q).publish(
+            sealed(
+                outcome = CollectionOutcome.RoutingFailed(id, "no_handler"),
+                stageHistory = listOf(CollectionOutcome.Recognized(id, "play", "en"), CollectionOutcome.RoutingFailed(id, "no_handler")),
+            ),
+        )
+        val routing = metadata(q).getJSONObject("observations").getJSONObject("routing")
+        assertEquals("failed", routing.getString("state"))
+        assertEquals("no_handler", routing.getString("reason"))
     }
 
     @Test

@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
@@ -93,6 +94,8 @@ class VoiceAsrEngine @Inject constructor(
     // Upload observation is OFF unless a composition module binds all three collaborators;
     // Dagger never applies Kotlin defaults, so an unbound constructor fails at build time.
     @ApplicationContext private val context: Context,
+    /** One clock for every timing mark, so the table's differences are real quantities. */
+    private val elapsedClockMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -355,9 +358,24 @@ class VoiceAsrEngine @Inject constructor(
                                 }
                             }
 
-                            val request = shouldTranscribe(result, openContext)
+                            // The acoustic end is the table's zero point: the instant the user
+                            // stopped speaking, after which every cost is the client's.
+                            val timing = TurnTimingRecord(
+                                requestId = "utt-" + elapsedClockMs(),
+                            )
+                            timing.mark(TurnTimingRecord.Stage.AcousticEnd, elapsedClockMs())
+                            // The segmenter has already decided the utterance ended by the time
+                            // it reports the segment, so the decision is observed here, next to
+                            // the acoustic end and distinct from it.
+                            timing.mark(TurnTimingRecord.Stage.EndpointDecision, elapsedClockMs())
+
+                            val request = shouldTranscribe(result, openContext, timing)
                             if (request != null) {
-                                transcribeSegment(result, request)
+                                transcribeSegment(result, request, timing)
+                            } else {
+                                // Nothing ran for this utterance: publish the table so the
+                                // dropped turn is still visible with its real stages.
+                                timing.publish()
                             }
                             openContext = null
                         }
@@ -559,6 +577,7 @@ class VoiceAsrEngine @Inject constructor(
     private suspend fun shouldTranscribe(
         segment: VoiceSegmenterResult.SpeechEnded,
         capture: CaptureContext?,
+        timing: TurnTimingRecord,
     ): TranscribeRequest? {
         // Build float samples from the segment
         val totalSamples = segment.frames.sumOf { it.samples.size }
@@ -607,6 +626,10 @@ class VoiceAsrEngine @Inject constructor(
             ),
             framesProvider = { segment.frames.map { it.samples } to (segment.frames.firstOrNull()?.sampleRateHz ?: 16000) },
         )
+
+        // The final wake result, as the detector reported it. Recorded before any decision that
+        // depends on it, so a negative result is still a measured stage.
+        timing.mark(TurnTimingRecord.Stage.WakeResult, elapsedClockMs())
 
         val mode = currentMode
         val wakeCmp = when {
@@ -664,6 +687,7 @@ class VoiceAsrEngine @Inject constructor(
     private suspend fun transcribeSegment(
         segment: VoiceSegmenterResult.SpeechEnded,
         request: TranscribeRequest,
+        timing: TurnTimingRecord,
     ) {
         val b = backend ?: return
         val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
@@ -710,6 +734,7 @@ class VoiceAsrEngine @Inject constructor(
             Timber.w(t, "[VoicePipeline] asr provider failed")
             return
         }
+        timing.mark(TurnTimingRecord.Stage.AsrDone, elapsedClockMs())
         val asrMs = System.currentTimeMillis() - asrStartedAt
         val durationMs = (floatSamples.size * 1000L / sampleRateHz).toInt()
         val transcript = WakeTranscriptTrimmer.commandText(
@@ -863,7 +888,13 @@ class VoiceAsrEngine @Inject constructor(
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
-        processUtterance(routePrep.input!!, addressed = request.wakePositive, capture = request.capture, admittedId = request.admittedId)
+        processUtterance(
+            routePrep.input!!,
+            addressed = request.wakePositive,
+            capture = request.capture,
+            admittedId = request.admittedId,
+            timing = timing,
+        )
     }
 
     /** Samples of [frames] beyond the first [skip] — the exact delta the producer added. */
@@ -898,7 +929,13 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal fun intentCategory(intent: VoiceIntent): String? = PredictedIntentName.of(intent)
 
-    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, capture: CaptureContext?, admittedId: String) {
+    private suspend fun processUtterance(
+        input: IntentRoutingInput,
+        addressed: Boolean,
+        capture: CaptureContext?,
+        admittedId: String,
+        timing: TurnTimingRecord? = null,
+    ) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: run {
             // No handler is wired, so routing cannot happen for this capture. Recorded as its own
@@ -954,6 +991,7 @@ class VoiceAsrEngine @Inject constructor(
         // that happen to say the same words do not. The dialog path mints its own for
         // clarification flows; this is the producer for a plain utterance.
         val outcome = recognizer.recognize(input, ctx, admittedId)
+        timing?.mark(TurnTimingRecord.Stage.RoutingDone, elapsedClockMs())
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
         val diagnostic = outcome.diagnostic
@@ -988,6 +1026,8 @@ class VoiceAsrEngine @Inject constructor(
                     // prepared once and may be retried. A local intent has no wire identity to reuse.
                     .let { it.withLogicalRequest(admittedId) },
             )
+            timing?.markOutcome(TurnTimingRecord.Outcome.ActionExecuted)
+            timing?.publish()
             return
         }
 
@@ -1000,6 +1040,10 @@ class VoiceAsrEngine @Inject constructor(
             reason,
             input.routerTranscript,
         )
+        // The router ran and produced no intent. That is not an executed action, and the table
+        // says so rather than leaving the reader to infer it from a missing stage.
+        timing?.markOutcome(TurnTimingRecord.Outcome.ActionFailed)
+        timing?.publish()
 
         // P1: the recognizer's OWN reported decision travels — a null
         // intent is NOT always no_candidates (it may be validation or a model failure), and

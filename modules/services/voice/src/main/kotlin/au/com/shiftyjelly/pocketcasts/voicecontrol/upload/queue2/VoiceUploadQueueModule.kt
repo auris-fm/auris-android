@@ -58,7 +58,18 @@ object VoiceUploadQueueModule {
     @Singleton
     fun provideLegacyQueueRemoval(
         @ApplicationContext context: Context,
-    ): LegacyQueueRemoval = LegacyQueueRemoval(context.filesDir)
+        workManager: dagger.Lazy<androidx.work.WorkManager>,
+    ): LegacyQueueRemoval = LegacyQueueRemoval(
+        filesDir = context.filesDir,
+        // The previous path enqueued a unique periodic job that outlives the class it named, so it
+        // fails with a missing-class error on every run for a path that no longer exists.
+        cancelLegacyWork = {
+            runCatching { workManager.get().cancelUniqueWork(LEGACY_DRAIN_WORK) }
+        },
+    )
+
+    /** The unique name the deleted upload path scheduled its drain under. */
+    private const val LEGACY_DRAIN_WORK = "voice-upload-drain"
 
     internal fun deleteLegacyQueue(
         filesDir: File,
@@ -146,10 +157,15 @@ object VoiceUploadQueueModule {
  * The queue itself is built during object-graph assembly, before the app has set up logging, so
  * doing this there would delete the right directory and leave no trace of having done it.
  */
-class LegacyQueueRemoval(private val filesDir: File) {
+class LegacyQueueRemoval(
+    private val filesDir: File,
+    /** Cancels the previous upload path's scheduled work, if the work manager is present. */
+    private val cancelLegacyWork: () -> Unit = {},
+) {
     fun run() {
         VoiceUploadQueueModule.deleteLegacyQueue(filesDir) { message ->
             LogBuffer.i("VoiceUploadQueue2", message)
         }
+        cancelLegacyWork()
     }
 }

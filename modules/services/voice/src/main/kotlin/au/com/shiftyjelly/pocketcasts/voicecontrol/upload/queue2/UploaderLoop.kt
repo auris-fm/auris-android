@@ -78,6 +78,7 @@ class UploaderLoop(
                 is GateVerdict.Refuse -> {
                     // Anything buffered for this recording must stop too, not just its folder.
                     cancelInFlightOnce()
+                    log("upload: ${recording.captureId} not sent: ${verdict.reason}")
                     queue.delete(recording, verdict.reason)
                     clearBackoff(recording.captureId)
                     deleted++
@@ -89,11 +90,18 @@ class UploaderLoop(
 
             // Only now does the retry schedule matter: this recording may be sent, but not yet.
             val dueAt = nextAttemptAt[recording.captureId] ?: 0L
-            if (t < dueAt) continue
+            if (t < dueAt) {
+                log("upload: ${recording.captureId} waiting to retry")
+                continue
+            }
 
             val status = runCatching { send(recording) }
                 .onFailure { log("upload: request failed (${it.javaClass.simpleName})") }
                 .getOrNull()
+
+            // One line per attempt, so a loop that is running and a loop that is stuck can be told
+            // apart from the outside. Without this the two are identical in the log.
+            log("upload: ${recording.captureId} answered ${status ?: "no answer"}")
 
             when (AnswerTable.classify(status)) {
                 Answer.Accepted -> {

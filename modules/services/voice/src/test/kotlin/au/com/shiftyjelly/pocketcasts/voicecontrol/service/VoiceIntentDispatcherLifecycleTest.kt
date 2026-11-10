@@ -143,6 +143,35 @@ class VoiceIntentDispatcherLifecycleTest {
     }
 
     @Test
+    fun `a debounced dispatch is a client refusal, not a silent stage`() {
+        // The spec's fixed refusal mapping: a debounce-suppressed turn is a client refusal, so its
+        // settled record must carry failed/refused/client_refused -- not the not_run fallthrough a
+        // bare settle produces, which reads as "nothing was attempted".
+        val engine = engine()
+        val d = dispatcher()
+        val t = token()
+        d.dispatch(
+            scope = scope(),
+            engine = engine,
+            executor = executor { _, _ -> VoiceResponse.Silent },
+            render = { _, _ -> },
+            onCommandRecognized = { },
+            intent = VoiceIntent.Playback.Pause,
+            invocationToken = null,
+        )
+        d.dispatch(
+            scope = scope(),
+            engine = engine,
+            executor = executor { _, _ -> error("debounced: must not run") },
+            render = { _, _ -> },
+            onCommandRecognized = { },
+            intent = VoiceIntent.Playback.Pause,
+            invocationToken = t,
+        )
+        verify(engine, times(1)).reportExecutionResult(eq(t), eq(ExecutionOutcome.Refused))
+    }
+
+    @Test
     fun `facts reported through the invocation-local channel reach the engine by token`() = runBlocking {
         val engine = engine()
         val t = token()

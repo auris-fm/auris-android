@@ -53,6 +53,14 @@ class VoiceIntentDispatcher @Inject constructor() {
             // its publication (schema unknown — no action was attempted) instead of leaking an
             // open invocation forever.
             invocationToken?.let { engine.settleInvocation(it) }
+||||||| /tmp/mfb
+            // Its publication (schema unknown — no action was attempted) instead of leaking an
+            // Open invocation forever.
+            invocationToken?.let { engine.settleInvocation(it) }
+            invocationToken?.let {
+                engine.reportExecutionResult(it, ExecutionOutcome.Refused)
+                engine.settleInvocation(it)
+            }
             return null
         }
         lastIntentType = intentType

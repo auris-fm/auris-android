@@ -324,22 +324,96 @@ class VoiceSharingSettingsViewModel(
         // recorded first: stopping collection on the old account is correct the instant of the tap.
         val tappedSession = ownerSession()
         scope.launch {
-            // A render reads the durable marker, so the tap's own emission is computed off the
-            // caller's thread too; only the finished state is published to main.
-            mutableState.value = withContext(ioDispatcher) { render() }
+            // IO CROSSES, STATE DOES NOT. A render reads the durable marker, so the values it
+            // needs are computed off the caller's thread, but every field this class owns is read
+            // and written back here on main. Otherwise an old withdrawal could pass its generation
+            // check while on IO and then overwrite a newer action's presentation.
+            // Capture the IO result FIRST, then re-check on main, then publish: a render that is
+            // composed lines up its fields at publish time, so publishing a value read across the
+            // suspension would let an old tap paint over a newer action.
+            // The generation checks below are defence in depth, not this path's guarantee. What
+            // actually protects a newer action is the enrollment controller's own fence, which
+            // reports the superseded request and is covered by EnrollmentControllerTest. These
+            // checks sit in front of it because the repaint they prevent is cheap to rule out
+            // here; a control that removed them could not see the difference, since this same
+            // withdrawal publishes again further down and lands back on the newer presentation.
+            val openedEnrolled = withContext(ioDispatcher) { readRenderInputs() }
+            if (generation != actionGeneration) return@launch
+            mutableState.value = renderFrom(openedEnrolled)
             withContext(ioDispatcher) {
                 withdrawalIntent.recordWithdrawalRequested()
                 // Stopping collection must reach a request already being sent. Cancelling here, at
                 // the moment of the tap, is the only point that is not blocked behind that request.
                 cancelInFlightUpload()
             }
-            mutableState.value = withContext(ioDispatcher) { render() }
+            // Re-checked on main AFTER the IO suspension: a tap that arrived meanwhile owns the
+            // screen, and this one must not overwrite it.
+            val closedEnrolled = withContext(ioDispatcher) { readRenderInputs() }
+            if (generation != actionGeneration) return@launch
             if (ownerSession() != tappedSession) {
-                retireTapPresentation(generation)
+                retireTapPresentation(generation, closedEnrolled)
                 return@launch
             }
-            withContext(ioDispatcher) {
-                consume(enrollmentController.withdraw(), FailedOperation.WITHDRAW, generation)
+            mutableState.value = renderFrom(closedEnrolled)
+            val outcome = withContext(ioDispatcher) { enrollmentController.withdraw() }
+            if (ownerSession() != tappedSession) {
+                retireTapPresentation(generation, withContext(ioDispatcher) { readRenderInputs() })
+                return@launch
+            }
+            applyWithdrawalOutcome(outcome, generation)
+        }
+    }
+
+    /**
+     * The durable parts of a render, read off the caller's thread.
+     *
+     * Only the marker read qualifies: everything else in the UI state is an in-memory field this
+     * class owns and must not be touched from an IO thread.
+     */
+    private fun readRenderInputs(): Boolean = isEnrolled()
+
+    /**
+     * The main-thread half of a withdrawal outcome.
+     *
+     * The fenced persistence effect runs on IO because it writes the marker; this method decides,
+     * back on main and from the returned value, what the screen should say. It re-checks the
+     * generation first, so an outcome that lost to a newer action is dropped rather than published.
+     */
+    private suspend fun applyWithdrawalOutcome(outcome: EnrollmentOutcome, generation: Long) {
+        when (outcome) {
+            is EnrollmentOutcome.Applied -> {
+                // The server AGREED: reconcile the recorded request. The write is on IO; the
+                // reconciliation runs under the controller's fence.
+                withContext(ioDispatcher) {
+                    enrollmentController.applyForOutcome(outcome) { withdrawalIntent.onServerAgrees() }
+                }
+                // Capture, re-check on main, then publish.
+                val enrolled = withContext(ioDispatcher) { readRenderInputs() }
+                if (generation != actionGeneration) return
+                pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.NONE
+                mutableState.value = renderFrom(enrolled)
+            }
+
+            is EnrollmentOutcome.Failed, is EnrollmentOutcome.Refused -> {
+                // A failure latches with the intent store, fenced, off the caller's thread.
+                withContext(ioDispatcher) {
+                    enrollmentController.applyForOutcome(outcome) { withdrawalIntent.onWithdrawalFailed() }
+                }
+                val enrolled = withContext(ioDispatcher) { readRenderInputs() }
+                if (generation != actionGeneration) return
+                lastFailedOperation = FailedOperation.WITHDRAW
+                pendingOperation = PendingOperation.NONE
+                presentationStatus = SettingsOperationStatus.FAILED
+                mutableState.value = renderFrom(enrolled)
+            }
+
+            is EnrollmentOutcome.DataDeleted,
+            EnrollmentOutcome.Superseded,
+            -> {
+                // Nothing settled for the withdrawal, or the action was superseded and the
+                // superseding action owns the screen.
+                if (generation != actionGeneration) return
             }
         }
     }
@@ -471,17 +545,32 @@ class VoiceSharingSettingsViewModel(
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState {
         // Installed-path diagnostic (staging test, reviewer 1f2d9cbf): distinguish the POLICY
         // gate from the MEMBERSHIP gate on the device, without changing either gate.
+||||||| /tmp/mfb
+    private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState {
+        // Installed-path diagnostic: distinguish the POLICY
+        // Gate from the MEMBERSHIP gate on the device, without changing either gate.
+    private fun retireTapPresentation(generation: Long, enrolled: Boolean) {
+        if (generation != actionGeneration) return
+        pendingOperation = PendingOperation.NONE
+        presentationStatus = SettingsOperationStatus.NONE
+        mutableState.value = renderFrom(enrolled)
+    }
+    private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState = renderFrom(isEnrolled(), status)
+    private fun renderFrom(
+        enrolled: Boolean,
+        status: SettingsOperationStatus = presentationStatus,
+    ): VoiceSharingSettingsUiState {
         val observed = projection.value != null
         Timber.i(
             "voice-sharing surface: settingAvailable=%b projectionObserved=%b (session=%d) enrolled=%b",
             true,
             observed,
             ownerSession(),
-            isEnrolled(),
+            enrolled,
         )
         return VoiceSharingSettingsUiState(
             settingAvailable = true,
-            enrolled = isEnrolled(),
+            enrolled = enrolled,
             // Pending is PRESENTATION state, not the shared controller's: the controller keeps the
             // last operation's Pending state even after it settles as Superseded (its own lifecycle
             // owns that), and account B must never inherit account A's spinner (reviewer 66ae7752).

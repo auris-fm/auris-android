@@ -14,6 +14,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -258,6 +260,70 @@ class VoiceSharingSettingsViewModelTest {
             touches.count { it.startsWith("marker-clear") || it.startsWith("marker-stop") } >= 2,
         )
         assertEquals("the purge runs once", 1, purges)
+    }
+
+    /** Bounded poll on real dispatchers: true as soon as [condition] holds. */
+    private fun awaitTrue(timeoutMs: Long, condition: () -> Boolean): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (System.nanoTime() < deadline) {
+            if (condition()) return true
+            Thread.sleep(5)
+        }
+        return condition()
+    }
+
+    @Test
+    fun `presentation is published on main, observed at the write`() {
+        // Observe the WRITE itself, inline with publication. A collector dispatched onto main
+        // only proves the collector's thread, so the record has to happen where the value is set.
+        val mainExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "sharing-main").apply { isDaemon = true }
+        }
+        val ioExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "sharing-io").apply { isDaemon = true }
+        }
+        val mainDispatcher = mainExecutor.asCoroutineDispatcher()
+        val writes = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher)
+        val enrollGate = Gate()
+        enrollGate.result = VoiceSharingMutationResult.Failure
+        val vm = try {
+            viewModel(
+                enrollGate = enrollGate,
+                scope = scope,
+                ioDispatcher = ioExecutor.asCoroutineDispatcher(),
+            )
+        } finally {}
+
+        try {
+            setProjection(enrolledProjection())
+            // Observe the state flow itself. Each emission is recorded on the thread that made
+            // it, so this is inline with publication - not a snapshot taken later from elsewhere.
+            // `drop(1)`: a StateFlow replays its current value to a new collector, and that replay
+            // happens on the subscribing thread - it is not a write.
+            val watch = kotlinx.coroutines.CoroutineScope(mainDispatcher).launch(Dispatchers.Unconfined) {
+                vm.state.drop(1).collect { writes += Thread.currentThread().name }
+            }
+            val issued = java.util.concurrent.CountDownLatch(1)
+            kotlinx.coroutines.CoroutineScope(mainDispatcher).launch {
+                vm.withdraw()
+                issued.countDown()
+            }
+            assertTrue("the tap is issued", issued.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            awaitTrue(10_000) { vm.state.value.pendingOperation != PendingOperation.NONE }
+            Thread.sleep(100)
+            watch.cancel()
+
+            assertTrue("the surface must publish state: $writes", writes.isNotEmpty())
+            // `Dispatchers.Unconfined` resumes in the publishing coroutine, so the name recorded
+            // here is the publisher's thread. Anything not on main means the write escaped.
+            val offMain = writes.filterNot { it.startsWith("sharing-main") }
+            assertEquals("every state write must happen on main: $writes", emptyList<String>(), offMain)
+        } finally {
+            scope.cancel()
+            mainExecutor.shutdownNow()
+            ioExecutor.shutdownNow()
+        }
     }
 
     @Test

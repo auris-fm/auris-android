@@ -182,7 +182,18 @@ class EngineProcessingJoinControlTest {
             // BARRIER: the processing flow has failed, so the job has already FAILED by the time
             // stop() runs. The engine tracks the job only when stop() references it, so the state
             // to assert is what stop() records for an already-failed job.
+||||||| /tmp/mfb
+            // Barrier: the processing flow has failed, so the job has already failed by the time
+            // Stop() runs. The engine tracks the job only when stop() references it, so the state
+            // To assert is what stop() records for an already-failed job.
             withTimeout(5_000) { died.await() }
+            val ownedBeforeStop = engine.ownedJobs.toSet()
+            assertEquals("the failed job must be owned before stop", 1, ownedBeforeStop.size)
+            withTimeout(5_000) { ownedBeforeStop.single().join() }
+            assertTrue(
+                "the processing job must have finished before stop; premise broken otherwise",
+                ownedBeforeStop.single().isCompleted,
+            )
             engine.stop()
             // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
             // outstanding work. What matters is what stop() recorded for it: a failure must not be
@@ -193,13 +204,22 @@ class EngineProcessingJoinControlTest {
             // Relabelled as expected shutdown.
             val owned = engine.ownedJobs
             val outstanding = engine.unfinishedProcessingJobs.filter { it in owned && !it.isCompleted }
+||||||| /tmp/mfb
+            // The job had ALREADY finished, so stop() must not track it as work still running.
+            // The unfinished list cannot carry that claim: its completion callback removes the job
+            // an instant after it finishes, so reading it here races the removal and can observe a
+            // job that is done but not yet pruned (Cancelling under load). The deterministic claim
+            // is about OWNERSHIP — stop() adds only an unfinished job to the unfinished set, and
+            // ownership is registered at creation and survives completion.
+            val owned = engine.ownedJobs
+            val outstanding = engine.unfinishedProcessingJobs.filter { it in owned && !it.isCompleted }
             assertTrue(
-                "a finished job is not outstanding work, got $outstanding",
-                outstanding.isEmpty(),
+                "a finished job is not outstanding work, got ${engine.unfinishedProcessingJobs}",
+                engine.unfinishedProcessingJobs.none { it === ownedBeforeStop.single() },
             )
             assertTrue(
                 "a job that had already FAILED must NOT be recorded as engine-cancelled",
-                engine.cancelledProcessingJobs.none { it.isCompleted },
+                engine.cancelledProcessingJobs.none { it === ownedBeforeStop.single() },
             )
         } finally {
             scope.cancel()

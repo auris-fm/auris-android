@@ -78,7 +78,7 @@ object SlotRepair {
 
     // Must cover every (tool, action) ToolCallMapper / ToolSchema can dispatch so
     // sanitizeParams does not strip legitimate generated slots.
-    private val ACTION_PARAMS: Map<Pair<String, String>, Set<String>> = mapOf(
+    internal val ACTION_PARAMS: Map<Pair<String, String>, Set<String>> = mapOf(
         "playback" to "pause" to emptySet(),
         "playback" to "resume" to emptySet(),
         "playback" to "seek_relative" to setOf("delta_seconds", "direction"),
@@ -88,7 +88,7 @@ object SlotRepair {
         "effects" to "adjust_speed" to setOf("delta"),
         "effects" to "set_trim_mode" to setOf("mode"),
         "effects" to "set_volume_boost" to setOf("enabled"),
-        "effects" to "query_effects" to emptySet(),
+        "effects" to "query" to emptySet(),
         "volume" to "set_volume" to setOf("volume"),
         "volume" to "adjust_volume" to setOf("delta"),
         "volume" to "query" to emptySet(),

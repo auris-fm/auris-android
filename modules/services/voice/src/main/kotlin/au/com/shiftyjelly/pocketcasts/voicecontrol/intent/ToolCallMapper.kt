@@ -68,7 +68,7 @@ class ToolCallMapper @Inject constructor() {
             VoiceIntent.Effects.SetVolumeBoost(enabled)
         }
 
-        "query_effects" -> VoiceIntent.Effects.QueryEffects
+        "query" -> VoiceIntent.Effects.QueryEffects
 
         else -> null
     }

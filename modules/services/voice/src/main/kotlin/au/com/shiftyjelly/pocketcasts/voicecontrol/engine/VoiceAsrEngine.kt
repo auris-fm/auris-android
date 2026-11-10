@@ -939,7 +939,7 @@ class VoiceAsrEngine @Inject constructor(
      * The upload spec fixes the value as `<tool>.<action>` from the Voice Intents tool schema, or
      * `cloud_route` alone, derived from the intent's type and action and never from its arguments.
      */
-    internal fun intentCategory(intent: VoiceIntent): String = PredictedIntentName.of(intent)
+    internal fun intentCategory(intent: VoiceIntent): String? = PredictedIntentName.of(intent)
 
     private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, capture: CaptureContext?, admittedId: String) {
         val recognizer = intentRecognizer
@@ -950,7 +950,10 @@ class VoiceAsrEngine @Inject constructor(
             capture?.let { joinOutcome(CollectionOutcome.RoutingFailed(it.captureId, ROUTER_NO_HANDLER)) }
             return
         }
-        fun routed(category: String, fields: Map<String, String> = emptyMap()) {
+        fun routed(category: String?, fields: Map<String, String> = emptyMap()) {
+            // A null name means the schema defines no action for this intent. Routing still
+            // happened -- the app decided -- so the stage is recorded; the name is simply absent
+            // rather than invented.
             if (capture != null) joinOutcome(CollectionOutcome.Routed(capture.captureId, category, fields))
         }
 

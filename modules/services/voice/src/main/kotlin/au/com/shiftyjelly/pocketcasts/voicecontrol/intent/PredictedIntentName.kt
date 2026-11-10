@@ -33,7 +33,7 @@ object PredictedIntentName {
      * than a lookup by class name, so a new leaf fails the build instead of silently publishing a
      * name the schema does not define.
      */
-    fun of(intent: VoiceIntent): String = when (intent) {
+    fun of(intent: VoiceIntent): String? = when (intent) {
         // playback
         is VoiceIntent.Playback.Pause -> "playback.pause"
 
@@ -54,7 +54,7 @@ object PredictedIntentName {
 
         is VoiceIntent.Effects.SetVolumeBoost -> "effects.set_volume_boost"
 
-        is VoiceIntent.Effects.QueryEffects -> "effects.query_effects"
+        is VoiceIntent.Effects.QueryEffects -> "effects.query"
 
         // volume
         is VoiceIntent.Volume.SetVolume -> "volume.set_volume"
@@ -144,7 +144,12 @@ object PredictedIntentName {
 
         is VoiceIntent.PlaybackQuery.TimeRemaining -> "playback_query.time_remaining"
 
-        is VoiceIntent.PlaybackQuery.CurrentPodcast -> "playback_query.current_podcast"
+        // The canonical schema has no action for this intent, so there is no name to publish.
+        // It is reachable (the forward mapper builds it and the executor answers it), so it is not
+        // dead code -- it is an intent the schema never defined an action for. Referred for a
+        // ruling rather than given an invented name: the field stays absent, and the server files
+        // that recording under `none`.
+        is VoiceIntent.PlaybackQuery.CurrentPodcast -> null
 
         is VoiceIntent.PlaybackQuery.EpisodeDuration -> "playback_query.episode_duration"
 
@@ -171,7 +176,10 @@ object PredictedIntentName {
 
         is VoiceIntent.StatsQuery.DownloadStats -> "stats_query.download_stats"
 
-        is VoiceIntent.StatsQuery.QueueTotal -> "stats_query.queue_total"
+        // Same as CurrentPodcast: reachable, but no schema action exists. `queue.query_length` is the
+        // schema's queue-length query, a different tool -- mapping to it would change what the user
+        // asked rather than name it. Left absent pending the ruling.
+        is VoiceIntent.StatsQuery.QueueTotal -> null
 
         is VoiceIntent.StatsQuery.NewEpisodes -> "stats_query.new_episodes"
 
@@ -182,7 +190,7 @@ object PredictedIntentName {
     }
 
     /** The tool half of the name, used to group by feature where only the family is needed. */
-    fun toolOf(intent: VoiceIntent): String = of(intent).substringBefore('.')
+    fun toolOf(intent: VoiceIntent): String? = of(intent)?.substringBefore('.')
 
     /** Every name the schema defines, so a control can assert the mapping stays inside it. */
     fun allFamilyTools(): Set<String> = TOOL_OF_FAMILY.values.toSet()

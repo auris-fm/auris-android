@@ -259,7 +259,10 @@ class RecordingPublisher(
                 }
             }
         if (routed != null) {
-            return StageObservation.completed("predicted_intent" to routed.intentCategory)
+            // No schema name means no field: the spec says a name comes only from the schema, so
+            // an intent the schema does not define publishes routing as completed and names nothing.
+            val name = routed.intentCategory ?: return StageObservation.completed()
+            return StageObservation.completed("predicted_intent" to name)
         }
         val none = (sealed.stageHistory + listOfNotNull(sealed.outcome))
             .filterIsInstance<CollectionOutcome.RoutingNone>().lastOrNull()

@@ -83,10 +83,15 @@ sealed interface CollectionOutcome {
         val detectedLanguage: String?,
     ) : CollectionOutcome
 
-    /** Routing finished with an allowlisted category; unauthorized fields are excluded. */
+    /**
+     * Routing finished with an allowlisted category; unauthorized fields are excluded.
+     *
+     * A null [intentCategory] means the intent's schema name is not defined, so the record states
+     * that routing happened and names nothing -- never an invented action.
+     */
     data class Routed(
         override val captureId: UUID,
-        val intentCategory: String,
+        val intentCategory: String?,
         val authorizedArgumentFields: Map<String, String>,
     ) : CollectionOutcome
 

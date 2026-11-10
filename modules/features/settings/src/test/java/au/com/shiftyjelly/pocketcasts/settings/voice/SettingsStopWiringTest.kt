@@ -70,19 +70,29 @@ class SettingsStopWiringTest {
 
     @Test
     fun `the off tap records the durable stop before the request is launched`() {
+        // All three indexes are taken within `withdraw()`'s own body. Searched over the whole
+        // file, each literal also matches in other functions, so an ordering pair could compare a
+        // statement from one function against one from another -- the control passed regardless of
+        // where the real statements sat. Bounding the search makes a real reordering fail.
         val source = viewModelSource()
-        val recordIndex = source.indexOf("withdrawalIntent.recordWithdrawalRequested()")
+        val fnStart = source.indexOf("fun withdraw(")
+        assertTrue("the withdraw entry point must exist", fnStart >= 0)
+        // The body ends where the next top-level member starts: a fixed character window breaks
+        // silently when the function grows.
+        val fnEnd = source.indexOf("\n    fun ", fnStart).let { if (it == -1) source.length else it }
+        val fnBody = source.substring(fnStart, fnEnd)
+        val recordIndex = fnBody.indexOf("withdrawalIntent.recordWithdrawalRequested()")
         assertTrue(
             "the settings Off path must reach the durable stop store; production previously called " +
                 "only revokeAndPurge, so the collection gate read a flag nobody ever set",
             recordIndex >= 0,
         )
-        val launchIndex = source.indexOf("scope.launch")
+        val launchIndex = fnBody.indexOf("scope.launch")
         assertTrue("the tap must still launch its work", launchIndex >= 0)
         // The stop is recorded off the caller's thread, so it now sits INSIDE the launch. It must
         // still come before the withdraw request, or a scheduling window exists in which
         // collection could admit a capture after the user asked to stop.
-        val withdrawIndex = source.indexOf("enrollmentController.withdraw()")
+        val withdrawIndex = fnBody.indexOf("enrollmentController.withdraw()")
         assertTrue("the tap must still issue the withdraw request", withdrawIndex > launchIndex)
         assertTrue(
             "the stop must be recorded BEFORE the withdraw request, whichever thread it runs on",

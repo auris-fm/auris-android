@@ -127,11 +127,23 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 lifecycle.addObserver(observer)
                 onDispose { lifecycle.removeObserver(observer) }
             }
+            // Formats resolved in composition: the resolver is a pure function, so the strings it
+            // emits come from resources at the call site (same shape as wakeWordModelText).
+            val downloadProgressTemplate = stringResource(LR.string.voice_control_model_downloading)
+            val downloadFailedText = stringResource(LR.string.voice_control_model_download_failed)
+            val backendReadyTemplate = stringResource(LR.string.voice_control_backend_ready)
+            val backendMissingTemplate = stringResource(LR.string.voice_control_backend_model_missing)
+            val notForLanguageText = stringResource(LR.string.voice_control_model_not_for_language)
             val recognitionRows = remember(selectedBackend, modelState, readinessRevision) {
                 recognitionRowsFor(
                     selectedBackend = selectedBackend,
                     isModelReady = modelManager::isModelReady,
                     downloadState = modelState,
+                    downloadingTemplate = { percent -> downloadProgressTemplate.format(percent) },
+                    downloadFailed = downloadFailedText,
+                    readyTemplate = { name -> backendReadyTemplate.format(name) },
+                    missingTemplate = { name -> backendMissingTemplate.format(name) },
+                    notForLanguage = notForLanguageText,
                 )
             }
             // The wake word is a different component from the recognition backend: its model is
@@ -263,14 +275,14 @@ private fun VoiceControlSettingsPage(
     val copyResolver: (Int) -> String = { rowStrings[it].orEmpty() }
     Column(modifier = Modifier.padding(bottom = bottomInset)) {
         ThemedTopAppBar(
-            title = "Voice Control",
+            title = stringResource(LR.string.voice_control_title),
             onNavigationClick = { onBackPress() },
         )
         LazyColumn(contentPadding = PaddingValues(vertical = 16.dp)) {
             item {
                 SettingRow(
-                    primaryText = "Enable Voice Control",
-                    secondaryText = "Listen for voice commands during playback",
+                    primaryText = stringResource(LR.string.voice_control_enable_primary),
+                    secondaryText = stringResource(LR.string.voice_control_enable_secondary),
                     toggle = SettingRowToggle.Switch(checked = enabled),
                     modifier = Modifier.toggleable(
                         value = enabled,
@@ -281,7 +293,7 @@ private fun VoiceControlSettingsPage(
             }
             item {
                 SettingRow(
-                    primaryText = WAKE_WORD_MODEL_LABEL,
+                    primaryText = stringResource(WAKE_WORD_MODEL_LABEL),
                     secondaryText = wakeWordModelText(
                         detectorReady = wakeWordReady,
                         ready = stringResource(LR.string.voice_control_model_ready),
@@ -293,7 +305,7 @@ private fun VoiceControlSettingsPage(
             }
             item {
                 SettingRow(
-                    primaryText = RECOGNITION_MODEL_LABEL,
+                    primaryText = stringResource(RECOGNITION_MODEL_LABEL),
                     secondaryText = recognitionRowSecondaryText(recognitionRows),
                     toggle = SettingRowToggle.None,
                     indent = false,
@@ -380,8 +392,8 @@ private fun VoiceControlSettingsPagePreview(
 }
 
 /** Each row names the component it measures. */
-internal const val WAKE_WORD_MODEL_LABEL = "Wake Word Model"
-internal const val RECOGNITION_MODEL_LABEL = "Speech Recognition Model"
+internal val WAKE_WORD_MODEL_LABEL = LR.string.voice_control_wake_word_model_label
+internal val RECOGNITION_MODEL_LABEL = LR.string.voice_control_recognition_model_label
 
 /**
  * The transcription backends the product selects between, mirroring `AsrBackendSelector`.
@@ -417,6 +429,11 @@ internal fun recognitionRowsFor(
     selectedBackend: AsrBackend?,
     isModelReady: (ModelSpec) -> Boolean,
     downloadState: ModelDownloadState,
+    downloadingTemplate: (Int) -> String,
+    downloadFailed: String,
+    readyTemplate: (String) -> String,
+    missingTemplate: (String) -> String,
+    notForLanguage: String,
 ): RecognitionRows {
     val row = when {
         selectedBackend == null -> null
@@ -433,34 +450,44 @@ internal fun recognitionRowsFor(
         requiredModel = selectedBackend?.requiredModel,
         isModelReady = isModelReady,
         downloadState = downloadState,
+        downloadingTemplate = downloadingTemplate,
+        downloadFailed = downloadFailed,
+        readyTemplate = readyTemplate,
+        missingTemplate = missingTemplate,
+        notForLanguage = notForLanguage,
     )
 }
 
 /**
  * Resolves the recognition rows by querying the SELECTED backend's own required model through the
- * file-readiness provider.
- *
- * An earlier version of this function received an already-computed
- * `backendFilesPresent` Boolean and had no production caller, so its tests could not establish
- * which spec production actually queried. This one takes the spec the backend requires and the
- * readiness provider, so a test can assert the queried spec, and production calls it.
+ * file-readiness provider. The progress line's and the readiness line's texts are supplied by the
+ * caller, which resolves them from string resources; this function owns only the mapping, so a
+ * unit test asserts the mapping without a resource context.
  */
 internal fun resolveRecognitionRows(
     selectedBackend: RecognitionBackend?,
     requiredModel: ModelSpec?,
     isModelReady: (ModelSpec) -> Boolean,
     downloadState: ModelDownloadState,
+    downloadingTemplate: (Int) -> String,
+    downloadFailed: String,
+    readyTemplate: (String) -> String,
+    missingTemplate: (String) -> String,
+    notForLanguage: String,
 ): RecognitionRows {
     val backendFilesPresent = requiredModel?.let(isModelReady) ?: false
     val progressText = when (downloadState) {
-        is ModelDownloadState.Downloading -> "Downloading: ${downloadState.progressPercent}%"
-        is ModelDownloadState.Failed -> "Download failed"
+        is ModelDownloadState.Downloading -> downloadingTemplate(downloadState.progressPercent)
+        is ModelDownloadState.Failed -> downloadFailed
         else -> ""
     }
     return RecognitionRows(
         recognitionText = recognitionModelText(
             backend = selectedBackend,
             backendReady = backendFilesPresent,
+            readyTemplate = readyTemplate,
+            missingTemplate = missingTemplate,
+            notForLanguage = notForLanguage,
         ),
         recognitionProgressText = progressText,
     )
@@ -478,7 +505,10 @@ internal fun resolveRecognitionRows(
 internal fun recognitionModelText(
     backend: RecognitionBackend?,
     backendReady: Boolean,
+    readyTemplate: (String) -> String,
+    missingTemplate: (String) -> String,
+    notForLanguage: String,
 ): String {
-    if (backend == null) return "Not available for this language"
-    return if (backendReady) "${backend.displayName} ready" else "${backend.displayName} model missing"
+    if (backend == null) return notForLanguage
+    return if (backendReady) readyTemplate(backend.displayName) else missingTemplate(backend.displayName)
 }

@@ -24,6 +24,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import au.com.shiftyjelly.pocketcasts.localization.R as LR
 
 /**
  * Every row of the settings status table in `voice-control-core.md` > "Privacy and UX",
@@ -327,8 +328,8 @@ class VoiceControlModelRowsTest {
 
     @Test
     fun `the labels separate the wake word model from the recognition model`() {
-        assertEquals("Wake Word Model", WAKE_WORD_MODEL_LABEL)
-        assertEquals("Speech Recognition Model", RECOGNITION_MODEL_LABEL)
+        assertEquals(LR.string.voice_control_wake_word_model_label, WAKE_WORD_MODEL_LABEL)
+        assertEquals(LR.string.voice_control_recognition_model_label, RECOGNITION_MODEL_LABEL)
     }
 
     /**
@@ -344,6 +345,9 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = RecognitionBackend.SenseVoice,
                 backendReady = true,
+                readyTemplate = { name -> "$name ready" },
+                missingTemplate = { name -> "$name model missing" },
+                notForLanguage = "Not available for this language",
             ),
         )
         assertEquals(
@@ -351,6 +355,9 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = RecognitionBackend.SenseVoice,
                 backendReady = false,
+                readyTemplate = { name -> "$name ready" },
+                missingTemplate = { name -> "$name model missing" },
+                notForLanguage = "Not available for this language",
             ),
         )
         assertEquals(
@@ -358,6 +365,9 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = RecognitionBackend.CanaryFlash,
                 backendReady = true,
+                readyTemplate = { name -> "$name ready" },
+                missingTemplate = { name -> "$name model missing" },
+                notForLanguage = "Not available for this language",
             ),
         )
     }
@@ -369,6 +379,9 @@ class VoiceControlModelRowsTest {
             recognitionModelText(
                 backend = null,
                 backendReady = false,
+                readyTemplate = { name -> "$name ready" },
+                missingTemplate = { name -> "$name model missing" },
+                notForLanguage = "Not available for this language",
             ),
         )
     }
@@ -400,6 +413,11 @@ class VoiceControlModelRowsTest {
                 false
             },
             downloadState = ModelDownloadState.NotStarted,
+            downloadingTemplate = { percent -> "Downloading: $percent%" },
+            downloadFailed = "Download failed",
+            readyTemplate = { name -> "$name ready" },
+            missingTemplate = { name -> "$name model missing" },
+            notForLanguage = "Not available for this language",
         )
         assertEquals(listOf(backend.requiredModel), queried)
     }
@@ -410,6 +428,11 @@ class VoiceControlModelRowsTest {
             selectedBackend = FakeBackend(spec("sensevoice-model")),
             isModelReady = { true },
             downloadState = ModelDownloadState.NotStarted,
+            downloadingTemplate = { percent -> "Downloading: $percent%" },
+            downloadFailed = "Download failed",
+            readyTemplate = { name -> "$name ready" },
+            missingTemplate = { name -> "$name model missing" },
+            notForLanguage = "Not available for this language",
         )
         assertEquals("SenseVoice ready", rows.recognitionText)
     }
@@ -420,6 +443,11 @@ class VoiceControlModelRowsTest {
             selectedBackend = FakeBackend(spec("sensevoice-model")),
             isModelReady = { false },
             downloadState = ModelDownloadState.Ready,
+            downloadingTemplate = { percent -> "Downloading: $percent%" },
+            downloadFailed = "Download failed",
+            readyTemplate = { name -> "$name ready" },
+            missingTemplate = { name -> "$name model missing" },
+            notForLanguage = "Not available for this language",
         )
         assertEquals("SenseVoice model missing", rows.recognitionText)
     }
@@ -486,6 +514,11 @@ class VoiceControlModelRowsTest {
             selectedBackend = FakeBackend(spec("sensevoice-model")),
             isModelReady = { false },
             downloadState = ModelDownloadState.Downloading(37),
+            downloadingTemplate = { percent -> "Downloading: $percent%" },
+            downloadFailed = "Download failed",
+            readyTemplate = { name -> "$name ready" },
+            missingTemplate = { name -> "$name model missing" },
+            notForLanguage = "Not available for this language",
         )
         assertEquals("SenseVoice model missing", rows.recognitionText)
         assertEquals("Downloading: 37%", rows.recognitionProgressText)
@@ -497,6 +530,11 @@ class VoiceControlModelRowsTest {
             selectedBackend = null,
             isModelReady = { error("no spec should be queried when no backend is selected") },
             downloadState = ModelDownloadState.NotStarted,
+            downloadingTemplate = { percent -> "Downloading: $percent%" },
+            downloadFailed = "Download failed",
+            readyTemplate = { name -> "$name ready" },
+            missingTemplate = { name -> "$name model missing" },
+            notForLanguage = "Not available for this language",
         )
         assertEquals("Not available for this language", rows.recognitionText)
     }

@@ -1816,6 +1816,16 @@
     <string name="voice_control_model_status_label">Status</string>
     <string name="voice_control_model_ready">Ready</string>
     <string name="voice_control_model_unavailable">Unavailable</string>
+    <string name="voice_control_title">Voice Control</string>
+    <string name="voice_control_enable_primary">Enable Voice Control</string>
+    <string name="voice_control_enable_secondary">Listen for voice commands during playback</string>
+    <string name="voice_control_wake_word_model_label">Wake Word Model</string>
+    <string name="voice_control_recognition_model_label">Speech Recognition Model</string>
+    <string name="voice_control_model_downloading">Downloading: %1$d%%</string>
+    <string name="voice_control_model_download_failed">Download failed</string>
+    <string name="voice_control_model_not_for_language">Not available for this language</string>
+    <string name="voice_control_backend_ready">%1$s ready</string>
+    <string name="voice_control_backend_model_missing">%1$s model missing</string>
     <string name="settings_title_playback">General</string>
     <string name="settings_title_signin" translatable="false">@string/sign_in</string>
     <string name="settings_title_signout" translatable="false">@string/sign_out</string>

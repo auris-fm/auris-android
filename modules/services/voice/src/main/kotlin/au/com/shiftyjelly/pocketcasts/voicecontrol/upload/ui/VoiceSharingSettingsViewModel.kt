@@ -165,6 +165,10 @@ class VoiceSharingSettingsViewModel(
     // Declaration order matters: these initializers run render(), so the durable fields above
     // must already be initialized (reviewer-turned-self-inflicted NPE: Kotlin initializes in
     // declaration order, and a null field under a non-null type fails the intrinsic check).
+||||||| /tmp/mfb
+    // Must already be initialized (reviewer-turned-self-inflicted NPE: Kotlin initializes in
+    // Declaration order, and a null field under a non-null type fails the intrinsic check).
+    private var lastRenderedEnrolled: Boolean = isEnrolled()
     private val mutableState = MutableStateFlow(render())
     val state: StateFlow<VoiceSharingSettingsUiState> = mutableState.asStateFlow()
 
@@ -174,8 +178,15 @@ class VoiceSharingSettingsViewModel(
         // re-label a retained foreign-session projection as current (reviewer 578bb62a).
         scope.launch {
             projection.collect {
+                // Publish FIRST from the cached marker: the retire above must be visible in the
+                // published state immediately, or the screen keeps presenting the previous
+                // session's operation until an IO hop lands. The marker refresh below re-publishes
+                // only if the durable answer actually changed. This emits for every projection and
+                // controller change -- exactly the frequency at which a Binder lookup and a file
+                // read on Main were showing.
                 retireForeignSessionPresentation()
                 mutableState.value = render()
+                refreshEnrolled()
             }
         }
         // ONE bounded projection request per surface construction (production): the GET that makes
@@ -189,6 +200,7 @@ class VoiceSharingSettingsViewModel(
                 .collect {
                     retireForeignSessionPresentation()
                     mutableState.value = render()
+                    refreshEnrolled()
                 }
         }
     }
@@ -302,6 +314,9 @@ class VoiceSharingSettingsViewModel(
 
                 else -> {}
             }
+            // Sync render from the cached marker: the deletion does not touch the withdrawal
+            // marker, and a completion publish that hops to IO would land its state update
+            // outside the caller's scheduling horizon.
             mutableState.value = render()
         }
     }
@@ -365,11 +380,23 @@ class VoiceSharingSettingsViewModel(
     }
 
     /**
-     * The durable parts of a render, read off the caller's thread.
+     * Refreshes the cached marker on IO and re-renders only if the durable answer changed.
      *
-     * Only the marker read qualifies: everything else in the UI state is an in-memory field this
-     * class owns and must not be touched from an IO thread.
+     * Only the marker read qualifies for IO: everything else in the UI state is an in-memory field
+     * this class owns. The synchronous publish in the collectors carries the retire and pending
+     * presentation immediately; this pass exists so a marker changed by something outside this
+     * screen (or by this screen's own earlier write) shows up on the next event.
      */
+    private fun refreshEnrolled() {
+        scope.launch {
+            val enrolled = withContext(ioDispatcher) { readRenderInputs() }
+            if (enrolled != lastRenderedEnrolled) {
+                lastRenderedEnrolled = enrolled
+                mutableState.value = renderFrom(enrolled)
+            }
+        }
+    }
+
     private fun readRenderInputs(): Boolean = isEnrolled()
 
     /**
@@ -556,6 +583,16 @@ class VoiceSharingSettingsViewModel(
         mutableState.value = renderFrom(enrolled)
     }
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState = renderFrom(isEnrolled(), status)
+||||||| /tmp/mfb
+
+    private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState = renderFrom(isEnrolled(), status)
+
+    /**
+     * Composes the UI state from a marker read taken elsewhere.
+     *
+     * Split out so the marker can be read on IO while every field below stays a main-thread read.
+     */
+    private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState = renderFrom(lastRenderedEnrolled, status)
     private fun renderFrom(
         enrolled: Boolean,
         status: SettingsOperationStatus = presentationStatus,

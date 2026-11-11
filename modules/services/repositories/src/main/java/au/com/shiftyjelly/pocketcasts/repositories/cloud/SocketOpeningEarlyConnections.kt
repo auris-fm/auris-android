@@ -76,11 +76,17 @@ class SocketOpeningEarlyConnections(
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                // Binary before adoption is a protocol violation: the server sends nothing until
-                // the client's auth frame, which has not been sent. Surface it as a failure rather
-                // than dropping a frame the adopting turn would wait for forever.
-                connectionRef.get()?.markDead()
-                events.trySendBlocking(RawSocketEvent.Failed(code = 0, message = "binary frame before adoption"))
+                if (connectionRef.get() == null) {
+                    // Binary before adoption is a protocol violation: the server sends nothing
+                    // until the client's auth frame, which has not been sent. Surface it as a
+                    // failure rather than dropping a frame the adopting turn would wait for
+                    // forever. (Null ref: nothing to mark dead yet.)
+                    events.trySendBlocking(RawSocketEvent.Failed(code = 0, message = "binary frame before adoption"))
+                } else {
+                    // After adoption the binary frames are the server's audio; the adopting turn
+                    // decodes them with the same code a dialled connection would have used.
+                    events.trySendBlocking(RawSocketEvent.Binary(bytes.toByteArray()))
+                }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {

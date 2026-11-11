@@ -2,11 +2,14 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.LegacyQueueRemoval
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploaderLoop
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploaderWakes
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -22,7 +25,6 @@ import kotlinx.coroutines.launch
  *   watcher.start() → accounts listener, enrollment hook, policy flow, exact lease deadline
  *
  * NO ALLOWANCE COMPOSITION (core c74d7e30, spec §"Actual upload usage"). This class used to own the
- * no allowance composition (core c74d7e30, spec §"Actual upload usage"). This class used to own the
  * capture-allowance lifecycle, its retirement watcher and the provisioner entry point. Those are
  * removed: capture no longer reserves daily capacity before it starts, and the daily limit is
  * metered server-side at acceptance of actual audio bytes. Legacy `no_backup/voice_allowance/`
@@ -35,11 +37,17 @@ class CollectionStartup @Inject constructor(
     private val accountStartup: VoiceSharingAccountStartup,
     private val authority: CollectionAuthority,
     private val observer: SegmentObserver,
-    private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
+    private val outcomeFinalizer: CaptureOutcomeFinalizer,
     private val uploaderLoop: UploaderLoop,
     private val foregroundStateMonitor: ForegroundStateMonitor,
-    @androidx.annotation.OptIn(androidx.annotation.RequiresOptIn::class) @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: android.content.Context,
-    @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope private val appScope: CoroutineScope,
+    @ApplicationContext private val appContext: android.content.Context,
+    @ApplicationScope private val appScope: CoroutineScope,
+    /**
+     * THE NETWORK-BACK WAKE: a default network callback fires [UploaderWakes.wake] when the
+     * system reports the default network became available (or its capabilities changed to
+     * include internet). Best-effort: a device where registration fails falls back to the retry
+     * timer and the other wakes, never to a poller.
+     */
     /**
      * Removes the previous upload path's queue root.
      *
@@ -102,12 +110,6 @@ class CollectionStartup @Inject constructor(
     @Volatile
     var publishWake: (() -> Unit)? = null
 
-    /**
-     * THE NETWORK-BACK WAKE: a default network callback fires [UploaderWakes.wake] when the
-     * system reports the default network became available (or its capabilities changed to
-     * include internet). Best-effort: a device where registration fails falls back to the retry
-     * timer and the other wakes, never to a poller.
-     */
     private var uploaderStarted = false
 
     private fun registerNetworkWake(wakes: UploaderWakes) {

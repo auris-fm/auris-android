@@ -295,7 +295,10 @@ class EngineProcessingJoinControlTest {
                 engine.unfinishedProcessingJobs.none { it === secondJob },
             )
             assertTrue(
-                "the still-held job must NOT be pruned just because its sibling finished",
+                "the still-held job must NOT be pruned just because its sibling finished " +
+                    "(firstJob.isCompleted=\${firstJob.isCompleted} holdFirst=\${holdFirst.isComplete} " +
+                    "unfinished=\${engine.unfinishedProcessingJobs} owned=\${engine.ownedJobs} " +
+                    "cancelledJobs=\${engine.cancelledProcessingJobs} secondJob.isCompleted=\${secondJob.isCompleted})",
                 engine.unfinishedProcessingJobs.contains(firstJob),
             )
 

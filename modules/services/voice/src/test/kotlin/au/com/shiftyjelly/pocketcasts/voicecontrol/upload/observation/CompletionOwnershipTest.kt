@@ -115,9 +115,11 @@ class CompletionOwnershipTest {
             CollectionBudget(1L shl 20),
             lossEventObserver = { event, _ ->
                 synchronized(losses) { losses += event }
-                // The observer blocks (it is a file write) until it is explicitly released.
+                // The observer blocks (it is a file write) until the TEST releases it: there is no
+                // self-timeout, so a broken (lock-holding) order cannot resume on its own and let
+                // the second thread through while the control is no longer watching.
                 observerBlocked.countDown()
-                releaseObserver.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                releaseObserver.await()
             },
         )
         sink.started(SegmentObservation.Started(ctx(), ShortArray(8)))
@@ -135,13 +137,14 @@ class CompletionOwnershipTest {
         // still blocked (releaseObserver has not been touched), another thread must acquire the
         // sink lock. Under the broken order this latch never reaches zero - the broken code only
         // lets the other thread through after the observer's own 5s await expires.
-        assertTrue(
-            "another thread must acquire the sink lock WHILE the observer is still blocked",
-            lockAcquiredByOther.await(2, java.util.concurrent.TimeUnit.SECONDS),
-        )
         try {
-            releaseObserver.countDown()
+            assertTrue(
+                "another thread must acquire the sink lock WHILE the observer is still blocked",
+                lockAcquiredByOther.await(2, java.util.concurrent.TimeUnit.SECONDS),
+            )
         } finally {
+            // Always release and join: a failed assertion must still clean up its threads.
+            releaseObserver.countDown()
             purgeThread.join(5_000)
             otherThread.join(5_000)
         }

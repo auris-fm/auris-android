@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
+import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import dagger.Module
 import dagger.Provides
@@ -93,7 +94,14 @@ object VoiceObservationModule {
     fun provideRetentionSink(
         budget: CollectionBudget,
         publisher: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher,
-    ): ContributionRetentionSink = ContributionRetentionSink(budget).apply {
+    ): ContributionRetentionSink = ContributionRetentionSink(
+        budget,
+        lossEventObserver = { event, count ->
+            // Reason plus running count: bounded bookkeeping in the sink, the trail itself lives
+            // in the persisted log, not in singleton memory.
+            LogBuffer.i(RETENTION_LOG_TAG, "retention loss: $event (total $count)")
+        },
+    ).apply {
         onReadyForPublication = { sealed -> publisher.publish(sealed) }
     }
 
@@ -217,3 +225,4 @@ object VoiceObservationModule {
 
 /** 64 MiB aggregate ceiling for upload-owned PCM (queue bounds refine this in Task 5). */
 private const val DEFAULT_TOTAL_RETENTION_BYTES: Long = 64L * 1024 * 1024
+private const val RETENTION_LOG_TAG = "VoiceRetention"

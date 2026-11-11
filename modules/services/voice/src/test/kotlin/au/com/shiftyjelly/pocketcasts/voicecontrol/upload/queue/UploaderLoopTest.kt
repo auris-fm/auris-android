@@ -103,6 +103,40 @@ class UploaderLoopTest {
     }
 
     @Test
+    fun `a retried recording that then expires leaves no backoff bookkeeping behind`() = runTest {
+        // REVIEWER (full 57 review): the retry maps were only ever cleared through delete()
+        // paths. Expiry runs FIRST in the pass and never calls delete(), so a recording that was
+        // retried and then aged out kept its nextAttemptAt/attemptCount entries forever.
+        val q = queue()
+        publish(q, "a")
+        var t = 10_000L
+        val loop = UploaderLoop(q, { 503 }, {}, now = { t }, baseBackoffMs = 60_000)
+        loop.runOnce()
+        assertTrue("premise: the failure scheduled a retry", loop.retryBookkeepingCount() > 0)
+        // Age past the queue's expiry; the recording is now gone without any delete() call.
+        t += FolderQueue.MAX_AGE_MS + 1
+        loop.runOnce()
+        assertEquals("an expired recording must leave no retry-map entries", 0, loop.retryBookkeepingCount())
+    }
+
+    @Test
+    fun `a retried recording whose folder is purged externally leaves no backoff bookkeeping`() = runTest {
+        // The second leak: settings purge folders externally (sharing off, account change), so
+        // the recording vanishes without delete() or expiry — the maps must prune to the live
+        // snapshot each pass regardless of HOW it disappeared.
+        val q = queue()
+        publish(q, "a")
+        var t = 10_000L
+        val loop = UploaderLoop(q, { 503 }, {}, now = { t }, baseBackoffMs = 60_000)
+        loop.runOnce()
+        assertTrue("premise: the failure scheduled a retry", loop.retryBookkeepingCount() > 0)
+        // External purge: the folder disappears without the loop's knowledge.
+        q.recordings().forEach { it.folder.deleteRecursively() }
+        loop.runOnce()
+        assertEquals("a purged recording must leave no retry-map entries", 0, loop.retryBookkeepingCount())
+    }
+
+    @Test
     fun `a recording in backoff is skipped, not retried, on the next pass`() = runTest {
         val q = queue()
         publish(q, "a")

@@ -181,6 +181,10 @@ open class ContributionRetentionSink(
     /** Injectable monotonic clock (Batch B): the outcome-wait deadline is frozen at REAL
      *  completion time in THIS clock domain, so delayed registration cannot extend the wait. */
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    /** Observes each content-free loss decision (cause name only). Production wires a
+     * log line; tests capture events. The sink itself keeps NO history: a long-lived
+     * singleton appending every discard grew without bound. */
+    private val lossEventObserver: ((event: String, runningCount: Int) -> Unit)? = null,
 ) : SegmentSink,
     RevocationAware {
 
@@ -221,8 +225,6 @@ open class ContributionRetentionSink(
     private var openPrefix: OpenPrefix? = null
     private val candidates = ArrayDeque<RetainedCandidate>()
 
-    private val _lossEvents = mutableListOf<String>()
-
     private class OpenPrefix(val context: CaptureContext, val buffer: MutableList<ShortArray>) {
         /** Frozen at admission; travels with THIS capture only (reviewer be120bf2 #2). */
         var allowanceMetadataCap: Int? = null
@@ -236,8 +238,11 @@ open class ContributionRetentionSink(
         fun samples(): Long = buffer.sumOf { (validLengths[it] ?: it.size).toLong() }
     }
 
-    /** Content-free audit trail of loss decisions (cause names only, never audio/text). */
-    val lossEvents: List<String> get() = synchronized(lock) { _lossEvents.toList() }
+    /** Content-free loss-decision counts, by cause name (never audio/text). Bounded: one
+     * entry per DISTINCT cause, not per event — the audit trail itself is the injected
+     * observer's job. */
+    val lossReasonCounts: Map<String, Int> get() = synchronized(lock) { lossReasonCountsInternal.toMap() }
+    private val lossReasonCountsInternal = mutableMapOf<String, Int>()
 
     /**
      * Opens a bounded prefix ONLY when the first-chunk reservation succeeds; a refused budget
@@ -629,7 +634,7 @@ open class ContributionRetentionSink(
                 budget.release(c.bytesCharged)
                 c.pcm = null
             }
-            _lossEvents.add("purge-all:$reason")
+            logLoss("purge-all:$reason")
         }
         // BATCH B: every deadline is moot after a purge (outside the lock).
         onPurged?.invoke()
@@ -919,7 +924,13 @@ open class ContributionRetentionSink(
         budget.release(bytes)
     }
 
-    private fun logLoss(event: String) = synchronized(lock) { _lossEvents.add(event) }
+    private fun logLoss(event: String) = synchronized(lock) {
+        val count = lossReasonCountsInternal.merge(event, 1, Int::plus) ?: 1
+        // The observer fires OUTSIDE the lock in spirit: it is a plain callback the caller
+        // injected (a log write or a test capture); keeping it inside avoids reordering, and it
+        // never re-enters the sink.
+        lossEventObserver?.invoke(event, count)
+    }
 
     private fun flatten(frames: List<ShortArray>): ShortArray {
         val out = ShortArray(frames.sumOf { it.size })

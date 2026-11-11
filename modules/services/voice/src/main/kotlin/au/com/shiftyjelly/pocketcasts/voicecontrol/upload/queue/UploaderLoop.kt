@@ -67,6 +67,14 @@ class UploaderLoop(
         // expired recording cannot be sent even if it is first in line.
         queue.deleteExpired(t)
 
+        // Prune the retry bookkeeping to the LIVE folder snapshot. Expiry never calls delete(),
+        // and folders can vanish externally (settings purge, account change), so neither
+        // nextAttemptAt nor attemptCount has another path to be cleared: without this, every
+        // retried-then-expired or retried-then-purged recording leaks an entry forever.
+        val liveIds = queue.recordings().mapTo(mutableSetOf()) { it.captureId }
+        nextAttemptAt.keys.retainAll(liveIds)
+        attemptCount.keys.retainAll(liveIds)
+
         for (recording in queue.recordings()) {
             // The gate is asked BEFORE the backoff skip. Waiting does not make an ineligible
             // recording eligible, so deferring its deletion to its next retry time would keep data
@@ -140,6 +148,9 @@ class UploaderLoop(
     fun cancelInFlight() = cancelInFlightOnce()
 
     fun backoffRemainingMs(captureId: String): Long = ((nextAttemptAt[captureId] ?: 0L) - now()).coerceAtLeast(0L)
+
+    /** Test observation of the bookkeeping the maps hold right now (the leak this prunes). */
+    internal fun retryBookkeepingCount(): Int = nextAttemptAt.size + attemptCount.size
 
     private fun scheduleRetry(captureId: String, t: Long) {
         val attempts = (attemptCount[captureId] ?: 0) + 1

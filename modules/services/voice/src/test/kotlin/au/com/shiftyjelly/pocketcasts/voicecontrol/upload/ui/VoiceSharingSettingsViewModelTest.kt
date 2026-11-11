@@ -1072,7 +1072,10 @@ class VoiceSharingSettingsViewModelTest {
         parked[3].complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
-        parked[1].complete(Unit)
+        assertTrue(
+            "PREMISE: the pre-stop read is still parked, so completing it must resume it",
+            parked[0].complete(Unit),
+        )
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse(
             "a pre-stop read completing after the stop must not repaint enrolled",

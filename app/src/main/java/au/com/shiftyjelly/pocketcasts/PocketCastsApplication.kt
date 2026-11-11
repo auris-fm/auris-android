@@ -1,5 +1,4 @@
 package au.com.shiftyjelly.pocketcasts
-
 import android.app.Application
 import android.os.Environment
 import android.os.StrictMode
@@ -76,89 +75,49 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.rx2.asFlow
 import kotlinx.coroutines.withContext
 import timber.log.Timber
-
 @HiltAndroidApp
 class PocketCastsApplication :
     Application(),
     Configuration.Provider {
-
     @Inject lateinit var appLifecycleObserver: AppLifecycleObserver
-
     @Inject lateinit var moshi: Moshi
-
     @Inject lateinit var statsManager: StatsManager
-
     @Inject lateinit var podcastManager: PodcastManager
-
     @Inject lateinit var episodeManager: EpisodeManager
-
     @Inject lateinit var settings: Settings
-
     @Inject lateinit var fileStorage: FileStorage
-
     @Inject lateinit var playbackManager: PlaybackManager
-
     @Inject lateinit var downloadStatusObserver: DownloadStatusObserver
-
     @Inject lateinit var notificationHelper: NotificationHelper
-
     @Inject lateinit var workerFactory: HiltWorkerFactory
-
     @Inject lateinit var userEpisodeManager: UserEpisodeManager
-
     @Inject lateinit var appIcon: AppIcon
-
     @Inject lateinit var coilImageLoader: ImageLoader
-
     @Inject lateinit var userManager: UserManager
-
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
-
     @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
-
     @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
-
     @Inject lateinit var analyticsController: AnalyticsController
-
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
-
     @Inject @ApplicationScope
     lateinit var applicationScope: CoroutineScope
-
     @Inject lateinit var playerWidgetManager: PlayerWidgetManager
-
     @Inject lateinit var upNextDao: UpNextDao
-
     @Inject lateinit var sleepTimerRestartWhenShakingDevice: SleepTimerRestartWhenShakingDevice
-
     @Inject lateinit var initializeRemoteLogging: InitializeRemoteLogging
-
     @Inject lateinit var databaseExportHelper: DatabaseExportHelper
-
     @Inject lateinit var engageSdkBridge: EngageSdkBridge
-
     @Inject lateinit var experimentProvider: ExperimentProvider
-
     @Inject lateinit var endOfYearSync: EndOfYearSync
-
     @Inject lateinit var notificationManager: NotificationManager
-
     @Inject lateinit var shortcutsSynchronizer: DynamicShortcutsSynchronizer
-
     @Inject lateinit var playlistInteractionNotifier: PlaylistInteractionNotifier
-
     @Inject lateinit var appReviewManager: AppReviewManager
-
     @Inject lateinit var appReviewExceptionHandler: AppReviewExceptionHandler
-
     @Inject lateinit var voiceControlServiceController: VoiceControlServiceController
-
     @Inject lateinit var cloudPrefetchObserver: CloudPrefetchObserver
-
     @Inject lateinit var liveConditionMonitor: LiveConditionMonitor
-
     @Inject lateinit var voiceControlGate: VoiceControlGate
-
     override fun onCreate() {
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(
@@ -172,31 +131,24 @@ class PocketCastsApplication :
                     .detectLeakedSqlLiteObjects()
                     .detectLeakedClosableObjects()
                     .penaltyLog()
-                    // .penaltyDeath()
                     .build(),
             )
         }
-
         super.onCreate()
-
         PlaybackServiceToggle.ensureCorrectServiceEnabled(this)
-
         RxJavaUncaughtExceptionHandling.setUp()
         setupCrashLogging()
         setupLogging()
         setupAnalytics()
-
         setupApp()
         cleanupDatabaseExportFileIfExists()
     }
-
     private fun setupAnalytics() {
         analyticsController.clearAllData()
         analyticsController.refreshMetadata()
         downloadStatisticsReporter.setup()
         experimentProvider.initialize()
     }
-
     private fun setupCrashLogging() {
         val exceptionHandler = ChainedExceptionHandler(
             listOfNotNull(
@@ -206,67 +158,37 @@ class PocketCastsApplication :
             ),
         )
         Thread.setDefaultUncaughtExceptionHandler(exceptionHandler)
-
         initializeRemoteLogging()
-
-        // Setup the Firebase, the documentation says this isn't needed but in production we sometimes get the following error "FirebaseApp is not initialized in this process au.com.shiftyjelly.pocketcasts. Make sure to call FirebaseApp.initializeApp(Context) first."
         FirebaseApp.initializeApp(this)
     }
-
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
             .setWorkerFactory(workerFactory)
             .setExecutor(Executors.newFixedThreadPool(3))
             .setJobSchedulerJobIdRange(1000, 20000)
             .build()
-
     private fun setupCloudPrefetch() {
-        // Flag-gated inside the observer, so this is a no-op until the prefetch
-        // flag is on. Started here rather than from an androidx.startup
-        // initializer: the app's startup convention is Hilt-injected singletons
-        // on onCreate, and ours was the only Initializer in the codebase.
         cloudPrefetchObserver.start()
     }
-
     private fun setupVoiceControl() {
-        // The live conditions (a call in progress, power save, casting) gate voice control, and the
-        // gate gates the service that would otherwise keep them current. Registering them for the
-        // process lifetime breaks that circle: a condition that was blocked when a service lifetime
-        // ended still clears itself, so the gate can allow again.
         liveConditionMonitor.start()
         voiceControlServiceController.startMonitoring(voiceControlGate)
     }
-
     private fun setupApp() {
         LogBuffer.i("Application", "App started. ${settings.getVersion()} (${settings.getVersionCode()})")
-
         applicationScope.launch {
             try {
                 defaultPlaylistsInitializer.initialize()
                 voiceSharingAccountStartup.initializeOnAppStart()
-                // Loss subscriptions (accounts/enrollment), sink wiring and the one uploader loop.
-                // A pass with nothing queued or no signed-in account puts nothing on the network.
                 voiceCollectionStartup.initializeOnAppStart()
-                // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
-                // starting it puts nothing on the network until every eligibility gate opens.
-                voiceUploadTrigger.start()
-                // Platform deferred-transfer scheduling: ONE unique periodic drain, ANY network.
-                voiceUploadSchedulerBinding.start()
-                // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
-                // Starting it puts nothing on the network until every eligibility gate opens.
-                voiceUploadTrigger.start()
-                // Platform deferred-transfer scheduling: one unique periodic drain, any network.
-                voiceUploadSchedulerBinding.start()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 LogBuffer.e(LogBuffer.TAG_BACKGROUND_TASKS, e, "Failed to seed the default playlists")
             }
         }
-
         runBlocking {
             appIcon.enableSelectedAlias(appIcon.activeAppIcon)
-
             notificationHelper.setupNotificationChannels()
             notificationManager.setupOnboardingNotifications()
             notificationManager.setupReEngagementNotifications()
@@ -277,22 +199,15 @@ class PocketCastsApplication :
             PlaybackServiceToggle.ensureCorrectServiceEnabled(this@PocketCastsApplication)
             setupVoiceControl()
             setupCloudPrefetch()
-
             SingletonImageLoader.setSafe { coilImageLoader }
-
             withContext(Dispatchers.Default) {
                 playbackManager.setup()
-
                 val isRestoreFromBackup = settings.isRestoreFromBackup()
-                // as this may be a different device clear the storage location on a restore
                 if (isRestoreFromBackup) {
                     settings.setStorageChoice(null, null)
                 }
-
-                // migrate old storage locations
                 val storageChoice = settings.getStorageChoice()
                 if (storageChoice == null) {
-                    // the user doesn't have a storage choice, give them one
                     val storageOptions = StorageOptions()
                     val locationsAvailable = storageOptions.getFolderLocations(this@PocketCastsApplication)
                     if (locationsAvailable.size > 0) {
@@ -309,48 +224,33 @@ class PocketCastsApplication :
                     val location = findExternalStorageDirectory()
                     settings.setStorageCustomFolder(location.absolutePath)
                 }
-
-                // after the app is installed check it
                 if (isRestoreFromBackup) {
                     val podcasts = podcastManager.findSubscribedBlocking()
                     val restoredFromBackup = podcasts.isNotEmpty()
                     if (restoredFromBackup) {
-                        // check to see if the episode files already exist
                         episodeManager.updateAllEpisodeStatusBlocking(EpisodeDownloadStatus.DownloadNotRequested)
                         fileStorage.fixBrokenFiles(episodeManager)
-                        // reset stats
                         statsManager.reset()
-                        // Flag for login prompt in MainActivity
                         settings.setNeedsLoginPromptAfterRestore(true)
                     }
                     settings.setRestoreFromBackupEnded()
                 }
-
-                // create opml import folder
                 try {
                     fileStorage.getOrCreateOpmlDir()
                 } catch (e: Exception) {
                     Timber.e(e, "Unable to create opml folder.")
                 }
-
                 VersionMigrationsWorker.performMigrations(
                     context = this@PocketCastsApplication,
                     settings = settings,
                     moshi = moshi,
                 )
-
-                // check that we have .nomedia files in existing folders
                 fileStorage.checkNoMediaDirs()
-
-                // init the stats engine
                 statsManager.initStatsEngine()
-
                 sleepTimerRestartWhenShakingDevice.init() // Begin detecting when the device has been shaken to restart the sleep timer.
             }
         }
-
         applicationScope.launch(Dispatchers.IO) { fileStorage.fixBrokenFiles(episodeManager) }
-
         userEpisodeManager.monitorUploads(applicationContext)
         downloadStatusObserver.monitorDownloadStatus()
         userManager.beginMonitoringAccountManager(playbackManager)
@@ -359,19 +259,14 @@ class PocketCastsApplication :
         shortcutsSynchronizer.keepShortcutsInSync()
         playlistInteractionNotifier.monitorPlaylistsInteraction()
         applicationScope.launch { appReviewManager.monitorAppReviewReasons() }
-
         keepPlayerWidgetsUpdated()
-
         if (FeatureFlag.isEnabled(Feature.SYNC_EOY_DATA_ON_STARTUP)) {
             applicationScope.launch { endOfYearSync.sync() }
         }
-
         PlaybackStatsSyncWorker.scheduleOneTimeWork(this)
         PlaybackStatsSyncWorker.schedulePeriodicWork(this)
-
         Timber.i("Launched ${BuildConfig.APPLICATION_ID}")
     }
-
     private fun keepPlayerWidgetsUpdated() {
         settings.artworkConfiguration.flow
             .onEach { playerWidgetManager.updateUseEpisodeArtwork(it.useEpisodeArtwork) }
@@ -394,7 +289,6 @@ class PocketCastsApplication :
         val queueFlow = flow {
             while (true) {
                 emit(upNextDao.getUpNextBaseEpisodes(limit = PlayerWidgetManager.EPISODE_LIMIT))
-                // Emit every second to update playback durations
                 delay(1.seconds)
             }
         }
@@ -404,12 +298,10 @@ class PocketCastsApplication :
             .onEach(playerWidgetManager::updateQueue)
             .launchIn(applicationScope)
     }
-
     @Suppress("DEPRECATION")
     private fun findExternalStorageDirectory(): File {
         return Environment.getExternalStorageDirectory()
     }
-
     private fun cleanupDatabaseExportFileIfExists() {
         applicationScope.launch(Dispatchers.IO) {
             val email = File(applicationContext.filesDir, "email")
@@ -419,12 +311,10 @@ class PocketCastsApplication :
             }
         }
     }
-
     override fun onTerminate() {
         super.onTerminate()
         LogBuffer.i("Application", "Application terminating")
     }
-
     private fun setupLogging() {
         LogBuffer.setup(File(filesDir, "logs").absolutePath)
         if (BuildConfig.DEBUG) {

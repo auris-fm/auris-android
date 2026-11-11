@@ -102,7 +102,7 @@ class EarconPlayer(
     // because the cases ran THIS copy. A test seam must route through the mechanism, not restate it.
     internal fun <T> submitForTest(block: () -> T): T = onPlayerThread(block)
 
-    /** Test seam: install a real clip so submit()/play() take an actual accepted write. */
+    /** Test seam (4d1e5946): install a real clip so submit()/play() take an actual accepted write. */
     internal fun installClipForTest(id: EarconId, samples: ShortArray, sampleRateHz: Int) {
         val ctor = EarconClip::class.java.getDeclaredConstructor(
             EarconPlayer::class.java,
@@ -119,7 +119,7 @@ class EarconPlayer(
 
     // Replaces the worker with [service], so a test controls when it is shut down.
 
-    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran. */
+    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran (35f7e2d8). */
     internal fun acceptedFrontierForTest(): Int = synchronized(executorLock) { acceptedFramesTotal }
 
     internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {
@@ -467,7 +467,7 @@ class EarconPlayer(
             closeRecorderAdmission()
             // THE SNAPSHOT IS RETIRED BEFORE THE TRACK IS STOPPED, so an in-flight scoped read
             // revalidates against the retirement instead of vouching a head sampled from a track
-            // whose admission just ended (stop-during-sampling).
+            // whose admission just ended (719c64c8, stop-during-sampling).
             currentFrontier = null
             // DISCARDING A TRACK MEANS DISCARDING EVERYTHING IT OWNS, in one step. Nulling the reference
             // after `stop()` alone LEFT THE RESOURCE UNRELEASED -- nothing could release it afterwards,
@@ -566,12 +566,6 @@ class EarconPlayer(
      *   mutation and B's marker. Marker-last alone let A accept B's bounds as its own; with the
      *   snapshot there are no shared bounds to half-write -- A reads either its OWN immutable bounds
      *   (its verdict, correct) or B's whole snapshot (not its admission, bails).
-     * - the callback gap (63f99bed, control 2034cd5d4): A reads after B's whole publication -- B's
-     * snapshot is current, A bails.
-     * - the writer-internal window (52b786fe, control ddaf3aa7b): A reads between B's frontier
-     * mutation and B's marker. Marker-last alone let A accept B's bounds as its own; with the
-     * snapshot there are no shared bounds to half-write -- A reads either its OWN immutable bounds
-     * (its verdict, correct) or B's whole snapshot (not its admission, bails).
      *
      * The playback head is read AFTER the snapshot: the head is cumulative track state, not admission
      * state, and a head sampled slightly later only ever makes a verdict MORE progressed, never
@@ -594,7 +588,7 @@ class EarconPlayer(
         }.getOrNull() ?: return EarconCompletion.Unknown
         // THE SNAPSHOT MUST STILL BE LIVE AFTER SAMPLING. A stop or release that lands during the
         // read retires the frontier; the sampled head then describes audio whose admission no longer
-        // exists, and publishing it would attribute a stopped cue (stop-during-sampling).
+        // exists, and publishing it would attribute a stopped cue (719c64c8, stop-during-sampling).
         if (currentFrontier !== frontier) return EarconCompletion.Unknown
         return when {
             head >= frontier.target -> EarconCompletion.Consumed
@@ -663,7 +657,6 @@ class EarconPlayer(
 
     /**
      * Test seam (4d1e5946; 35f7e2d8 correction): substitutes only the AudioTrack CONSTRUCTION.
-     * Test seam (4d1e5946; correction): substitutes only the AudioTrack CONSTRUCTION.
      * The returned instance goes through the SAME lifecycle as a platform track -- rate reuse,
      * discard-and-recreate, `track = created`, play(), and the acceptedFramesTotal frontier reset --
      * so completion/release bookkeeping is exercised, not bypassed. Null in production.
@@ -679,7 +672,7 @@ class EarconPlayer(
             // the wrong rate, which would change its pitch and duration.
             // RETIRE THE ADMISSION'S SNAPSHOT BEFORE THE TRACK GOES. Replacement happens BEFORE any
             // write, so a REFUSED successor still leaves the track replaced; the stale snapshot must
-            // not survive it paired with a track its admission never wrote to.
+            // not survive it paired with a track its admission never wrote to (719c64c8).
             currentFrontier = null
             // INDEPENDENT RELEASE (reviewer 4356632394): a single runCatching around both calls
             // skips release() when stop() throws -- the pattern this file's own release()/stopAdmissionNow

@@ -1,7 +1,5 @@
 @file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
-
 import android.app.Service
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -32,7 +30,6 @@ import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class VoiceControlServiceFeedbackLifecycleTest {
@@ -49,14 +46,10 @@ class VoiceControlServiceFeedbackLifecycleTest {
             first.renderWithFailureHandling(VoiceIntent.Playback.Pause)
             advanceUntilIdle()
             assertEquals("first session", tts.lastSpokenText)
-
-            // The real service teardown, including stopVoiceControl(), not a lifecycle enum fixture.
             first.onDestroy()
-
             val next = service(renderer, "next session")
             next.renderWithFailureHandling(VoiceIntent.Playback.Pause)
             advanceUntilIdle()
-
             assertEquals("a new service reuses the same Hilt singletons", "next session", tts.lastSpokenText)
             verify(earcon, times(2)).play(EarconId.SUCCESS)
         } finally {
@@ -64,7 +57,6 @@ class VoiceControlServiceFeedbackLifecycleTest {
             Dispatchers.resetMain()
         }
     }
-
     private suspend fun service(renderer: AudioFeedbackRenderer, reply: String): VoiceControlService = spy(VoiceControlService()).apply {
         audioFeedbackRenderer = renderer
         playbackBufferRecorder = mock<PlaybackBufferRecorder>()
@@ -73,10 +65,7 @@ class VoiceControlServiceFeedbackLifecycleTest {
         gracePeriodSignal = GracePeriodSignal()
         notificationManager = mock<VoiceControlNotificationManager>()
         voiceControlServiceController = mock<VoiceControlServiceController>()
-        voicePlaybackIntentExecutor = mock<VoicePlaybackIntentExecutor>().also { executor ->
-            whenever(executor.execute(any(), any())).thenReturn(VoiceResponse.Combined(EarconId.SUCCESS, reply))
-        }
-        // OS transport is outside this boundary test; the actual service teardown runs unchanged.
+        voicePlaybackIntentExecutor = StubVoiceExecutor { _, _, _ -> VoiceResponse.Combined(EarconId.SUCCESS, reply) }
         doNothing().whenever(this).stopForeground(Service.STOP_FOREGROUND_REMOVE)
         doNothing().whenever(this).stopSelf()
     }

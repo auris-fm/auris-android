@@ -1,7 +1,5 @@
 @file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-
 package au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics
-
 import android.app.Notification
 import android.content.Context
 import android.media.AudioDeviceInfo
@@ -52,7 +50,6 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.AudioDeviceInfoBuilder
-
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class VoiceLifecycleWiringTest {
@@ -91,9 +88,6 @@ class VoiceLifecycleWiringTest {
                 val prepared = sink.prepareTurn(
                     request = "PRIVATE UTTERANCE", tier = VoiceIntent.CloudTier.Premium, context = PlaybackContext(),
                     isLiveGraceTurn = true, capturedOrigin = signal.currentGeneration, isWakeOriginated = true,
-                    // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
-                    // non-UUID as `request_id=invalid`, so a placeholder here would assert the
-                    // opposite of the contract.
                     hint = null, logicalRequestId = "b7ce1a5e-1c1b-4a4f-9d1e-3f2c8a6d5e70", isRetry = false, sourceLanguage = "zh",
                 )!!
                 val turn = async { sink.dispatchPrepared(prepared) }
@@ -108,7 +102,6 @@ class VoiceLifecycleWiringTest {
                 assertTrue(lines.any { it.contains("reason=TurnCancelled") && it.contains("owner=$owner ") })
                 assertTrue(lines.any { it.contains("reason=HoldCancelled") && it.contains("owner=$owner ") })
                 assertFalse(lines.any { it.contains("PRIVATE") || it.contains("example.invalid") })
-                // Cancellation thrown by a child/provider occurs while the outer job is still active.
                 lookupMode = 1
                 val childCancelled = async { sink.dispatchPrepared(prepared, isRetry = true) }
                 childCancelled.join()
@@ -131,7 +124,6 @@ class VoiceLifecycleWiringTest {
             Dispatchers.resetMain()
         }
     }
-
     @Test
     fun `real route callbacks retain their different sources`() = runTest {
         LifecycleLogCapture().use { log ->
@@ -158,7 +150,6 @@ class VoiceLifecycleWiringTest {
             }
         }
     }
-
     @Test
     fun `the foreground monitor records its actual background transition`() = runTest {
         LifecycleLogCapture().use { log ->
@@ -183,7 +174,6 @@ class VoiceLifecycleWiringTest {
             signal.finishCloudTurn(hold)
         }
     }
-
     @Test
     fun `the actual service observer exports context loss and capture stop`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -263,7 +253,6 @@ class VoiceLifecycleWiringTest {
                 whenever(monitor.route).thenAnswer {
                     if (reopenBeforeQueuedOff) {
                         reopenBeforeQueuedOff = false
-                        // Eligibility recovers after Off was emitted but before its observer handles it.
                         visibility.value = true
                         signal.onWakeWordDetected()
                     }
@@ -299,7 +288,13 @@ class VoiceLifecycleWiringTest {
                 service.voiceAsrEngine = dagger.Lazy { engine }
                 service.asrBackendSelector = selector
                 service.playbackBufferRecorder = mock()
-                service.modelManager = mock()
+                service.modelManager = mock {
+                    on { isModelReady(any()) }.thenReturn(true)
+                    on { isModelReadyVerified(any()) }.thenReturn(true)
+                    on { isLfmModelReady() }.thenReturn(true)
+                    on { ensureModel(any()) }.thenReturn(Result.success(Unit))
+                    on { ensureLfmModel() }.thenReturn(Result.success(Unit))
+                }
                 service.modelsReadyCondition = ready
                 service.voiceControlServiceController = mock()
                 service.audioFeedbackRenderer = mock()

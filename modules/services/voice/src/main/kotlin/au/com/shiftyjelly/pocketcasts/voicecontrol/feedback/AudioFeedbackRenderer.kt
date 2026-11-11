@@ -24,7 +24,6 @@ class AudioFeedbackRenderer(
     private val ttsEngine: TtsEngine,
     /**
      * The grace signal, for OUTPUT-HOLD release (spec ruling 7a6a62e3): a turn whose spoken
-     * The grace signal, for output-hold release (spec ruling 7a6a62e3): a turn whose spoken
      * feedback keeps its grace hold past sink completion releases it HERE, at the renderer's true
      * output terminal — the awaited TTS call in [speakWithHeartbeat] returns only after the
      * AudioTrack has played and drained, so the submit note denotes COMPLETED output, not
@@ -175,7 +174,7 @@ class AudioFeedbackRenderer(
     /**
      * Renders one response and returns whether it ACCEPTED OWNERSHIP of any transferred output hold.
      * True means the renderer will release the hold at its own terminal; false means the caller must
-     * release (the renderer cannot or will not play this response).: map insertion
+     * release (the renderer cannot or will not play this response). Reviewer 664f82d0: map insertion
      * alone is not acknowledgement.
      */
     fun render(response: VoiceResponse, language: String = "en", requestId: String? = null): Boolean {
@@ -379,7 +378,7 @@ class AudioFeedbackRenderer(
      */
     fun submitEarcon(id: EarconId) {
         if (disposed) return
-        // Coverage starts ONLY from the player task's own result: starting it here would
+        // Coverage starts ONLY from the player task's own result (bb6f3aa9): starting it here would
         // read the predecessor's emittedDurationMs/completion -- publishing its Consumed and stopping
         // before this cue is even written -- and a refused or missing clip would get an observer
         // despite no acceptance. Disposal between submission and admission is handled by the same
@@ -419,7 +418,7 @@ class AudioFeedbackRenderer(
             // covers with a heartbeat, and the reason this cannot rest on the submission note alone.
             //
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
-            // accepted them at so a shorter cue is not covered longer than it sounds and a longer one
+            // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
             coverEarconUntilConsumed(id, admitted)
         }
@@ -819,15 +818,13 @@ class AudioFeedbackRenderer(
         }
         // Surfaces TtsPlaybackIncompleteException (or any other failure) to the caller.
         utterance.join()
-        // false means the engine never synthesized (uninitialized, refused
+        // REVIEWER 4356625551: false means the engine never synthesized (uninitialized, refused
         // queue, onError) -- the caller must not count the reply as delivered.
         synthesized
     }
 
     /**
      * ONE TRUTHFUL SPEECH OUTCOME (reviewer 4356625551, follow-up 58d1f1b9): when the TTS engine
-     * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
-     * one truthful speech outcome51, follow-up 58d1f1b9): when the TTS engine
      * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
      * error earcon and the hold release as not-delivered, in BOTH the Spoken and Combined branches.
      * Shared here so the two branches cannot drift again.

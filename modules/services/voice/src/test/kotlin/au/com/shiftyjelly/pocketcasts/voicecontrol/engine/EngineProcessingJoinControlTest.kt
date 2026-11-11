@@ -1,5 +1,4 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
-
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -43,44 +42,17 @@ import org.junit.Test
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.`when`
 import org.mockito.stubbing.Answer
-
-/**
- * ENGINE PROCESSING JOIN CONTROL.
- *
- * Reviewer 267001c1 caught a false claim I made: I wrote that `VoiceAsrEngine.stop()` is
- * "synchronous for the engine's own resources". It is not. The engine runs its processing work on
- * its OWN `SupervisorJob + Dispatchers.IO` scope (`VoiceAsrEngine.scope`), so cancelling the service
- * scope's root cannot wait for it. A noncooperative ASR/native call, or that job's `finally`, can
- * outlive `stop()` and overlap `VoiceControlService`'s ASR backend release.
- *
- * `stop()` therefore keeps the cancelled job in [VoiceAsrEngine.stoppedProcessingJob] and the service
- * teardown joins it BEFORE releasing anything. This control exercises the REAL engine (constructed
- * with a real `VoiceAsrEngine` and a test scope) rather than modelling it:
- *
- * - [stop] hands back the processing job it cancelled, and
- * - a joiner of that job stays incomplete while its `finally` is held, and completes once released.
- *
- * BOUNDARY: no Android `Service` is constructed here, so this does not execute the service teardown
- * itself. It does execute the engine's real stop/join contract — the part the reviewer showed was
- * missing — rather than restating it.
- */
 class EngineProcessingJoinControlTest {
-    // VoiceAudioProcessor is a FINAL class, so it is mocked rather than implemented (the existing
-    // VoiceAsrEngineTest does the same). startProcessing() returns the flow the engine collects.
     private val processingFlow = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
     private val processor = mock(VoiceAudioProcessor::class.java).also {
         `when`(it.startProcessing()).thenReturn(processingFlow)
-        // The engine refuses to listen unless capture attaches and the backend is ready.
         `when`(it.attachCapture()).thenReturn(true)
     }
     private val backend = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend::class.java)
-
-    // ensureReady() is suspend, so it is stubbed under runBlocking rather than in a field initializer.
     private fun readyBackend() = runBlocking {
         `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
         backend
     }
-
     private fun engine(scope: CoroutineScope): VoiceAsrEngine {
         val context = mock(android.content.Context::class.java)
         val issued = IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1")
@@ -110,7 +82,6 @@ class EngineProcessingJoinControlTest {
             context = context,
         ).also { it.scope = scope }
     }
-
     @Test
     fun `stop exposes the processing job it cancelled so teardown can await it`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -124,20 +95,11 @@ class EngineProcessingJoinControlTest {
                 micExposureProvider = { MicExposure.NoMic },
                 onIntent = { _, _ -> },
             )
-            // Wait until the engine actually reached its processing launch (attachCapture was called).
             withTimeout(5_000) {
                 while (engine.unfinishedProcessingJobs.firstOrNull() == null && processingFlow.subscriptionCount.value == 0) {
                     kotlinx.coroutines.delay(10)
                 }
             }
-            // ROOT-CAUSED FLAKE. The old assertion read `unfinishedProcessingJobs` after stop, but
-            // that list's completion callback removes a job the moment it finishes -- so under load
-            // the assertion raced the removal and lost, failing a stop that had done exactly the
-            // right thing. The surface production teardown actually consumes is the OWNERSHIP set
-            // (`ownedJobs`), which is registered at job CREATION and outlives completion; the
-            // unfinished list is only the still-running subset. The deterministic claim is:
-            // after stop, the engine still owns the launched processing job, so teardown can
-            // classify and await it -- and that job's completion is observable.
             engine.stop()
             val owned = engine.ownedJobs
             assertTrue(
@@ -146,21 +108,13 @@ class EngineProcessingJoinControlTest {
                     "service scope",
                 owned.isNotEmpty(),
             )
-            // The exposure is awaitable: joining every owned job terminates.
             owned.forEach { it.join() }
         } finally {
             scope.cancel()
         }
     }
-
     @Test
     fun `a processing job that already FAILED is not relabelled as engine-cancelled`() = runBlocking {
-        // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
-        // failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
-        // expected shutdown and hide it from the quiescence verdict.
-        // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
-        // Failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
-        // Expected shutdown and hide it from the quiescence verdict.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val died = CompletableDeferred<Unit>()
         `when`(processor.startProcessing()).thenReturn(
@@ -178,12 +132,6 @@ class EngineProcessingJoinControlTest {
                 micExposureProvider = { MicExposure.NoMic },
                 onIntent = { _, _ -> },
             )
-            // BARRIER: the processing flow has failed, so the job has already FAILED by the time
-            // stop() runs. The engine tracks the job only when stop() references it, so the state
-            // to assert is what stop() records for an already-failed job.
-            // Barrier: the processing flow has failed, so the job has already failed by the time
-            // Stop() runs. The engine tracks the job only when stop() references it, so the state
-            // To assert is what stop() records for an already-failed job.
             withTimeout(5_000) { died.await() }
             val ownedBeforeStop = engine.ownedJobs.toSet()
             assertEquals("the failed job must be owned before stop", 1, ownedBeforeStop.size)
@@ -193,22 +141,6 @@ class EngineProcessingJoinControlTest {
                 ownedBeforeStop.single().isCompleted,
             )
             engine.stop()
-            // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
-            // outstanding work. What matters is what stop() recorded for it: a failure must not be
-            // relabelled as expected shutdown.
-            // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
-            // Outstanding work. What matters is what stop() recorded for it: a failure must not be
-            // Relabelled as expected shutdown.
-            val owned = engine.ownedJobs
-            val outstanding = engine.unfinishedProcessingJobs.filter { it in owned && !it.isCompleted }
-            // The job had ALREADY finished, so stop() must not track it as work still running.
-            // The unfinished list cannot carry that claim: its completion callback removes the job
-            // an instant after it finishes, so reading it here races the removal and can observe a
-            // job that is done but not yet pruned (Cancelling under load). The deterministic claim
-            // is about OWNERSHIP — stop() adds only an unfinished job to the unfinished set, and
-            // ownership is registered at creation and survives completion.
-            val owned = engine.ownedJobs
-            val outstanding = engine.unfinishedProcessingJobs.filter { it in owned && !it.isCompleted }
             assertTrue(
                 "a finished job is not outstanding work, got ${engine.unfinishedProcessingJobs}",
                 engine.unfinishedProcessingJobs.none { it === ownedBeforeStop.single() },
@@ -221,23 +153,14 @@ class EngineProcessingJoinControlTest {
             scope.cancel()
         }
     }
-
     @Test
     fun `both jobs stay retained while each is held, then prune independently`() = runBlocking {
-        // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
-        // it flaky. So BOTH completions are held: capture distinct identities, assert exact
-        // retention while both are held, then release each one and assert it prunes on its own.
-        // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
-        // It flaky. So BOTH completions are held: capture distinct identities, assert exact
-        // Retention while both are held, then release each one and assert it prunes on its own.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val holdFirst = CompletableDeferred<Unit>()
         val holdSecond = CompletableDeferred<Unit>()
         val firstEntered = CompletableDeferred<Unit>()
         val secondEntered = CompletableDeferred<Unit>()
         var starts = 0
-        // A FRESH flow per start: sharing one MutableSharedFlow meant the second collection never
-        // reached its own onCompletion, and the test hung instead of proving anything.
         val flowStarted = CompletableDeferred<Unit>()
         `when`(processor.startProcessing()).thenAnswer {
             val n = ++starts
@@ -269,31 +192,21 @@ class EngineProcessingJoinControlTest {
             engine.stop()
             withTimeout(5_000) { firstEntered.await() } // BARRIER: job #1 is in its finalization
             val firstJob = checkNotNull(engine.unfinishedProcessingJobs.singleOrNull()) { "job #1 must be retained" }
-
             startOnce()
             withTimeout(5_000) { secondEntered.await() }
             engine.stop()
             withTimeout(5_000) { secondEntered.await() } // BARRIER: job #2 is in its finalization
-
-            // BOTH held, so neither can be pruned by completion: the exact set is stable.
             val jobs = engine.unfinishedProcessingJobs
             assertEquals("both held jobs must be retained", 2, jobs.size)
             assertTrue("the older held job must be retained", jobs.contains(firstJob))
             val secondJob = jobs.first { it !== firstJob }
             assertNotSame("the two retained jobs must be distinct", firstJob, secondJob)
-
-            // Release ONE and assert only that one prunes; the other stays.
             holdSecond.complete(Unit)
             withTimeout(5_000) { secondJob.join() }
             assertTrue(
                 "the released job must actually have completed",
                 secondJob.isCompleted,
             )
-            // join() proves the job FINISHED, but the engine's completion callback removes it from
-            // The unfinished list asynchronously - observing completion does not establish that the
-            // bookkeeping removal has run yet (root cause of this test's one observed flake: the
-            // finished job was still listed when the assertion read the list). Wait for the removal
-            // itself, then judge retention on a list that is settled for the pair under test.
             withTimeout(5_000) {
                 while (engine.unfinishedProcessingJobs.any { it === secondJob }) {
                     kotlinx.coroutines.delay(10)
@@ -313,7 +226,6 @@ class EngineProcessingJoinControlTest {
                     "cancelledJobs=${engine.cancelledProcessingJobs})",
                 engine.unfinishedProcessingJobs.contains(firstJob),
             )
-
             holdFirst.complete(Unit)
             withTimeout(5_000) { firstJob.join() }
         } finally {
@@ -322,17 +234,8 @@ class EngineProcessingJoinControlTest {
             scope.cancel()
         }
     }
-
     @Test
     fun `a join of the engine processing jobs waits for the real processing flow to finish`() = runBlocking {
-        // Reviewer 26883305: the previous version held a SIBLING job in the test scope and joined it
-        // in the test, so it proved nothing about production. This version holds the REAL processing
-        // flow — the one the engine's own launch collects — so the join under test is over the
-        // production job, and the barrier is that job's actual finalization.
-        // Reviewer 26883305: the previous version held a SIBLING job in the test scope and joined it
-        // In the test, so it proved nothing about production. This version holds the REAL processing
-        // Flow — the one the engine's own launch collects — so the join under test is over the
-        // Production job, and the barrier is that job's actual finalization.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val heldFlow = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
         val flowStarted = CompletableDeferred<Unit>()
@@ -340,8 +243,6 @@ class EngineProcessingJoinControlTest {
         `when`(processor.startProcessing()).thenReturn(
             heldFlow.onEach { flowStarted.complete(Unit) }
                 .onCompletion {
-                    // The engine's processing job reaches here only when the flow ends. Hold it, the
-                    // way a noncooperative native call would, and make it observable.
                     withContext(NonCancellable) { releaseFlow.await() }
                 },
         )
@@ -359,8 +260,6 @@ class EngineProcessingJoinControlTest {
             engine.stop()
             val jobs = engine.unfinishedProcessingJobs
             assertTrue("stop must expose the processing job(s) it cancelled", jobs.isNotEmpty())
-
-            // THE SUBJECT: the same joins the service teardown performs before releasing.
             val joinerStarted = CompletableDeferred<Unit>()
             val joiner = CoroutineScope(Dispatchers.IO).launch {
                 withContext(NonCancellable) {

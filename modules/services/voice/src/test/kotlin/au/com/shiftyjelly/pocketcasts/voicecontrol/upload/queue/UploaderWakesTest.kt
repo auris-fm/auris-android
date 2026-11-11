@@ -108,4 +108,39 @@ class UploaderWakesTest {
         assertEquals("an event wake must not wait out the retry timer", 2, passes)
         workerScope.cancel()
     }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an overdue retry runs promptly instead of waiting for another event`() {
+        // REVIEWER: UploaderLoop schedules the retry from the PASS-START time, so a slow failed
+        // send can exhaust the backoff before the pass returns - by the worker wakes, the
+        // deadline is already in the past. `takeIf { it > 0 }` read that as "no deadline" and
+        // the worker waited INDEFINITELY for another event. A due deadline must run promptly.
+        var passes = 0
+        var now = 0L
+        var retryScheduled = false
+        val wakes = UploaderWakes(
+            earliestRetryAtMs = { if (retryScheduled) 60_000L else null },
+            nowMs = { now },
+            pass = {
+                passes += 1
+                if (passes == 1) {
+                    // The failed send takes 70 seconds: the retry deadline (60s from pass
+                    // start) is already exhausted when the pass returns.
+                    now += 70_000L
+                    retryScheduled = true
+                }
+                if (passes > 1) retryScheduled = false
+            },
+        )
+        kotlinx.coroutines.test.runTest {
+            val workerScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+            wakes.startPass(workerScope)
+            // The deadline is already overdue the moment the worker wakes. No event wake
+            // arrives: the DUE RETRY itself must produce the second pass.
+            advanceUntilIdle()
+            assertEquals("an overdue retry must run promptly, not wait for an event", 2, passes)
+            workerScope.cancel()
+        }
+    }
 }

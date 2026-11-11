@@ -100,4 +100,45 @@ class CompletionOwnershipTest {
         assertTrue(sink.commitDelta(context, ShortArray(8), 8, token))
         assertEquals(32L, sink.totalChargedBytesForTest())
     }
+
+    @Test
+    fun `the purge observer runs OUTSIDE the sink lock - another thread can take the lock while it fires`() {
+        // REVIEWER trace: purgeAllForRevocation invoked logLoss inside its OUTER synchronized
+        // block; logLoss's own inner synchronized is reentrant there, so releasing it did not
+        // release the outer lock - the observer (a production LogBuffer file write) ran with the
+        // sink lock held, stalling every budget/retention caller for the write's duration.
+        val sinkLockAcquiredByOther = java.util.concurrent.CountDownLatch(1)
+        val releaseObserver = java.util.concurrent.CountDownLatch(1)
+        var otherThreadGotThrough = false
+        val losses = mutableListOf<String>()
+        val sink = ContributionRetentionSink(
+            CollectionBudget(1L shl 20),
+            lossEventObserver = { event, _ ->
+                synchronized(losses) { losses += event }
+                // The observer blocks: it is a file write. While it blocks, ANOTHER thread must
+                // be able to acquire the sink lock.
+                sinkLockAcquiredByOther.countDown()
+                releaseObserver.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            },
+        )
+        sink.started(SegmentObservation.Started(ctx(), ShortArray(8)))
+
+        val purgeThread = Thread { sink.purgeAllForRevocation("account-change") }
+        purgeThread.start()
+        assertTrue("observer must fire", sinkLockAcquiredByOther.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        val otherThread = Thread {
+            // Acquires the sink lock; with the bug this blocks until the (blocked) observer
+            // times out and the purge thread dies holding nothing.
+            sink.retainedSnapshot()
+            otherThreadGotThrough = true
+            releaseObserver.countDown()
+        }
+        otherThread.start()
+        purgeThread.join(5_000)
+
+        assertTrue("the purge must finish while the observer still could have been running", !purgeThread.isAlive)
+        assertTrue("another thread must acquire the sink lock while the observer runs", otherThreadGotThrough)
+        synchronized(losses) { assertTrue(losses.any { it == "purge-all:account-change" }) }
+    }
 }

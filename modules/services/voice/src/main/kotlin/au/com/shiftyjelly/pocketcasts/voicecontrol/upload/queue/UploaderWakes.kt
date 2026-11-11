@@ -9,7 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * The uploader's wake source (spec ruling, reviewer simplification S4): the queue is drained by
+ * The uploader's wake source: the queue is drained by
  * EVENTS, not by polling. One worker runs a pass, then sleeps until either
  *
  * - an event wake arrives — [wake], called from the producers the spec names (a recording was
@@ -41,13 +41,18 @@ class UploaderWakes(
         while (isActive) {
             runCatching { pass() }
             val dueAtMs = earliestRetryAtMs()
-            val delayMs = dueAtMs?.let { it - nowMs() }?.takeIf { it > 0 }
-            if (delayMs == null) {
-                wakes.receive()
-            } else {
-                // Exactly one timer, at the earliest retry time; a wake during the window
-                // short-circuits it.
-                withTimeoutOrNull(delayMs) { wakes.receive() }
+            // THREE cases, not two (reviewer trace): null means no deadline (sleep on events);
+            // a delay > 0 arms exactly one timer at the earliest retry time; and a delay <= 0
+            // means the deadline is ALREADY exhausted — UploaderLoop schedules from pass start,
+            // so a slow failed send can burn the whole backoff before the pass returns — and a
+            // due retry must run promptly, not wait for another event to happen along.
+            if (dueAtMs != null && dueAtMs - nowMs() <= 0) {
+                // Due retry: another pass, immediately.
+                continue
+            }
+            when {
+                dueAtMs == null -> wakes.receive()
+                else -> withTimeoutOrNull(dueAtMs - nowMs()) { wakes.receive() }
             }
         }
     }

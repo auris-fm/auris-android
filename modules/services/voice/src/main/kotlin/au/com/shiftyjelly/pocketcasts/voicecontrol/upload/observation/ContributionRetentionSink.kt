@@ -634,8 +634,14 @@ open class ContributionRetentionSink(
                 budget.release(c.bytesCharged)
                 c.pcm = null
             }
-            logLoss("purge-all:$reason")
+            // Count INSIDE the purge lock; the observer is invoked AFTER the outer block below —
+            // it is a production log write, and the sink lock must not be held while it runs.
+            lossReasonCountsInternal.merge("purge-all:$reason", 1, Int::plus)
         }
+        // Outside the outer lock: the observer is a log write, and revocation must not hold the
+        // sink lock while a file write runs (a nested release inside an outer synchronized does
+        // not release the outer lock, so this must not route through logLoss).
+        lossEventObserver?.invoke("purge-all:$reason", synchronized(lock) { lossReasonCountsInternal["purge-all:$reason"] ?: 1 })
         // BATCH B: every deadline is moot after a purge (outside the lock).
         onPurged?.invoke()
     }
@@ -925,7 +931,7 @@ open class ContributionRetentionSink(
     }
 
     private fun logLoss(event: String) {
-        // Count under the lock; OBSERVE outside it (bot finding): the observer is a production
+        // Count under the lock; OBSERVE outside it: the observer is a production
         // log write (LogBuffer file I/O), and blocking the sink lock on file I/O stalls every
         // budget/retention caller for the duration of a disk write.
         val count = synchronized(lock) {

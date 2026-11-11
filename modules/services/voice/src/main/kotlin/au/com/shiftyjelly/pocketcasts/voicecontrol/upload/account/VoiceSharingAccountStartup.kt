@@ -68,7 +68,7 @@ class VoiceSharingAccountStartup @Inject constructor(
     var accountReadableListener: ((String, Long) -> Unit)? = null
 
     /**
-     * The PRESENTATION-side session source (reviewer simplification S1): the owner's own
+     * The PRESENTATION-side session source: the owner's own
      * session-generation atomic, read directly. There is deliberately no committed-session
      * cache — the atomic read is as cheap as a volatile read and cannot go stale, so no
      * commit-hook or authority-move refresh path is needed to keep presentation fencing

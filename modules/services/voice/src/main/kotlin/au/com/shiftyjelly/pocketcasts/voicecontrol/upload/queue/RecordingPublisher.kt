@@ -89,7 +89,7 @@ class RecordingPublisher(
                 metadataBytes = metadata,
             ) != null
         }.getOrDefault(false)
-        // THE PUBLISH WAKE (spec ruling, reviewer simplification S4): new work exists, so the
+        // THE PUBLISH WAKE: new work exists, so the
         // uploader drains now instead of waiting for the next poll — there is no next poll.
         if (queued) onPublished()
         return queued

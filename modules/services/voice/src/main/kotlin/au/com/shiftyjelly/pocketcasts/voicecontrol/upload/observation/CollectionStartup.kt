@@ -67,7 +67,7 @@ class CollectionStartup @Inject constructor(
     }
 
     /**
-     * The uploader's wake wiring (spec ruling, reviewer simplification S4: event wakes, no
+     * The uploader's wake wiring (event wakes, no
      * poller). One worker drains the queue, woken by:
      * - a recording published ([RecordingPublisher]`s publish wake),
      * - an authority move on the account binding (sign-in restored — and sign-out, where the

@@ -73,6 +73,9 @@ public:
      */
     void setEarlyWakeCutoff(int32_t samples);
 
+    /** Host-test observation of the configured cutoff (JniBridgeOwnershipTest scenario D). */
+    int32_t earlyWakeCutoff() const { return mEarlyWakeCutoff.load(std::memory_order_relaxed); }
+
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
 

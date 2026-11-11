@@ -20,6 +20,9 @@ static OboeAudioCapture* gCapture = nullptr;
 static RetireableProcessorHandle<NativeVadProcessor> gVadProcessor;
 static std::mutex gCaptureMutex;
 
+// Early-wake cutoff remembered across processor lifetimes (see nativeSetEarlyWakeCutoff).
+static std::atomic<int32_t> gEarlyWakeCutoff {0};
+
 // NARROW TEST SEAM (host ownership test only; see src/test/cpp/JniBridgeOwnershipTest.cpp).
 // Counts every PUBLICATION of a VAD processor through gVadProcessor. The host test needs to
 // observe attachment DIRECTLY -- an idle attached VAD emits no events and holds no speech PCM, so
@@ -157,6 +160,8 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
     // processor deleted out from under it.
     gVadProcessor.retire();
     auto* processor = new NativeVadProcessor(gCapture);
+    // Apply the remembered cutoff BEFORE start: the VAD thread reads it from its first chunk on.
+    processor->setEarlyWakeCutoff(gEarlyWakeCutoff.load());
     if (!processor->start()) {
         delete processor;
         // Capture is still valid — caller will stop/close it
@@ -339,12 +344,25 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     return result;
 }
 
+// Narrow test seam (see JniBridgeOwnershipTest.cpp scenario D): the currently published VAD
+// processor, or null. Observation only; gates nothing.
+NativeVadProcessor* publishedVadProcessorForTest() {
+    auto* processor = gVadProcessor.acquire();
+    gVadProcessor.release();
+    return processor;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetEarlyWakeCutoff(
     JNIEnv* /*env*/,
     jclass /*clazz*/,
     jint samples)
 {
+    // Remember the cutoff across processor LIFETIMES, not just apply it to a live one: the Kotlin
+    // attach path configures it BEFORE nativeStartCaptureAndVad creates the processor, so a
+    // live-only write is a silent no-op and event 4 never fires. start applies the remembered
+    // value to each processor it creates.
+    gEarlyWakeCutoff.store(static_cast<int32_t>(samples));
     auto* processor = gVadProcessor.acquire();
     if (processor != nullptr) {
         processor->setEarlyWakeCutoff(static_cast<int32_t>(samples));

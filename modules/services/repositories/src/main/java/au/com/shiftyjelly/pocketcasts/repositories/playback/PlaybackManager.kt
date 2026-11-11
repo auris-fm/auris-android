@@ -1552,14 +1552,10 @@ open class PlaybackManager @Inject constructor(
             // been pointed at a different episode in the meantime.
             target to playerEpisodeIncarnation
         }
-        // RE-CHECKED ON BOTH SIDES OF THE SUSPENDING CALL, and the AFTER check is the one that matters.
-        //
-        // `seekToTimeMs` SUSPENDS, so a reconfiguration can land while it is in flight -- which is exactly
-        // @reviewer's measured case: the seek is issued against the replaced player and only then does the
-        // episode change. A check BEFORE the call cannot see that, because at that moment nothing has
-        // happened yet. Holding the monitor across the suspension is impossible, so the exclusion comes
-        // from DETECTING the change: if the player was pointed at another episode while the seek was in
-        // flight, the seek has already acted on the wrong audio and this must NOT report success.
+        // RE-CHECKED IMMEDIATELY BEFORE THE SUSPENDING CALL. These checks close the window between the
+        // boundary's release and the call; a reconfiguration that lands after them happens while the call
+        // is in flight, which they cannot see. That remaining case is handled by the player's own bound
+        // seek below, which re-checks at its mutation point rather than here afterwards.
         if (playerEpisodeIncarnation != seekTarget.second) return false
         if (seekTarget.first.episodeUuid != episodeUuid) return false
 
@@ -1592,10 +1588,9 @@ open class PlaybackManager @Inject constructor(
      * instead of performed.
      */
     private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean {
-        // AN UNSUPPORTED PLAYER IS REFUSED, NOT DOWNGRADED. The default implementation checks and then
-        // delegates, which carries the very gap this contract exists to close; falling back to it would
-        // perform an unrestricted seek under a bound request. A player that cannot enforce the binding
-        // makes the bound call UNAVAILABLE.
+        // AN UNSUPPORTED PLAYER IS REFUSED, NOT DOWNGRADED. Falling back to an unrestricted `seekToTimeMs`
+        // would perform the very unbound mutation this contract exists to prevent. A player that cannot
+        // enforce the binding makes the bound call UNAVAILABLE.
         if (!player.enforcesEpisodeBoundSeek) {
             Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
             return false

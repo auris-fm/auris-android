@@ -12,7 +12,7 @@ class FingerprintTapAudioProcessor(
     private val tap: FingerprintPcmTap,
     /** STATIC eligibility (feature/platform/decode policy); cannot change mid-stream. */
     private val isEnabled: () -> Boolean,
-    /** DYNAMIC eligibility (active capture session); checked per buffer and at configure time. */
+    /** DYNAMIC eligibility (active capture session); checked per buffer in [queueInput]. */
     private val episodeReferenceEligibility: EpisodeReferenceEligibility? = null,
 ) : BaseAudioProcessor() {
 

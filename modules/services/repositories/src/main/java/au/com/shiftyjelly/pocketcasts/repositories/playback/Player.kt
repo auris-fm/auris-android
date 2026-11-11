@@ -115,10 +115,10 @@ interface Player {
     /**
      * Whether this player can enforce [seekToTimeMsIfEpisode]'s binding itself.
      *
-     * THE DEFAULT ABOVE IS A FALLBACK, NOT AN ENFORCEMENT. It checks and then delegates, so it carries the
-     * same check-then-act gap the contract exists to close -- it is correct only for an implementation
-     * whose `episodeUuid` cannot change while a seek is in flight. A player that can be RE-POINTED must
-     * report true here and override the operation, which is why [LocalPlayer] and [CastPlayer] both do.
+     * THE DEFAULT ABOVE IS A REFUSAL, NOT AN ENFORCEMENT. It cannot check the binding, so it refuses
+     * instead of carrying the same check-then-act gap a caller-side check would have. A player that can be
+     * RE-POINTED must report true here and override the operation, which is why [LocalPlayer] and
+     * [CastPlayer] both do.
      *
      * A BOUND CALLER CAN REFUSE AN UNSUPPORTED PLAYER rather than fall back to an unrestricted seek:
      * `false` here means "do not rely on the default for a binding".

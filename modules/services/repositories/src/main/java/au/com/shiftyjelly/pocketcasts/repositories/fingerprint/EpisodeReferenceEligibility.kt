@@ -8,8 +8,8 @@ import javax.inject.Singleton
  * Whether the episode reference (the [FingerprintPcmTap]) must be live INDEPENDENTLY of the
  * transcripts feature: while a voice-capture session is active, the echo reference is required
  * for bleed rejection whatever the transcript toggle says (4235652501). The voice layer sets
- * [setCaptureActive] at the capture lifecycle boundaries; playback reads [isCaptureActive] when
- * the audio processor (re)configures.
+ * [setCaptureActive] at the capture lifecycle boundaries; playback reads [isCaptureActive] for
+ * every buffer the audio processor forwards.
  */
 @Singleton
 class EpisodeReferenceEligibility @Inject constructor() {

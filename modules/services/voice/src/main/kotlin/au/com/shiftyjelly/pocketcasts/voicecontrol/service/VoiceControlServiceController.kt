@@ -15,7 +15,6 @@ import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -132,10 +131,5 @@ class VoiceControlServiceController @Inject constructor(
                 start()
             }
         }.launchIn(scope)
-    }
-
-    fun stopMonitoring() {
-        isMonitoring = false
-        scope.cancel()
     }
 }

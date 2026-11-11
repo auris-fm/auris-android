@@ -47,7 +47,8 @@ import kotlinx.coroutines.flow.onEach
  *
  *  - episode playback, via the existing [FingerprintPcmTap] sink-submission tap (see [start]);
  *  - cloud answer audio, written at its `AudioTrack` submission point (`CloudAudioPlayer`);
- *  - local feedback (earcon/TTS), pending a later increment because neither exposes PCM today.
+ *  - local feedback (earcon/TTS), written from each renderer's accepted-submission path
+ *    (`EarconPlayer`, `AndroidPlatformTtsEngine`).
  *
  * Timestamps stay aligned because every source feeds the same single writer; the correlation only
  * needs a bounded alignment window, so a submission reference is sufficient — it does not need to

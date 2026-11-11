@@ -13,7 +13,6 @@ internal object CloudRouteJson {
         CloudTurnAuthenticateJsonAdapter(moshi)
     val connectedAdapter: JsonAdapter<CloudRouteConnectedPayload> = CloudRouteConnectedPayloadJsonAdapter(moshi)
     val errorAdapter: JsonAdapter<CloudRouteErrorPayload> = CloudRouteErrorPayloadJsonAdapter(moshi)
-    val httpErrorAdapter: JsonAdapter<CloudRouteHttpErrorPayload> = CloudRouteHttpErrorPayloadJsonAdapter(moshi)
     val flexibleMapAdapter: JsonAdapter<Map<String, Any?>> = FlexibleMapAdapter()
 
     val resultAdapter: JsonAdapter<CloudSearchResults> = CloudSearchResultsJsonAdapter(moshi)

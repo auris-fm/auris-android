@@ -24,8 +24,6 @@ class CloudReferenceMatcher {
         checkpoints.add(Checkpoint(timestampSeconds, hashes, hashes.toHashSet()))
     }
 
-    fun clear() = checkpoints.clear()
-
     val count: Int get() = checkpoints.size
 
     /** Returns the top [maxResults] reference checkpoints by overlap score, descending. */

@@ -52,7 +52,6 @@ interface Settings {
         const val SERVER_LIST_HOST = BuildConfig.SERVER_LIST_HOST
         const val SEARCH_API_URL = BuildConfig.SEARCH_API_URL
         const val WEB_FEEDS_API_URL = BuildConfig.WEB_FEEDS_API_URL
-        const val AURIS_GATEWAY_URL = BuildConfig.AURIS_GATEWAY_URL
 
         const val WP_COM_API_URL = "https://public-api.wordpress.com"
 
@@ -457,7 +456,6 @@ interface Settings {
     val headphoneControlsPreviousAction: UserSetting<HeadphoneAction>
     val headphoneControlsPlayBookmarkConfirmationSound: UserSetting<Boolean>
     val voiceControlUserDisabled: UserSetting<Boolean>
-    val voiceControlSetupCompleted: UserSetting<Boolean>
 
     // Firebase remote config
     fun getPeriodicSaveTimeMs(): Long

@@ -786,10 +786,6 @@ class MainActivity :
         BumpStatsTask.scheduleToRun(this)
     }
 
-    override fun onUserInteraction() {
-        super.onUserInteraction()
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(SAVEDSTATE_BOTTOM_SHEET_TAG, bottomSheetTag)

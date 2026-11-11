@@ -106,9 +106,6 @@ object LfmToolCallParser {
         val raw = text.substring(start, end).trim()
         if (raw.isEmpty()) return null
         val value = when {
-            raw.equals("True", ignoreCase = false) -> true
-            raw.equals("False", ignoreCase = false) -> false
-            raw.equals("None", ignoreCase = false) -> null
             raw.equals("true", ignoreCase = true) -> true
             raw.equals("false", ignoreCase = true) -> false
             raw.equals("null", ignoreCase = true) -> null

@@ -84,13 +84,6 @@ internal data class CloudRouteErrorPayload(
     val message: String,
 )
 
-@JsonClass(generateAdapter = true)
-internal data class CloudRouteHttpErrorPayload(
-    val code: String? = null,
-    val message: String? = null,
-    val error: String? = null,
-)
-
 /**
  * The `connected` frame's payload: the codec the server negotiated for the binary audio path.
  * This is where that value arrives — the protocol has no separate `auth` frame.

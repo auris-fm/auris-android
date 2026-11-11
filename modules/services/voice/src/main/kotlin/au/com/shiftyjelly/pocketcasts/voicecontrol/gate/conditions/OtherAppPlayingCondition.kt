@@ -76,7 +76,7 @@ class OtherAppPlayingCondition(
 
     /**
      * Directly updates the condition state, bypassing the AudioManager.
-     * Used for testing and by external state monitors.
+     * Used by tests.
      */
     fun update(otherAppPlaying: Boolean) {
         handleStateChange(otherAppPlaying)
@@ -88,7 +88,7 @@ class OtherAppPlayingCondition(
             debounceJob = scope.launch {
                 delay(debounceMs)
                 // Output and attribution may have changed during the debounce. Publish a block only
-                // if its premise is still true; update(Boolean) remains an external monitor's verdict.
+                // if its premise is still true; update(Boolean) remains the test seam's verdict.
                 val stillOtherApp = !revalidate || withContext(Dispatchers.IO) {
                     otherAppPlaying(audioManager?.isMusicActive == true)
                 }

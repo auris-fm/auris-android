@@ -183,11 +183,6 @@ class GracePeriodSignal @Inject constructor() {
      * separated at the event boundary rather than inferred from a count that increments on
      * visibility changes alone.
      */
-
-    // Records that the host's playback stopped while the window was closed by a privacy event.
-    // Called by the playback-context layer when it observes the stop, so the closure kinds are
-    // separated at the event boundary rather than inferred from a count that increments on
-    // visibility changes alone.
     fun noteHostPlaybackStopped() {
         playbackStopClosures.incrementAndGet()
     }
@@ -393,7 +388,7 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun onWakeWordDetected() {
         // ONE TRANSITION. The markers and the opening are the SAME act, so they must not be separable:
-        // setting them around `openWindow()` left a moment where the window was open with the previous
+        // setting them around a separate opening call left a moment where the window was open with the previous
         // marker, and a concurrent reader could observe it. A FRESH WAKE BEGINS A NEW USER ACT and
         // therefore a new conversation -- the window it opens is marked wake-originated so a turn
         // captured under it prepares CREATE even if an older conversation handle exists.
@@ -409,14 +404,8 @@ class GracePeriodSignal @Inject constructor() {
     /** The grace window a request captured now belongs to; independent from request identity. */
     val currentGeneration: Long get() = synchronized(windowLock) { generation }
 
-    /** A new act opens a window and begins its generation. */
-    private fun openWindow() {
-        val ending = synchronized(windowLock) { openWindowLocked() }
-        notifyIfEnded(ending)
-    }
-
     /**
-     * [openWindow]'s body, for a caller already holding the monitor.
+     * The opening transition, for a caller already holding the monitor.
      *
      * Returns the generation that ENDED, which the caller reports OUTSIDE the monitor: a callback that
      * runs other components' code inside the lock could deadlock against a component calling back in.
@@ -527,19 +516,6 @@ class GracePeriodSignal @Inject constructor() {
         // DELIVERED OUTSIDE the monitor: a callback running other components' code inside the lock could
         // deadlock against a component that calls back in.
         onWindowEnded?.invoke(ended)
-    }
-
-    private fun startOrReset() {
-        // UNDER THE MONITOR: extending a window is a transition of the same state the claim reads, so it
-        // must not interleave with one. The timer is ARMED with this window's generation, so an expired
-        // extension closes the window it belongs to and cannot touch a successor.
-        synchronized(windowLock) {
-            _isActive.value = true
-            // ARMED THROUGH armTimerForLocked, like every other open: arming directly here skipped the
-            // ownership re-check, so this one path could install a timer owned by a window that a
-            // concurrent transition had already replaced.
-            armTimerForLocked(ownedGeneration = generation)
-        }
     }
 
     /**

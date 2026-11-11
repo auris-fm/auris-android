@@ -131,15 +131,18 @@ fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentStartMs(): Long? {
  * missing: an absent binding must stay absent — the timing table leaves the stage unmarked rather
  * than substituting the buffer end or "now".
  */
-fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndMs(): Long? {
+fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndNs(): Long? {
     val endPosition = segmentEndStreamPosition ?: return null
     val observation = captureClock ?: return null
     // 0 means the segmenter does not report the speech end — unknown, not "the first sample".
     val speechEndSample = speechEndSample.takeIf { it > 0 } ?: return null
     val totalRetainedSamples = frames.sumOf { it.samples.size.toLong() }
     val speechEndStreamPosition = endPosition - totalRetainedSamples + speechEndSample
-    return captureTimeNsForPosition(observation, speechEndStreamPosition)?.div(1_000_000L)
+    return captureTimeNsForPosition(observation, speechEndStreamPosition)
 }
+
+/** Milliseconds form of [captureTimeOfSegmentEndNs], for callers outside the timing table. */
+fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndMs(): Long? = captureTimeOfSegmentEndNs()?.div(1_000_000L)
 
 enum class RejectionReason {
     /**

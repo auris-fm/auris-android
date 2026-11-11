@@ -101,7 +101,7 @@ class CloudRouteSink internal constructor(
                     au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
                         id,
                         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible,
-                        android.os.SystemClock.elapsedRealtime(),
+                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
                     )
                 }
             }
@@ -1015,7 +1015,7 @@ class CloudRouteSink internal constructor(
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
                     requestId,
                     au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.CloudRequestSent,
-                    android.os.SystemClock.elapsedRealtime(),
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
                 )
             }
             override fun onSendResult(

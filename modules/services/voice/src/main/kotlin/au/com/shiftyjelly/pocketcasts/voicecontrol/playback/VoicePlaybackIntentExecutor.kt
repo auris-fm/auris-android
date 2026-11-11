@@ -340,7 +340,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
                 timingRequestId,
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
-                android.os.SystemClock.elapsedRealtime(),
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
             )
         }
         // THE OUTCOME GUARD BELONGS HERE, at the site that recognizes -- not only at a later caller.

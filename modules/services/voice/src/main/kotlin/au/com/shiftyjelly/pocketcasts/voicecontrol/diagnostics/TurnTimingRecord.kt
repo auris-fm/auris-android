@@ -11,9 +11,11 @@ import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
  * unmeasured stage is absent from the record rather than written as zero, because a zero would read
  * as instantaneous and would make a missing measurement look like a win.
  *
- * All instants come from one clock ([SystemClock.elapsedRealtime], passed in as [mark]), so the
- * differences between stages are real quantities. The table starts at the acoustic end of speech:
- * that is the instant the user finished and every later cost is the client's.
+ * All instants come from ONE monotonic clock: [clockNanos] (System.nanoTime). Callers take the
+ * instant from the record's own clock and pass it to [mark]; the nanos-to-milliseconds conversion
+ * happens in exactly one place inside the record. A mixed-clock table (one stage from
+ * elapsedRealtime, the next from nanoTime) would report meaningless deltas after any boot-time
+ * adjustment, so the record does not accept caller-chosen clocks.
  */
 class TurnTimingRecord(private val requestId: String) {
 
@@ -57,8 +59,8 @@ class TurnTimingRecord(private val requestId: String) {
      * The first observation wins: a stage arrives once, and re-marking it later would move the
      * measurement to whenever a caller happened to notice rather than when it happened.
      */
-    fun mark(stage: Stage, atMs: Long) {
-        marks.putIfAbsent(stage, atMs)
+    fun mark(stage: Stage, atNanos: Long) {
+        marks.putIfAbsent(stage, atNanos)
     }
 
     /**
@@ -68,8 +70,8 @@ class TurnTimingRecord(private val requestId: String) {
      * and a reader needs to know which. The stage's own instant is still recorded at the same
      * moment, so the table's arithmetic is unchanged.
      */
-    fun markDisposition(atMs: Long, cancelled: Boolean) {
-        mark(Stage.CommitOrCancel, atMs)
+    fun markDisposition(atNanos: Long, cancelled: Boolean) {
+        mark(Stage.CommitOrCancel, atNanos)
         disposition = if (cancelled) Outcome.Cancelled else Outcome.Committed
         outcomes += disposition!!
     }
@@ -84,7 +86,7 @@ class TurnTimingRecord(private val requestId: String) {
     fun elapsedMs(stage: Stage): Long? {
         val zero = marks[Stage.AcousticEnd] ?: return null
         val at = marks[stage] ?: return null
-        return at - zero
+        return nanosToMs(at - zero)
     }
 
     /** How long [stage] itself took, measured against the stage before it that was recorded. */
@@ -94,7 +96,7 @@ class TurnTimingRecord(private val requestId: String) {
             val index = keys.indexOf(stage)
             if (index <= 0) null else keys[index - 1]
         } ?: return null
-        return at - marks.getValue(previous)
+        return nanosToMs(at - marks.getValue(previous))
     }
 
     /** One line per measured stage, oldest first, each carrying the turn's identity. */
@@ -105,7 +107,7 @@ class TurnTimingRecord(private val requestId: String) {
             append(" stage=").append(
                 if (stage == Stage.CommitOrCancel) disposition?.wireName ?: stage.wireName else stage.wireName,
             )
-            append(" elapsed_ms=").append(at - (marks[Stage.AcousticEnd] ?: at))
+            append(" elapsed_ms=").append(nanosToMs(at - (marks[Stage.AcousticEnd] ?: at)))
             append(" outcome=").append(outcomes.joinToString(",") { it.wireName }.ifEmpty { "-" })
         }
     }
@@ -132,6 +134,16 @@ class TurnTimingRecord(private val requestId: String) {
         const val TAG = "TurnTiming"
 
         /**
+         * THE clock for timing marks. Every stage instant comes from here — never from a caller's
+         * own clock — so deltas between stages are always same-clock quantities. The single
+         * nanos-to-ms conversion lives in [nanosToMs]. Overridable so a test can pin instants.
+         */
+        internal var clockNanos: () -> Long = { System.nanoTime() }
+
+        /** The record's ONLY nanos-to-milliseconds conversion. */
+        private fun nanosToMs(nanos: Long): Long = nanos / 1_000_000L
+
+        /**
          * Where a published table goes. Production writes the persisted log; a test substitutes
          * this so it can assert what was actually published rather than only what a record could
          * be made to say.
@@ -156,8 +168,8 @@ class TurnTimingRecord(private val requestId: String) {
         }
 
         /** Mark the live turn [id] at [stage], on the caller's clock, or do nothing if it is gone. */
-        fun markFor(id: String, stage: Stage, atMs: Long) {
-            active[id]?.mark(stage, atMs)
+        fun markFor(id: String, stage: Stage, atNanos: Long) {
+            active[id]?.mark(stage, atNanos)
         }
 
         fun unregister(id: String) {

@@ -37,10 +37,12 @@ class TurnTimingWiringTest {
 
     private val published = mutableListOf<String>()
     private val original = TurnTimingRecord.sink
+    private val originalClock = TurnTimingRecord.clockNanos
 
     @After
     fun restore() {
         TurnTimingRecord.sink = original
+        TurnTimingRecord.clockNanos = originalClock
     }
 
     @Test
@@ -91,6 +93,9 @@ class TurnTimingWiringTest {
         // gap between the capture-derived acoustic end and the delivery-side stages is then a
         // huge, deterministic number — unless the engine stamped the acoustic end "now", which
         // collapses it to zero.
+        // Pin the record's clock so the delivery-side stages are deterministic against the
+        // capture-derived acoustic end (1_000_000_000ns).
+        TurnTimingRecord.clockNanos = { 2_000_000_000_000L }
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = audioProcessor,
             utteranceFilter = utteranceFilter,
@@ -179,6 +184,9 @@ class TurnTimingWiringTest {
             WakeWordResult(detected = false, confidence = 0.02f, completionSample = 800, threshold = 0.812f),
         )
 
+        // Pin the record's clock so the delivery-side stages are deterministic against the
+        // capture-derived acoustic end (1_000_000_000ns).
+        TurnTimingRecord.clockNanos = { 2_000_000_000_000L }
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = audioProcessor,
             utteranceFilter = utteranceFilter,

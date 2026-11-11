@@ -16,15 +16,15 @@ class TurnTimingRecordTest {
 
     private fun complete(): TurnTimingRecord {
         val record = TurnTimingRecord(requestId = "turn-1")
-        record.mark(TurnTimingRecord.Stage.AcousticEnd, atMs = 1_000)
-        record.mark(TurnTimingRecord.Stage.EndpointDecision, atMs = 1_180)
-        record.mark(TurnTimingRecord.Stage.WakeResult, atMs = 1_210)
-        record.mark(TurnTimingRecord.Stage.AsrDone, atMs = 1_360)
-        record.mark(TurnTimingRecord.Stage.RoutingDone, atMs = 1_940)
-        record.mark(TurnTimingRecord.Stage.CloudRequestSent, atMs = 1_950)
-        record.markDisposition(atMs = 2_100, cancelled = false)
-        record.mark(TurnTimingRecord.Stage.LocalActionExecuted, atMs = 2_120)
-        record.mark(TurnTimingRecord.Stage.FirstAudible, atMs = 2_160)
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 1_000 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.EndpointDecision, atNanos = 1_180 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.WakeResult, atNanos = 1_210 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.AsrDone, atNanos = 1_360 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.RoutingDone, atNanos = 1_940 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.CloudRequestSent, atNanos = 1_950 * 1_000_000L)
+        record.markDisposition(atNanos = 2_100 * 1_000_000L, cancelled = false)
+        record.mark(TurnTimingRecord.Stage.LocalActionExecuted, atNanos = 2_120 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.FirstAudible, atNanos = 2_160 * 1_000_000L)
         return record
     }
 
@@ -49,9 +49,9 @@ class TurnTimingRecordTest {
         // A committed turn never cancels, and a turn that was gated never executes a local
         // action. Writing either as 0 would read as "instantaneous", which is wrong.
         val record = TurnTimingRecord(requestId = "turn-2")
-        record.mark(TurnTimingRecord.Stage.AcousticEnd, atMs = 1_000)
-        record.mark(TurnTimingRecord.Stage.EndpointDecision, atMs = 1_180)
-        record.markDisposition(atMs = 1_400, cancelled = false)
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 1_000 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.EndpointDecision, atNanos = 1_180 * 1_000_000L)
+        record.markDisposition(atNanos = 1_400 * 1_000_000L, cancelled = false)
 
         val text = record.render()
         assertTrue("the measured stages are present", text.contains("stage=acoustic_end"))
@@ -67,8 +67,8 @@ class TurnTimingRecordTest {
         // The plan lists "local action executed". An action that errored did not execute, and a
         // table that calls it executed turns a failure into a latency win.
         val record = TurnTimingRecord(requestId = "turn-3")
-        record.mark(TurnTimingRecord.Stage.AcousticEnd, atMs = 1_000)
-        record.mark(TurnTimingRecord.Stage.RoutingDone, atMs = 1_500)
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 1_000 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.RoutingDone, atNanos = 1_500 * 1_000_000L)
         record.markOutcome(TurnTimingRecord.Outcome.ActionFailed)
 
         val text = record.render()
@@ -84,8 +84,8 @@ class TurnTimingRecordTest {
         // Rendering was submitted, not heard. Only the first audible stage is audible, and the
         // transport/queue delay is precisely what this table exists to expose.
         val record = TurnTimingRecord(requestId = "turn-4")
-        record.mark(TurnTimingRecord.Stage.AcousticEnd, atMs = 1_000)
-        record.mark(TurnTimingRecord.Stage.LocalActionExecuted, atMs = 1_200)
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 1_000 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.LocalActionExecuted, atNanos = 1_200 * 1_000_000L)
         record.markOutcome(TurnTimingRecord.Outcome.ActionExecuted)
 
         val text = record.render()
@@ -122,10 +122,34 @@ class TurnTimingRecordTest {
         // A stage's arrival is the first time it was observed. Re-marking it later would move the
         // measurement to whenever the caller happened to notice.
         val record = TurnTimingRecord(requestId = "turn-5")
-        record.mark(TurnTimingRecord.Stage.AcousticEnd, atMs = 1_000)
-        record.mark(TurnTimingRecord.Stage.AcousticEnd, atMs = 1_400)
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 1_000 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 1_400 * 1_000_000L)
         // The acoustic end is the table's zero point, so it is checked via a later stage.
-        record.mark(TurnTimingRecord.Stage.EndpointDecision, atMs = 1_500)
+        record.mark(TurnTimingRecord.Stage.EndpointDecision, atNanos = 1_500 * 1_000_000L)
         assertEquals(500L, record.elapsedMs(TurnTimingRecord.Stage.EndpointDecision))
+    }
+
+    @Test
+    fun `every mark flows through the ONE monotonic clock conversion`() {
+        // REVIEWER (task81): mixed clock sources (a caller on elapsedRealtime here, nanoTime
+        // there) make stage deltas meaningless after a boot-time adjustment. The record owns the
+        // clock: callers take instants from TurnTimingRecord.clockNanos, and the ONLY
+        // nanos-to-ms conversion is inside the record.
+        TurnTimingRecord.clockNanos = { 1_000_000_000L }
+        try {
+            val record = TurnTimingRecord(requestId = "turn-clock")
+            TurnTimingRecord.registerFor("turn-clock", record)
+            record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = TurnTimingRecord.clockNanos())
+            TurnTimingRecord.clockNanos = { 2_500_000_000L }
+            TurnTimingRecord.markFor(
+                "turn-clock",
+                TurnTimingRecord.Stage.FirstAudible,
+                TurnTimingRecord.clockNanos(),
+            )
+            assertEquals(1_500L, record.elapsedMs(TurnTimingRecord.Stage.FirstAudible))
+            assertEquals(1_500L, record.stageMs(TurnTimingRecord.Stage.FirstAudible))
+        } finally {
+            TurnTimingRecord.clockNanos = { System.nanoTime() }
+        }
     }
 }

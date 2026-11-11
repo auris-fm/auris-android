@@ -13,7 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.InProgressUtteranceReader
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentEndMs
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentEndNs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -438,13 +438,19 @@ class VoiceAsrEngine @Inject constructor(
                             val timing = TurnTimingRecord(
                                 requestId = "utt-" + elapsedClockMs(),
                             )
-                            result.captureTimeOfSegmentEndMs()?.let { captureEndMs ->
-                                timing.mark(TurnTimingRecord.Stage.AcousticEnd, captureEndMs)
+                            // The acoustic end is marked on the record's ONE monotonic clock:
+                            // the capture timestamp observation is AudioRecord's nanoTime-domain
+                            // instant, the same base as TurnTimingRecord.clockNanos(), so the
+                            // endpoint decision's elapsed against it is a real quantity. (The
+                            // AudioRecord nanoTime base equals System.nanoTime's base — both are
+                            // CLOCK_MONOTONIC.)
+                            result.captureTimeOfSegmentEndNs()?.let { captureEndNs ->
+                                timing.mark(TurnTimingRecord.Stage.AcousticEnd, captureEndNs)
                             }
                             // The segmenter has already decided the utterance ended by the time
                             // it reports the segment, so the decision is observed here, next to
                             // the acoustic end and distinct from it.
-                            timing.mark(TurnTimingRecord.Stage.EndpointDecision, elapsedClockMs())
+                            timing.mark(TurnTimingRecord.Stage.EndpointDecision, TurnTimingRecord.clockNanos())
 
                             val request = shouldTranscribe(result, openContext, timing)
                             if (request != null) {
@@ -841,7 +847,7 @@ class VoiceAsrEngine @Inject constructor(
 
         // The final wake result, as the detector reported it. Recorded before any decision that
         // depends on it, so a negative result is still a measured stage.
-        timing.mark(TurnTimingRecord.Stage.WakeResult, elapsedClockMs())
+        timing.mark(TurnTimingRecord.Stage.WakeResult, TurnTimingRecord.clockNanos())
 
         val mode = currentMode
         val wakeCmp = when {
@@ -954,7 +960,10 @@ class VoiceAsrEngine @Inject constructor(
             Timber.w(t, "[VoicePipeline] asr provider failed")
             return
         }
-        timing.mark(TurnTimingRecord.Stage.AsrDone, elapsedClockMs())
+        timing.mark(TurnTimingRecord.Stage.AsrDone, TurnTimingRecord.clockNanos())
+||||||| parent of 05218e81 (voice: one monotonic clock for the whole timing table)
+        val asrResult = b.transcribe(floatSamples, sampleRateHz)
+        timing.mark(TurnTimingRecord.Stage.AsrDone, TurnTimingRecord.clockNanos())
         val asrMs = System.currentTimeMillis() - asrStartedAt
         val durationMs = (floatSamples.size * 1000L / sampleRateHz).toInt()
         val transcript = WakeTranscriptTrimmer.commandText(
@@ -1211,7 +1220,7 @@ class VoiceAsrEngine @Inject constructor(
         // that happen to say the same words do not. The dialog path mints its own for
         // clarification flows; this is the producer for a plain utterance.
         val outcome = recognizer.recognize(input, ctx, admittedId)
-        timing?.mark(TurnTimingRecord.Stage.RoutingDone, elapsedClockMs())
+        timing?.mark(TurnTimingRecord.Stage.RoutingDone, TurnTimingRecord.clockNanos())
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
         val diagnostic = outcome.diagnostic

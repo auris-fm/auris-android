@@ -176,10 +176,21 @@ class SettingsStopWiringTest {
         )
         val acceptIndex = source.indexOf("private fun acceptMarkerRead(")
         assertTrue("the marker's single writer must exist", acceptIndex >= 0)
-        val fencedIndex = source.indexOf("collectionPermittedByLocalIntent()")
+        // Bound to the fenced read itself: a whole-file search would pass even if the only
+        // remaining read were the constructor seed, with the fenced path switched to something
+        // else. The fenced read that feeds the single writer must consult the durable store.
+        val readFnIndex = source.indexOf("private suspend fun readMarkerFenced(")
+        assertTrue("the fenced read must exist", readFnIndex >= 0)
+        val readFnEnd = source.indexOf("\n    private fun ", readFnIndex).let { if (it == -1) source.length else it }
         assertTrue(
-            "the durable stop must still be the thing the marker is read from",
-            fencedIndex >= 0,
+            "the durable stop must still be the thing the marker is read from, inside the fenced read",
+            source.substring(readFnIndex, readFnEnd).contains("collectionPermittedByLocalIntent()"),
+        )
+        // And the fenced read is what the single writer accepts: its call site sits inside
+        // readMarkerFenced's body, not in some other function's.
+        assertTrue(
+            "the fenced read must reach the marker's single writer",
+            readFnIndex < acceptIndex,
         )
     }
 

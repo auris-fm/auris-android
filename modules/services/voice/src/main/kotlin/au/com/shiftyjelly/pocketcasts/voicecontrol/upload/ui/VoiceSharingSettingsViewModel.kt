@@ -493,8 +493,12 @@ class VoiceSharingSettingsViewModel(
                 // touch: a superseded outcome must not clear the newer action's pending label
                 // (reviewer a2136dd9).
                 if (operation == FailedOperation.ENROLL) {
-                    val released = enrollmentController.applyForOutcome(outcome) {
-                        withdrawalIntent.clearOnUserEnrollment()
+                    // The durable clear is a fsync'd marker write: it runs on IO, still inside
+                    // the fence's critical section (applyForOutcome itself stays atomic).
+                    val released = withContext(ioDispatcher) {
+                        enrollmentController.applyForOutcome(outcome) {
+                            withdrawalIntent.clearOnUserEnrollment()
+                        }
                     }
                     // false = the effect RAN and durable clearing FAILED: collection stays
                     // stopped while the server says enrolled. That is a distinct state from a
@@ -559,9 +563,12 @@ class VoiceSharingSettingsViewModel(
             is EnrollmentOutcome.Failed -> {
                 if (generation != actionGeneration) return
                 if (operation == FailedOperation.WITHDRAW) {
-                    // A FAILED withdrawal latches its failure with the intent store, fenced.
-                    enrollmentController.applyForOutcome(outcome) {
-                        withdrawalIntent.onWithdrawalFailed()
+                    // A FAILED withdrawal latches its failure with the intent store, fenced, and
+                    // the latch write is a fsync'd marker write: on IO like its siblings.
+                    withContext(ioDispatcher) {
+                        enrollmentController.applyForOutcome(outcome) {
+                            withdrawalIntent.onWithdrawalFailed()
+                        }
                     }
                 }
                 lastFailedOperation = operation
@@ -580,8 +587,10 @@ class VoiceSharingSettingsViewModel(
             is EnrollmentOutcome.Refused -> {
                 if (generation != actionGeneration) return
                 if (operation == FailedOperation.WITHDRAW) {
-                    enrollmentController.applyForOutcome(outcome) {
-                        withdrawalIntent.onWithdrawalFailed()
+                    withContext(ioDispatcher) {
+                        enrollmentController.applyForOutcome(outcome) {
+                            withdrawalIntent.onWithdrawalFailed()
+                        }
                     }
                 }
                 lastFailedOperation = operation

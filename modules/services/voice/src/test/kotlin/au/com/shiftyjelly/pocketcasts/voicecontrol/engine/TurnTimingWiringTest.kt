@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -71,6 +72,104 @@ class TurnTimingWiringTest {
                     listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
                     speechOnsetSample = 0,
                     speechEndSample = 0,
+                    // Capture accounting: 1600 samples at 16k, segment end observed at stream
+                    // position 1600 when the clock read 1_000_000_000ns (t=1000ms on the
+                    // elapsedRealtime base). The acoustic end is therefore 1000ms — derived from
+                    // the accounting, not stamped "now".
+                    captureClock = longArrayOf(1600, 1_000_000_000L, 16_000, 1),
+                    segmentEndStreamPosition = 1600,
+                ),
+            ),
+        )
+        whenever(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        whenever(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            WakeWordResult(detected = false, confidence = 0.02f, completionSample = 800, threshold = 0.812f),
+        )
+
+        // A pinned wall clock far beyond the capture accounting's derived instant (1000ms): the
+        // gap between the capture-derived acoustic end and the delivery-side stages is then a
+        // huge, deterministic number — unless the engine stamped the acoustic end "now", which
+        // collapses it to zero.
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = audioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = feedback,
+            translationStage = translationStage,
+            context = context,
+            elapsedClockMs = { 5_000_000L },
+        )
+        engine.scope = this
+        engine.start(
+            backend = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend>(),
+            audioRoute = au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute.Speaker,
+            listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.WakeWord,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+        testScheduler.advanceUntilIdle()
+
+        val text = synchronized(published) { published.toList() }.joinToString("\n")
+        assertTrue(
+            "the engine must publish a timing table, not just construct one: got '$text'",
+            text.isNotEmpty(),
+        )
+        assertTrue("the table starts at the acoustic end: $text", text.contains("stage=acoustic_end"))
+        assertTrue(
+            "the endpoint decision is its own stage, not folded into the acoustic end: $text",
+            text.contains("stage=endpoint_decision"),
+        )
+        // THE ZERO POINT IS THE CAPTURE CLOCK, NOT THE DELIVERY INSTANT. The acoustic end comes
+        // from the sample accounting (1000ms); the delivery lands later on the wall clock, so the
+        // endpoint decision's elapsed against the capture-derived zero is the real drain delay.
+        // If the engine stamped the acoustic end "now" at delivery, this elapsed would collapse
+        // to ~0 and this assertion fails — the substitution the spec forbids.
+        val endpointElapsed = Regex("stage=endpoint_decision elapsed_ms=(\\d+)").find(text)
+            ?.groupValues?.get(1)?.toLongOrNull()
+        assertNotNull("endpoint decision line must carry its elapsed: $text", endpointElapsed)
+        assertTrue(
+            "endpoint decision must be measured against the CAPTURE-derived acoustic end, not now: $text",
+            endpointElapsed!! > 1_000_000L,
+        )
+        assertTrue(
+            "the wake result is recorded even when it ended the turn: $text",
+            text.contains("stage=wake_result"),
+        )
+        assertTrue("every line names its utterance: $text", text.contains("request_id="))
+    }
+
+    @Test
+    fun `without capture accounting the acoustic end stays absent rather than becoming now`() = runTest {
+        TurnTimingRecord.sink = { _, message -> synchronized(published) { published += message } }
+
+        val context = mock<Context>()
+        val audioManager = mock<AudioManager>()
+        val audioProcessor = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor>()
+        val utteranceFilter = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter>()
+        val recognizer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer>()
+        val wakeWordDetector = mock<WakeWordDetector>()
+        val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
+        val feedback = mock<AudioFeedbackRenderer>()
+        val translationStage = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage>()
+
+        whenever(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        whenever(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        whenever(audioProcessor.attachCapture()).thenReturn(true)
+        whenever(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        // NO captureClock and NO segmentEndStreamPosition: the engine cannot know when the last
+        // sample was captured, so the table must start at the endpoint decision instead of
+        // substituting the delivery instant.
+        whenever(
+            audioProcessor.startProcessing(),
+        ).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
+                    speechOnsetSample = 0,
+                    speechEndSample = 0,
                 ),
             ),
         )
@@ -96,24 +195,15 @@ class TurnTimingWiringTest {
             listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed },
-            onIntent = {},
+            onIntent = { _, _ -> },
         )
         testScheduler.advanceUntilIdle()
 
         val text = synchronized(published) { published.toList() }.joinToString("\n")
+        assertTrue("the turn is still published: $text", text.contains("stage=endpoint_decision"))
         assertTrue(
-            "the engine must publish a timing table, not just construct one: got '$text'",
-            text.isNotEmpty(),
+            "absent accounting must leave the acoustic end absent, not stamped with now: $text",
+            !text.contains("stage=acoustic_end"),
         )
-        assertTrue("the table starts at the acoustic end: $text", text.contains("stage=acoustic_end"))
-        assertTrue(
-            "the endpoint decision is its own stage, not folded into the acoustic end: $text",
-            text.contains("stage=endpoint_decision"),
-        )
-        assertTrue(
-            "the wake result is recorded even when it ended the turn: $text",
-            text.contains("stage=wake_result"),
-        )
-        assertTrue("every line names its utterance: $text", text.contains("request_id="))
     }
 }

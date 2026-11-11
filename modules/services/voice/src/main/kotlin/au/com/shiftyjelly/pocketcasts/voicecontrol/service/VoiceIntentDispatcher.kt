@@ -44,6 +44,8 @@ class VoiceIntentDispatcher @Inject constructor() {
         onCommandRecognized: (VoiceIntent) -> Unit,
         intent: VoiceIntent,
         invocationToken: VoiceAsrEngine.InvocationToken?,
+        // The utterance's admitted request id, forwarded so local actions mark the timing table.
+        timingRequestId: String? = null,
     ): Job? {
         val now = System.currentTimeMillis()
         val intentType = intent::class.simpleName ?: intent.toString()
@@ -77,7 +79,7 @@ class VoiceIntentDispatcher @Inject constructor() {
                 try {
                     val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
                     val response = try {
-                        executor.execute(intent, outcome = turnOutcome, onOutcome = onOutcome)
+                        executor.execute(intent, outcome = turnOutcome, onOutcome = onOutcome, timingRequestId = timingRequestId)
                     } catch (t: kotlinx.coroutines.CancellationException) {
                         // Cancellation is NOT "the user cancelled" and NOT "the action did not
                         // happen": work may already have run. No fact is invented; the settle

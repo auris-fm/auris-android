@@ -13,6 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.InProgressUtteranceReader
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentEndMs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -183,7 +184,9 @@ class VoiceAsrEngine @Inject constructor(
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null
-    private var onIntent: ((VoiceIntent, InvocationToken?) -> Unit)? = null
+    /** Hands an intent to the executor, with the invocation token for its result attribution
+     * and the admitted request id for its timing table. */
+    private var onIntent: ((VoiceIntent, InvocationToken?, String?) -> Unit)? = null
     private var micExposureProvider: (() -> MicExposure)? = null
 
     @Volatile
@@ -234,7 +237,8 @@ class VoiceAsrEngine @Inject constructor(
         micExposureProvider: () -> MicExposure,
         // The dispatch handler receives the INVOCATION token for this specific dispatch, or null when
         // the intent belongs to no retained capture. Results are reported back against that token.
-        onIntent: (VoiceIntent, InvocationToken?) -> Unit,
+        // The admitted request id rides along so the executor can mark the utterance's timing table.
+        onIntent: (VoiceIntent, InvocationToken?, String?) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
         // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
         // scopes the reaction to its start generation so only an unexpected end is acted on.
@@ -409,11 +413,17 @@ class VoiceAsrEngine @Inject constructor(
                             }
 
                             // The acoustic end is the table's zero point: the instant the user
-                            // stopped speaking, after which every cost is the client's.
+                            // stopped speaking, after which every cost is the client's. It comes
+                            // from the capture sample accounting, not "now": the drain between the
+                            // last captured sample and this delivery is CLIENT cost, and stamping
+                            // it here would hide exactly the latency the table exists to measure.
+                            // Absent accounting stays absent — the table starts at the endpoint.
                             val timing = TurnTimingRecord(
                                 requestId = "utt-" + elapsedClockMs(),
                             )
-                            timing.mark(TurnTimingRecord.Stage.AcousticEnd, elapsedClockMs())
+                            result.captureTimeOfSegmentEndMs()?.let { captureEndMs ->
+                                timing.mark(TurnTimingRecord.Stage.AcousticEnd, captureEndMs)
+                            }
                             // The segmenter has already decided the utterance ended by the time
                             // it reports the segment, so the decision is observed here, next to
                             // the acoustic end and distinct from it.
@@ -421,6 +431,11 @@ class VoiceAsrEngine @Inject constructor(
 
                             val request = shouldTranscribe(result, openContext, timing)
                             if (request != null) {
+                                // Registered under the turn's ADMITTED id, the one every producer
+                                // outside the engine knows: the wire request id on the route socket,
+                                // the executor's logical id. CloudRequestSent, LocalActionExecuted
+                                // and FirstAudible mark through the registry by that id.
+                                TurnTimingRecord.registerFor(request.admittedId, timing)
                                 transcribeSegment(result, request, timing)
                             } else {
                                 // Nothing ran for this utterance: publish the table so the
@@ -546,13 +561,13 @@ class VoiceAsrEngine @Inject constructor(
      * join arms publication — finalizing before publication is what lets the record carry a
      * result instead of a permanent unknown.
      */
-    private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?) -> Unit), intent: VoiceIntent) {
+    private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?, String?) -> Unit), intent: VoiceIntent, admittedId: String?) {
         val capture = pendingExecutionContext
         pendingExecutionContext = null
         val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
         if (token != null) synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
         try {
-            handler(intent, token)
+            handler(intent, token, admittedId)
         } catch (t: Throwable) {
             // A SYNCHRONOUS handler throw must not strand the token: settle it here so the
             // invocation finalizes (recorded fact or explicit unknown) exactly once.
@@ -1202,6 +1217,7 @@ class VoiceAsrEngine @Inject constructor(
                     // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
                     // prepared once and may be retried. A local intent has no wire identity to reuse.
                     .let { it.withLogicalRequest(admittedId) },
+                admittedId,
             )
             timing?.markOutcome(TurnTimingRecord.Outcome.ActionExecuted)
             timing?.publish()
@@ -1292,6 +1308,7 @@ class VoiceAsrEngine @Inject constructor(
                         // names one identity rather than two.
                         logicalRequestId = admittedId,
                     ),
+                    admittedId,
                 )
             }
         }

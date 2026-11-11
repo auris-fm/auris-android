@@ -1858,4 +1858,59 @@ class VoicePlaybackIntentExecutorTest {
 
         org.junit.Assert.assertNotSame("a confirmed action resets inactivity", timerBefore, signal.timerJobForTest())
     }
+
+    @Test
+    fun `a local action marks the live turn's timing table when the id is supplied`() = runTest {
+        // The executor stamps the mark with the device clock; the test pins it so the stage's
+        // lag against the acoustic-end baseline is a real quantity, not a mock artifact.
+        org.mockito.Mockito.mockStatic(android.os.SystemClock::class.java).use { clock ->
+            clock.`when`<Long> { android.os.SystemClock.elapsedRealtime() }.thenReturn(1_250L)
+            val admittedId = "local-timing-id"
+            val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+            record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+            val sinks = FakeSinks()
+            val executor = sinks.executor()
+            try {
+                executor.execute(VoiceIntent.Playback.Pause, timingRequestId = admittedId)
+            } finally {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+            }
+            assertNotNull(
+                "local action stage must be marked through the registry",
+                record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+            )
+            assertEquals(listOf("pause"), sinks.playback.calls)
+        }
+    }
+
+    @Test
+    fun `a local action with no timing id leaves the table untouched`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        // No record registered under any id the executor could reach; the executor itself must
+        // not throw or mint one.
+        val response = executor.execute(VoiceIntent.Playback.Pause)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        assertEquals(listOf("pause"), sinks.playback.calls)
+    }
+
+    @Test
+    fun `a cloud turn's execution does not mark the local action stage`() = runTest {
+        val admittedId = "cloud-timing-id"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        try {
+            executor.execute(VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Premium, logicalRequestId = admittedId), timingRequestId = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        assertNull(
+            "a cloud action's timing belongs to the sink, not the executor",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+        )
+    }
 }

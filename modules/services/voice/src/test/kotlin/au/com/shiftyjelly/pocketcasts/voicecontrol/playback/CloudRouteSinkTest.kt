@@ -4748,4 +4748,84 @@ class CloudRouteSinkTest {
             (feedback as VoiceResponse.Spoken).text,
         )
     }
+
+    @Test
+    fun `the send attempt marks the live turn's timing table with the cloud request stage`() = runTest {
+        val admittedId = testWireId
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        // THE REAL BRIDGE: the sink's own observer sees the send attempt, as the
+                        // transport invokes it on the wire.
+                        observer?.onSendAttempted(rid)
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        try {
+            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        // The registry route lands in the live record: without the sink's observer mark the stage
+        // is absent, and the acoustic-end baseline makes its absence (not a null lag) the failure.
+        assertNotNull(
+            "cloud request stage must be marked through the registry",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.CloudRequestSent),
+        )
+    }
+
+    @Test
+    fun `the first audible from the player marks the active turn's timing table`() = runTest {
+        val admittedId = testWireId
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        val listeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            listeners += invocation.getArgument<(Boolean) -> Unit>(0)
+            Unit
+        }.whenever(player).addAudibleListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // The player's audible callback arrives DURING the turn, through the
+                        // listener the sink registered — after the turn it is not the first.
+                        listeners.forEach { it(true) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        assertTrue("sink must register an audible listener", listeners.isNotEmpty())
+        try {
+            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        assertNotNull(
+            "first audible must be marked through the registry while the turn is live",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible),
+        )
+    }
 }

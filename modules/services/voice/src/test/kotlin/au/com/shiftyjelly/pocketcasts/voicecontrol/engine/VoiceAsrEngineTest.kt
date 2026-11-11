@@ -827,7 +827,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
 
         advanceUntilIdle()
@@ -1243,7 +1243,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1307,7 +1307,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1366,7 +1366,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1506,7 +1506,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -2328,7 +2328,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
         assertEquals("exactly one cloud dispatch", 1, intents.size)
@@ -2427,7 +2427,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
         assertEquals("exactly one intent dispatched", 1, intents.size)

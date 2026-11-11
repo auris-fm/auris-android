@@ -99,6 +99,21 @@ class CloudAudioPlayer(
      */
     var onPlaybackAudibleChanged: ((Boolean) -> Unit)? = null
 
+    /**
+     * Additional audible observers, so more than one consumer can watch the same fact (the DI
+     * module already owns the single-delegate property above). Invoked together with it.
+     */
+    private val audibleListeners = mutableListOf<(Boolean) -> Unit>()
+
+    fun addAudibleListener(listener: (Boolean) -> Unit) {
+        synchronized(audibleListeners) { audibleListeners += listener }
+    }
+
+    private fun notifyAudible(audible: Boolean) {
+        onPlaybackAudibleChanged?.invoke(audible)
+        synchronized(audibleListeners) { audibleListeners.toList() }.forEach { it(audible) }
+    }
+
     /** Ticks the audible stamp while we are playing, so it cannot go stale mid-answer. */
     private var audibleHeartbeat: Job? = null
     private val frameBuffer = mutableListOf<ByteArray>()
@@ -446,12 +461,12 @@ class CloudAudioPlayer(
         }
         observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
-        onPlaybackAudibleChanged?.invoke(true)
+        notifyAudible(true)
         audibleHeartbeat = heartbeatScope.launch {
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
                 if (!isPlaying) break
-                onPlaybackAudibleChanged?.invoke(true)
+                notifyAudible(true)
             }
         }
     }
@@ -459,7 +474,7 @@ class CloudAudioPlayer(
     private fun stopAudibleHeartbeat() {
         audibleHeartbeat?.cancel()
         audibleHeartbeat = null
-        onPlaybackAudibleChanged?.invoke(false)
+        notifyAudible(false)
     }
 
     private val heartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

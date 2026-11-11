@@ -139,7 +139,7 @@ class EngineEarlyConnectionOpenControlTest {
             mode,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = {},
+            onIntent = { _, _ -> },
         )
         return engine
     }

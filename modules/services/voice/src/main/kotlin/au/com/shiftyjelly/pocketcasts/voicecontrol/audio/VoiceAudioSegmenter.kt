@@ -103,6 +103,21 @@ fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentStartMs(): Long? {
     return captureTimeNsForPosition(observation, segmentStartPosition)?.div(1_000_000L)
 }
 
+/**
+ * The monotonic instant (ms on the client's elapsedRealtime base) the segment's LAST sample was
+ * CAPTURED — the acoustic end the timing table starts from. Same sample-accounted anchor as
+ * [captureTimeOfSegmentStartMs], at the segment's end position instead of its start.
+ *
+ * Null when either the accounted end position or a timestamp observation is missing: an absent
+ * binding must stay absent — the timing table leaves the stage unmarked rather than substituting
+ * "now", which would fold the drain delay into the user's time.
+ */
+fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndMs(): Long? {
+    val endPosition = segmentEndStreamPosition ?: return null
+    val observation = captureClock ?: return null
+    return captureTimeNsForPosition(observation, endPosition)?.div(1_000_000L)
+}
+
 enum class RejectionReason {
     /**
      * Audio segment was too short to be considered valid speech

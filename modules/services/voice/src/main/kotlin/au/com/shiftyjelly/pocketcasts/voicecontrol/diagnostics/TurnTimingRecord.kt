@@ -120,7 +120,13 @@ class TurnTimingRecord(private val requestId: String) {
         } catch (_: Exception) {
             // A diagnostic that cannot be written must not fail the turn it describes.
         }
+        // A published turn is no longer live: later marks for its id must not resurrect it. The
+        // registration id is the turn's admitted id, which differs from this record's own request id.
+        registeredId?.let { unregister(it) }
     }
+
+    /** The id this record was registered under, when a producer outside the engine marks it. */
+    internal var registeredId: String? = null
 
     companion object {
         const val TAG = "TurnTiming"
@@ -131,5 +137,31 @@ class TurnTimingRecord(private val requestId: String) {
          * be made to say.
          */
         internal var sink: (String, String) -> Unit = { tag, message -> LogBuffer.i(tag, message) }
+
+        /**
+         * Records for turns that are LIVE OUTSIDE THE ENGINE, by the turn's request id.
+         *
+         * CloudRequestSent, LocalActionExecuted and FirstAudible are observed by producers far from
+         * the engine that created the record — the route sink, the intent executor, the audio
+         * player. They cannot hold a reference to a record they do not own, so the registry lets
+         * them mark by id instead. The engine registers when it mints the turn's admitted id; the
+         * record unregisters itself when it publishes.
+         */
+        private val active = java.util.concurrent.ConcurrentHashMap<String, TurnTimingRecord>()
+
+        /** Make [record] markable by id. Registration is per live turn: a re-registration replaces. */
+        fun registerFor(id: String, record: TurnTimingRecord) {
+            record.registeredId = id
+            active[id] = record
+        }
+
+        /** Mark the live turn [id] at [stage], on the caller's clock, or do nothing if it is gone. */
+        fun markFor(id: String, stage: Stage, atMs: Long) {
+            active[id]?.mark(stage, atMs)
+        }
+
+        fun unregister(id: String) {
+            active.remove(id)
+        }
     }
 }

@@ -227,7 +227,7 @@ class EarlyWakeStreamScoreControlTest {
             ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), sampleRateHz, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = {},
+            onIntent = { _, _ -> },
         )
         scope.advanceUntilIdle()
     }

@@ -137,7 +137,21 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         intent: VoiceIntent,
         outcome: TurnOutcome = TurnOutcome(),
         onOutcome: ((VoiceActionOutcome) -> Unit)? = null,
+        // The utterance's admitted request id, when this intent came from the engine's pipeline.
+        // Local actions mark the timing table under it; a cloud turn's action is the server's, so
+        // its timing belongs to the sink instead.
+        timingRequestId: String? = null,
     ): VoiceResponse {
+        // LOCAL ACTION EXECUTED, observed where the action actually ran. Only local intents run
+        // this arm — a cloud turn's action is the server's, so its timing belongs to the sink. The
+        // admitted id is the identity the engine registered the record under.
+        if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                timingRequestId,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
+                android.os.SystemClock.elapsedRealtime(),
+            )
+        }
         // AUXILIARY vs PRIMARY (reviewer 8c77f5aa): a cloud turn's audio FOCUS is an AUXILIARY
         // operation — its success says nothing about whether the turn's own actions ran. So
         // primary results are tracked SEPARATELY from auxiliary ones: with no primary fact, the
@@ -159,7 +173,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         // saying so is what prevents the auxiliary success from being published as the turn's
         // outcome. Known facts are never overwritten: this only ADDS an observation.
         return try {
-            executeIntent(intent, outcome, observed)
+            executeIntent(intent, outcome, observed, timingRequestId)
         } finally {
             if (onOutcome != null && !primaryReported) onOutcome(VoiceActionOutcome.NotObserved)
         }
@@ -169,6 +183,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         intent: VoiceIntent,
         outcome: TurnOutcome,
         onOutcome: ((VoiceActionOutcome) -> Unit)?,
+        timingRequestId: String? = null,
     ): VoiceResponse {
         fun report(outcome: VoiceActionOutcome) = onOutcome?.invoke(outcome)
         // Recorded *before* the action runs: the revision is what a cloud turn
@@ -317,6 +332,16 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
             is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
+        }
+        // LOCAL ACTION EXECUTED, observed where the action actually ran. Only local intents run
+        // this arm — a cloud turn's action is the server's, so its timing belongs to the sink. The
+        // admitted id is the identity the engine registered the record under.
+        if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                timingRequestId,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
+                android.os.SystemClock.elapsedRealtime(),
+            )
         }
         // THE OUTCOME GUARD BELONGS HERE, at the site that recognizes -- not only at a later caller.
         // Recognizing unconditionally here meant a turn whose action outcome could not be established

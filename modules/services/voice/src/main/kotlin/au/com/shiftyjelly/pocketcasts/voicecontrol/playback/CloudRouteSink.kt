@@ -92,6 +92,22 @@ class CloudRouteSink internal constructor(
     private val earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
 ) : VoiceCloudRouteSink {
 
+    init {
+        // FIRST AUDIBLE is observed here because this is where the turn's identity lives: the player
+        // only knows that sound started, and the timing table needs to know FOR WHICH TURN.
+        audioPlayer?.addAudibleListener { audible ->
+            if (audible) {
+                activeTimingRequestId?.let { id ->
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                        id,
+                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible,
+                        android.os.SystemClock.elapsedRealtime(),
+                    )
+                }
+            }
+        }
+    }
+
     @Inject constructor(
         cloudConfig: CloudConfig,
         tokenProvider: CloudTokenProviding,
@@ -159,6 +175,12 @@ class CloudRouteSink internal constructor(
     private val turnMutex = Mutex()
     private var activeTurnId: Long = 0
 
+    /**
+     * The request id whose timing table the FIRST AUDIBLE mark belongs to, set while this sink is
+     * actively serving that turn and cleared when the turn ends. The audible fact itself comes from
+     * the player, one consumer among several, so it arrives through the listener list.
+     */
+    @Volatile private var activeTimingRequestId: String? = null
     private var activeTurn: Job? = null
 
     /**
@@ -543,6 +565,8 @@ class CloudRouteSink internal constructor(
                 routeHint = hint,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+            // From here until the turn ends, FIRST AUDIBLE belongs to this request.
+            activeTimingRequestId = turn.requestId
             val events = openRoute(turn)
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
@@ -936,6 +960,8 @@ class CloudRouteSink internal constructor(
         if (selectedKind != null) {
             Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, feedbackKind = selectedKind))
         }
+        // This turn is done: a later audible is not its first audible.
+        activeTimingRequestId = null
         return CloudTurnResult(
             feedback = finalFeedback,
             // THE LANGUAGE THE LINE WAS ACTUALLY RESOLVED IN: an utterance-language line carries
@@ -984,6 +1010,13 @@ class CloudRouteSink internal constructor(
             }
             override fun onSendAttempted(requestId: String) {
                 Trace.record(Event(Kind.Turn, Reason.TurnSocketSendComplete, Source.Cloud, requestId = requestId, errorCode = "SEND_ATTEMPTED"))
+                // The auth frame leaving for the wire is the cloud-request stage the timing table
+                // names. The engine registered this turn's record under this id.
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                    requestId,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.CloudRequestSent,
+                    android.os.SystemClock.elapsedRealtime(),
+                )
             }
             override fun onSendResult(
                 requestId: String,

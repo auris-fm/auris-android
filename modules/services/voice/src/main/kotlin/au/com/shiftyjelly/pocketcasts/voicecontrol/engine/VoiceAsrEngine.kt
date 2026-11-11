@@ -316,6 +316,8 @@ class VoiceAsrEngine @Inject constructor(
                             // with one no turn will ever claim.
                             inFlightUtteranceId = null
                             earlyWakeResult = null
+                            earlyUtteranceGeneration = null
+                            earlyScoringRetired = false
                             earlyWakeAcknowledged = false
                             // Per-capture model provenance: the
                             // ACTUAL selected backend's model identity, frozen with the context.
@@ -660,6 +662,12 @@ class VoiceAsrEngine @Inject constructor(
     /** The wake result scored from the in-progress utterance, or null before the cutoff was reached. */
     private var earlyWakeResult: WakeWordResult? = null
 
+    /** The native utterance generation the early state belongs to; null until the first snapshot. */
+    private var earlyUtteranceGeneration: Long? = null
+
+    /** Set when a snapshot crossed a generation boundary: no more early scoring this utterance. */
+    private var earlyScoringRetired = false
+
     /** Whether the early hit already fired grace and the earcon, so the finished-segment path fires them once. */
     private var earlyWakeAcknowledged = false
 
@@ -672,12 +680,31 @@ class VoiceAsrEngine @Inject constructor(
      * window every frame would spend detector time on a decided question.
      */
     private suspend fun scoreWakeEarly() {
-        if (earlyWakeResult != null) return
+        if (earlyWakeResult != null || earlyScoringRetired) return
         val reader = inProgressUtterance ?: return
         if (!wakeWordDetector.isReady) return
         val sampleRateHz = reader.sampleRateHz()
-        val available = reader.availableSamples()
-        val onset = reader.speechOnsetSample()
+        // ONE snapshot call: generation, onset, size and PCM under one lock. A snapshot whose
+        // generation does not match this utterance describes audio across a finalization boundary;
+        // it is dropped and early scoring is retired for this utterance — no retry, because the
+        // endpoint path scores that utterance anyway.
+        val header = LongArray(3)
+        val buffer = ShortArray(EarlyWakeScore.CUTOFF_SAMPLES * 2)
+        val copied = reader.readSnapshot(buffer, header)
+        if (copied <= 0) return
+        val generation = header[0]
+        val currentGeneration = earlyUtteranceGeneration
+        when {
+            currentGeneration == null -> earlyUtteranceGeneration = generation
+
+            generation != currentGeneration -> {
+                Timber.i("[VoicePipeline] early snapshot crossed an utterance boundary; dropping, endpoint will score")
+                earlyScoringRetired = true
+                return
+            }
+        }
+        val onset = header[1].toInt()
+        val available = header[2].toInt()
         val request = EarlyWakeScore.request(
             speechOnsetSample = onset,
             availableSamples = available,
@@ -686,8 +713,7 @@ class VoiceAsrEngine @Inject constructor(
         ) ?: return
         // The detector runs on this collector; scoring blocks the segmenter loop briefly, which the
         // native capture buffer absorbs. Scoring is once per utterance, not per frame.
-        val buffer = ShortArray(available)
-        val read = reader.readInto(buffer)
+        val read = copied
         if (read < request.startSample + request.lengthSamples) return
         val prefix = FloatArray(request.lengthSamples) {
             buffer[request.startSample + it].toFloat() / 32768f

@@ -77,6 +77,12 @@ class EarlyConnectionOpener(
                 current.close()
                 return@withLock null
             }
+            if (current.isDead) {
+                // A failure or close already arrived on this socket: adopting it would end a turn
+                // that had not started. The turn dials fresh.
+                current.close()
+                return@withLock null
+            }
             if (!current.adopt()) {
                 current.close()
                 return@withLock null

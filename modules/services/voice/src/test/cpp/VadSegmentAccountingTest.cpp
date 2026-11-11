@@ -249,7 +249,7 @@ int main() {
             lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; break; }  // TERMINAL
             if (event == 2) { segmentsEmitted++; continue; }
-            if (event == 1) { continue; }  // ordinary mid-run event
+            if (event == 1 || event == 3 || event == 4) { continue; }  // ordinary mid-run events; 3/4 = early-wake
             if (event == 0) { timedOut = true; break; }
             if (event == -1) { break; }
             std::printf("      stuck-case unexpected event=%d\n", event);
@@ -470,8 +470,9 @@ int main() {
             if (processor.waitForEvent(5) == 2) closed = true;
         }
         while (!closed) {
-            if (processor.waitForEvent(30000) == 2) closed = true;
-            else break;
+            const int e = processor.waitForEvent(30000);
+            if (e == 2) closed = true;
+            else if (e != 1 && e != 3 && e != 4) break;  // 3/4: non-terminal early-wake events
         }
         check(closed, "the ring-path script produces a segment");
         if (closed) {
@@ -553,7 +554,7 @@ int main() {
         while (!closed) {
             const int e = processor.waitForEvent(30000);
             if (e == 2) { closed = true; }
-            else if (e != 1) break;
+            else if (e != 1 && e != 3 && e != 4) break;  // 3/4: trailing-silence/cutoff, non-terminal
         }
         check(closed, "the slow-consumer script produces a segment");
         if (closed) {
@@ -620,8 +621,9 @@ int main() {
             if (processor.waitForEvent(5) == 2) closed = true;
         }
         while (!closed) {
-            if (processor.waitForEvent(30000) == 2) closed = true;
-            else break;
+            const int e = processor.waitForEvent(30000);
+            if (e == 2) closed = true;
+            else if (e != 1 && e != 3 && e != 4) break;  // 3/4: non-terminal early-wake events
         }
         check(closed, "audio still forms a segment after a drop");
         if (closed) {
@@ -933,11 +935,13 @@ int main() {
             bool closed = false;
             for (int i = 0; i < 60 && !closed; i++) {
                 push(quiet);
-                if (processor.waitForEvent(5) == 2) closed = true;
+                const int e = processor.waitForEvent(5);
+                if (e == 2) closed = true;
             }
             while (!closed) {
-                if (processor.waitForEvent(30000) == 2) closed = true;
-                else break;
+                const int e = processor.waitForEvent(30000);
+                if (e == 2) closed = true;
+                else if (e != 1 && e != 3 && e != 4) break;  // 3/4: non-terminal early-wake events
             }
             check(closed, "the extraction script produces a segment");
             if (closed) {

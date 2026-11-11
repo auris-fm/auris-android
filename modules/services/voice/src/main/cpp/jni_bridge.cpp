@@ -339,25 +339,28 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     return result;
 }
 
-extern "C" JNIEXPORT jint JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressPcmSize(
+extern "C" JNIEXPORT void JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetEarlyWakeCutoff(
     JNIEnv* /*env*/,
-    jclass /*clazz*/)
+    jclass /*clazz*/,
+    jint samples)
 {
-    NativeVadProcessor* processor = gVadProcessor.acquire();
-    if (processor == nullptr) {
-        return 0;
+    auto* processor = gVadProcessor.acquire();
+    if (processor != nullptr) {
+        processor->setEarlyWakeCutoff(static_cast<int32_t>(samples));
     }
-    const int result = processor->getInProgressSampleCount();
     gVadProcessor.release();
-    return result;
 }
 
+// ONE call returns generation, onset and size AND copies the PCM, all under the speech mutex: a
+// snapshot that cannot describe two different utterances is the whole point of replacing the three
+// separate getters this used to be.
 extern "C" JNIEXPORT jint JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressPcm(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressSnapshot(
     JNIEnv* env,
     jclass /*clazz*/,
-    jshortArray jBuffer)
+    jshortArray jBuffer,
+    jlongArray jHeader)
 {
     NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
@@ -370,12 +373,19 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInPro
         gVadProcessor.release();
         return 0;
     }
-
-    int32_t copied = processor->getInProgressPcm(
+    jlong headerRaw[3] = {0, 0, 0};
+    int32_t copied = processor->getInProgressSnapshot(
         reinterpret_cast<int16_t*>(elements),
-        static_cast<int32_t>(capacity));
+        static_cast<int32_t>(capacity),
+        headerRaw);
 
     env->ReleaseShortArrayElements(jBuffer, elements, 0); // copy back
+    jlong header[3] = {
+        static_cast<jlong>(headerRaw[0]),
+        static_cast<jlong>(headerRaw[1]),
+        static_cast<jlong>(headerRaw[2]),
+    };
+    env->SetLongArrayRegion(jHeader, 0, 3, header);
     gVadProcessor.release();
     return static_cast<jint>(copied);
 }
@@ -462,20 +472,6 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
 // VAD thread when it finalized the segment. The onset anchor must come from this accounting rather
 // than a later clock read: the audio callback and ring advance while the drain loop delivers the
 // segment, and folding that lag into the anchor misplaces every delayed segment.
-extern "C" JNIEXPORT jint JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressSpeechOnsetSample(
-    JNIEnv* /*env*/,
-    jclass /*clazz*/)
-{
-    NativeVadProcessor* processor = gVadProcessor.acquire();
-    if (processor == nullptr) {
-        return 0;
-    }
-    const int result = processor->getInProgressSpeechOnsetSample();
-    gVadProcessor.release();
-    return result;
-}
-
 extern "C" JNIEXPORT jlong JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechEndStreamPosition(
     JNIEnv* /*env*/,

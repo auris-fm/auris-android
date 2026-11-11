@@ -286,9 +286,13 @@ class VoiceControlCaptureRestartTest {
         override fun getSpeechPcm(buffer: ShortArray) = 0
         override fun getSpeechPcmSize() = 0
         override fun getSpeechOnsetSample() = 0
-        override fun getInProgressSpeechOnsetSample() = 0
-        override fun getInProgressPcmSize() = 0
-        override fun getInProgressPcm(buffer: ShortArray) = 0
+        override fun getInProgressSnapshot(buffer: ShortArray, header: LongArray): Int {
+            header[0] = 0
+            header[1] = 0
+            header[2] = 0
+            return 0
+        }
+        override fun setEarlyWakeCutoff(samples: Int) = Unit
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
     }

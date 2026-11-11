@@ -65,6 +65,44 @@ class WebSocketCloudTurnTransport(
         // and its upgrade request already exist, and building one here would pretend the early
         // open had not happened.
 
+        // The ONE authentication send both paths use: encode, observe, send, observe the outcome.
+        // The dialled socket sends from its listener's onOpen; an adopted connection has no onOpen
+        // of its own any more, so its exchange sends through this same helper — the two paths
+        // cannot drift.
+        fun sendAuthFrame(requestId: String, send: (String) -> Boolean) {
+            val json: String
+            try {
+                json = frame.toJson()
+            } catch (encodeFailure: Exception) {
+                // Encode failure — send was never attempted. Record bounded outcome and propagate.
+                Timber.w(encodeFailure, "Cloud route auth frame encode failed")
+                observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.ENCODE_FAILED)
+                emitTerminal(
+                    channel,
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                )
+                return
+            }
+            val sent: Boolean
+            try {
+                observer?.onSendAttempted(requestId)
+                sent = send(json)
+            } catch (sendThrow: Exception) {
+                // Send threw — distinct from encode failure and false-return rejection.
+                Timber.w(sendThrow, "Cloud route auth frame send threw")
+                observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.SEND_THREW)
+                emitTerminal(
+                    channel,
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                )
+                return
+            }
+            observer?.onSendResult(
+                requestId,
+                if (sent) CloudTurnTransportObserver.SendOutcome.ACCEPTED else CloudTurnTransportObserver.SendOutcome.REJECTED,
+            )
+        }
+
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 val requestId = frame.requestId
@@ -83,37 +121,7 @@ class WebSocketCloudTurnTransport(
                     return
                 }
                 observer?.onSocketOpened(requestId)
-                val json: String
-                try {
-                    json = frame.toJson()
-                } catch (encodeFailure: Exception) {
-                    // Encode failure — send was never attempted. Record bounded outcome and propagate.
-                    Timber.w(encodeFailure, "Cloud route auth frame encode failed")
-                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.ENCODE_FAILED)
-                    emitTerminal(
-                        channel,
-                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
-                    )
-                    return
-                }
-                val sent: Boolean
-                try {
-                    observer?.onSendAttempted(requestId)
-                    sent = webSocket.send(json)
-                } catch (sendThrow: Exception) {
-                    // Send threw — distinct from encode failure and false-return rejection.
-                    Timber.w(sendThrow, "Cloud route auth frame send threw")
-                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.SEND_THREW)
-                    emitTerminal(
-                        channel,
-                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
-                    )
-                    return
-                }
-                observer?.onSendResult(
-                    requestId,
-                    if (sent) CloudTurnTransportObserver.SendOutcome.ACCEPTED else CloudTurnTransportObserver.SendOutcome.REJECTED,
-                )
+                sendAuthFrame(requestId) { json -> webSocket.send(json) }
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -206,14 +214,39 @@ class WebSocketCloudTurnTransport(
             .url(baseUrl.trimEnd('/') + ROUTE_PATH)
             .build()
         val socket: WebSocket? = if (early != null) null else dial(request, listener)
-        if (early != null) {
-            early.events?.let { events ->
+        val replayJob = early?.let { connection ->
+            // An early connection's exchange owns the socket the moment it adopts it. The first
+            // frame is this exchange's job now: sent immediately when the open is already buffered,
+            // otherwise the moment the open arrives. After adoption every event is forwarded —
+            // binary included, because audio after the handshake is the turn's payload — and only
+            // PRE-adoption failures or closes end the turn, replayed exactly as the dialled
+            // listener would have reported them.
+            connection.events?.let { events ->
                 launch {
+                    var authSent = false
+                    fun ensureAuthSent() {
+                        if (authSent) return
+                        authSent = true
+                        sendAuthFrame(frame.requestId) { json -> connection.send(json) }
+                    }
                     for (raw in events) {
                         when (raw) {
                             // Through the same handler the dialled socket uses, so the adopted
                             // path gets identical handshake validation instead of its own copy.
                             is RawSocketEvent.Text -> listener.acceptText(raw.text)
+
+                            RawSocketEvent.Opened -> ensureAuthSent()
+
+                            // Post-adoption binary is audio, not a protocol violation: same
+                            // negotiated-codec guard the dialled listener applies.
+                            is RawSocketEvent.Binary -> {
+                                val codec = negotiatedCodec.get()
+                                if (codec == null) {
+                                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                                } else {
+                                    emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = raw.bytes))
+                                }
+                            }
 
                             is RawSocketEvent.Failed -> {
                                 observer?.onConnectionFailed(frame.requestId)
@@ -226,16 +259,17 @@ class WebSocketCloudTurnTransport(
                                 channel.close()
                                 return@launch
                             }
-
-                            RawSocketEvent.Opened -> Unit
                         }
                     }
                 }
+            } ?: run {
+                // No replayable events (a handle that owns no socket buffer): the open has
+                // already happened by construction, so the exchange sends now.
+                launch { sendAuthFrame(frame.requestId) { json -> connection.send(json) } }
             }
         }
 
         // Launch collection BEFORE awaitClose so it runs concurrently with the
-        // socket being open. awaitClose suspends until the callbackFlow is
         // cancelled, so any code after it would not execute while the socket
         // is active. The launched job forwards channel events to the flow,
         // and is cancelled when the flow is cancelled (which also cancels the
@@ -270,10 +304,12 @@ class WebSocketCloudTurnTransport(
         }
 
         awaitClose {
-            // An adopted socket belongs to its connection, not to this collection: the connection
-            // closes it on replacement, staleness or shutdown. Cancelling here would close a socket
-            // other bookkeeping still believes is held.
+            // An adopted socket belongs to ITS EXCHANGE once adopted: completion, error and
+            // cancellation all close it here, so a finished turn can never leave a socket open.
+            // Before adoption it belongs to its connection, whose own bookkeeping closes it.
             socket?.cancel()
+            early?.close()
+            replayJob?.cancel()
             collectionJob.cancel()
         }
     }

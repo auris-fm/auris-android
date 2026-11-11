@@ -91,18 +91,15 @@ internal object OboeNative {
     external fun nativeGetSpeechPcmSize(): Int
 
     /**
-     * Samples of the utterance still in progress, and a copy of them from its onset.
-     *
-     * Wake detection only scores the first two seconds after onset, so samples this early are
-     * enough to reach the same verdict the finished segment would, without waiting for the user to
-     * stop speaking. Both return 0 when no utterance is in progress.
+     * ONE call returns the coherent in-progress snapshot: PCM copied into [buffer], and
+     * [header] = [generation, onsetSample, sizeSamples]. Returns how many samples were copied;
+     * 0 when no utterance is in progress.
      */
-    external fun nativeGetInProgressPcmSize(): Int
-    external fun nativeGetInProgressPcm(buffer: ShortArray): Int
-    external fun nativeGetSpeechOnsetSample(): Int
+    external fun nativeGetInProgressSnapshot(buffer: ShortArray, header: LongArray): Int
 
-    /** Speech onset inside the utterance still in progress, in samples from its start. */
-    external fun nativeGetInProgressSpeechOnsetSample(): Int
+    /** The in-progress utterance length at which the cutoff event (4) fires once, in samples. 0 disables. */
+    external fun nativeSetEarlyWakeCutoff(samples: Int)
+    external fun nativeGetSpeechOnsetSample(): Int
     external fun nativeGetSpeechEndSample(): Int
 
     /**
@@ -147,14 +144,11 @@ interface CaptureHardware {
 
     fun getSpeechOnsetSample(): Int
 
-    /** Speech onset inside the utterance still in progress, in samples from its start. */
-    fun getInProgressSpeechOnsetSample(): Int
+    /** See [OboeNative.nativeGetInProgressSnapshot]: one locked call for generation, onset, size and PCM. */
+    fun getInProgressSnapshot(buffer: ShortArray, header: LongArray): Int
 
-    /** Samples accumulated so far for the utterance still in progress. */
-    fun getInProgressPcmSize(): Int
-
-    /** Reads the utterance in progress into [buffer]; returns how many samples were read. */
-    fun getInProgressPcm(buffer: ShortArray): Int
+    /** See [OboeNative.nativeSetEarlyWakeCutoff]. */
+    fun setEarlyWakeCutoff(samples: Int)
 
     fun getSpeechEndSample(): Int
 
@@ -176,9 +170,8 @@ class OboeCaptureHardware : CaptureHardware {
     override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = OboeNative.nativeGetSpeechPcmRange(out, fromSample)
     override fun getSpeechPcmSize(): Int = OboeNative.nativeGetSpeechPcmSize()
     override fun getSpeechOnsetSample(): Int = OboeNative.nativeGetSpeechOnsetSample()
-    override fun getInProgressSpeechOnsetSample(): Int = OboeNative.nativeGetInProgressSpeechOnsetSample()
-    override fun getInProgressPcmSize(): Int = OboeNative.nativeGetInProgressPcmSize()
-    override fun getInProgressPcm(buffer: ShortArray): Int = OboeNative.nativeGetInProgressPcm(buffer)
+    override fun getInProgressSnapshot(buffer: ShortArray, header: LongArray): Int = OboeNative.nativeGetInProgressSnapshot(buffer, header)
+    override fun setEarlyWakeCutoff(samples: Int) = OboeNative.nativeSetEarlyWakeCutoff(samples)
     override fun getSpeechEndSample(): Int = OboeNative.nativeGetSpeechEndSample()
     override fun getSpeechEndStreamPosition(): Long = OboeNative.nativeGetSpeechEndStreamPosition()
 }
@@ -229,7 +222,12 @@ internal class OboeCaptureEngine(
      * microphone is selected, so capture must never begin here. Returns false when no confirmed
      * stream is active or the VAD pipeline could not start.
      */
-    fun attachCapture(): Boolean = hardware.startCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS, assetManager)
+    fun attachCapture(): Boolean {
+        // Configure the native cutoff so the VAD publishes the early-wake event at the same length
+        // the wake scorer would need: one constant, one side of the boundary.
+        hardware.setEarlyWakeCutoff(au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.EarlyWakeScore.CUTOFF_SAMPLES)
+        return hardware.startCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS, assetManager)
+    }
 
     /**
      * Consumes VAD events from an attached capture; [attachCapture] must have returned true
@@ -241,6 +239,14 @@ internal class OboeCaptureEngine(
             while (currentCoroutineContext().isActive && !disposed) {
                 when (val event = hardware.waitForVadEvent(500)) {
                     1 -> emit(VoiceSegmenterResult.SpeechStarted)
+
+                    // The early-wake cutoff: the in-progress utterance passed the wake window's
+                    // length, so the engine can score the wake word while the user is still speaking.
+                    4 -> emit(VoiceSegmenterResult.SpeechContinuing)
+
+                    // The first silent frame after speech: where an early connection opens, outside
+                    // the grace window.
+                    3 -> emit(VoiceSegmenterResult.TrailingSilenceBegan)
 
                     2 -> {
                         val totalSamples = hardware.getSpeechPcmSize()

@@ -27,7 +27,8 @@ public:
     bool start();   // launch processing thread
     void stop();    // join thread, reset state
 
-    // Block until event. Returns: 1=speech started, 2=speech ended, 0=timeout, -1=stopped
+    // Block until event. Returns: 1=speech started, 2=speech ended, 3=trailing silence began,
+    // 4=early-wake cutoff reached (needs setEarlyWakeCutoff), 0=timeout, -1=stopped
     int waitForEvent(int32_t timeoutMs);
 
     int32_t getSpeechPcmSize();
@@ -48,12 +49,15 @@ public:
     int32_t getInProgressSampleCount();
 
     /**
-     * Copy up to maxSamples of the in-progress utterance, starting at its onset.
-     *
-     * Returns the number copied, or 0 when no utterance is in progress. Taken under the same lock
-     * as the finalization snapshot, so a concurrent segment end cannot tear the copy.
+     * ONE coherent snapshot of the utterance still in progress: PCM copied into [outBuffer] (up to
+     * [maxSamples]), and header[0] = utterance generation, header[1] = speech onset (samples from
+     * the utterance's start), header[2] = utterance size in samples — all read under mSpeechMutex
+     * in a single call, so they can never describe different utterances. Returns the number of
+     * samples copied, or 0 when no utterance is in progress. The generation changes at every
+     * finalisation or fault reset, so a caller that recorded one generation can drop a snapshot
+     * taken across that boundary instead of scoring a mixture.
      */
-    int32_t getInProgressPcm(int16_t* outBuffer, int32_t maxSamples);
+    int32_t getInProgressSnapshot(int16_t* outBuffer, int32_t maxSamples, int64_t header[3]);
 
     /**
      * The speech onset inside the utterance STILL IN PROGRESS, in samples from its start.
@@ -61,6 +65,13 @@ public:
      * window in the buffer it copies without racing finalisation.
      */
     int32_t getInProgressSpeechOnsetSample();
+
+    /**
+     * The utterance length past which the VAD publishes an early-wake cutoff event (code 4), in
+     * samples at the capture rate. 0 disables it. Set by Kotlin so the constant lives on one side
+     * of the boundary.
+     */
+    void setEarlyWakeCutoff(int32_t samples);
 
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
@@ -185,6 +196,15 @@ private:
     int32_t mSnapshotSpeechEndSample = 0;
     int64_t mSnapshotSpeechEndStreamPosition = 0;
 
+    /** Bumped at every finalisation or fault reset, under mSpeechMutex. Identifies one utterance. */
+    int32_t mUtteranceGeneration = 0;
+
+    /** Utterance length past which the cutoff event (4) fires once. 0 = disabled. Atomic: set from JNI. */
+    std::atomic<int32_t> mEarlyWakeCutoff {0};
+
+    /** Whether event 4 already fired for the current utterance. VAD thread only. */
+    bool mEarlyWakeSignalled = false;
+
     /** Ring read-cursor position after the most recent chunk this thread consumed (VAD thread only). */
     int64_t mLastChunkEndPosition = 0;
     std::mutex mSpeechMutex;
@@ -194,8 +214,13 @@ private:
 
     std::mutex mEventMutex;
     std::condition_variable mEventCv;
-    int mPendingEvent = 0;
-    bool mEventReady = false;
+
+    /**
+     * Pending events, FIFO. Was a single slot: the early-wake events made that a lossy publisher —
+     * a cutoff or trailing-silence event published while the consumer slept overwrote an unread
+     * one, and the engine would miss the very moments the early-wake optimisation reacts to.
+     */
+    std::deque<int> mPendingEvents;
 };
 
 #endif // POCKETCASTS_NATIVE_VAD_PROCESSOR_H

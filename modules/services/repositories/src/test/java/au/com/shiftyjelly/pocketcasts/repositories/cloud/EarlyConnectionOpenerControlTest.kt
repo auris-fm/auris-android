@@ -136,6 +136,25 @@ class EarlyConnectionOpenerControlTest {
             io.shutdownNow()
         }
     }
+
+    @Test
+    fun `a dead connection is refused so the turn dials fresh`() = runTest {
+        val harness = Harness()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val opener = harness.opener(this, dispatcher)
+
+        opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+        val dead = harness.opened.single()
+        dead.markDead()
+
+        val adopted = opener.takeFor("utt-1")
+        testScheduler.advanceUntilIdle()
+
+        assertNull("a connection whose socket already failed must never be adopted", adopted)
+        assertTrue("a refused dead connection must be closed, not left open", dead.isClosed)
+        assertEquals("a refused connection must not count as spent-adopted", false, dead.isSpent)
+    }
 }
 
 /** `ExecutorService.asCoroutineDispatcher()` under a name that reads as what it is here. */

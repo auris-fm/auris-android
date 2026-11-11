@@ -64,13 +64,14 @@ class EarlyWakeStreamScoreControlTest {
     private fun inProgressBuffer() = ShortArray(totalSamples) { (it % 32768).toShort() }
 
     /** A reader over one in-progress utterance that already holds the full cutoff window. */
-    private fun reader(): InProgressUtteranceReader {
+    private fun reader(generation: Long = 0L): InProgressUtteranceReader {
         val captured = inProgressBuffer()
         return object : InProgressUtteranceReader {
             override fun sampleRateHz() = sampleRateHz
-            override fun availableSamples() = captured.size
-            override fun speechOnsetSample() = onsetSamples
-            override fun readInto(buffer: ShortArray): Int {
+            override fun readSnapshot(buffer: ShortArray, header: LongArray): Int {
+                header[0] = generation
+                header[1] = onsetSamples.toLong()
+                header[2] = captured.size.toLong()
                 val count = minOf(buffer.size, captured.size)
                 System.arraycopy(captured, 0, buffer, 0, count)
                 return count

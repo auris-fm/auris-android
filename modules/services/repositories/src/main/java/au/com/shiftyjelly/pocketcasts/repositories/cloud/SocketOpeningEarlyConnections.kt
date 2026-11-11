@@ -52,12 +52,17 @@ class SocketOpeningEarlyConnections(
      */
     private fun dial(tag: String, openedAtMs: Long): CloudTurnConnection {
         val events = Channel<RawSocketEvent>(eventBufferSize)
+        // Set the moment the connection object exists; the listener reads it to mark the
+        // connection dead on any failure or close. Null only in the window before that, in which
+        // case there is nothing to mark.
+        val connectionRef = java.util.concurrent.atomic.AtomicReference<SocketCloudTurnConnection?>(null)
         val request = Request.Builder()
             .url(baseUrl().trimEnd('/') + WebSocketCloudTurnTransport.ROUTE_PATH)
             .build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (response.code != 101) {
+                    connectionRef.get()?.markDead()
                     events.trySendBlocking(RawSocketEvent.Failed(code = response.code, message = response.message))
                 } else {
                     // 101 says nothing the adopting turn does not already know: it opened. Recorded
@@ -74,28 +79,33 @@ class SocketOpeningEarlyConnections(
                 // Binary before adoption is a protocol violation: the server sends nothing until
                 // the client's auth frame, which has not been sent. Surface it as a failure rather
                 // than dropping a frame the adopting turn would wait for forever.
+                connectionRef.get()?.markDead()
                 events.trySendBlocking(RawSocketEvent.Failed(code = 0, message = "binary frame before adoption"))
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                connectionRef.get()?.markDead()
                 events.trySendBlocking(RawSocketEvent.Failed(code = response?.code ?: 0, message = t.message ?: "failed"))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                connectionRef.get()?.markDead()
                 events.trySendBlocking(RawSocketEvent.Closed(code, reason))
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
                 webSocket.close(code, reason)
-                events.trySendBlocking(RawSocketEvent.Closed(code, reason))
             }
         }
         val socket = okHttpClient.newWebSocket(request, listener)
-        return SocketCloudTurnConnection(
+        val connection = SocketCloudTurnConnection(
             ownerTag = tag,
             openedAtMs = openedAtMs,
             onClose = { socket.cancel() },
             events = events,
+            socket = socket,
         )
+        connectionRef.set(connection)
+        return connection
     }
 }

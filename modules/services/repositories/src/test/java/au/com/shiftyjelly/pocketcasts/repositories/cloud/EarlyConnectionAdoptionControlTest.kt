@@ -2,6 +2,8 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
@@ -119,5 +121,111 @@ class EarlyConnectionAdoptionControlTest {
         withTimeoutOrNull(2_000) { transport.exchange(turn).first() }
 
         assertEquals("the second exchange must dial", 1, dialled)
+    }
+
+    /** Records every send and cancellation on the socket an early connection owns. */
+    class FakeWebSocket : WebSocket {
+        val sends = mutableListOf<String>()
+        var cancelled = false
+        var closeRequested = false
+
+        override fun request(): okhttp3.Request = Request.Builder().url("https://example.invalid").build()
+        override fun send(text: String): Boolean {
+            sends += text
+            return true
+        }
+        override fun send(bytes: okio.ByteString): Boolean = false
+        override fun close(code: Int, reason: String?): Boolean {
+            closeRequested = true
+            return true
+        }
+        override fun cancel() {
+            cancelled = true
+        }
+        override fun queueSize(): Long = 0L
+    }
+
+    @Test
+    fun `the adopted exchange sends the authentication frame itself`() = runTest {
+        val fakeSocket = FakeWebSocket()
+        val events = Channel<RawSocketEvent>(Channel.UNLIMITED)
+        // Opened is the only pre-buffered event: the server sends nothing before the auth frame,
+        // so the send must come from the exchange, the moment it adopts.
+        events.trySend(RawSocketEvent.Opened)
+        val transport = WebSocketCloudTurnTransport(
+            baseUrl = "https://example.invalid",
+            okHttpClient = OkHttpClient(),
+        )
+        transport.dial = { _: Request, _: WebSocketListener -> throw IllegalStateException("must not dial") }
+        transport.adopt(
+            SocketCloudTurnConnection("utt-1", openedAtMs = 0L, events = events, socket = fakeSocket),
+        )
+
+        withTimeoutOrNull(2_000) { transport.exchange(turn).first() }
+
+        assertTrue(
+            "the adopted exchange must send the auth frame on the adopted socket, sent=${fakeSocket.sends}",
+            fakeSocket.sends.any { it.contains("\"type\":\"authenticate\"") && it.contains("utt-1") },
+        )
+    }
+
+    @Test
+    fun `binary audio after adoption reaches the turn`() = runTest {
+        val events = Channel<RawSocketEvent>(Channel.UNLIMITED)
+        val transport = WebSocketCloudTurnTransport(
+            baseUrl = "https://example.invalid",
+            okHttpClient = OkHttpClient(),
+        )
+        transport.dial = { _: Request, _: WebSocketListener -> throw IllegalStateException("must not dial") }
+        events.trySend(RawSocketEvent.Opened)
+        events.trySend(
+            RawSocketEvent.Text(
+                """{"type":"connected","codec":"pcm_s16le@24k","reservation_id":"r-1"}""",
+            ),
+        )
+        val audio = byteArrayOf(1, 2, 3, 4)
+        events.trySend(RawSocketEvent.Binary(audio))
+        transport.adopt(connection("utt-1", events))
+
+        val events2 = withTimeoutOrNull(2_000) { transport.exchange(turn).take(2).toList() }
+
+        assertTrue("expected the handshake, got $events2", events2?.firstOrNull() is CloudRouteEvent.Connected)
+        val frame = events2?.getOrNull(1)
+        assertTrue("post-adoption binary must arrive as audio, got $frame", frame is CloudRouteEvent.AudioFrame)
+        assertTrue("audio bytes must be intact", (frame as CloudRouteEvent.AudioFrame).bytes.contentEquals(audio))
+    }
+
+    @Test
+    fun `the exchange closes the adopted socket when the turn ends`() = runTest {
+        val fakeSocket = FakeWebSocket()
+        var connectionClosed = false
+        val events = Channel<RawSocketEvent>(Channel.UNLIMITED)
+        events.trySend(RawSocketEvent.Opened)
+        events.trySend(RawSocketEvent.Closed(1000, "done"))
+        val transport = WebSocketCloudTurnTransport(
+            baseUrl = "https://example.invalid",
+            okHttpClient = OkHttpClient(),
+        )
+        transport.dial = { _: Request, _: WebSocketListener -> throw IllegalStateException("must not dial") }
+        transport.adopt(
+            SocketCloudTurnConnection(
+                "utt-1",
+                openedAtMs = 0L,
+                onClose = {
+                    connectionClosed = true
+                    fakeSocket.cancelled = true
+                },
+                events = events,
+                socket = fakeSocket,
+            ),
+        )
+
+        withTimeoutOrNull(2_000) { transport.exchange(turn).toList() }
+        testScheduler.advanceUntilIdle()
+
+        assertTrue(
+            "a finished turn must leave no socket behind: the exchange owns the adopted socket",
+            connectionClosed && fakeSocket.cancelled,
+        )
     }
 }

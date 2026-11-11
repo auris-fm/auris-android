@@ -12,17 +12,20 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.EarlyWakeScore
  * after the endpoint wait it exists to overlap.
  */
 interface InProgressUtteranceReader {
-    /** The capture sample rate, at which [availableSamples] and [speechOnsetSample] are expressed. */
+    /** The capture sample rate, at which the snapshot's onset and size are expressed. */
     fun sampleRateHz(): Int
 
-    /** Samples accumulated so far for the utterance in progress, or 0 between utterances. */
-    fun availableSamples(): Int
-
-    /** The speech onset inside the utterance in progress, in samples from its start. */
-    fun speechOnsetSample(): Int
-
-    /** Reads the utterance in progress into [buffer]; returns how many samples were read. */
-    fun readInto(buffer: ShortArray): Int
+    /**
+     * ONE coherent snapshot of the utterance in progress: PCM copied into [buffer], and
+     * [header] filled with `[generation, onsetSample, sizeSamples]`. All four values come from a
+     * single locked native call, so they can never describe different utterances. Returns the
+     * number of samples copied, or 0 when no utterance is in progress.
+     *
+     * The [generation] changes at every utterance boundary (finalization or fault reset). A caller
+     * that recorded the generation of its utterance drops a snapshot carrying any other: that
+     * snapshot describes audio the caller's utterance does not contain.
+     */
+    fun readSnapshot(buffer: ShortArray, header: LongArray): Int
 }
 
 /** The production reader, over the native capture bridge. */
@@ -31,7 +34,5 @@ class NativeInProgressUtteranceReader(
     private val sampleRateHz: Int = OboeConfig.SAMPLE_RATE_HZ,
 ) : InProgressUtteranceReader {
     override fun sampleRateHz(): Int = sampleRateHz
-    override fun availableSamples(): Int = hardware.getInProgressPcmSize()
-    override fun speechOnsetSample(): Int = hardware.getInProgressSpeechOnsetSample()
-    override fun readInto(buffer: ShortArray): Int = hardware.getInProgressPcm(buffer)
+    override fun readSnapshot(buffer: ShortArray, header: LongArray): Int = hardware.getInProgressSnapshot(buffer, header)
 }

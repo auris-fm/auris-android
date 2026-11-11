@@ -52,6 +52,21 @@ interface CloudTurnConnection {
     fun close()
 
     /**
+     * Send [text] on this connection's socket, or false when there is no socket or the send was
+     * rejected. This is how an adopted exchange sends the authentication frame the dialled path
+     * sends from its listener's `onOpen`: an early socket has no turn's frame when it opens, so
+     * the first frame is sent at adoption, on the connection.
+     */
+    fun send(text: String): Boolean = false
+
+    /**
+     * True once a failure or close has arrived on this connection's socket before any turn adopted
+     * it. A dead connection must never be adopted: the turn it belonged to no longer exists, and
+     * its buffered failure would end a turn that had not started.
+     */
+    val isDead: Boolean get() = false
+
+    /**
      * Whether this connection is too old to be worth using, measured from the upgrade request.
      *
      * A stale connection is replaced silently: it is not an error, and the user must never see it.
@@ -83,14 +98,29 @@ class SocketCloudTurnConnection(
      * socket. Buffered so a close or failure that arrives before a turn adopts is still observable.
      */
     override val events: Channel<RawSocketEvent>? = null,
+    /** The socket this connection owns, when it is a real dial. Null for a test handle. */
+    private val socket: okhttp3.WebSocket? = null,
 ) : CloudTurnConnection {
 
     private val spent = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
+    private val dead = AtomicBoolean(false)
 
     override val isSpent: Boolean get() = spent.get()
 
     override fun adopt(): Boolean = spent.compareAndSet(false, true)
+
+    override fun send(text: String): Boolean = socket?.send(text) ?: false
+
+    /**
+     * Mark this connection unusable: a failure or close arrived before any turn adopted it. Set by
+     * the listener that drives the socket, which is the only side that observes those events.
+     */
+    fun markDead() {
+        dead.set(true)
+    }
+
+    override val isDead: Boolean get() = dead.get()
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
@@ -112,6 +142,9 @@ class SocketCloudTurnConnection(
 sealed interface RawSocketEvent {
     data object Opened : RawSocketEvent
     data class Text(val text: String) : RawSocketEvent
+
+    /** Binary audio. Only meaningful after the handshake carried a codec; before it is a violation. */
+    class Binary(val bytes: ByteArray) : RawSocketEvent
     data class Failed(val code: Int, val message: String) : RawSocketEvent
     data class Closed(val code: Int, val reason: String) : RawSocketEvent
 }

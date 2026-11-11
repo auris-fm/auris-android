@@ -4753,7 +4753,8 @@ class CloudRouteSinkTest {
     fun `the send attempt marks the live turn's timing table with the cloud request stage`() = runTest {
         val admittedId = testWireId
         val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
-        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+        // Acoustic end on the capture clock's monotonic ns base: 1s.
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Done(0, 0)),
@@ -4789,18 +4790,21 @@ class CloudRouteSinkTest {
         val admittedId = testWireId
         val published = java.util.concurrent.CopyOnWriteArrayList<String>()
         val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
-        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+        // Acoustic end on the capture clock's monotonic ns base: 1s.
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
         val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
         val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
         whenever(player.audioWritten).thenReturn(true)
         whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
-        val listeners = java.util.concurrent.CopyOnWriteArrayList<(Boolean) -> Unit>()
+        // The sink now registers for PRESENTATION evidence (first AudioTimestamp with a positive
+        // framePosition), not the submission-side audible stamp.
+        val firstAudibleListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
         org.mockito.kotlin.doAnswer { invocation ->
-            listeners += invocation.getArgument<(Boolean) -> Unit>(0)
+            firstAudibleListeners += invocation.getArgument<(Long) -> Unit>(0)
             Unit
-        }.whenever(player).addAudibleListener(any())
+        }.whenever(player).addFirstAudibleListener(any())
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Done(0, 0)),
             audioPlayer = player,
@@ -4808,16 +4812,17 @@ class CloudRouteSinkTest {
                 object : CloudTurnTransport {
                     override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
                         emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
-                        // The player's audible callback arrives DURING the turn, through the
-                        // listener the sink registered — after the turn it is not the first.
-                        listeners.forEach { it(true) }
+                        // The player's first-audible callback arrives DURING the turn, through
+                        // the listener the sink registered — after the turn it is not the first.
+                        // The instant is the track's presentation nanoTime (monotonic ns).
+                        firstAudibleListeners.forEach { it(5_000_000_000L) }
                         emit(CloudRouteEvent.Done(0, 0))
                     }
                 }
             },
         )
         val sink = deps.sink()
-        assertTrue("sink must register an audible listener", listeners.isNotEmpty())
+        assertTrue("sink must register a first-audible listener", firstAudibleListeners.isNotEmpty())
         try {
             sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
         } finally {

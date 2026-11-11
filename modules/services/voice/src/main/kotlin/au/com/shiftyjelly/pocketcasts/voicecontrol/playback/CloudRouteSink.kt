@@ -95,15 +95,17 @@ class CloudRouteSink internal constructor(
     init {
         // FIRST AUDIBLE is observed here because this is where the turn's identity lives: the player
         // only knows that sound started, and the timing table needs to know FOR WHICH TURN.
-        audioPlayer?.addAudibleListener { audible ->
-            if (audible) {
-                activeTimingRequestId?.let { id ->
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
-                        id,
-                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible,
-                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
-                    )
-                }
+        // The stage is the PRESENTATION instant — the first AudioTimestamp with framePosition > 0,
+        // in the track's monotonic nanoTime base (the timing clock's own base) — not the
+        // submission-side stamp, which can be seconds early on an underrun. The audible listener
+        // stays for the ducking/gate consumers; it no longer speaks for this stage.
+        audioPlayer?.addFirstAudibleListener { presentationNanos ->
+            activeTimingRequestId?.let { id ->
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                    id,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible,
+                    presentationNanos,
+                )
             }
         }
     }

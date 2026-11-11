@@ -109,6 +109,27 @@ class CloudAudioPlayer(
         synchronized(audibleListeners) { audibleListeners += listener }
     }
 
+    /**
+     * Observers of the turn's REAL first audible: the first presentation-evidence instant, the
+     * first [android.media.AudioTimestamp] whose framePosition is positive, reported with the
+     * timestamp's nanoTime (the track's CLOCK_MONOTONIC presentation base, the same base the
+     * timing table's clock uses). A submission-side stamp says frames were HANDED to the track,
+     * which can be seconds before the listener hears anything; this fires only when the track
+     * says it has actually presented. Once per playback run — reset at [play]/[stop].
+     */
+    private val firstAudibleListeners = mutableListOf<(Long) -> Unit>()
+
+    /** True once THIS run has reported first audible; reset when a run starts. */
+    private var firstAudibleFired = false
+
+    fun addFirstAudibleListener(listener: (Long) -> Unit) {
+        synchronized(firstAudibleListeners) { firstAudibleListeners += listener }
+    }
+
+    private fun notifyFirstAudible(nanoTime: Long) {
+        synchronized(firstAudibleListeners) { firstAudibleListeners.toList() }.forEach { it(nanoTime) }
+    }
+
     private fun notifyAudible(audible: Boolean) {
         onPlaybackAudibleChanged?.invoke(audible)
         synchronized(audibleListeners) { audibleListeners.toList() }.forEach { it(audible) }
@@ -462,11 +483,24 @@ class CloudAudioPlayer(
         observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
         notifyAudible(true)
+        // A new run presents again: clear the previous run's latch so the next answer gets its
+        // own first-audible instant.
+        firstAudibleFired = false
         audibleHeartbeat = heartbeatScope.launch {
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
                 if (!isPlaying) break
                 notifyAudible(true)
+                // Presentation evidence rides the same tick: if the track has presented its
+                // first frame by now, this run's first audible is THAT instant, not the
+                // submission stamp above.
+                if (!firstAudibleFired) {
+                    val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
+                    if (ts != null && ts.framePosition > 0) {
+                        firstAudibleFired = true
+                        notifyFirstAudible(ts.nanoTime)
+                    }
+                }
             }
         }
     }

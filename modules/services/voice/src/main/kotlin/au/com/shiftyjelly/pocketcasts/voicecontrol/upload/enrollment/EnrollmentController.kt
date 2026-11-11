@@ -27,7 +27,7 @@ sealed interface EnrollmentState {
     data object Failed : EnrollmentState
 }
 
-/** The separate deletion workflow's observed status. A 202 is PENDING, never "deleted". */
+/** The separate deletion workflow's observed status. Deletion is a synchronous 204, so Done means the server confirmed it. */
 enum class DeletionState { Done, }
 
 sealed interface EnrollmentOutcome {

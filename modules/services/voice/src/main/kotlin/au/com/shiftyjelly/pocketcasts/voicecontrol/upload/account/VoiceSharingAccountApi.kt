@@ -95,6 +95,13 @@ sealed interface VoiceSharingMutationResult {
  * - A 401 revokes only the AURIS credential (forcing a re-mint from the SAME account) and drops
  *   the mirror. It never touches the upstream Pocket Casts session: a rejected derived token must
  *   not sign the user out of the account that minted it.
+||||||| /tmp/mfb
+ * byte-identical (same request_id) and never re-read state after an await.
+ * - Exact endpoint statuses: membership routes 200, deletion 202. Transport failures and 503
+ * retry within bounds; 401/403/409/422 are terminal with no retry.
+ * - A 401 revokes only the auris credential (forcing a re-mint from the same account) and drops
+ * the mirror. It never touches the upstream Pocket Casts session: a rejected derived token must
+ * not sign the user out of the account that minted it.
  * - A response is discarded when a NEWER projection publication already landed (the store's
  *   publication count), so a slow answer can never overwrite newer membership state.
  */

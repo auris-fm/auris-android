@@ -147,6 +147,15 @@ abstract class VoiceControlModule {
             return sockets.opener
         }
 
+        /**
+         * The production reader for the utterance the native VAD is still accumulating, over the
+         * capture bridge the rest of the pipeline uses.
+         */
+        @Provides @Singleton
+        fun provideInProgressUtteranceReader(): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.InProgressUtteranceReader = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.NativeInProgressUtteranceReader(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeCaptureHardware(),
+        )
+
         @Provides @Singleton
         fun provideCaptureHardware(): CaptureHardware = OboeCaptureHardware()
 

@@ -57,6 +57,9 @@ class MicrophoneCaptureTest {
         override fun getSpeechPcmSize(): Int = 0
 
         override fun getSpeechOnsetSample(): Int = 0
+        override fun getInProgressSpeechOnsetSample(): Int = 0
+        override fun getInProgressPcmSize(): Int = 0
+        override fun getInProgressPcm(buffer: ShortArray): Int = 0
 
         override fun getSpeechEndSample(): Int = 0
         override fun getSpeechEndStreamPosition(): Long = 0L

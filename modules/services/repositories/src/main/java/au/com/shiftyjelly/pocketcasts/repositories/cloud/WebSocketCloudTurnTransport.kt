@@ -61,9 +61,9 @@ class WebSocketCloudTurnTransport(
 
         val offeredCodecs = (frame as CloudTurnFrame.Authenticate).codecs
         val negotiatedCodec = AtomicReference<String?>(null)
-        val request = Request.Builder()
-            .url(baseUrl.trimEnd('/') + ROUTE_PATH)
-            .build()
+        // Built only when this exchange dials. An adopted exchange has no use for it: the socket
+        // and its upgrade request already exist, and building one here would pretend the early
+        // open had not happened.
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -202,6 +202,9 @@ class WebSocketCloudTurnTransport(
         // path cannot drift from the dialled one. They are buffered because the socket can open,
         // fail or close in the window between the early open and this turn adopting it.
         val early = adopted.getAndSet(null)
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + ROUTE_PATH)
+            .build()
         val socket: WebSocket? = if (early != null) null else dial(request, listener)
         if (early != null) {
             early.events?.let { events ->

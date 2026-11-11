@@ -462,6 +462,20 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
 // VAD thread when it finalized the segment. The onset anchor must come from this accounting rather
 // than a later clock read: the audio callback and ring advance while the drain loop delivers the
 // segment, and folding that lag into the anchor misplaces every delayed segment.
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressSpeechOnsetSample(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    NativeVadProcessor* processor = gVadProcessor.acquire();
+    if (processor == nullptr) {
+        return 0;
+    }
+    const int result = processor->getInProgressSpeechOnsetSample();
+    gVadProcessor.release();
+    return result;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechEndStreamPosition(
     JNIEnv* /*env*/,

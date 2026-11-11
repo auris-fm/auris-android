@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.InProgressUtteranceReader
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
@@ -41,8 +42,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Contributi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.EarlyWakeScore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
@@ -104,6 +107,11 @@ class VoiceAsrEngine @Inject constructor(
      * round trip, so every failure here is silent by construction -- the turn dials for itself.
      */
     private val earlyConnectionOpener: EarlyConnectionOpener? = null,
+    /**
+     * Reads the utterance the native VAD is still accumulating. Null disables early wake scoring:
+     * the verdict then only exists at the endpoint, as before.
+     */
+    private val inProgressUtterance: InProgressUtteranceReader? = null,
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -301,6 +309,14 @@ class VoiceAsrEngine @Inject constructor(
                             // which already carries the whole utterance. (The native buffer itself
                             // is left alone: recognition reads it asynchronously, and clearing it
                             // here could wipe an utterance before ASR copies it.)
+                            // A new utterance must not inherit a verdict or an identity scored for
+                            // the last one. Both live across the endpoint (SpeechEnded), where the
+                            // endpoint path still needs them: the turn must carry the SAME id the
+                            // early connection was opened under, or it replaces that connection
+                            // with one no turn will ever claim.
+                            inFlightUtteranceId = null
+                            earlyWakeResult = null
+                            earlyWakeAcknowledged = false
                             // Per-capture model provenance: the
                             // ACTUAL selected backend's model identity, frozen with the context.
                             // The VERSION is the model's own manifest identity, never a filename.
@@ -341,6 +357,12 @@ class VoiceAsrEngine @Inject constructor(
                             // here copied the previous utterance's audio into the current clip.
                             // SpeechEnded already collects the whole utterance from the segment
                             // event, which is the only clip source.
+                            // The detector scores only the first EarlyWakeScore.cutoffMillis() after
+                            // onset, so for an utterance at least that long the wake answer is fully
+                            // determined while the user is still speaking. Score it as soon as that
+                            // much audio exists: this is what lets the verdict exist at the trailing-
+                            // silence onset, and the connection open there, outside grace too.
+                            scoreWakeEarly()
                         }
 
                         is VoiceSegmenterResult.TrailingSilenceBegan -> {
@@ -354,10 +376,14 @@ class VoiceAsrEngine @Inject constructor(
                         }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
-                            // This utterance is over: the next one needs its own identity, or it
-                            // would inherit a connection opened for speech already handled.
-                            inFlightUtteranceId = null
+                            // This utterance is over. Its identity is NOT cleared here: the
+                            // endpoint path below mints, opens and transcribes under this id, and
+                            // the next SpeechStarted clears it for the next utterance.
                             wakePositiveForCurrentUtterance = false
+                            // The early-verdict fields are NOT reset here: this event is about to
+                            // run the endpoint path, which must still see the early verdict (to
+                            // score the detector once and to fire grace and the earcon once). The
+                            // next SpeechStarted clears them for the next utterance.
                             val totalSamples = result.frames.sumOf { it.samples.size }
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
@@ -631,6 +657,66 @@ class VoiceAsrEngine @Inject constructor(
      */
     private var wakePositiveForCurrentUtterance: Boolean = false
 
+    /** The wake result scored from the in-progress utterance, or null before the cutoff was reached. */
+    private var earlyWakeResult: WakeWordResult? = null
+
+    /** Whether the early hit already fired grace and the earcon, so the finished-segment path fires them once. */
+    private var earlyWakeAcknowledged = false
+
+    /**
+     * Score the wake word from the utterance in progress, once enough audio exists.
+     *
+     * The window handed to the detector is exactly the prefix a finished segment would give it
+     * (onset-relative, [EarlyWakeScore.CUTOFF_SAMPLES] long), so the early score IS the finished
+     * score, not an approximation of it. A negative result is cached too: re-scoring the same
+     * window every frame would spend detector time on a decided question.
+     */
+    private suspend fun scoreWakeEarly() {
+        if (earlyWakeResult != null) return
+        val reader = inProgressUtterance ?: return
+        if (!wakeWordDetector.isReady) return
+        val sampleRateHz = reader.sampleRateHz()
+        val available = reader.availableSamples()
+        val onset = reader.speechOnsetSample()
+        val request = EarlyWakeScore.request(
+            speechOnsetSample = onset,
+            availableSamples = available,
+            sampleRateHz = sampleRateHz,
+            isGraceActive = currentMode == ListeningMode.Continuous,
+        ) ?: return
+        // The detector runs on this collector; scoring blocks the segmenter loop briefly, which the
+        // native capture buffer absorbs. Scoring is once per utterance, not per frame.
+        val buffer = ShortArray(available)
+        val read = reader.readInto(buffer)
+        if (read < request.startSample + request.lengthSamples) return
+        val prefix = FloatArray(request.lengthSamples) {
+            buffer[request.startSample + it].toFloat() / 32768f
+        }
+        val result = runCatching { wakeWordDetector.detect(prefix, sampleRateHz, 0) }.getOrElse { e ->
+            // An early score that cannot be produced is not a failure the user sees: the finished
+            // segment still runs the detector at the endpoint, exactly as it always did.
+            Timber.w(e, "[VoicePipeline] early wake scoring failed, deferring to endpoint")
+            return
+        }
+        Timber.i("[VoicePipeline] early wake %s", if (result.detected) "hit" else "miss")
+        earlyWakeResult = result
+        if (result.detected) {
+            wakePositiveForCurrentUtterance = true
+            acknowledgeEarlyWake()
+            // The verdict now exists BEFORE the trailing-silence onset for any utterance longer
+            // than the cutoff, so the onset open covers outside grace too.
+            openEarlyConnectionIfAddressed()
+        }
+    }
+
+    /** Fires grace and the wake earcon once per utterance, from the early hit or the endpoint. */
+    private fun acknowledgeEarlyWake() {
+        if (earlyWakeAcknowledged) return
+        earlyWakeAcknowledged = true
+        gracePeriodSignal.onWakeWordDetected()
+        audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
+    }
+
     private suspend fun shouldTranscribe(
         segment: VoiceSegmenterResult.SpeechEnded,
         capture: CaptureContext?,
@@ -698,10 +784,9 @@ class VoiceAsrEngine @Inject constructor(
         if (wwResult.detected) {
             // Open or reset the conversation grace period. This causes
             // ListeningModePolicy to switch to Continuous for subsequent utterances.
-            gracePeriodSignal.onWakeWordDetected()
-
-            // Always acknowledge detection with the WAKE_WORD earcon
-            audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
+            // When the early score already fired these for this utterance, they fire only
+            // once: the user hears one earcon and grace starts once for one wake word.
+            acknowledgeEarlyWake()
 
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             // The verdict is final here. If the first trailing silence arrived before it (the usual

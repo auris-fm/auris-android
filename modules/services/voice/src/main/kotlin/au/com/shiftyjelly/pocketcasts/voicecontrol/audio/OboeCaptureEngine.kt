@@ -100,6 +100,9 @@ internal object OboeNative {
     external fun nativeGetInProgressPcmSize(): Int
     external fun nativeGetInProgressPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechOnsetSample(): Int
+
+    /** Speech onset inside the utterance still in progress, in samples from its start. */
+    external fun nativeGetInProgressSpeechOnsetSample(): Int
     external fun nativeGetSpeechEndSample(): Int
 
     /**
@@ -144,6 +147,15 @@ interface CaptureHardware {
 
     fun getSpeechOnsetSample(): Int
 
+    /** Speech onset inside the utterance still in progress, in samples from its start. */
+    fun getInProgressSpeechOnsetSample(): Int
+
+    /** Samples accumulated so far for the utterance still in progress. */
+    fun getInProgressPcmSize(): Int
+
+    /** Reads the utterance in progress into [buffer]; returns how many samples were read. */
+    fun getInProgressPcm(buffer: ShortArray): Int
+
     fun getSpeechEndSample(): Int
 
     /** See [OboeNative.nativeGetSpeechEndStreamPosition]. */
@@ -164,6 +176,9 @@ class OboeCaptureHardware : CaptureHardware {
     override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = OboeNative.nativeGetSpeechPcmRange(out, fromSample)
     override fun getSpeechPcmSize(): Int = OboeNative.nativeGetSpeechPcmSize()
     override fun getSpeechOnsetSample(): Int = OboeNative.nativeGetSpeechOnsetSample()
+    override fun getInProgressSpeechOnsetSample(): Int = OboeNative.nativeGetInProgressSpeechOnsetSample()
+    override fun getInProgressPcmSize(): Int = OboeNative.nativeGetInProgressPcmSize()
+    override fun getInProgressPcm(buffer: ShortArray): Int = OboeNative.nativeGetInProgressPcm(buffer)
     override fun getSpeechEndSample(): Int = OboeNative.nativeGetSpeechEndSample()
     override fun getSpeechEndStreamPosition(): Long = OboeNative.nativeGetSpeechEndStreamPosition()
 }

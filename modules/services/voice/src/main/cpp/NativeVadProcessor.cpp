@@ -187,6 +187,11 @@ int32_t NativeVadProcessor::getSpeechEndSample() {
     return mSnapshotSpeechEndSample;
 }
 
+int32_t NativeVadProcessor::getInProgressSpeechOnsetSample() {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    return mSpeechOnsetSample;
+}
+
 int32_t NativeVadProcessor::getSpeechOnsetSample() {
     std::lock_guard<std::mutex> lock(mSpeechMutex);
     return mSnapshotSpeechOnsetSample;

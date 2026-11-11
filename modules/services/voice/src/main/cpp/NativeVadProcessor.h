@@ -54,6 +54,14 @@ public:
      * as the finalization snapshot, so a concurrent segment end cannot tear the copy.
      */
     int32_t getInProgressPcm(int16_t* outBuffer, int32_t maxSamples);
+
+    /**
+     * The speech onset inside the utterance STILL IN PROGRESS, in samples from its start.
+     * Taken under the same lock as the in-progress reads, so a reader can place the early-score
+     * window in the buffer it copies without racing finalisation.
+     */
+    int32_t getInProgressSpeechOnsetSample();
+
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
 

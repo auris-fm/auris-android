@@ -101,7 +101,7 @@ class VoiceSharingSettingsViewModel(
     private val enrollmentController: EnrollmentController,
     private val withdrawalIntent: LocalWithdrawalIntentStore,
     /**
-     * THE shared owner-session source (the same authority snapshot the controller fences with).
+     * THE shared owner-session source.
      * The ViewModel is a process-wide singleton, so operation PRESENTATION must retire at the
      * account boundary too: account B must never see account A's failure copy (reviewer a2136dd9).
 ||||||| /tmp/mfb

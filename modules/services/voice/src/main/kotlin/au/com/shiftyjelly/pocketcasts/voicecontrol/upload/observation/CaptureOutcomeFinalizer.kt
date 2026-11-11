@@ -32,18 +32,18 @@ import timber.log.Timber
  *    validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
  *  - a purge notification cancels only registrations from BEFORE that purge (generation
  *    filter), so a capture registered after the purge keeps its valid timer.
- * - one [Registration] per capture; entry inserted before the coroutine launches; removal is
- * identity-safe (`remove(id, reg)`) and [runDeadline] cleans up in `finally` on any
- * exception/cancellation path (62023896 #2/#3);
- * - REGISTRATION is validated against the sink ([canAcceptOutcomeWaitRegistration]:
- * generation + presence + unsealed + no publishable terminal) and promptly dropped when a
- * callback arrives for an already-sealed/released/purged capture; actual sealing cancels
- * the timer through the sink's [onCaptureSealed] hook, alongside release, revocation, and
- * disposal (62023896 #2);
- * - the FIRING decision is atomic: [ContributionRetentionSink.sealExpiredOutcome]`(id, gen)`
- * validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
- * - a purge notification cancels only registrations from BEFORE that purge (generation
- * filter), so a capture registered after the purge keeps its valid timer.
+ *  - ONE [Registration] per capture; entry inserted BEFORE the coroutine launches; removal is
+ *    identity-safe (`remove(id, reg)`) and [runDeadline] cleans up in `finally` on any
+ *    exception/cancellation path (62023896 #2/#3);
+ *  - REGISTRATION is validated against the sink ([canAcceptOutcomeWaitRegistration]:
+ *    generation + presence + unsealed + no publishable terminal) and promptly dropped when a
+ *    callback arrives for an already-sealed/released/purged capture; ACTUAL SEALING cancels
+ *    the timer through the sink's [onCaptureSealed] hook, alongside release, revocation, and
+ *    disposal (62023896 #2);
+ *  - the FIRING decision is atomic: [ContributionRetentionSink.sealExpiredOutcome]`(id, gen)`
+ *    validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
+ *  - a purge notification cancels only registrations from BEFORE that purge (generation
+ *    filter), so a capture registered after the purge keeps its valid timer.
  *
  * [waitLimits] carries the INDEPENDENT selected and ceiling inputs. No limits selected →
  * INACTIVE, and that state CLOSES contribution admission (spec cf1b9809).

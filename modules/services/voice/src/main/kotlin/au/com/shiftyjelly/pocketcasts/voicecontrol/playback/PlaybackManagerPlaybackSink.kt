@@ -104,8 +104,8 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     }
 
     override suspend fun resume(expectedEpisodeId: String?): EpisodeOperationResult {
-        // Through the owner when the caller has an episode-specific subject. A quote's resume is about
-        // The recording the quote came from, so it must not start a replacement.
+        // THROUGH THE OWNER when the caller has an episode-specific subject. A quote's resume is about
+        // the recording the quote came from, so it must not start a replacement.
         if (expectedEpisodeId != null) {
             // THE REFUSAL PROPAGATES. Discarding this Boolean made a REFUSED resume indistinguishable
             // from an accepted one, so the caller reported the action as performed. A resume that never

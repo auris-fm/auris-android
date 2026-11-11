@@ -277,9 +277,9 @@ class CloudRouteSink internal constructor(
         sourceLanguage: String?,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
-            // The admitted utterance identity is the wire identity (spec 3b1def9/f47e972): minted once
-            // At admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
-            // Refusing here means no wire request exists that client logs cannot name. Never mint here.
+            // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
+            // at admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
+            // refusing here means no wire request exists that client logs cannot name. Never mint here.
             val admitted = logicalRequestId?.takeIf { it.isNotBlank() } ?: run {
                 Timber.w("cloud turn refused: no admitted request identity (request=%.40s)", request)
                 return@retainOrPrepare null
@@ -393,9 +393,9 @@ class CloudRouteSink internal constructor(
         admittedId: String? = null,
     ): CloudTurnResult {
         if (prepared == null && admittedId.isNullOrBlank()) {
-            // Fail closed, before any admission, state write or connection: a turn without a
-            // Client-owned identity would need the sink to mint one, and a wire request no client
-            // Log can name is exactly the divergence spec 3b1def9 removes.
+            // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
+            // client-owned identity would need the sink to mint one, and a wire request no client
+            // log can name is exactly the divergence spec 3b1def9 removes.
             Timber.w("cloud turn refused: no admitted request identity (request=%.40s)", request)
             return CloudTurnResult(
                 feedback = VoiceResponse.Silent,
@@ -557,9 +557,9 @@ class CloudRouteSink internal constructor(
                 conversationId = admission.conversationId,
                 conversationMode = admission.mode,
                 capturedOrigin = origin,
-                // The admitted utterance identity, unchanged (spec 3b1def9/f47e972): stable per
-                // Logical turn, a transport retry reuses it, and the server rejects a repeat rather
-                // Than re-executing (no auto-retry is attempted by this client).
+                // THE ADMITTED UTTERANCE IDENTITY, unchanged (spec 3b1def9/f47e972): stable per
+                // logical turn, a transport retry reuses it, and the server rejects a repeat rather
+                // than re-executing (no auto-retry is attempted by this client).
                 requestId = admittedId!!,
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
@@ -953,16 +953,16 @@ class CloudRouteSink internal constructor(
                     ),
                 )
                 graceHold?.let { hold ->
-                    // The output-hold handoff (spec ruling 7a6a62e3): when this turn will speak
-                    // Locally, its hold transfers to the renderer path — sink return is not the
-                    // Output boundary, and releasing here would unhold the window WHILE the refusal
-                    // Is still being spoken. The renderer's output terminal (completed playback,
-                    // Failure, or clear) releases it exactly once. Everything else — cancellation,
-                    // Failure (no feedback will be rendered), or silent feedback — releases here at
-                    // Terminal turn completion.
-                    // A terminal error can still speak (the localized refusal): TurnFailed with
-                    // Spoken feedback renders output, so it transfers too. Only CANCELLATION (no
-                    // Feedback will be rendered) or non-spoken feedback releases here.
+                    // THE OUTPUT-HOLD HANDOFF (spec ruling 7a6a62e3): when this turn WILL speak
+                    // locally, its hold transfers to the renderer path — sink return is not the
+                    // output boundary, and releasing here would unhold the window WHILE the refusal
+                    // is still being spoken. The renderer's output terminal (completed playback,
+                    // failure, or clear) releases it exactly once. Everything else — cancellation,
+                    // failure (no feedback will be rendered), or silent feedback — releases here at
+                    // terminal turn completion.
+                    // A terminal ERROR can still SPEAK (the localized refusal): TurnFailed with
+                    // spoken feedback renders output, so it transfers too. Only CANCELLATION (no
+                    // feedback will be rendered) or non-spoken feedback releases here.
                     val willSpeak = endReason != Reason.TurnCancelled &&
                         outcome?.let { it is VoiceResponse.Spoken || it is VoiceResponse.Combined } == true
                     if (willSpeak) {
@@ -1090,8 +1090,8 @@ class CloudRouteSink internal constructor(
             episodeId = episodeId,
             podcastId = context.podcastId?.takeIf { it.isNotEmpty() },
             // Every playback position is omitted without an episode -- reference, client, recent and
-            // Previous alike. They are positions IN an episode; without one there is nothing they can
-            // Be positions in, and a saved value describes the episode it was saved from.
+            // previous alike. They are positions IN an episode; without one there is nothing they can
+            // be positions in, and a saved value describes the episode it was saved from.
             referencePositionMs = context.referencePositionMs.takeIf { hasEpisode },
             clientPositionMs = context.clientPositionMs.takeIf { hasEpisode },
             recentReferencePositions = if (hasEpisode) {
@@ -1112,7 +1112,7 @@ class CloudRouteSink internal constructor(
 
     /**
      * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
-     * A line and the language it was resolved in, so fallbacks stay coherent: unknown/unsupported
+     * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
      * language or missing resources yield the default line with "en" — never one language's text
      * paired with another's voice.
      */

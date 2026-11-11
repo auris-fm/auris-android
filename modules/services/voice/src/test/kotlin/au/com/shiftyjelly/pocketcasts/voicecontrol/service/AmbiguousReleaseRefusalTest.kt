@@ -35,9 +35,9 @@ class AmbiguousReleaseRefusalTest {
     @Test
     fun `a superseded attempt may not publish its outcome`() {
         // Reviewer 97ab6e9a: serializing CREATION was not enough. The completion callbacks still
-        // Published unconditionally, so an older attempt finishing late could overwrite a newer
-        // Attempt's outcome and reinstate a hold that had already been resolved. Publication must be
-        // Guarded by attempt identity, under the same lock as creation.
+        // published unconditionally, so an older attempt finishing late could overwrite a newer
+        // attempt's outcome and reinstate a hold that had already been resolved. Publication must be
+        // guarded by attempt identity, under the same lock as creation.
         val source = java.io.File(
             "src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/service/VoiceControlService.kt",
         ).readText()

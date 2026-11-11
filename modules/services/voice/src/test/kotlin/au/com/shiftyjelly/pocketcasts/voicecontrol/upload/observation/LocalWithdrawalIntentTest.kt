@@ -56,9 +56,9 @@ class LocalWithdrawalIntentTest {
     @Test
     fun `a stop whose write FAILS still stops collection in this session`() {
         // Reviewer 7a2e10a6. The failure latch used to live in the Settings fragment, where nothing
-        // Read it, so a failed stop left the gate open for the rest of the session while the disk held
-        // An older PERMITTED marker. The latch now lives here - in the object the collection gate
-        // Actually asks - and this asserts the GATE's answer, not a flag's value.
+        // read it, so a failed stop left the gate open for the rest of the session while the disk held
+        // an older PERMITTED marker. The latch now lives here - in the object the collection gate
+        // actually asks - and this asserts the GATE's answer, not a flag's value.
         val persistence = FailingIntentPersistence()
         val intent = LocalWithdrawalIntentStore(persistence)
 

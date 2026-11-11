@@ -93,8 +93,8 @@ class VoiceSharingAurisCredentialInvalidationTest {
     fun `a 401 revokes the Auris credential and leaves the upstream session alone`() = runBlocking {
         // The failure this rules out is the one a naive wiring ships: the route only ever sees the
         // Auris token (cloud `bbb9beff`), so handing its 401 to the owner's invalidateAuthToken
-        // Would sign the user out of the account that MINTED that token -- a rejected derived
-        // Credential taking the session down with it.
+        // would sign the user out of the account that MINTED that token -- a rejected derived
+        // credential taking the session down with it.
         val ops = operations()
 
         server.enqueue(projection())

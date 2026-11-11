@@ -34,12 +34,6 @@ internal object EngineQuiescence {
         recordedCause: Throwable? = null,
         expectedCancellation: Set<Job> = emptySet(),
     ): Throwable? {
-        // AN EXPECTED CANCELLATION IS NOT A FAILURE — BUT ONLY THE CANCELLATION ITSELF IS EXEMPT
-        // (reviewers 51baa020, 9f873b94). This used to exempt the job unconditionally, which hid a
-        // genuine failure: a cleanup path that threw a RuntimeException AFTER we cancelled it had
-        // its throwable recorded, and the early return discarded it. Exemption is now literal —
-        // the recorded cause must actually BE a cancellation, and a cancellation wrapping a real
-        // cause is not one. Anything else keeps its verdict.
         // An expected cancellation is not A failure — but only the cancellation itself is exempt
         // (reviewers 51baa020, 9f873b94). This used to exempt the job unconditionally, which hid a
         // Genuine failure: a cleanup path that threw a RuntimeException AFTER we cancelled it had

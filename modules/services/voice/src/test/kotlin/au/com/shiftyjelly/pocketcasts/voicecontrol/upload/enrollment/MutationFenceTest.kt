@@ -22,11 +22,6 @@ class MutationFenceTest {
     @Test
     fun `a stale labelling check must not invalidate a newer attempt`() {
         // Reviewer 8ef73f3f: isCurrent claimed to be read-only but bumped generation / rebound the
-        // session from a possibly-STALE owner snapshot. An OLD attempt's check, arriving after an
-        // account switch or after a newer attempt was issued, could then invalidate the newer
-        // attempt it had no business touching. The labelling check must be pure: it answers for the
-        // attempt it was given and changes nothing.
-        // Reviewer 8ef73f3f: isCurrent claimed to be read-only but bumped generation / rebound the
         // Session from a possibly-stale owner snapshot. An old attempt's check, arriving after an
         // Account switch or after a newer attempt was issued, could then invalidate the newer
         // Attempt it had no business touching. The labelling check must be pure: it answers for the
@@ -66,10 +61,6 @@ class MutationFenceTest {
 
     @Test
     fun `the scoped path and isCurrent cannot deadlock against each other`() {
-        // Reviewer 445faa5c: applyIfCurrent with an owner scope takes owner -> fence, while the old
-        // isCurrent took fence -> owner (it read liveSession() INSIDE synchronized(this)). Two
-        // threads on those paths could each hold one lock and wait for the other. This control
-        // forces BOTH placements deterministically:
         // Reviewer 445faa5c: applyIfCurrent with an owner scope takes owner -> fence, while the old
         // IsCurrent took fence -> owner (it read liveSession() INSIDE synchronized(this)). Two
         // Threads on those paths could each hold one lock and wait for the other. This control
@@ -184,8 +175,6 @@ class MutationFenceTest {
 
     @Test
     fun `a second enroll in the same session makes the first result stale`() = runTest {
-        // Reviewer d47d2326: successive same-session attempts shared one generation, so a queued
-        // older response remained "current" even though the user had since asked for something else.
         // Reviewer d47d2326: successive same-session attempts shared one generation, so a queued
         // Older response remained "current" even though the user had since asked for something else.
         val fence = MutationFence()

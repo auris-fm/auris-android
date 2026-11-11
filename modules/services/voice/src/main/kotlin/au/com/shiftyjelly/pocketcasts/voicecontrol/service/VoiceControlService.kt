@@ -136,9 +136,6 @@ class VoiceControlService : Service() {
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
 
-    // ONE atomic shutdown barrier: closing it refuses every later start AND returns every job owned
-    // at that instant, which is what a snapshot-then-cancel cannot do (reviewers 902e0c1a1,
-    // cce1f100, 9045dd43).
     // One atomic shutdown barrier: closing it refuses every later start and returns every job owned
     // At that instant, which is what a snapshot-then-cancel cannot do (reviewers 902e0c1a1,
     // Cce1f100, 9045dd43).
@@ -188,9 +185,6 @@ class VoiceControlService : Service() {
     // older one overwrite a newer one (reviewer 9d15bb44 follow-up).
     private val retryLock = Any()
 
-    // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
-    // Volatile rather than CAS: the newest attempt is authoritative, and every read sees a whole
-    // record instead of a partially applied one.
     // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
     // Volatile rather than CAS: the newest attempt is authoritative, and every read sees a whole
     // Record instead of a partially applied one.
@@ -285,12 +279,6 @@ class VoiceControlService : Service() {
         // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
         // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
         // local defaults to English, never the raw detected language nor the device locale.
-        // The utterance's language drives TTS: the reply — including a localized
-        // Refusal — is spoken in the language the user spoke, not the device locale. Falls back
-        // To English when the ASR detected nothing this build understands.
-        // The language the feedback was actually resolved in (coherent text+voice, spec ruling
-        // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
-        // Local defaults to English, never the raw detected language nor the device locale.
         val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
         // ACKNOWLEDGED HANDOFF (reviewer 664f82d0): the renderer accepts ownership of the hold by
         // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
@@ -695,9 +683,6 @@ class VoiceControlService : Service() {
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private suspend fun startEngine(mode: ListeningMode): Boolean {
-        // FINAL SHUTDOWN EXCLUDES EVERY ENGINE START, not only the top-level one (reviewer
-        // e1b11171). A child that is already inside a start when teardown begins must not open a
-        // capture the teardown is about to release from under it.
         // Final shutdown excludes every engine start, not only the top-level one (reviewer
         // E1b11171). A child that is already inside a start when teardown begins must not open a
         // Capture the teardown is about to release from under it.
@@ -1137,11 +1122,6 @@ class VoiceControlService : Service() {
         // (reviewer f457fbad).
         val rootJob = serviceScope.coroutineContext[Job]
 
-        // CANCEL, STOP, JOIN, THEN RELEASE (reviewers 0bba7db5 + dbde4427).
-        // A cancellation REQUEST is not "the users have finished": dispatcher children call
-        // render()/onCommandRecognized and can still be inside them. Releasing the renderer,
-        // recognizer, session or backend before those children have actually finished is
-        // use-after-release, so the releases happen only AFTER the join below.
         // Cancel, stop, join, then release (reviewers 0bba7db5 + dbde4427).
         // A cancellation REQUEST is not "the users have finished": dispatcher children call
         // Render()/onCommandRecognized and can still be inside them. Releasing the renderer,
@@ -1150,9 +1130,6 @@ class VoiceControlService : Service() {
         modeJob?.cancel()
         playbackBufferRecorder.stop()
         // Engine + capture teardown runs after the cancellation request. It stops the engine's
-        // capture synchronously, but the engine's PROCESSING job lives on the engine's own
-        // SupervisorJob+IO scope and is only CANCELLED here, not joined (reviewers 267001c1). That
-        // job is captured below and awaited alongside the service children before any release.
         // Capture synchronously, but the engine's PROCESSING job lives on the engine's own
         // SupervisorJob+io scope and is only cancelled here, not joined (reviewers 267001c1). That
         // Job is captured below and awaited alongside the service children before any release.
@@ -1225,9 +1202,6 @@ class VoiceControlService : Service() {
                     completionCause = { job -> abnormalEngineFinish(job) },
                 )
                 if (verdict != EngineQuiescence.Verdict.Settled) {
-                    // REPORT THE OUTCOME TRUTHFULLY, WITHOUT THROWING (reviewers 6ce4ad78 + 3104ba44):
-                    // a resources-held teardown must not look like a clean one, but throwing from this
-                    // unrouted launch would be an UNCAUGHT exception and could take the process down.
                     // Report the outcome truthfully, without throwing (reviewers 6ce4ad78 + 3104ba44):
                     // A resources-held teardown must not look like a clean one, but throwing from this
                     // Unrouted launch would be an UNCAUGHT exception and could take the process down.
@@ -1243,10 +1217,6 @@ class VoiceControlService : Service() {
                 // evidence the verdict depends on.
                 runCatching { voiceAsrEngine.get().pruneConsumedBookkeeping(onlyKeep = emptySet()) }
                     .onFailure { Timber.w(it, "[VoicePipeline] bookkeeping prune failed") }
-                // THE INITIAL RELEASE USES THE SAME PER-KIND TRACKER AS THE RETRY (reviewer
-                // a9271b39). It used to release inline, recording nothing, so a retry could not tell
-                // which kinds had already completed and repeated them — a second media-session or
-                // renderer release is destructive. One enforcement point, one record.
                 // The initial release uses the same per-kind tracker as the retry (reviewer
                 // A9271b39). It used to release inline, recording nothing, so a retry could not tell
                 // Which kinds had already completed and repeated them — a second media-session or
@@ -1267,9 +1237,6 @@ class VoiceControlService : Service() {
             }
         }.also { teardown ->
             stopInFlightJob = teardown
-            // RECORD THE OBSERVED OUTCOME (reviewers 6ce4ad78 + 3104ba44). A resources-held result
-            // keeps the failure visible to status and health surfaces, so a hold is never mistaken
-            // for a clean teardown just because nothing threw.
             // Record the observed outcome (reviewers 6ce4ad78 + 3104ba44). A resources-held result
             // Keeps the failure visible to status and health surfaces, so a hold is never mistaken
             // For a clean teardown just because nothing threw.
@@ -1303,12 +1270,6 @@ class VoiceControlService : Service() {
                 when (
                     val decision = TeardownRetry.decide(
                         recheck = { voiceAsrEngine.get().unfinishedProcessingJobs },
-                        // THE SAME PRODUCTION PREDICATE THE INITIAL TEARDOWN USES (reviewer
-                        // 3ecf1db0). Counting unfinished jobs alone treated a late processing
-                        // FAILURE as quiescence, because the job had already dropped out of the live
-                        // list. The retry now re-classifies what actually happened to each job the
-                        // hold covered, using `abnormalEngineFinish` and the engine's owned set,
-                        // which deliberately outlives completion.
                         // The same production predicate the initial teardown uses (reviewer
                         // 3ecf1db0). Counting unfinished jobs alone treated a late processing
                         // FAILURE as quiescence, because the job had already dropped out of the live
@@ -1429,9 +1390,6 @@ class VoiceControlService : Service() {
     // without cancellation is clean (reviewer 47a3a267).
     private fun abnormalEngineFinish(job: Job): Throwable? {
         val engine = voiceAsrEngine.get()
-        // The RECORDED outcome and the expected-cancellation set are PASSED THROUGH (reviewer
-        // 51baa020): without them the classification that distinguishes a real failure from our own
-        // shutdown never runs in production, however well the helper is controlled.
         // The recorded outcome and the expected-cancellation set are passed through (reviewer
         // 51baa020): without them the classification that distinguishes a real failure from our own
         // Shutdown never runs in production, however well the helper is controlled.

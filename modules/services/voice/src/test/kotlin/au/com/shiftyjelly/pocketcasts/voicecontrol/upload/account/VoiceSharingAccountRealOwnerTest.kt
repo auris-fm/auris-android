@@ -106,10 +106,6 @@ class VoiceSharingAccountRealOwnerTest {
         assertTrue(bound.enroll(acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertEquals("the committed 401 spoke about the voice scope exactly once", 1, refused.size)
 
-        // This route only ever sees the AURIS token, so its 401 revokes the VOICE scope and nothing
-        // else. The upstream credential and its incarnation survive: until today this test asserted
-        // the opposite, and THAT contract is what would have signed the user out of the account
-        // that minted the rejected token (cloud bbb9beff).
         // This route only ever sees the auris token, so its 401 revokes the voice scope and nothing
         // Else. The upstream credential and its incarnation survive: until today this test asserted
         // The opposite, and THAT contract is what would have signed the user out of the account

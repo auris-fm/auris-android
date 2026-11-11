@@ -308,6 +308,7 @@ class VoiceSharingSettingsViewModelTest {
         setProjection(enrolledProjection())
         val gate = Gate()
         val vm = viewModel(withdrawGate = gate)
+        mainDispatcher.scheduler.advanceUntilIdle() // the fail-closed seed reads the real marker via IO
         assertTrue("PREMISE: enrolled and active", vm.state.value.enrolled)
         vm.withdraw()
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -559,6 +560,7 @@ class VoiceSharingSettingsViewModelTest {
         setProjection(enrolledProjection())
         val gate = Gate()
         val vm = viewModel(withdrawGate = gate)
+        mainDispatcher.scheduler.advanceUntilIdle() // the fail-closed seed reads the real marker via IO
         assertTrue("PREMISE: enrolled and active", vm.state.value.enrolled)
         vm.withdraw()
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -969,6 +971,7 @@ class VoiceSharingSettingsViewModelTest {
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
             ioDispatcher = io,
+            markerRead = { true },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -1050,6 +1053,8 @@ class VoiceSharingSettingsViewModelTest {
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
         mainDispatcher.scheduler.advanceUntilIdle()
+        parked[1].complete(Unit) // the LATEST init read completes: the fail-closed seed gets the real marker
+        mainDispatcher.scheduler.advanceUntilIdle()
         assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
         assertEquals("PREMISE: both init collector refreshes are parked", 2, parked.size)
         vm.withdraw()
@@ -1067,7 +1072,7 @@ class VoiceSharingSettingsViewModelTest {
         parked[3].complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
-        parked[0].complete(Unit)
+        parked[1].complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
         assertFalse(
             "a pre-stop read completing after the stop must not repaint enrolled",

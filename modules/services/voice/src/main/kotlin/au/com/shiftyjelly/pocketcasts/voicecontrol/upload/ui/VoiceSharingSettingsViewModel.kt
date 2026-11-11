@@ -56,7 +56,8 @@ class VoiceSharingSettingsViewModel(
     private var deleteConfirmationOpen = false
     private var confirmationSession = 0L
     private var presentationStatus = SettingsOperationStatus.NONE
-    private var lastRenderedMarker: Boolean = withdrawalIntent.collectionPermittedByLocalIntent()
+    /** Fail-closed seed: the real marker arrives from the collectors' IO read (no main-thread disk read at construction). */
+    private var lastRenderedMarker: Boolean = false
     private var markerReadGeneration = 0L
     private val mutableState = MutableStateFlow(render())
     val state: StateFlow<VoiceSharingSettingsUiState> = mutableState.asStateFlow()

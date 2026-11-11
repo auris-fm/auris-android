@@ -343,13 +343,7 @@ private fun VoiceControlSettingsPage(
                         indent = false,
                     )
                 }
-                // Deleting already-accepted data survives a withdrawal: eligibility is enrolled OR
-                // a recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
-                // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
-                // A recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
-                // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
-                // A recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
-                // Its pending state is 202-processing honesty, never "deleted".
+                // Deletion completes synchronously on 204.
                 if (sharing.deleteAvailable) {
                     item {
                         val deleteSecondary = VoiceSharingSettingsRowCopy.deleteSecondary(sharing, copyResolver)

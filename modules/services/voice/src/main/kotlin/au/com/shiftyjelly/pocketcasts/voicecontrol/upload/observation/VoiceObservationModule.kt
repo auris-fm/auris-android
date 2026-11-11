@@ -145,9 +145,6 @@ object VoiceObservationModule {
     }
 
     // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
-    // production, bound HERE at the Android construction boundary. A failed clear still reports
-    // false and sets the admission latch; there is no unsupported-runtime success fallback.
-    // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
     // Production, bound HERE at the Android construction boundary. A failed clear still reports
     // False and sets the admission latch; there is no unsupported-runtime success fallback.
 

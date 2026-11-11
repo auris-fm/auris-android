@@ -115,8 +115,6 @@ open class SyncAccountManagerImpl @Inject constructor(
                 ownershipBinding?.onSessionEnded(sessionGenerationCounter.get())
             }
             // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
-            // an identity replacement while the session is closed STILL voids the token.
-            // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
             // An identity replacement while the session is closed STILL voids the token.
             publishedToken = null
             credentialGenerationCounter.incrementAndGet()

@@ -695,9 +695,6 @@ open class ContributionRetentionSink(
                 // A seal with NO attached publish trigger means the audio is retained forever with
                 // no queue entry and no log — the exact device symptom of a startup path that never
                 // reached UploadTrigger.start() (spec 2aea78c3: every silent return gets a line).
-                // A seal with NO attached publish trigger means the audio is retained forever with
-                // No queue entry and no log — the exact device symptom of a startup path that never
-                // Reached UploadTrigger.start().
                 Timber.i(
                     "voice-capture publish: refused capture=%s reason=no-publisher-attached",
                     outcome.captureId,

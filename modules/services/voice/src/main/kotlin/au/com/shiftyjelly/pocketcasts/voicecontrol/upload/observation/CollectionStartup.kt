@@ -43,12 +43,6 @@ class CollectionStartup @Inject constructor(
     @ApplicationContext private val appContext: android.content.Context,
     @ApplicationScope private val appScope: CoroutineScope,
     /**
-     * THE NETWORK-BACK WAKE: a default network callback fires [UploaderWakes.wake] when the
-     * system reports the default network became available (or its capabilities changed to
-     * include internet). Best-effort: a device where registration fails falls back to the retry
-     * timer and the other wakes, never to a poller.
-     */
-    /**
      * Removes the previous upload path's queue root.
      *
      * It runs here rather than when the queue is constructed, because the queue is built while the
@@ -62,8 +56,6 @@ class CollectionStartup @Inject constructor(
         // Enrollment evidence: the state fence's post-commit hook feeds the authority AND the
         // loss watcher; both are set before any capture can start because initializeOnAppStart
         // runs at app startup, ahead of any voice session.
-        // Loss watcher; both are set before any capture can start because initializeOnAppStart
-        // Runs at app startup, ahead of any voice session.
         legacyQueueRemoval.run()
         watcher.start() // installs chained evidence + loss hooks (single composition point)
         // Bounded outcome finalization hooks onto the sink: a retained capture finalizes within
@@ -112,6 +104,12 @@ class CollectionStartup @Inject constructor(
 
     private var uploaderStarted = false
 
+    /**
+     * THE NETWORK-BACK WAKE: a default network callback fires [UploaderWakes.wake] when the
+     * system reports the default network became available (or its capabilities changed to
+     * include internet). Best-effort: a device where registration fails falls back to the retry
+     * timer and the other wakes, never to a poller.
+     */
     private fun registerNetworkWake(wakes: UploaderWakes) {
         runCatching {
             val manager = appContext.getSystemService(ConnectivityManager::class.java)

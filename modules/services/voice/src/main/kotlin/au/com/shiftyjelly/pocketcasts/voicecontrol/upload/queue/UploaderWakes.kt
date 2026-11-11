@@ -41,7 +41,7 @@ class UploaderWakes(
         while (isActive) {
             runCatching { pass() }
             val dueAtMs = earliestRetryAtMs()
-            // THREE cases, not two (reviewer trace): null means no deadline (sleep on events);
+            // THREE cases, not two: null means no deadline (sleep on events);
             // a delay > 0 arms exactly one timer at the earliest retry time; and a delay <= 0
             // means the deadline is ALREADY exhausted — UploaderLoop schedules from pass start,
             // so a slow failed send can burn the whole backoff before the pass returns — and a

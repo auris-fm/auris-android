@@ -107,17 +107,16 @@ class CompletionOwnershipTest {
         // block; logLoss's own inner synchronized is reentrant there, so releasing it did not
         // release the outer lock - the observer (a production LogBuffer file write) ran with the
         // sink lock held, stalling every budget/retention caller for the write's duration.
-        val sinkLockAcquiredByOther = java.util.concurrent.CountDownLatch(1)
+        val observerBlocked = java.util.concurrent.CountDownLatch(1)
+        val lockAcquiredByOther = java.util.concurrent.CountDownLatch(1)
         val releaseObserver = java.util.concurrent.CountDownLatch(1)
-        var otherThreadGotThrough = false
         val losses = mutableListOf<String>()
         val sink = ContributionRetentionSink(
             CollectionBudget(1L shl 20),
             lossEventObserver = { event, _ ->
                 synchronized(losses) { losses += event }
-                // The observer blocks: it is a file write. While it blocks, ANOTHER thread must
-                // be able to acquire the sink lock.
-                sinkLockAcquiredByOther.countDown()
+                // The observer blocks (it is a file write) until it is explicitly released.
+                observerBlocked.countDown()
                 releaseObserver.await(5, java.util.concurrent.TimeUnit.SECONDS)
             },
         )
@@ -125,20 +124,29 @@ class CompletionOwnershipTest {
 
         val purgeThread = Thread { sink.purgeAllForRevocation("account-change") }
         purgeThread.start()
-        assertTrue("observer must fire", sinkLockAcquiredByOther.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue("observer must fire", observerBlocked.await(5, java.util.concurrent.TimeUnit.SECONDS))
 
         val otherThread = Thread {
-            // Acquires the sink lock; with the bug this blocks until the (blocked) observer
-            // times out and the purge thread dies holding nothing.
             sink.retainedSnapshot()
-            otherThreadGotThrough = true
-            releaseObserver.countDown()
+            lockAcquiredByOther.countDown()
         }
         otherThread.start()
-        purgeThread.join(5_000)
-
-        assertTrue("the purge must finish while the observer still could have been running", !purgeThread.isAlive)
-        assertTrue("another thread must acquire the sink lock while the observer runs", otherThreadGotThrough)
+        // THE RESULT IS DECIDED BY ACQUISITION, NOT BY TIMEOUT SCHEDULING: while the observer is
+        // still blocked (releaseObserver has not been touched), another thread must acquire the
+        // sink lock. Under the broken order this latch never reaches zero - the broken code only
+        // lets the other thread through after the observer's own 5s await expires.
+        assertTrue(
+            "another thread must acquire the sink lock WHILE the observer is still blocked",
+            lockAcquiredByOther.await(2, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        try {
+            releaseObserver.countDown()
+        } finally {
+            purgeThread.join(5_000)
+            otherThread.join(5_000)
+        }
+        assertTrue("the purge must complete once the observer is released", !purgeThread.isAlive)
+        assertTrue("the second thread must finish", !otherThread.isAlive)
         synchronized(losses) { assertTrue(losses.any { it == "purge-all:account-change" }) }
     }
 }

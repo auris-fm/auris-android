@@ -26,6 +26,8 @@ class RecordingPublisher(
     private val appBuild: () -> String,
     private val platform: String = "android",
     private val conversionVersion: Int = 1,
+    /** Called after a recording was actually queued: the uploader's publish wake. */
+    private val onPublished: () -> Unit = {},
 ) {
     /**
      * Publish [sealed] to the queue. Returns false when it was dropped: full, failed to write, over
@@ -78,7 +80,7 @@ class RecordingPublisher(
             links = emptyMap(),
         )
 
-        return runCatching {
+        val queued = runCatching {
             val metadata = record.encodedBytes()
             if (metadata.size > PlainRecord.MAX_METADATA_BYTES) return@runCatching false
             queue.publish(
@@ -87,6 +89,10 @@ class RecordingPublisher(
                 metadataBytes = metadata,
             ) != null
         }.getOrDefault(false)
+        // THE PUBLISH WAKE (spec ruling, reviewer simplification S4): new work exists, so the
+        // uploader drains now instead of waiting for the next poll — there is no next poll.
+        if (queued) onPublished()
+        return queued
     }
 
     private fun modelsOf(sealed: SealedCapture): List<Pair<String, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record2.ModelRef>> = listOfNotNull(

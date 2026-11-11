@@ -149,6 +149,12 @@ class UploaderLoop(
 
     fun backoffRemainingMs(captureId: String): Long = ((nextAttemptAt[captureId] ?: 0L) - now()).coerceAtLeast(0L)
 
+    /** The loop's own clock, so the wake timer is computed against the time the backoff used. */
+    fun nowMs(): Long = now()
+
+    /** The earliest scheduled retry deadline, or null when nothing is in backoff. */
+    fun earliestRetryAtMs(): Long? = synchronized(this) { nextAttemptAt.values.minOrNull() }
+
     /** Test observation of the bookkeeping the maps hold right now (the leak this prunes). */
     internal fun retryBookkeepingCount(): Int = nextAttemptAt.size + attemptCount.size
 

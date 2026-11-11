@@ -18,6 +18,7 @@ import dagger.Lazy
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
@@ -27,20 +28,19 @@ import retrofit2.Retrofit
 import au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity as PcLoginIdentity
 
 /**
- * The committed-session cache the settings surface's presentation fence reads instead of a live
- * authority lookup.
+ * The presentation-side session source (reviewer simplification S1): the settings surface reads
+ * the owner's OWN session-generation atomic — no committed-session cache exists any more.
  *
- * The authority read is a Binder call; the settings surface used to run it on the main thread at
- * construction and once per projection emission. This control proves the cache:
- * 1. Construction performs exactly ONE authority read to seed it.
- * 2. Repeated `lastCommittedSession()` reads perform NO further authority reads — a main-thread
- *    render fence cannot cost an IPC.
- * 3. Each projection-fence commit re-reads the authority exactly once and updates the cache, so
- *    the presentation fence tracks commits.
+ * The control proves what the cache was bought for and what the deletion must not lose:
+ * 1. Construction performs ZERO authority reads (no cache seeding).
+ * 2. `ownerSessionGeneration()` tracks a live session move IMMEDIATELY, with no projection
+ *    commit and no authority-move hook — the atomic cannot go stale.
+ * 3. A projection commit still delivers the current generation to the enrollment-evidence
+ *    listener.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
-class VoiceSharingCommittedSessionCacheTest {
+class VoiceSharingOwnerSessionPresentationTest {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
 
@@ -65,7 +65,7 @@ class VoiceSharingCommittedSessionCacheTest {
     )
 
     @Test
-    fun `the committed session cache seeds once, reads for free, and tracks commits`() {
+    fun `presentation reads the live session generation - no cache, no seed, no staleness`() {
         val realAuth = SyncAccountManagerImpl(
             tokenErrorNotification = TokenErrorNotification(mock(EventHorizon::class.java), context),
             accountManager = AccountManager.get(context),
@@ -89,24 +89,30 @@ class VoiceSharingCommittedSessionCacheTest {
             savedSharingChoice = SavedSharingChoiceStore(InMemoryChoicePersistence()),
         )
 
-        // Construction seeded the cache with exactly one authority read.
-        val afterConstruction = owner.reads.get()
-        assertEquals(1, afterConstruction)
-        val session = startup.lastCommittedSession()
+        // Construction performs NO authority read: there is no cache to seed.
+        assertEquals("no cache seeding: construction must not read the authority", 0, owner.reads.get())
 
-        // The presentation fence may read it at render frequency: no authority read lands.
-        repeat(1_000) { assertEquals(session, startup.lastCommittedSession()) }
-        assertEquals("lastCommittedSession must be a cached read, not a lookup", afterConstruction, owner.reads.get())
+        // Presentation reads the live generation...
+        val session = startup.ownerSessionGeneration()
+        assertEquals(realAuth.authoritySnapshot().session, session)
 
-        // A projection commit re-reads the authority exactly once and updates the cache.
-        val projection = checkNotNull(projectionJson())
-        startup.state.publish(projection)
-        assertEquals(afterConstruction + 1, owner.reads.get())
-        assertEquals(realAuth.authoritySnapshot().session, startup.lastCommittedSession())
+        // ...and a live session move (a new account, no projection commit, no authority-move
+        // hook) is visible on the NEXT read: the atomic cannot go stale.
+        realAuth.addAccount(
+            "user2@example.com",
+            "uuid-2",
+            RefreshToken("refresh-2"),
+            AccessToken("t2"),
+            PcLoginIdentity.PocketCasts,
+        )
+        assertEquals("a session move must be visible immediately", realAuth.authoritySnapshot().session, startup.ownerSessionGeneration())
+        assertNotEquals(session, startup.ownerSessionGeneration())
 
-        // And the free-read property still holds after the update.
-        repeat(1_000) { startup.lastCommittedSession() }
-        assertEquals(afterConstruction + 1, owner.reads.get())
+        // A projection commit still delivers the CURRENT generation downstream.
+        var evidenceSession = -1L
+        startup.enrollmentEvidenceListener = { _, sessionArg -> evidenceSession = sessionArg }
+        startup.state.publish(checkNotNull(projectionJson()))
+        assertEquals(realAuth.authoritySnapshot().session, evidenceSession)
         server.shutdown()
     }
 }

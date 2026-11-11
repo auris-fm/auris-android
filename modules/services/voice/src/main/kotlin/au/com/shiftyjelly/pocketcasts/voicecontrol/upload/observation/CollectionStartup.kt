@@ -1,13 +1,15 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.LegacyQueueRemoval
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploaderLoop
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploaderWakes
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -36,6 +38,8 @@ class CollectionStartup @Inject constructor(
     private val observer: SegmentObserver,
     private val outcomeFinalizer: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer,
     private val uploaderLoop: UploaderLoop,
+    private val foregroundStateMonitor: ForegroundStateMonitor,
+    @androidx.annotation.OptIn(androidx.annotation.RequiresOptIn::class) @dagger.hilt.android.qualifiers.ApplicationContext private val appContext: android.content.Context,
     @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope private val appScope: CoroutineScope,
     /**
      * Removes the previous upload path's queue root.
@@ -63,24 +67,69 @@ class CollectionStartup @Inject constructor(
     }
 
     /**
-     * The one uploader loop. Started at app start and never restarted per capture: a recording is
-     * picked up by the next pass, so publishing never depends on the uploader being awake at that
-     * instant. Backoff lives in the loop, so a stalled recording simply waits its turn.
+     * The uploader's wake wiring (spec ruling, reviewer simplification S4: event wakes, no
+     * poller). One worker drains the queue, woken by:
+     * - a recording published ([RecordingPublisher]`s publish wake),
+     * - an authority move on the account binding (sign-in restored — and sign-out, where the
+     *   pass simply finds nothing eligible),
+     * - the app coming to the foreground,
+     * - the network coming back,
+     * plus exactly ONE timer armed at the loop's earliest retry time (exponential backoff,
+     * capped at one hour, in memory). There is deliberately no periodic tick.
      */
     private fun startUploader() {
         if (uploaderStarted) return
         uploaderStarted = true
+        val wakes = UploaderWakes(
+            earliestRetryAtMs = uploaderLoop::earliestRetryAtMs,
+            nowMs = uploaderLoop::nowMs,
+            pass = { runCatching { uploaderLoop.runOnce() } },
+        )
+        wakes.startPass(appScope)
+        // The publish wake: a queued recording drains immediately (no poller to catch it later).
+        publishWake = wakes::wake
+        // Sign-in wake: the binding's authority-move slot (single listener, otherwise unused
+        // since the presentation fence moved to the owner's session atomic).
+        accountStartup.binding.authorityMovedListener = wakes::wake
+        // Foreground wake: every foreground arrival drains.
         appScope.launch {
-            while (isActive) {
-                runCatching { uploaderLoop.runOnce() }
-                delay(UPLOAD_POLL_MS)
+            foregroundStateMonitor.isInForeground.collect { inForeground ->
+                if (inForeground) wakes.wake()
             }
         }
+        registerNetworkWake(wakes)
     }
 
+    /** THE PUBLISH WAKE TARGET: set by the wake worker, invoked by the publisher's hook. */
+    @Volatile
+    var publishWake: (() -> Unit)? = null
+
+    /**
+     * THE NETWORK-BACK WAKE: a default network callback fires [UploaderWakes.wake] when the
+     * system reports the default network became available (or its capabilities changed to
+     * include internet). Best-effort: a device where registration fails falls back to the retry
+     * timer and the other wakes, never to a poller.
+     */
     private var uploaderStarted = false
 
-    private companion object {
-        const val UPLOAD_POLL_MS = 60_000L
+    private fun registerNetworkWake(wakes: UploaderWakes) {
+        runCatching {
+            val manager = appContext.getSystemService(ConnectivityManager::class.java)
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    wakes.wake()
+                }
+
+                override fun onCapabilitiesChanged(
+                    network: android.net.Network,
+                    capabilities: NetworkCapabilities,
+                ) {
+                    if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        wakes.wake()
+                    }
+                }
+            }
+            manager.registerDefaultNetworkCallback(callback)
+        }
     }
 }

@@ -924,11 +924,13 @@ open class ContributionRetentionSink(
         budget.release(bytes)
     }
 
-    private fun logLoss(event: String) = synchronized(lock) {
-        val count = lossReasonCountsInternal.merge(event, 1, Int::plus) ?: 1
-        // The observer fires OUTSIDE the lock in spirit: it is a plain callback the caller
-        // injected (a log write or a test capture); keeping it inside avoids reordering, and it
-        // never re-enters the sink.
+    private fun logLoss(event: String) {
+        // Count under the lock; OBSERVE outside it (bot finding): the observer is a production
+        // log write (LogBuffer file I/O), and blocking the sink lock on file I/O stalls every
+        // budget/retention caller for the duration of a disk write.
+        val count = synchronized(lock) {
+            lossReasonCountsInternal.merge(event, 1, Int::plus) ?: 1
+        }
         lossEventObserver?.invoke(event, count)
     }
 

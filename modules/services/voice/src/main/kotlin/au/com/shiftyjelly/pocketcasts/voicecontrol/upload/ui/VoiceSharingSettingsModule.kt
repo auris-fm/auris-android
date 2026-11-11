@@ -54,6 +54,13 @@ object VoiceSharingSettingsModule {
             // Boundary and the correctness boundary must move together.
             ownerSession = { accountStartup.authoritySnapshot().session },
             ownerSession = { accountStartup.lastCommittedSession() },
+||||||| /tmp/mfb
+            // The COMMITTED session, not a fresh lookup: the authority read is a Binder call and
+            // this fence runs on Main at render frequency. The cache is written at the projection
+            // fence and on authority moves; correctness fencing keeps the live authority through
+            // the controller.
+            ownerSession = { accountStartup.lastCommittedSession() },
+            ownerSession = { accountStartup.ownerSessionGeneration() },
             // The membership GET the surface depends on: production-only request prefix. The
             // ordinary signed-in bearer is read by the operations layer itself.
             refreshProjection = { accountStartup.operations.refreshProjection() },

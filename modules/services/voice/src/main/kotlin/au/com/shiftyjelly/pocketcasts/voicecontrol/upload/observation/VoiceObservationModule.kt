@@ -110,11 +110,14 @@ object VoiceObservationModule {
     fun provideRecordingPublisher(
         queue: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.FolderQueue,
         settings: au.com.shiftyjelly.pocketcasts.preferences.Settings,
+        wakeSink: dagger.Lazy<CollectionStartup>,
     ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher(
         queue = queue,
         // Real binary provenance: the record names the build that produced it.
         appVersion = { settings.getVersion() },
         appBuild = { settings.getVersionCode().toString() },
+        // THE PUBLISH WAKE (S4): a queued recording wakes the uploader to drain immediately.
+        onPublished = { wakeSink.get().publishWake?.invoke() },
     )
 
     @Provides

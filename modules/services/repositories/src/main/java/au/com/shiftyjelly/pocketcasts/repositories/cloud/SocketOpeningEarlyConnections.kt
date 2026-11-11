@@ -56,13 +56,19 @@ class SocketOpeningEarlyConnections(
         // connection dead on any failure or close. Null only in the window before that, in which
         // case there is nothing to mark.
         val connectionRef = java.util.concurrent.atomic.AtomicReference<SocketCloudTurnConnection?>(null)
+        // Terminal socket state (close/failure/violation) can land while dial is still inside
+        // newWebSocket, BEFORE connectionRef exists to mark dead. The connection created later
+        // must not present itself alive over a socket that already died: remember the terminal
+        // state here and apply it to the connection the moment it exists.
+        val socketDiedBeforeConnection = java.util.concurrent.atomic.AtomicBoolean(false)
         val request = Request.Builder()
             .url(baseUrl().trimEnd('/') + WebSocketCloudTurnTransport.ROUTE_PATH)
             .build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (response.code != 101) {
-                    connectionRef.get()?.markDead()
+                    val existing = connectionRef.get()
+                    if (existing != null) existing.markDead() else socketDiedBeforeConnection.set(true)
                     events.trySendBlocking(RawSocketEvent.Failed(code = response.code, message = response.message))
                 } else {
                     // 101 says nothing the adopting turn does not already know: it opened. Recorded
@@ -80,7 +86,7 @@ class SocketOpeningEarlyConnections(
                     // Binary before adoption is a protocol violation: the server sends nothing
                     // until the client's auth frame, which has not been sent. Surface it as a
                     // failure rather than dropping a frame the adopting turn would wait for
-                    // forever. (Null ref: nothing to mark dead yet.)
+                    // forever.
                     events.trySendBlocking(RawSocketEvent.Failed(code = 0, message = "binary frame before adoption"))
                 } else {
                     // After adoption the binary frames are the server's audio; the adopting turn
@@ -90,12 +96,14 @@ class SocketOpeningEarlyConnections(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                connectionRef.get()?.markDead()
+                val existing = connectionRef.get()
+                if (existing != null) existing.markDead() else socketDiedBeforeConnection.set(true)
                 events.trySendBlocking(RawSocketEvent.Failed(code = response?.code ?: 0, message = t.message ?: "failed"))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                connectionRef.get()?.markDead()
+                val existing = connectionRef.get()
+                if (existing != null) existing.markDead() else socketDiedBeforeConnection.set(true)
                 events.trySendBlocking(RawSocketEvent.Closed(code, reason))
             }
 
@@ -112,6 +120,7 @@ class SocketOpeningEarlyConnections(
             socket = socket,
         )
         connectionRef.set(connection)
+        if (socketDiedBeforeConnection.get()) connection.markDead()
         return connection
     }
 }

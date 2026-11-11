@@ -2,6 +2,8 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -111,5 +113,30 @@ class EarlyConnectionBinaryFrameControlTest {
             "the violation must not mark the fresh connection dead",
             !connection.isDead,
         )
+    }
+
+    @Test
+    fun `a close landing before the connection exists dead-ends that connection`() = runBlocking {
+        val client = ListenerCapturingClient(holdDial = true)
+        val instance = early(client)
+        val openerJob = CoroutineScope(Dispatchers.IO).launch {
+            instance.opener.openFor("utt-3")
+        }
+        val listener = client.installed.poll(5, java.util.concurrent.TimeUnit.SECONDS)!!
+        // The server closed (or the socket failed) while dial was still inside newWebSocket:
+        // connectionRef is null, so the listener has no connection to mark dead. This is the
+        // exact init race: the terminal state arrives BEFORE the connection object exists.
+        listener.onClosed(FakeWebSocket, 1000, "server closed")
+        client.releaseDial()
+        withTimeout(5_000) { openerJob.join() }
+
+        // The dial then wrapped the (already closed) socket in a FRESH connection object. That
+        // object must not present itself alive: takeFor must refuse to adopt it.
+        val connection = instance.opener.takeFor("utt-3")
+        assertTrue(
+            "a connection whose socket died before it existed must never be adopted",
+            connection == null || connection.isDead,
+        )
+        withTimeout(5_000) { instance.opener.shutdown() }
     }
 }

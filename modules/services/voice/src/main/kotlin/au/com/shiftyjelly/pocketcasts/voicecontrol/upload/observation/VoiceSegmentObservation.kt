@@ -22,7 +22,6 @@ data class CaptureContext(
      * THE ASR backend actually selected for THIS capture, frozen at issuance (reviewer
      * 54635caa/spec: per-capture backend provenance is record truth). [ModelRef.None] is the
      * honest absence — a capture with no observed ASR model is not publishable.
-||||||| /tmp/mfb
      * the ASR backend actually selected for this capture, frozen at issuance (reviewer
      * 54635caa/spec: per-capture backend provenance is record truth). [ModelRef.None] is the
      * honest absence — a capture with no observed ASR model is not publishable.
@@ -93,7 +92,6 @@ sealed interface SegmentObservation {
         // and its null-means-refuse check are unchanged; only its source moved from a provisioned
         // batch to a compiled constant. Retained deliberately rather than silently renamed, so this
         // diff does not touch the persistence path beyond removing the allowance.
-||||||| /tmp/mfb
         // Note on the name (core c74d7e30): the allowance no longer exists, but this field still
         // Carries a REAL constraint — the per-clip metadata ceiling (ContributionCeilings
         // MAX_METADATA_BYTES), which the contract keeps. It is renamed nowhere because the value

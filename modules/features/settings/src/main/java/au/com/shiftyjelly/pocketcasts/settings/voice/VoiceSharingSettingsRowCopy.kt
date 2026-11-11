@@ -42,7 +42,6 @@ object VoiceSharingSettingsRowCopy {
     /**
      * The delete row's secondary copy. Three honest states (reviewer 578bb62a): the REQUEST in
      * flight, the accepted-but-processing 202 receipt, and a visible failure — none means deleted.
-||||||| /tmp/mfb
      * The delete row's secondary copy. Three honest states: the REQUEST in
      * flight, the accepted-but-processing 202 receipt, and a visible failure — none means deleted.
      */

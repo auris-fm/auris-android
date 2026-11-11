@@ -95,7 +95,6 @@ class VoiceSharingAurisCredentialInvalidationTest {
         // Auris token (cloud `bbb9beff`), so handing its 401 to the owner's invalidateAuthToken
         // would sign the user out of the account that MINTED that token -- a rejected derived
         // credential taking the session down with it.
-||||||| /tmp/mfb
         // Auris token (cloud `bbb9beff`), so handing its 401 to the owner's invalidateAuthToken
         // Would sign the user out of the account that MINTED that token -- a rejected derived
         // Credential taking the session down with it.

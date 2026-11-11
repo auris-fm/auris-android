@@ -346,10 +346,8 @@ private fun VoiceControlSettingsPage(
                 // Deleting already-accepted data survives a withdrawal: eligibility is enrolled OR
                 // a recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
                 // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
-||||||| /tmp/mfb
                 // A recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
                 // 20b681f0). Its pending state is 202-processing honesty, never "deleted".
-||||||| /tmp/mfb
                 // A recorded enrollment epoch (carried in the state as deleteAvailable, reviewer
                 // Its pending state is 202-processing honesty, never "deleted".
                 if (sharing.deleteAvailable) {

@@ -28,7 +28,6 @@ class SealedCapture(
     val translation: TranslationProvenance?,
     /** P1 (reviewer 0cd7e39d): identity of the backend ACTUALLY invoked for ASR; null = never invoked. */
     val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
-||||||| /tmp/mfb
     /** P1: identity of the backend ACTUALLY invoked for ASR; null = never invoked.*/
     val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef?,
     val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef?,

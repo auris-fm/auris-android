@@ -22,7 +22,6 @@ import kotlinx.coroutines.launch
  *   watcher.start() → accounts listener, enrollment hook, policy flow, exact lease deadline
  *
  * NO ALLOWANCE COMPOSITION (core c74d7e30, spec §"Actual upload usage"). This class used to own the
-||||||| /tmp/mfb
  * no allowance composition (core c74d7e30, spec §"Actual upload usage"). This class used to own the
  * capture-allowance lifecycle, its retirement watcher and the provisioner entry point. Those are
  * removed: capture no longer reserves daily capacity before it starts, and the daily limit is
@@ -55,7 +54,6 @@ class CollectionStartup @Inject constructor(
         // Enrollment evidence: the state fence's post-commit hook feeds the authority AND the
         // loss watcher; both are set before any capture can start because initializeOnAppStart
         // runs at app startup, ahead of any voice session.
-||||||| /tmp/mfb
         // Loss watcher; both are set before any capture can start because initializeOnAppStart
         // Runs at app startup, ahead of any voice session.
         legacyQueueRemoval.run()

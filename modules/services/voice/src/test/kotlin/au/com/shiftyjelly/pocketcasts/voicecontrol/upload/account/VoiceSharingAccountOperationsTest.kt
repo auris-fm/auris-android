@@ -193,7 +193,6 @@ internal class TestOwner(
  * - Per-operation identity: a bounded immutable retry reuses the SAME request_id and the SAME
  *   captured revision; the session token is captured BEFORE the await, so a session ended while
  *   the call is in flight cannot have its response applied.
-||||||| /tmp/mfb
  * expected_membership_revision (the current revision captured before the call), and
  * accepted_disclosure_version; withdrawal carries request_id, expected_revision and the
  * nullable epoch; deletion is a distinct DELETE returning 202 deletion_pending — withdrawal
@@ -307,11 +306,9 @@ class VoiceSharingAccountOperationsTest {
 
         // 2. Enrollment is the SWITCH turned on: an EXACT body of the desired state plus the
         // disclosure the user accepted; the last-read revision travels as the If-Match precondition.
-||||||| /tmp/mfb
         // 2. Enrollment is the switch turned on: an exact body of the desired state plus the
         // Disclosure the user accepted; the last-read revision travels as the If-Match precondition.
         enqueueProjection(revision = "rev-2")
-||||||| /tmp/mfb
         // 2. Enrollment is the switch turned on: the desired state plus the disclosure the user
         // accepted. The last request wins, so there is no revision and no precondition to carry.
         enqueueProjection(revision = "rev-2")
@@ -444,7 +441,6 @@ class VoiceSharingAccountOperationsTest {
             "{\"schema_version\":1,\"deletion_request_id\":\"del-4\",\"status\":\"deletion_pending\",\"surprise\":1}",
         )
         assertTrue("an unknown key must not yield a receipt", unknownKey == null)
-||||||| /tmp/mfb
     fun `deletion receipt cutoff is optional, validated when present, rejected when malformed`() = runTest {
         val receipt202: suspend (String) -> DeletionReceipt? = { body: String ->
             server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
@@ -524,7 +520,6 @@ class VoiceSharingAccountOperationsTest {
         // switch accounts BEFORE the ownership is captured. Send A's bearer under A's ownership or
         // refuse — never A's bearer labelled as B's request.
         enqueueProjection("rev-A")
-||||||| /tmp/mfb
         // Switch accounts BEFORE the ownership is captured. Send A's bearer under A's ownership or
         // Refuse — never A's bearer labelled as B's request.
         enqueueProjection("rev-A")
@@ -585,7 +580,6 @@ class VoiceSharingAccountOperationsTest {
         // The GET's own answer still stands (B has published nothing to replace it); what must NOT
         // happen is A's ENROLLMENT landing as B's consent evidence.
         assertEquals("rev-A", state.projection.value?.membershipRevision)
-||||||| /tmp/mfb
         // Happen is A's ENROLLMENT landing as B's consent evidence.
         assertEquals("rev-A", state.projection.value?.membershipRevision)
         assertEquals("epoch-A", state.projection.value?.enrollmentEpoch)

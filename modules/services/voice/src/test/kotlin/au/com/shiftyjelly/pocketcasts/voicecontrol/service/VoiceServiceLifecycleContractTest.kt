@@ -100,7 +100,6 @@ class VoiceServiceLifecycleContractTest {
         // Reviewer 47a3a267: the seam is the ONE stop authority. If it returned a bare Job, a
         // teardown that deliberately HELD resources would be indistinguishable from a clean release
         // at every caller. The result must cross the seam intact.
-||||||| /tmp/mfb
         // Reviewer 47a3a267: the seam is the ONE stop authority. If it returned a bare Job, a
         // Teardown that deliberately HELD resources would be indistinguishable from a clean release
         // At every caller. The result must cross the seam intact.

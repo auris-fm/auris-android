@@ -36,7 +36,6 @@ object VoiceSharingSettingsModule {
             // THE QUEUE'S OWN REVOCATION: "stop everything now" uses the same ownership-locked
             // purge as every other revocation, not a bare file sweep.
             clearLocalPending = { runCatching { store.revokeAndPurge("withdrawal requested from settings") } },
-||||||| /tmp/mfb
             // The queue'S own revocation: "stop everything now" uses the same ownership-locked
             // Purge as every other revocation, not a bare file sweep.
             clearLocalPending = { runCatching { store.revokeAndPurge("withdrawal requested from settings") } },
@@ -49,12 +48,10 @@ object VoiceSharingSettingsModule {
             // THE SAME shared session source the controller fences with: the presentation
             // boundary and the correctness boundary must move together (reviewer a2136dd9).
             ownerSession = { accountStartup.authoritySnapshot().session },
-||||||| /tmp/mfb
             // The same shared session source the controller fences with: the presentation
             // Boundary and the correctness boundary must move together.
             ownerSession = { accountStartup.authoritySnapshot().session },
             ownerSession = { accountStartup.lastCommittedSession() },
-||||||| /tmp/mfb
             // The COMMITTED session, not a fresh lookup: the authority read is a Binder call and
             // this fence runs on Main at render frequency. The cache is written at the projection
             // fence and on authority moves; correctness fencing keeps the live authority through

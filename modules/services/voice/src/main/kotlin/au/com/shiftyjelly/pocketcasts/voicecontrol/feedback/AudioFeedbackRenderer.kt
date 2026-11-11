@@ -24,7 +24,6 @@ class AudioFeedbackRenderer(
     private val ttsEngine: TtsEngine,
     /**
      * The grace signal, for OUTPUT-HOLD release (spec ruling 7a6a62e3): a turn whose spoken
-||||||| /tmp/mfb
      * The grace signal, for output-hold release (spec ruling 7a6a62e3): a turn whose spoken
      * feedback keeps its grace hold past sink completion releases it HERE, at the renderer's true
      * output terminal — the awaited TTS call in [speakWithHeartbeat] returns only after the
@@ -828,7 +827,6 @@ class AudioFeedbackRenderer(
     /**
      * ONE TRUTHFUL SPEECH OUTCOME (reviewer 4356625551, follow-up 58d1f1b9): when the TTS engine
      * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
-||||||| /tmp/mfb
      * one truthful speech outcome51, follow-up 58d1f1b9): when the TTS engine
      * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
      * error earcon and the hold release as not-delivered, in BOTH the Spoken and Combined branches.

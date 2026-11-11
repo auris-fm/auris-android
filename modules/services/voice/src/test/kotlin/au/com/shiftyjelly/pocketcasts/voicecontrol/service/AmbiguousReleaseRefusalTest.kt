@@ -8,7 +8,6 @@ import org.junit.Test
  * An ambiguous release must never be replayed.
  *
  * THE PROPERTY, in the reviewer's terms (97ab6e9a): a release that THREW may have taken effect
-||||||| /tmp/mfb
  * the property, in theterms (97ab6e9a): a release that threw may have taken effect
  * before throwing, so retrying it could perform destructive cleanup twice. This is not something a
  * quiescence recheck can resolve — unlike an outstanding-work hold, where the recheck is exactly the
@@ -39,7 +38,6 @@ class AmbiguousReleaseRefusalTest {
         // published unconditionally, so an older attempt finishing late could overwrite a newer
         // attempt's outcome and reinstate a hold that had already been resolved. Publication must be
         // guarded by attempt identity, under the same lock as creation.
-||||||| /tmp/mfb
         // Reviewer 97ab6e9a: serializing CREATION was not enough. The completion callbacks still
         // Published unconditionally, so an older attempt finishing late could overwrite a newer
         // Attempt's outcome and reinstate a hold that had already been resolved. Publication must be

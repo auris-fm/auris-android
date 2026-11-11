@@ -162,7 +162,6 @@ class SegmentObserver(
         // and fail closed when it was absent; that reserve-before-capture rule is removed, and the
         // daily limit is metered server-side at acceptance instead. Admission is now gated only by
         // consent/policy (above) and the compiled per-clip ceiling (below).
-||||||| /tmp/mfb
         // No allowance step here (core c74d7e30). Capture used to consult a prepaid allowance token
         // And fail closed when it was absent; that reserve-before-capture rule is removed, and the
         // Daily limit is metered server-side at acceptance instead. Admission is now gated only by

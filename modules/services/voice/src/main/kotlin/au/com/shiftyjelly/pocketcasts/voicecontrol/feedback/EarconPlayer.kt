@@ -566,7 +566,6 @@ class EarconPlayer(
      *   mutation and B's marker. Marker-last alone let A accept B's bounds as its own; with the
      *   snapshot there are no shared bounds to half-write -- A reads either its OWN immutable bounds
      *   (its verdict, correct) or B's whole snapshot (not its admission, bails).
-||||||| /tmp/mfb
      * - the callback gap (63f99bed, control 2034cd5d4): A reads after B's whole publication -- B's
      * snapshot is current, A bails.
      * - the writer-internal window (52b786fe, control ddaf3aa7b): A reads between B's frontier
@@ -664,7 +663,6 @@ class EarconPlayer(
 
     /**
      * Test seam (4d1e5946; 35f7e2d8 correction): substitutes only the AudioTrack CONSTRUCTION.
-||||||| /tmp/mfb
      * Test seam (4d1e5946; correction): substitutes only the AudioTrack CONSTRUCTION.
      * The returned instance goes through the SAME lifecycle as a platform track -- rate reuse,
      * discard-and-recreate, `track = created`, play(), and the acceptedFramesTotal frontier reset --

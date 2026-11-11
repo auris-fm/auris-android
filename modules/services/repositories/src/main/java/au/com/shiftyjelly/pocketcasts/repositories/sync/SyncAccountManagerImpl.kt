@@ -36,7 +36,6 @@ open class SyncAccountManagerImpl @Inject constructor(
 
     /**
      * Credential + session OWNERSHIP (reviewers a75df7ef→f1d41730): ONE lock; ONE immutable
-||||||| /tmp/mfb
      * Credential + session ownership (reviewers a75df7ef→f1d41730): one lock; one immutable
      * AuthoritySnapshot (account, session, credential, owner-published token); lifecycle
      * transactions fire the narrow synchronous binding INSIDE the lock (owner→voice is THE
@@ -117,7 +116,6 @@ open class SyncAccountManagerImpl @Inject constructor(
             }
             // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
             // an identity replacement while the session is closed STILL voids the token.
-||||||| /tmp/mfb
             // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
             // An identity replacement while the session is closed STILL voids the token.
             publishedToken = null
@@ -400,7 +398,6 @@ open class SyncAccountManagerImpl @Inject constructor(
     override fun setRefreshToken(refreshToken: RefreshToken) {
         underCollectionNesting {
             // audit b7ad5a9a: the refresh write was UNLOCKED
-||||||| /tmp/mfb
             // Audit b7ad5a9a: the refresh write was UNLOCKED
             reconcileLocked()
             val account = getAccount()

@@ -158,7 +158,6 @@ class EngineProcessingJoinControlTest {
         // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
         // failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
         // expected shutdown and hide it from the quiescence verdict.
-||||||| /tmp/mfb
         // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
         // Failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
         // Expected shutdown and hide it from the quiescence verdict.
@@ -182,7 +181,6 @@ class EngineProcessingJoinControlTest {
             // BARRIER: the processing flow has failed, so the job has already FAILED by the time
             // stop() runs. The engine tracks the job only when stop() references it, so the state
             // to assert is what stop() records for an already-failed job.
-||||||| /tmp/mfb
             // Barrier: the processing flow has failed, so the job has already failed by the time
             // Stop() runs. The engine tracks the job only when stop() references it, so the state
             // To assert is what stop() records for an already-failed job.
@@ -198,13 +196,11 @@ class EngineProcessingJoinControlTest {
             // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
             // outstanding work. What matters is what stop() recorded for it: a failure must not be
             // relabelled as expected shutdown.
-||||||| /tmp/mfb
             // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
             // Outstanding work. What matters is what stop() recorded for it: a failure must not be
             // Relabelled as expected shutdown.
             val owned = engine.ownedJobs
             val outstanding = engine.unfinishedProcessingJobs.filter { it in owned && !it.isCompleted }
-||||||| /tmp/mfb
             // The job had ALREADY finished, so stop() must not track it as work still running.
             // The unfinished list cannot carry that claim: its completion callback removes the job
             // an instant after it finishes, so reading it here races the removal and can observe a
@@ -231,7 +227,6 @@ class EngineProcessingJoinControlTest {
         // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
         // it flaky. So BOTH completions are held: capture distinct identities, assert exact
         // retention while both are held, then release each one and assert it prunes on its own.
-||||||| /tmp/mfb
         // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
         // It flaky. So BOTH completions are held: capture distinct identities, assert exact
         // Retention while both are held, then release each one and assert it prunes on its own.
@@ -291,14 +286,31 @@ class EngineProcessingJoinControlTest {
             holdSecond.complete(Unit)
             withTimeout(5_000) { secondJob.join() }
             assertTrue(
-                "only the finished job prunes; the still-held one must remain",
+                "the released job must actually have completed",
+                secondJob.isCompleted,
+            )
+            // join() proves the job FINISHED, but the engine's completion callback removes it from
+            // The unfinished list asynchronously - observing completion does not establish that the
+            // bookkeeping removal has run yet (root cause of this test's one observed flake: the
+            // finished job was still listed when the assertion read the list). Wait for the removal
+            // itself, then judge retention on a list that is settled for the pair under test.
+            withTimeout(5_000) {
+                while (engine.unfinishedProcessingJobs.any { it === secondJob }) {
+                    kotlinx.coroutines.delay(10)
+                }
+            }
+            assertTrue(
+                "only the finished job prunes; the still-held one must remain " +
+                    "(firstJob.isCompleted=${firstJob.isCompleted} holdFirst=${holdFirst.isCompleted} " +
+                    "unfinished=${engine.unfinishedProcessingJobs} owned=${engine.ownedJobs} " +
+                    "cancelledJobs=${engine.cancelledProcessingJobs} secondJob.isCompleted=${secondJob.isCompleted})",
                 engine.unfinishedProcessingJobs.none { it === secondJob },
             )
             assertTrue(
                 "the still-held job must NOT be pruned just because its sibling finished " +
-                    "(firstJob.isCompleted=\${firstJob.isCompleted} holdFirst=\${holdFirst.isComplete} " +
-                    "unfinished=\${engine.unfinishedProcessingJobs} owned=\${engine.ownedJobs} " +
-                    "cancelledJobs=\${engine.cancelledProcessingJobs} secondJob.isCompleted=\${secondJob.isCompleted})",
+                    "(firstJob.isCompleted=${firstJob.isCompleted} holdFirst=${holdFirst.isCompleted} " +
+                    "unfinished=${engine.unfinishedProcessingJobs} owned=${engine.ownedJobs} " +
+                    "cancelledJobs=${engine.cancelledProcessingJobs})",
                 engine.unfinishedProcessingJobs.contains(firstJob),
             )
 
@@ -317,7 +329,6 @@ class EngineProcessingJoinControlTest {
         // in the test, so it proved nothing about production. This version holds the REAL processing
         // flow — the one the engine's own launch collects — so the join under test is over the
         // production job, and the barrier is that job's actual finalization.
-||||||| /tmp/mfb
         // Reviewer 26883305: the previous version held a SIBLING job in the test scope and joined it
         // In the test, so it proved nothing about production. This version holds the REAL processing
         // Flow — the one the engine's own launch collects — so the join under test is over the

@@ -106,7 +106,6 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     override suspend fun resume(expectedEpisodeId: String?): EpisodeOperationResult {
         // THROUGH THE OWNER when the caller has an episode-specific subject. A quote's resume is about
         // the recording the quote came from, so it must not start a replacement.
-||||||| /tmp/mfb
         // Through the owner when the caller has an episode-specific subject. A quote's resume is about
         // The recording the quote came from, so it must not start a replacement.
         if (expectedEpisodeId != null) {

@@ -239,7 +239,6 @@ class GracePeriodSignal @Inject constructor() {
 
     /**
      * The request-owned holds handed to the FEEDBACK RENDERER (spec ruling 7a6a62e3): a turn whose
-||||||| /tmp/mfb
      * The request-owned holds handed to the feedback renderer (spec ruling 7a6a62e3): a turn whose
      * feedback is spoken/earcon keeps its hold past sink completion — sink return is NOT the output
      * boundary — until the renderer's actual output terminal (completion, failure, or clear).

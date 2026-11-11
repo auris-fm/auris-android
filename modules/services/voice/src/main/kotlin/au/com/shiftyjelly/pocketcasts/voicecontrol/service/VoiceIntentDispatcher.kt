@@ -53,7 +53,6 @@ class VoiceIntentDispatcher @Inject constructor() {
             // its publication (schema unknown — no action was attempted) instead of leaking an
             // open invocation forever.
             invocationToken?.let { engine.settleInvocation(it) }
-||||||| /tmp/mfb
             // Its publication (schema unknown — no action was attempted) instead of leaking an
             // Open invocation forever.
             invocationToken?.let { engine.settleInvocation(it) }

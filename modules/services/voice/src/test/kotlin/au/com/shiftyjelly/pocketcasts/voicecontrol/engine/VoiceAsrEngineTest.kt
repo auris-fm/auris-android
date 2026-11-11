@@ -34,7 +34,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
-||||||| /tmp/mfb
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
@@ -2697,7 +2696,6 @@ class VoiceAsrEngineTest {
         override fun audioMode(): Int = AudioManager.MODE_NORMAL
 
         override fun setAudioMode(mode: Int) = Unit
-||||||| /tmp/mfb
         val captured = runSegmentToPersistedRecord(
             dirName = "persisted-asr-empty",
             transcript = "   ",
@@ -2765,7 +2763,6 @@ class VoiceAsrEngineTest {
         // aed257b6). The command WAS discarded, so no routing input exists: the observation must
         // describe only what ASR produced. Android's provenance never writes `router_input` for a
         // non-content result — this control holds it that way through the real producer and store.
-||||||| /tmp/mfb
         // IOS found the router was recorded as having received input it was never given (spec
         // Aed257b6). The command WAS discarded, so no routing input exists: the observation must
         // Describe only what ASR produced. Android's provenance never writes `router_input` for a
@@ -3351,7 +3348,6 @@ class VoiceAsrEngineTest {
             (asr.fields["reason"] as? RecordNode.Str)?.value,
         )
         assertEquals(RecordNode.Str("zh"), asr.fields["source_language"])
-||||||| /tmp/mfb
         assertFalse(
             "the router never ran, so no router_input may be recorded",
             asr.fields.containsKey("router_input"),
@@ -3562,7 +3558,6 @@ class VoiceAsrEngineTest {
         assertEquals("the PERSISTED bleed state must be a completed check", StageState.Completed, bleed.state)
         assertEquals("overlap", (bleed.fields.getValue("decision") as RecordNode.Str).value)
     }
-||||||| /tmp/mfb
     private suspend fun kotlinx.coroutines.test.TestScope.captureOneSegmentForTest(
         mode: ListeningMode,
         afterWindowMeasured: (au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal) -> Unit = {},

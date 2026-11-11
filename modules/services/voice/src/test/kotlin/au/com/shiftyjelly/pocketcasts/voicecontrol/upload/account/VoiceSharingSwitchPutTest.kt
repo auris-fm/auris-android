@@ -25,7 +25,6 @@ import org.robolectric.RobolectricTestRunner
  *    retry after a network failure can simply resend what the user asked for;
  *  - the last-read `membership_revision` travels as `If-Match`, and a stale one comes back as 409
  *    with the server's current state rather than overwriting a newer choice.
-||||||| /tmp/mfb
  * - turning it on and off are the SAME request shape, differing only in the desired state and the
  * disclosure version that is required when turning it on;
  * - repeating a state is a no-op on the wire contract (the idempotency claim the spec makes), so a
@@ -136,7 +135,6 @@ class VoiceSharingSwitchPutTest {
         // answers, so reading any earlier can see the answer before the record.
         val put = requests.single()
         val body = bodies.single()
-||||||| /tmp/mfb
         // Read AFTER the call returns: the dispatcher records the request on its own thread as it
         // Answers, so reading any earlier can see the answer before the record.
         val put = requests.single()
@@ -171,7 +169,6 @@ class VoiceSharingSwitchPutTest {
         // The spec's idempotency claim: a second "on" changes nothing server-side, which is what makes
         // a plain resend after a network failure safe. The client's job is only to send it again,
         // unchanged.
-||||||| /tmp/mfb
         // Theidempotency claim: a second "on" changes nothing server-side, which is what makes
         // A plain resend after a network failure safe. The client's job is only to send it again,
         // Unchanged.
@@ -190,7 +187,6 @@ class VoiceSharingSwitchPutTest {
     fun `network failure keeps the user's choice and a resend lands the same desired state`() = runTest {
         // A failed switch is NOT a silent success: the caller learns the answer failed, keeps the
         // user's choice locally, and resends. The server sees the same desired state either way.
-||||||| /tmp/mfb
         // A failed switch is NOT a silent success: the caller learns the answer failed, keeps the
         // User's choice locally, and resends. The server sees the same desired state either way.
         seedCurrent(enrolled = false, revision = "rev-1")
@@ -294,7 +290,6 @@ class VoiceSharingSwitchPutTest {
         // The revision can disappear between the read and the freeze: a lifecycle clear empties the
         // projection while the bearer is being acquired. frozen() must refuse rather than emit a
         // SWITCH with no If-Match (reviewer 54627e05).
-||||||| /tmp/mfb
     fun `a stale revision comes back as 409 with the server's current state and changes nothing`() = runTest {
         // Two devices: this one last read rev-1, another turned sharing off meanwhile and the server
         // Is now at rev-5. The stale request must not overwrite that newer choice; it gets the current
@@ -396,7 +391,6 @@ class VoiceSharingSwitchPutTest {
             override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block("fixture-bearer")
         }
         val guarded = VoiceSharingAccountOperations(
-||||||| /tmp/mfb
         // The bearer is acquired inside the owner transaction that freezes the request, and it
         // Suspends: this stands in for a lifecycle clear landing in that window.
         val clearingBearer = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
@@ -447,7 +441,6 @@ class VoiceSharingSwitchPutTest {
                 .setBody(projectionJson(enrolled = false, revision = "rev-9", withdrawal = "withdrawn")),
         )
 
-||||||| /tmp/mfb
         val result = guarded.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
 
         assertEquals("no revision at freeze time means no request", VoiceSharingMutationResult.Failure, result)

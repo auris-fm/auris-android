@@ -284,7 +284,6 @@ class VoiceAsrEngine @Inject constructor(
                             // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
                             // PER-CAPTURE MODEL PROVENANCE (reviewers 54635caa/8288ac15): the
-||||||| /tmp/mfb
                             // Per-capture model provenance (reviewers 54635caa/8288ac15): the
                             // ACTUAL selected backend's model identity, frozen with the context.
                             // The VERSION is the model's own manifest identity, never a filename.
@@ -732,7 +731,6 @@ class VoiceAsrEngine @Inject constructor(
         } catch (ce: java.util.concurrent.CancellationException) {
             // Cancellation is NOT a provider failure: record the KNOWN cancelled fact (reviewer
             // be375ea1) and rethrow — nonterminal, no early publication.
-||||||| /tmp/mfb
             // Cancellation is not a provider failure: record the known cancelled fact (reviewer
             // Be375ea1) and rethrow — nonterminal, no early publication.
             request.capture?.let { joinOutcome(CollectionOutcome.AsrCancelled(it.captureId)) }
@@ -780,7 +778,6 @@ class VoiceAsrEngine @Inject constructor(
                     // transcript is EMPTY — so ROUTING never ran: not_run/wake_only. The
                     // time-based isWakeOnly arm of this drop (short speech, command text intact)
                     // must NOT be typed wake_only; that gate is the transcript emptiness itself.
-||||||| /tmp/mfb
                     // Spec delta 58940cbe: the observed wake-positive
                     // Trim consumed everything — raw text existed and the trimmed command
                     // Transcript is empty — so routing never ran: not_run/wake_only. The
@@ -825,7 +822,6 @@ class VoiceAsrEngine @Inject constructor(
             // travel with the non-content outcome instead of dying here (reviewer 1f7fe074,
             // cad3379e). The text recorded is the RAW result — the observation is what ASR produced,
             // and a trim is a pipeline behaviour, never an erasure of the output.
-||||||| /tmp/mfb
             // No usable command text, but the backend did observe this transcript and did measure a
             // Language. Both are facts: the command is discarded, the observation is not, so they
             // Travel with the non-content outcome instead of dying here (
@@ -1244,7 +1240,6 @@ class VoiceAsrEngine @Inject constructor(
     private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef = // P1 (reviewer be375ea1): ONLY the backend's OWN successful-load evidence counts; a
         // configured requiredModel is a requirement, not evidence. Absence → None.
         backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None
-||||||| /tmp/mfb
     private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef = // P1: only the backend's own successful-load evidence counts; a
         // Configured requiredModel is a requirement, not evidence. Absence → None.
         backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None

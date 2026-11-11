@@ -32,7 +32,6 @@ import timber.log.Timber
  *    validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
  *  - a purge notification cancels only registrations from BEFORE that purge (generation
  *    filter), so a capture registered after the purge keeps its valid timer.
-||||||| /tmp/mfb
  * - one [Registration] per capture; entry inserted before the coroutine launches; removal is
  * identity-safe (`remove(id, reg)`) and [runDeadline] cleans up in `finally` on any
  * exception/cancellation path (62023896 #2/#3);

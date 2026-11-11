@@ -9,7 +9,6 @@ import org.junit.Test
 
 /**
  * THE WIRING THE REVIEWER FOUND MISSING (0546969a).
-||||||| /tmp/mfb
  * the wiring the reviewer found missing (0546969a).
  *
  * The gate and the store were both correct in isolation; nothing in production ever reached the

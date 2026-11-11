@@ -598,7 +598,6 @@ class VoiceSharingSettingsViewModelTest {
         // one with an unrelated projection emission and assert again (timeline-probed: the stale
         // consume settles at advance #3, this render at #4 exposes any poison).
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-mid"))
-||||||| /tmp/mfb
         // One with an unrelated projection emission and assert again (timeline-probed: the stale
         // Consume settles at advance #3, this render at #4 exposes any poison).
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, membershipRevision = "rev-mid"))
@@ -613,7 +612,6 @@ class VoiceSharingSettingsViewModelTest {
     }
 
     // --- Reviewer a2136dd9: the failure presentation retires at the OWNER-SESSION boundary.
-||||||| /tmp/mfb
     // --- Reviewer a2136dd9: the failure presentation retires at the owner-session boundary.
 
     @Test

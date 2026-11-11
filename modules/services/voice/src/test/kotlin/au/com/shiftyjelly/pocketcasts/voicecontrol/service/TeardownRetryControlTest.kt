@@ -91,7 +91,6 @@ class TeardownRetryControlTest {
         // Reviewer 9f873b94: deciding on list emptiness alone let a retry release resources after a
         // FAILED STOP or an abnormal engine finish. The jobs were gone from the list, but the reason
         // the teardown held had never been resolved — so an empty list was not evidence of safety.
-||||||| /tmp/mfb
         // Reviewer 9f873b94: deciding on list emptiness alone let a retry release resources after a
         // Failed stop or an abnormal engine finish. The jobs were gone from the list, but the reason
         // The teardown held had never been resolved — so an empty list was not evidence of safety.
@@ -135,7 +134,6 @@ class TeardownRetryControlTest {
         // completed ABNORMALLY after a residual hold had already left the live list, so it looked
         // exactly like a clean settle and the retry released. The production predicate must be
         // re-run on the jobs the hold covered.
-||||||| /tmp/mfb
         // Reviewer 3ecf1db0. The retry used to count unfinished jobs only. A processing job that
         // Completed ABNORMALLY after a residual hold had already left the live list, so it looked
         // Exactly like a clean settle and the retry released. The production predicate must be

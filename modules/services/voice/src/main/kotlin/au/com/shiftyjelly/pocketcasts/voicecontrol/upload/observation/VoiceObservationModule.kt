@@ -147,7 +147,6 @@ object VoiceObservationModule {
     // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
     // production, bound HERE at the Android construction boundary. A failed clear still reports
     // false and sets the admission latch; there is no unsupported-runtime success fallback.
-||||||| /tmp/mfb
     // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
     // Production, bound HERE at the Android construction boundary. A failed clear still reports
     // False and sets the admission latch; there is no unsupported-runtime success fallback.
@@ -179,7 +178,6 @@ object VoiceObservationModule {
         // nor the evidence. The 60 s ceiling is the reviewed construction bound used by every
         // finalizer control. At expiry the retained capture is finalized as
         // outcome_wait_expired and published, never left open forever.
-||||||| /tmp/mfb
         // Finite production outcome wait: the
         // Null selection closed EVERY production capture (CollectionStartup installs
         // OutcomeWaitGuard = { outcomeFinalizer.limitsSelected }, and limitsSelected was false).

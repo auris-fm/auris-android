@@ -31,7 +31,6 @@ tasks.withType<Test>().configureEach {
 // upload.WorkerParity) are excluded from every ordinary Test task; they run only when the
 // suite is EXPLICITLY invoked with -PaurisIncludeWorkerParity, and then they still FAIL
 // honestly (never skip) when the pinned-worker authority is missing.
-||||||| /tmp/mfb
 // Owner a793f239: the ordinary code-test suite is self-contained and never fails because an
 // External repository is absent. The REAL-Worker parity tests (category
 // Upload.WorkerParity) are excluded from every ordinary Test task; they run only when the

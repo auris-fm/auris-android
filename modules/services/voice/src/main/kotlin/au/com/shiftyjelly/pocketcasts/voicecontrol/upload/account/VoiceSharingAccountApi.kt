@@ -39,7 +39,6 @@ interface VoiceSharingAccountApi {
      * THE SWITCH (spec 0264051b): one desired-state request. `If-Match` carries the last-read
      * `membership_revision` as an HTTP precondition, so a stale device is refused by the server
      * instead of overwriting a newer choice.
-||||||| /tmp/mfb
      * the switch: one desired-state request. `If-Match` carries the last-read
      * `membership_revision` as an HTTP precondition, so a stale device is refused by the server
      * instead of overwriting a newer choice.
@@ -95,7 +94,6 @@ sealed interface VoiceSharingMutationResult {
  * - A 401 revokes only the AURIS credential (forcing a re-mint from the SAME account) and drops
  *   the mirror. It never touches the upstream Pocket Casts session: a rejected derived token must
  *   not sign the user out of the account that minted it.
-||||||| /tmp/mfb
  * byte-identical (same request_id) and never re-read state after an await.
  * - Exact endpoint statuses: membership routes 200, deletion 202. Transport failures and 503
  * retry within bounds; 401/403/409/422 are terminal with no retry.
@@ -113,7 +111,6 @@ class VoiceSharingAccountOperations(
      * THE BEARER SOURCE. The account route verifies Auris-issued tokens only (cloud `84a4d25e`,
      * `bbb9beff`); the upstream Pocket Casts token the owner publishes is `alg=HS256` with no
      * `kid` and that route refuses it structurally.
-||||||| /tmp/mfb
      * the bearer source. The account route verifies Auris-issued tokens only (cloud `84a4d25e`,
      * `bbb9beff`); the upstream Pocket Casts token the owner publishes is `alg=HS256` with no
      * `kid` and that route refuses it structurally.
@@ -199,7 +196,6 @@ class VoiceSharingAccountOperations(
             val (accountNow, sessionNow) = ownerNow()
             if (accountNow != ownerAccount || sessionNow != ownerSession) return VoiceSharingMutationResult.Failure
         }
-||||||| /tmp/mfb
         // The precondition is required: the server refuses a PUT that names no
         // Revision, so a client holding none reads first and then sends that revision. The read is
         // The ordinary GET, so its answer also becomes the current projection — a switch issued on a
@@ -340,7 +336,6 @@ class VoiceSharingAccountOperations(
      * [issue] for a request whose intent was expressed under an ALREADY CAPTURED owner (the switch's
      * read-first step). The captured owner must still be the live one, both before the bearer is
      * acquired and after it, or the request is refused rather than relabelled onto a new session.
-||||||| /tmp/mfb
      * [issue] for a request whose intent was expressed under an already captured owner (the switch's
      * read-first step). The captured owner must still be the live one, both before the bearer is
      * acquired and after it, or the request is refused rather than relabelled onto a new session.
@@ -355,7 +350,6 @@ class VoiceSharingAccountOperations(
             // The precondition is READ inside this same transaction: frozen() refuses a SWITCH without
             // one, and a projection cleared during bearer acquisition must not degrade into an
             // unconditional PUT.
-||||||| /tmp/mfb
             // The precondition is read inside this same transaction: frozen() refuses a switch without
             // One, and a projection cleared during bearer acquisition must not degrade into an
             // Unconditional PUT.
@@ -392,7 +386,6 @@ class VoiceSharingAccountOperations(
         // THE KEY ID IS LOGGED WHERE THE BEARER IS ATTACHED, and nowhere else: it answers whether
         // THIS app's token names a signing key staging publishes (cloud 84a4d25e). Only the JOSE
         // header is read, and a diagnostic changes no branch, no retry and no credential path.
-||||||| /tmp/mfb
         // The key ID is logged where the bearer is attached, and nowhere else: it answers whether
         // This app's token names a signing key staging publishes (cloud 84a4d25e). Only the jose
         // Header is read, and a diagnostic changes no branch, no retry and no credential path.
@@ -415,7 +408,6 @@ class VoiceSharingAccountOperations(
         // the check.
         if (route == Route.SWITCH && ifMatch == null) return null
         return FrozenOperation(bearer, body, route, ifMatch)
-||||||| /tmp/mfb
         val ifMatch = projection?.membershipRevision?.takeIf { it.isNotBlank() }
         // A switch never leaves without its precondition: the
         // Revision can disappear between the read-first step and this construction — a lifecycle
@@ -576,7 +568,6 @@ class VoiceSharingAccountOperations(
         null
     }
 
-||||||| /tmp/mfb
     /**
      * 202 deletion_pending receipt: strict complete parse, exact types/keys, numeric schema.
      * `cutoff` is an optional RFC3339 instant: when present it must parse as
@@ -642,7 +633,6 @@ class VoiceSharingAccountOperations(
          * holds none (spec e3cfc8ae).
          */
         val ifMatch: String? = null,
-||||||| /tmp/mfb
         /**
          * The last-read `membership_revision`, sent as `If-Match`. Null only for the GET itself: a
          * SWITCH never leaves without a revision, because `setVoiceSharing` reads first when it

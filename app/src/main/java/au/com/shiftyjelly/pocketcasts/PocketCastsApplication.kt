@@ -252,7 +252,6 @@ class PocketCastsApplication :
                 voiceUploadTrigger.start()
                 // Platform deferred-transfer scheduling: ONE unique periodic drain, ANY network.
                 voiceUploadSchedulerBinding.start()
-||||||| /tmp/mfb
                 // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
                 // Starting it puts nothing on the network until every eligibility gate opens.
                 voiceUploadTrigger.start()

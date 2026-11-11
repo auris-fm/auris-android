@@ -23,7 +23,6 @@ class CompletionOwnershipTest {
     fun `completion reserves peak - prefix plus flattened output charged together`() {
         // Budget fits EITHER the 16-byte prefix OR the 32-byte output, never both (peak = 48).
         val (sink, context) = sinkWithOpenPrefix(cap = 40L)
-||||||| /tmp/mfb
         // Budget fits either the 16-byte prefix or the 32-byte output, never both (peak = 48).
         val (sink, context) = sinkWithOpenPrefix(cap = 40L)
         val (sink, context, losses) = sinkWithOpenPrefix(cap = 40L)

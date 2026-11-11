@@ -54,7 +54,6 @@ data class VoiceSharingSettingsUiState(
      * Deletion of already-accepted data, in THREE honest states (reviewer 578bb62a): the tap is
      * the REQUEST in flight; a 202 receipt is ACCEPTED-BUT-PROCESSING; neither ever means
      * deleted, and a failure is visible until the next action.
-||||||| /tmp/mfb
      * Deletion of already-accepted data, in THREE honest states: the tap is
      * the request in flight; a 202 receipt is accepted-but-processing; neither ever means
      * deleted, and a failure is visible until the next action.
@@ -104,7 +103,6 @@ class VoiceSharingSettingsViewModel(
      * THE shared owner-session source.
      * The ViewModel is a process-wide singleton, so operation PRESENTATION must retire at the
      * account boundary too: account B must never see account A's failure copy (reviewer a2136dd9).
-||||||| /tmp/mfb
      * account boundary too: account B must never see account A's failure copy.
      */
     private val ownerSession: () -> Long,
@@ -173,11 +171,9 @@ class VoiceSharingSettingsViewModel(
     // Declaration order matters: these initializers run render(), so the durable fields above
     // must already be initialized (reviewer-turned-self-inflicted NPE: Kotlin initializes in
     // declaration order, and a null field under a non-null type fails the intrinsic check).
-||||||| /tmp/mfb
     // Must already be initialized (reviewer-turned-self-inflicted NPE: Kotlin initializes in
     // Declaration order, and a null field under a non-null type fails the intrinsic check).
     private var lastRenderedEnrolled: Boolean = isEnrolled()
-||||||| /tmp/mfb
     private var lastRenderedEnrolled: Boolean = isEnrolled()
 
     private var lastRenderedMarker: Boolean = withdrawalIntent.collectionPermittedByLocalIntent()
@@ -251,7 +247,6 @@ class VoiceSharingSettingsViewModel(
         // THE SESSION IS CAPTURED AT THE TAP, not when the queued coroutine starts (reviewer
         // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
         // never reach the new account's controller.
-||||||| /tmp/mfb
         // The session is captured at the tap, not when the queued coroutine starts (reviewer
         // 66ae7752): a tap issued under a session that changed before the dispatcher ran it must
         // Never reach the new account's controller.
@@ -546,7 +541,6 @@ class VoiceSharingSettingsViewModel(
                 mutableState.value = render(SettingsOperationStatus.CONFLICT)
             }
 
-||||||| /tmp/mfb
             is EnrollmentOutcome.Conflict -> {
                 if (generation != actionGeneration) return
                 if (operation == FailedOperation.WITHDRAW) {
@@ -623,7 +617,6 @@ class VoiceSharingSettingsViewModel(
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState {
         // Installed-path diagnostic (staging test, reviewer 1f2d9cbf): distinguish the POLICY
         // gate from the MEMBERSHIP gate on the device, without changing either gate.
-||||||| /tmp/mfb
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState {
         // Installed-path diagnostic: distinguish the POLICY
         // Gate from the MEMBERSHIP gate on the device, without changing either gate.
@@ -634,7 +627,6 @@ class VoiceSharingSettingsViewModel(
         mutableState.value = renderFrom(enrolled)
     }
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState = renderFrom(isEnrolled(), status)
-||||||| /tmp/mfb
 
     private fun render(status: SettingsOperationStatus = presentationStatus): VoiceSharingSettingsUiState = renderFrom(isEnrolled(), status)
 

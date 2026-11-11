@@ -280,7 +280,6 @@ class CloudRouteSink internal constructor(
             // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
             // at admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
             // refusing here means no wire request exists that client logs cannot name. Never mint here.
-||||||| /tmp/mfb
             // The admitted utterance identity is the wire identity (spec 3b1def9/f47e972): minted once
             // At admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
             // Refusing here means no wire request exists that client logs cannot name. Never mint here.
@@ -400,7 +399,6 @@ class CloudRouteSink internal constructor(
             // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
             // client-owned identity would need the sink to mint one, and a wire request no client
             // log can name is exactly the divergence spec 3b1def9 removes.
-||||||| /tmp/mfb
             // Fail closed, before any admission, state write or connection: a turn without a
             // Client-owned identity would need the sink to mint one, and a wire request no client
             // Log can name is exactly the divergence spec 3b1def9 removes.
@@ -568,7 +566,6 @@ class CloudRouteSink internal constructor(
                 // THE ADMITTED UTTERANCE IDENTITY, unchanged (spec 3b1def9/f47e972): stable per
                 // logical turn, a transport retry reuses it, and the server rejects a repeat rather
                 // than re-executing (no auto-retry is attempted by this client).
-||||||| /tmp/mfb
                 // The admitted utterance identity, unchanged (spec 3b1def9/f47e972): stable per
                 // Logical turn, a transport retry reuses it, and the server rejects a repeat rather
                 // Than re-executing (no auto-retry is attempted by this client).
@@ -975,7 +972,6 @@ class CloudRouteSink internal constructor(
                     // A terminal ERROR can still SPEAK (the localized refusal): TurnFailed with
                     // spoken feedback renders output, so it transfers too. Only CANCELLATION (no
                     // feedback will be rendered) or non-spoken feedback releases here.
-||||||| /tmp/mfb
                     // The output-hold handoff (spec ruling 7a6a62e3): when this turn will speak
                     // Locally, its hold transfers to the renderer path — sink return is not the
                     // Output boundary, and releasing here would unhold the window WHILE the refusal
@@ -1115,7 +1111,6 @@ class CloudRouteSink internal constructor(
             // Every playback position is omitted without an episode -- reference, client, recent and
             // previous alike. They are positions IN an episode; without one there is nothing they can
             // be positions in, and a saved value describes the episode it was saved from.
-||||||| /tmp/mfb
             // Previous alike. They are positions IN an episode; without one there is nothing they can
             // Be positions in, and a saved value describes the episode it was saved from.
             referencePositionMs = context.referencePositionMs.takeIf { hasEpisode },
@@ -1138,7 +1133,6 @@ class CloudRouteSink internal constructor(
 
     /**
      * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
-||||||| /tmp/mfb
      * A line and the language it was resolved in, so fallbacks stay coherent: unknown/unsupported
      * language or missing resources yield the default line with "en" — never one language's text
      * paired with another's voice.

@@ -139,7 +139,6 @@ class VoiceControlService : Service() {
     // ONE atomic shutdown barrier: closing it refuses every later start AND returns every job owned
     // at that instant, which is what a snapshot-then-cancel cannot do (reviewers 902e0c1a1,
     // cce1f100, 9045dd43).
-||||||| /tmp/mfb
     // One atomic shutdown barrier: closing it refuses every later start and returns every job owned
     // At that instant, which is what a snapshot-then-cancel cannot do (reviewers 902e0c1a1,
     // Cce1f100, 9045dd43).
@@ -192,7 +191,6 @@ class VoiceControlService : Service() {
     // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
     // Volatile rather than CAS: the newest attempt is authoritative, and every read sees a whole
     // record instead of a partially applied one.
-||||||| /tmp/mfb
     // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
     // Volatile rather than CAS: the newest attempt is authoritative, and every read sees a whole
     // Record instead of a partially applied one.
@@ -287,7 +285,6 @@ class VoiceControlService : Service() {
         // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
         // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
         // local defaults to English, never the raw detected language nor the device locale.
-||||||| /tmp/mfb
         // The utterance's language drives TTS: the reply — including a localized
         // Refusal — is spoken in the language the user spoke, not the device locale. Falls back
         // To English when the ASR detected nothing this build understands.
@@ -701,7 +698,6 @@ class VoiceControlService : Service() {
         // FINAL SHUTDOWN EXCLUDES EVERY ENGINE START, not only the top-level one (reviewer
         // e1b11171). A child that is already inside a start when teardown begins must not open a
         // capture the teardown is about to release from under it.
-||||||| /tmp/mfb
         // Final shutdown excludes every engine start, not only the top-level one (reviewer
         // E1b11171). A child that is already inside a start when teardown begins must not open a
         // Capture the teardown is about to release from under it.
@@ -1146,7 +1142,6 @@ class VoiceControlService : Service() {
         // render()/onCommandRecognized and can still be inside them. Releasing the renderer,
         // recognizer, session or backend before those children have actually finished is
         // use-after-release, so the releases happen only AFTER the join below.
-||||||| /tmp/mfb
         // Cancel, stop, join, then release (reviewers 0bba7db5 + dbde4427).
         // A cancellation REQUEST is not "the users have finished": dispatcher children call
         // Render()/onCommandRecognized and can still be inside them. Releasing the renderer,
@@ -1158,7 +1153,6 @@ class VoiceControlService : Service() {
         // capture synchronously, but the engine's PROCESSING job lives on the engine's own
         // SupervisorJob+IO scope and is only CANCELLED here, not joined (reviewers 267001c1). That
         // job is captured below and awaited alongside the service children before any release.
-||||||| /tmp/mfb
         // Capture synchronously, but the engine's PROCESSING job lives on the engine's own
         // SupervisorJob+io scope and is only cancelled here, not joined (reviewers 267001c1). That
         // Job is captured below and awaited alongside the service children before any release.
@@ -1203,7 +1197,6 @@ class VoiceControlService : Service() {
                 // FAIL CLOSED (reviewers 1092c632 + 9294defb): a failed final stop, round
                 // exhaustion, or anything still unfinished at release time all mean the released
                 // resources might still be in use. Only Settled permits release.
-||||||| /tmp/mfb
                 // Their own join. Snapshot them only now, after the service children have finished
                 // the engine's stop() is called from several service children,
                 // And a child that ran during this teardown may have cancelled a job that did not
@@ -1235,7 +1228,6 @@ class VoiceControlService : Service() {
                     // REPORT THE OUTCOME TRUTHFULLY, WITHOUT THROWING (reviewers 6ce4ad78 + 3104ba44):
                     // a resources-held teardown must not look like a clean one, but throwing from this
                     // unrouted launch would be an UNCAUGHT exception and could take the process down.
-||||||| /tmp/mfb
                     // Report the outcome truthfully, without throwing (reviewers 6ce4ad78 + 3104ba44):
                     // A resources-held teardown must not look like a clean one, but throwing from this
                     // Unrouted launch would be an UNCAUGHT exception and could take the process down.
@@ -1255,7 +1247,6 @@ class VoiceControlService : Service() {
                 // a9271b39). It used to release inline, recording nothing, so a retry could not tell
                 // which kinds had already completed and repeated them — a second media-session or
                 // renderer release is destructive. One enforcement point, one record.
-||||||| /tmp/mfb
                 // The initial release uses the same per-kind tracker as the retry (reviewer
                 // A9271b39). It used to release inline, recording nothing, so a retry could not tell
                 // Which kinds had already completed and repeated them — a second media-session or
@@ -1279,7 +1270,6 @@ class VoiceControlService : Service() {
             // RECORD THE OBSERVED OUTCOME (reviewers 6ce4ad78 + 3104ba44). A resources-held result
             // keeps the failure visible to status and health surfaces, so a hold is never mistaken
             // for a clean teardown just because nothing threw.
-||||||| /tmp/mfb
             // Record the observed outcome (reviewers 6ce4ad78 + 3104ba44). A resources-held result
             // Keeps the failure visible to status and health surfaces, so a hold is never mistaken
             // For a clean teardown just because nothing threw.
@@ -1319,7 +1309,6 @@ class VoiceControlService : Service() {
                         // list. The retry now re-classifies what actually happened to each job the
                         // hold covered, using `abnormalEngineFinish` and the engine's owned set,
                         // which deliberately outlives completion.
-||||||| /tmp/mfb
                         // The same production predicate the initial teardown uses (reviewer
                         // 3ecf1db0). Counting unfinished jobs alone treated a late processing
                         // FAILURE as quiescence, because the job had already dropped out of the live
@@ -1336,7 +1325,6 @@ class VoiceControlService : Service() {
                         // may have taken effect before throwing, so replaying it could perform
                         // destructive cleanup twice, and no recheck can prove otherwise. It is
                         // therefore never exempt.
-||||||| /tmp/mfb
                         // a failed stop or abnormal finish stays unproven.
                         // Only A quiescence hold may be cleared by observing quiescence (reviewer
                         // 97ab6e9a). `Residual` with no error is a work-outstanding hold that a
@@ -1444,7 +1432,6 @@ class VoiceControlService : Service() {
         // The RECORDED outcome and the expected-cancellation set are PASSED THROUGH (reviewer
         // 51baa020): without them the classification that distinguishes a real failure from our own
         // shutdown never runs in production, however well the helper is controlled.
-||||||| /tmp/mfb
         // The recorded outcome and the expected-cancellation set are passed through (reviewer
         // 51baa020): without them the classification that distinguishes a real failure from our own
         // Shutdown never runs in production, however well the helper is controlled.

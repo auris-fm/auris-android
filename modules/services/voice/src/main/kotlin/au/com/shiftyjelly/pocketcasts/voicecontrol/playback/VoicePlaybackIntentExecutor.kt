@@ -191,79 +191,146 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         // the player but not this counter is exactly the window where the turn
         // would resume over them.
         if (intent.changesPlayPauseState()) playbackManager.noteUserPlaybackCommand()
-        val response = when (intent) {
+        // THE RECORD-LIFETIME RULE (reviewer, task81): for a local intent this executor owns the
+        // turn's end. Whatever happens below — success, failure, cancellation — the record is
+        // finished and published exactly once here, in a finally, so a cancelled dispatch still
+        // publishes what it measured instead of leaking its registry entry.
+        val response = try {
+            when (intent) {
             is VoiceIntent.Playback -> executePlayback(intent, onOutcome)
 
-            is VoiceIntent.Effects -> executeEffects(intent)
+                is VoiceIntent.Effects -> executeEffects(intent)
 
-            is VoiceIntent.Volume -> executeVolume(intent)
+                is VoiceIntent.Volume -> executeVolume(intent)
 
-            is VoiceIntent.Sleep -> executeSleep(intent)
+                is VoiceIntent.Sleep -> executeSleep(intent)
 
-            is VoiceIntent.Chapter -> executeChapter(intent)
+                is VoiceIntent.Chapter -> executeChapter(intent)
 
-            is VoiceIntent.Bookmark -> executeBookmark(intent)
+                is VoiceIntent.Bookmark -> executeBookmark(intent)
 
-            is VoiceIntent.CloudRoute -> {
-                // THE CONTROLLER RETRY PATH: a dispatch carrying a PREPARED turn sends that turn, not a
-                // newly prepared one, so a retry reuses its request ID, handle and mode. Its captured
-                // origin decides which window it is validated against, so a retry whose window has since
-                // been superseded or closed is refused rather than adopting the current one.
-                // The PREPARED TURN when the caller carries one; otherwise preparation itself
-                // resolves a retry, because the SINK retains turns by logical request and returns the
-                // existing one unchanged. Retention therefore lives in one place, and a direct sink
-                // caller and this executor cannot disagree about what a retry is.
-                //
-                // THE RETURNED TURN'S OWN ORIGIN IS WHAT MATTERS. A retained turn carries the origin it
-                // was prepared under, which may be OLDER than this dispatch's stamp -- so validating the
-                // INCOMING stamp would pass while the turn being sent belongs to a superseded window.
-                // The live-authority check therefore runs on the origin of the turn that will actually
-                // be dispatched.
-                //
-                // AN UNKNOWN RETRY IS REFUSED. A dispatch naming a logical request that was never
-                // prepared is not a retry of anything -- treating it as new input would silently create
-                // a conversation for a request whose own identity is unresolvable, which is the
-                // substitution this whole mechanism exists to prevent.
-                // The refusal applies to a RETRY, not to a first attempt: a first attempt naming a
-                // logical request is exactly how that request comes to exist.
-                if (intent.isRetry) {
-                    val logical = intent.logicalRequestId
-                    val known = logical != null &&
-                        (intent.preparedTurn != null || retainedForLogical(logical) != null)
-                    if (!known) {
-                        Timber.i("[Voice] refused: retry of unknown logical request ${intent.logicalRequestId}")
+                is VoiceIntent.CloudRoute -> {
+                    // THE CONTROLLER RETRY PATH: a dispatch carrying a PREPARED turn sends that turn, not a
+                    // newly prepared one, so a retry reuses its request ID, handle and mode. Its captured
+                    // origin decides which window it is validated against, so a retry whose window has since
+                    // been superseded or closed is refused rather than adopting the current one.
+                    // The PREPARED TURN when the caller carries one; otherwise preparation itself
+                    // resolves a retry, because the SINK retains turns by logical request and returns the
+                    // existing one unchanged. Retention therefore lives in one place, and a direct sink
+                    // caller and this executor cannot disagree about what a retry is.
+                    //
+                    // THE RETURNED TURN'S OWN ORIGIN IS WHAT MATTERS. A retained turn carries the origin it
+                    // was prepared under, which may be OLDER than this dispatch's stamp -- so validating the
+                    // INCOMING stamp would pass while the turn being sent belongs to a superseded window.
+                    // The live-authority check therefore runs on the origin of the turn that will actually
+                    // be dispatched.
+                    //
+                    // AN UNKNOWN RETRY IS REFUSED. A dispatch naming a logical request that was never
+                    // prepared is not a retry of anything -- treating it as new input would silently create
+                    // a conversation for a request whose own identity is unresolvable, which is the
+                    // substitution this whole mechanism exists to prevent.
+                    // The refusal applies to a RETRY, not to a first attempt: a first attempt naming a
+                    // logical request is exactly how that request comes to exist.
+                    if (intent.isRetry) {
+                        val logical = intent.logicalRequestId
+                        val known = logical != null &&
+                            (intent.preparedTurn != null || retainedForLogical(logical) != null)
+                        if (!known) {
+                            Timber.i("[Voice] refused: retry of unknown logical request ${intent.logicalRequestId}")
+                            return VoiceResponse.Silent
+                        }
+                    }
+                    // A RETRY THAT THE SINK WILL RESOLVE is validated on the turn the sink HOLDS, before it
+                    // is asked to dispatch it: the retained turn's origin is the one that decides, and it
+                    // may be older than this dispatch's stamp.
+                    val resolvedBySink = intent.logicalRequestId
+                        ?.takeIf { intent.isRetry }
+                        ?.let { retainedForLogical(it) }
+                    val sinkResolvedOrigin = resolvedBySink?.capturedOrigin
+                    if (sinkResolvedOrigin != null && !gracePeriodSignal.isCurrent(sinkResolvedOrigin)) {
+                        Timber.i("[Voice] superseded retry discarded (stamp=$sinkResolvedOrigin)")
                         return VoiceResponse.Silent
                     }
-                }
-                // A RETRY THAT THE SINK WILL RESOLVE is validated on the turn the sink HOLDS, before it
-                // is asked to dispatch it: the retained turn's origin is the one that decides, and it
-                // may be older than this dispatch's stamp.
-                val resolvedBySink = intent.logicalRequestId
-                    ?.takeIf { intent.isRetry }
-                    ?.let { retainedForLogical(it) }
-                val sinkResolvedOrigin = resolvedBySink?.capturedOrigin
-                if (sinkResolvedOrigin != null && !gracePeriodSignal.isCurrent(sinkResolvedOrigin)) {
-                    Timber.i("[Voice] superseded retry discarded (stamp=$sinkResolvedOrigin)")
-                    return VoiceResponse.Silent
-                }
-                val alreadyPrepared = intent.preparedTurn
-                if (alreadyPrepared != null) {
-                    // The TURN'S origin, not the dispatch's: after a successor window opens, a retry of
-                    // an older logical request still carries the older origin, and it is that turn
-                    // which must be refused. Checking the incoming stamp let the old turn through.
-                    val captureForRetry = alreadyPrepared.capturedOrigin
-                    if (captureForRetry != null && !gracePeriodSignal.isCurrent(captureForRetry)) {
-                        Timber.i("[Voice] superseded retry discarded (stamp=$captureForRetry)")
+                    val alreadyPrepared = intent.preparedTurn
+                    if (alreadyPrepared != null) {
+                        // The TURN'S origin, not the dispatch's: after a successor window opens, a retry of
+                        // an older logical request still carries the older origin, and it is that turn
+                        // which must be refused. Checking the incoming stamp let the old turn through.
+                        val captureForRetry = alreadyPrepared.capturedOrigin
+                        if (captureForRetry != null && !gracePeriodSignal.isCurrent(captureForRetry)) {
+                            Timber.i("[Voice] superseded retry discarded (stamp=$captureForRetry)")
+                            return VoiceResponse.Silent
+                        }
+                        // THE SAME CONSUMPTION AS THE OTHER DISPATCH SITE: feedback out, action outcome
+                        // recorded. A retry that returns only its feedback would hide an unknowable action
+                        // on exactly the path where the caller most needs to know whether it ran.
+                        val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
+                        outcome.action = retried.action
+                        outcome.feedbackLanguage = retried.feedbackLanguage
+                        outcome.turnSucceeded = retried.succeeded
+                        return retried.feedback
+                    }
+                    val context = playbackContextProvider.current()
+                    // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
+                    // not the current one read here. The executor runs later than the dispatch, so reading
+                    // the live window would let a fresh wake look like a continuation of the previous
+                    // conversation, and would let a request captured before a successor wake act under the
+                    // successor's. The stamp is the captured origin; when a dispatch carries none, there is
+                    // no window to claim and the sink falls back to the declared-live origin.
+                    val captured = intent.windowGeneration
+                    // A dispatch stamped with a window that is no longer current is SUPERSEDED and does
+                    // not run at all. This belongs here rather than only in the sink: the sink's admission
+                    // governs which CONVERSATION a turn joins, while this governs whether a superseded
+                    // request may act on the successor's playback at all -- and a stale dispatch reaching
+                    // the sink would still be a mutation made on behalf of a replaced user act.
+                    if (captured != null && !gracePeriodSignal.isCurrent(captured)) {
+                        Timber.i("[Voice] superseded dispatch discarded (stamp=$captured)")
                         return VoiceResponse.Silent
                     }
-                    // THE SAME CONSUMPTION AS THE OTHER DISPATCH SITE: feedback out, action outcome
-                    // recorded. A retry that returns only its feedback would hide an unknowable action
-                    // on exactly the path where the caller most needs to know whether it ran.
-                    val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
-                    outcome.action = retried.action
-                    outcome.feedbackLanguage = retried.feedbackLanguage
-                    outcome.turnSucceeded = retried.succeeded
-                    return retried.feedback
+                    // READ BEFORE NOTING: whether this is the window's first request decides whether it
+                    // begins a conversation, and noting first made every dispatch see itself as a
+                    // continuation -- the flag was computed against a state this dispatch had just set.
+                    val isFirstRequestOfWindow = captured != null &&
+                        !gracePeriodSignal.hasPreparedRequest(captured)
+                    // PREPARED ONCE, RETAINED FOR A RETRY. Preparing here rather than at the call site is
+                    // what makes the retry path a production path: the identity fixed at this moment is the
+                    // identity a later retry must reuse.
+                    val preparedTurn = cloudRouteSink.prepareTurn(
+                        request = intent.request,
+                        tier = intent.tier,
+                        context = context,
+                        isLiveGraceTurn = captured != null &&
+                            gracePeriodSignal.isCurrent(captured) &&
+                            gracePeriodSignal.isActive.value,
+                        capturedOrigin = captured,
+                        isWakeOriginated = captured != null &&
+                            gracePeriodSignal.isWakeOriginated(
+                                captured,
+                                isFirstRequestOfWindow = isFirstRequestOfWindow,
+                            ),
+                        logicalRequestId = intent.logicalRequestId,
+                        // THE RETRY FLAG IS FORWARDED. Without it the sink cannot tell a retry from new
+                        // input, so a retry whose identity was retired between the executor's entry guards
+                        // and this preparation was silently MINTED AS A NEW REQUEST and sent -- the exact
+                        // defect the refusal exists to prevent.
+                        isRetry = intent.isRetry,
+                        sourceLanguage = intent.sourceLanguage,
+                    ) ?: return VoiceResponse.Silent
+                    // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
+                    // the SAME path and the identity is the one fixed above rather than a second one minted
+                    // here.
+                    val dispatched = cloudRouteSink.dispatchPrepared(preparedTurn, isRetry = intent.isRetry)
+                    // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
+                    // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
+                    // confirmed action from one that was dispatched without a knowable outcome. Reading only
+                    // the feedback would treat an unknowable execution as if nothing had happened.
+                    outcome.action = dispatched.action
+                    outcome.feedbackLanguage = dispatched.feedbackLanguage
+                    outcome.turnSucceeded = dispatched.succeeded
+                    // Noted after the dispatch: this window now has a request, so a LATER one continues
+                    // rather than beginning.
+                    captured?.let { gracePeriodSignal.notePreparedRequest(it) }
+                    dispatched.feedback
                 }
                 val context = playbackContextProvider.current()
                 // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
@@ -332,27 +399,28 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
             is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
+            }
+            // LOCAL ACTION EXECUTED, observed where the action actually ran. Only local intents run
+            // this arm — a cloud turn's action is the server's, so its timing belongs to the sink. The
+            // admitted id is the identity the engine registered the record under.
+            if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                    timingRequestId,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
+                )
+            }
+            return response
+        } finally {
+            if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                    timingRequestId,
+                    cancelled = false,
+                    failed = !outcome.turnSucceeded,
+                )
+            }
         }
-        // LOCAL ACTION EXECUTED, observed where the action actually ran. Only local intents run
-        // this arm — a cloud turn's action is the server's, so its timing belongs to the sink. The
-        // admitted id is the identity the engine registered the record under.
-        if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
-            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
-                timingRequestId,
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
-            )
         }
-        // THE OUTCOME GUARD BELONGS HERE, at the site that recognizes -- not only at a later caller.
-        // Recognizing unconditionally here meant a turn whose action outcome could not be established
-        // still earned the recognized-command privileges before any caller could check, so a guard added
-        // downstream was defeated by this call. ONE RULE, AT THE SITE THAT ACTS.
-        if (capabilityOf(intent, outcome).allowsRecognition) {
-            gracePeriodSignal.onCommandRecognized(
-                fromGeneration = intent.windowGenerationOf(),
-            )
-        }
-        return response
     }
 
     /**

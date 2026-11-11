@@ -175,5 +175,28 @@ class TurnTimingRecord(private val requestId: String) {
         fun unregister(id: String) {
             active.remove(id)
         }
+
+        /**
+         * Publish the live turn [id]'s table with its final disposition, at the async producer's
+         * real end. THE RECORD LIFETIME RULE: the engine hands the record off with the intent and
+         * does NOT publish at handoff — publish() unregisters, and the downstream producers
+         * (executor, route sink, audio player) still mark through the registry after that point.
+         * The producer that owns the turn's end calls this: on normal completion, cancellation or
+         * failure alike, so a cancelled turn still publishes what it measured. No-op when the id
+         * is unknown.
+         */
+        fun finishFor(id: String?, cancelled: Boolean, failed: Boolean) {
+            if (id == null) return
+            active[id]?.let { record ->
+                record.markOutcome(
+                    when {
+                        cancelled -> Outcome.Cancelled
+                        failed -> Outcome.ActionFailed
+                        else -> Outcome.Committed
+                    },
+                )
+                record.publish()
+            }
+        }
     }
 }

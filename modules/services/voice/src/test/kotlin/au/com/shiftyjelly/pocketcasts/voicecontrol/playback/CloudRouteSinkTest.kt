@@ -4833,4 +4833,52 @@ class CloudRouteSinkTest {
             record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible),
         )
     }
+
+    @Test
+    fun `the record lives until the cloud turn actually ends - published once, not at handoff`() = kotlinx.coroutines.test.runTest {
+        // REVIEWER (task81): the engine published the table the moment it dispatched the intent,
+        // and publish() unregisters the id — so the sink's CloudRequestSent, the player's
+        // FirstAudible and the disposition arrived at an EMPTY registry and were silently
+        // dropped. The record must live through the whole async turn: the sink publishes at the
+        // turn's real end (Done, failure or cancellation), inside its non-cancellable cleanup.
+        val admittedId = testWireId
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        val firstAudibleListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstAudibleListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstAudibleListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // First audible arrives mid-turn, as the player would report it.
+                        firstAudibleListeners.forEach { it(5_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        try {
+            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        val text = published.joinToString("\n")
+        assertTrue("the table must be published at the turn's real end: '$text'", text.isNotEmpty())
+        assertTrue("the published table carries first_audible: '$text'", text.contains("stage=first_audible"))
+        assertTrue("the published table carries the committed outcome: '$text'", text.contains("outcome=committed"))
+    }
 }

@@ -1256,8 +1256,11 @@ class VoiceAsrEngine @Inject constructor(
                     .let { it.withLogicalRequest(admittedId) },
                 admittedId,
             )
-            timing?.markOutcome(TurnTimingRecord.Outcome.ActionExecuted)
-            timing?.publish()
+            // The record's lifetime transfers with the intent: the engine does NOT publish
+            // here — publish() unregisters the admitted id, and the async arm downstream (the
+            // executor for a local action, the route sink for a cloud turn, the audio player for
+            // first audible) still marks through the registry after this dispatch returns. The
+            // producer that owns the turn's end finishes and publishes the table.
             return
         }
 

@@ -916,6 +916,16 @@ class CloudRouteSink internal constructor(
                             activeTurnId = 0
                             activeTurn = null
                         }
+                        // THE RECORD-LIFETIME RULE (reviewer, task81): this sink owns a cloud
+                        // turn's end. The engine handed the record off at dispatch without
+                        // publishing — publishing there would have unregistered the id before
+                        // CloudRequestSent and FirstAudible were marked. Finish and publish HERE,
+                        // non-cancellable, for every exit path.
+                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                            activeTimingRequestId,
+                            cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true,
+                            failed = endReason == Reason.TurnFailed,
+                        )
                     }
                 }
             } finally {

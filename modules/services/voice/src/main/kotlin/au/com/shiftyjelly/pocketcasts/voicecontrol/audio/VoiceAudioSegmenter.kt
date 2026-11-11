@@ -8,6 +8,20 @@ sealed interface VoiceSegmenterResult {
     data object Silence : VoiceSegmenterResult
     data object SpeechStarted : VoiceSegmenterResult
     data object SpeechContinuing : VoiceSegmenterResult
+
+    /**
+     * The first silent frame after speech: the utterance may be over, but the endpoint has not been
+     * decided yet.
+     *
+     * Reported because the cloud connection is opened here, overlapping the end-of-speech wait and
+     * ASR rather than following them. [Silence] cannot carry that job -- it also describes silence
+     * with no speech before it, and the engine must never open a connection for speech that was not
+     * addressed to the app.
+     *
+     * Fires once per pause, so an utterance that pauses and resumes reports it more than once; the
+     * consumer is responsible for treating repeats within one utterance as the same utterance.
+     */
+    data object TrailingSilenceBegan : VoiceSegmenterResult
     data class SpeechEnded(
         val frames: List<PcmAudioFrame>,
         val speechOnsetSample: Int = 0,

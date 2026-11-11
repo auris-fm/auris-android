@@ -85,6 +85,11 @@ class CloudRouteSink internal constructor(
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     /** Test seam: a custom OkHttp client for the route socket (MockWebServer wiring). */
     private val okHttpClient: okhttp3.OkHttpClient? = null,
+    /**
+     * Holds connections opened early, before the turn existed. Null disables adoption: every turn
+     * dials for itself.
+     */
+    private val earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -100,6 +105,7 @@ class CloudRouteSink internal constructor(
         playbackContextMonitor: PlaybackContextMonitor,
         audioPlayer: CloudAudioPlayer?,
         gracePeriodSignal: GracePeriodSignal,
+        earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         tokenProvider = tokenProvider,
@@ -121,6 +127,7 @@ class CloudRouteSink internal constructor(
         // turn's own pause when the answer completes, unless playback actually stopped or a user
         // command superseded it.
         privacyClosureCount = playbackContextMonitor::playbackStopClosureCount,
+        earlyConnectionOpener = earlyConnectionOpener,
     )
 
     /**
@@ -1004,7 +1011,15 @@ class CloudRouteSink internal constructor(
             okHttpClient = okHttpClient ?: CloudTurnRoute.defaultOkHttpClient(),
             transport = transport,
             observer = transportObserver,
+            earlyConnections = earlyConnectionOpener,
         ).route(turn)
+    }
+
+    /** Advertise a capability only when its renderer is actually available. */
+    private fun advertisedCapabilities(): List<String> = if (searchResultsRenderer != null) {
+        listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1)
+    } else {
+        emptyList()
     }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {

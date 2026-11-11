@@ -53,6 +53,12 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
         if (speechFrames > 0) {
             frames += frame
             silenceFrames += 1
+            // Report the onset of trailing silence exactly once per pause: the first silent frame
+            // after speech is the earliest moment the utterance may be over, and the only point at
+            // which a connection can be opened early enough to overlap the endpoint wait.
+            if (silenceFrames == 1) {
+                return VoiceSegmenterResult.TrailingSilenceBegan
+            }
             if (silenceFrames >= trailingSilenceFrames) {
                 val segment = if (speechFrames >= minimumSpeechFrames) frames.toList() else null
                 reset()

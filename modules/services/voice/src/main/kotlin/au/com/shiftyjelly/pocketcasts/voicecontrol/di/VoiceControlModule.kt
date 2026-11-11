@@ -121,6 +121,32 @@ abstract class VoiceControlModule {
         @Provides @Singleton
         fun provideCurrentLocale(): () -> Locale = { Locale.getDefault() }
 
+        /**
+         * One monotonic clock for every voice timing mark, including the early connection's 9s
+         * age, so stage differences are real quantities and the two clocks cannot disagree.
+         */
+        @Provides @Singleton
+        fun provideElapsedClockMs(): () -> Long = { android.os.SystemClock.elapsedRealtime() }
+
+        /**
+         * The production early-connection opener: one that actually dials the route socket.
+         *
+         * A default value on an `@Inject` constructor parameter does NOT satisfy Dagger, so
+         * without this binding the graph fails to build. It is a real opener rather than null
+         * because the early connection is the latency win task 81 exists for; the null path
+         * remains reachable by constructing the engine without Hilt in tests.
+         */
+        @Provides @Singleton
+        fun provideEarlyConnectionOpener(
+            cloudConfig: au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig,
+        ): au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener {
+            val sockets = au.com.shiftyjelly.pocketcasts.repositories.cloud.SocketOpeningEarlyConnections(
+                baseUrl = cloudConfig::baseUrl,
+                now = { android.os.SystemClock.elapsedRealtime() },
+            )
+            return sockets.opener
+        }
+
         @Provides @Singleton
         fun provideCaptureHardware(): CaptureHardware = OboeCaptureHardware()
 

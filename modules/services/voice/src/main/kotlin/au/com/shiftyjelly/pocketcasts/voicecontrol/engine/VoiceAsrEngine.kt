@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import androidx.annotation.RequiresPermission
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
@@ -96,6 +97,13 @@ class VoiceAsrEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     /** One clock for every timing mark, so the table's differences are real quantities. */
     private val elapsedClockMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
+    /**
+     * Opens the route connection early, while the turn is still being recognised.
+     *
+     * Null disables the optimisation; production supplies it. An early connection only saves a
+     * round trip, so every failure here is silent by construction -- the turn dials for itself.
+     */
+    private val earlyConnectionOpener: EarlyConnectionOpener? = null,
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -335,7 +343,21 @@ class VoiceAsrEngine @Inject constructor(
                             // event, which is the only clip source.
                         }
 
+                        is VoiceSegmenterResult.TrailingSilenceBegan -> {
+                            // The utterance may be over: this is where the cloud connection starts
+                            // opening, so the handshake overlaps the endpoint wait and ASR instead
+                            // of following them. Fires once per pause, so an utterance that pauses
+                            // and resumes reports it again -- the opener keys on the tag, so a
+                            // repeat keeps the connection this utterance already opened rather
+                            // than dialling a second one.
+                            openEarlyConnectionIfAddressed()
+                        }
+
                         is VoiceSegmenterResult.SpeechEnded -> {
+                            // This utterance is over: the next one needs its own identity, or it
+                            // would inherit a connection opened for speech already handled.
+                            inFlightUtteranceId = null
+                            wakePositiveForCurrentUtterance = false
                             val totalSamples = result.frames.sumOf { it.samples.size }
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
@@ -544,7 +566,7 @@ class VoiceAsrEngine @Inject constructor(
          * this point forward can name the same request. Carried through to the
          * wire request_id unchanged.
          */
-        val admittedId: String = java.util.UUID.randomUUID().toString(),
+        val admittedId: String,
     )
 
     /**
@@ -573,6 +595,41 @@ class VoiceAsrEngine @Inject constructor(
         }
         return false
     }
+
+    /**
+     * The utterance currently in flight, from trailing silence to its next resume.
+     *
+     * The connection is opened per UTTERANCE, and the tag must be the same one the turn will later
+     * carry, so the identity has to exist before the endpoint decision -- not be minted there.
+     * It is cleared when the segment closes, so the next utterance gets its own.
+     */
+    private var inFlightUtteranceId: String? = null
+
+    /**
+     * Opens the route connection early, if this utterance is one the app should answer at all.
+     *
+     * Addressed means the app is the intended recipient: a positive wake result, or the grace
+     * period that follows one. Speech that was never addressed must never open a connection -- the
+     * server would learn that someone spoke near the phone.
+     *
+     * Only the first trailing silence of an utterance opens. Later ones are the same utterance
+     * resuming, and the opener keeps the connection it already holds for that tag.
+     */
+    private fun openEarlyConnectionIfAddressed() {
+        val opener = earlyConnectionOpener ?: return
+        val addressed = currentMode == ListeningMode.Continuous || wakePositiveForCurrentUtterance
+        if (!addressed) return
+        val tag = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString().also { inFlightUtteranceId = it }
+        opener.openForLater(tag)
+    }
+
+    /**
+     * Whether the wake result for the utterance in flight is already positive.
+     *
+     * Trailing silence can arrive before the wake decision is final; when it does, the connection
+     * is opened later, at the moment the verdict turns positive.
+     */
+    private var wakePositiveForCurrentUtterance: Boolean = false
 
     private suspend fun shouldTranscribe(
         segment: VoiceSegmenterResult.SpeechEnded,
@@ -647,7 +704,11 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
 
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
-            return TranscribeRequest(
+            // The verdict is final here. If the first trailing silence arrived before it (the usual
+            // case outside grace), this is the moment the connection may be opened.
+            wakePositiveForCurrentUtterance = true
+            openEarlyConnectionIfAddressed()
+            val addressed = TranscribeRequest(
                 capture = capture,
                 noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
                 samples = floatSamples,
@@ -655,7 +716,11 @@ class VoiceAsrEngine @Inject constructor(
                 sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
                 wakePositive = true,
                 completionSample = wwResult.completionSample,
+                // The identity the early connection was opened under. Reusing it here is what lets
+                // the turn adopt that connection; a fresh id would open a connection no turn claims.
+                admittedId = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString(),
             )
+            return addressed
         }
 
         // Negative detection
@@ -667,6 +732,7 @@ class VoiceAsrEngine @Inject constructor(
                     noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
                     samples = floatSamples,
                     wakePositive = false,
+                    admittedId = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString(),
                 )
             }
 

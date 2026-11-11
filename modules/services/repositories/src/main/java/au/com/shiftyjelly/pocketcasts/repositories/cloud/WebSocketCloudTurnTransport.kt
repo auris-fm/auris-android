@@ -40,6 +40,18 @@ class WebSocketCloudTurnTransport(
         okHttpClient.newWebSocket(request, listener)
     }
 
+    /**
+     * A connection opened before this turn existed, to consume instead of dialling.
+     *
+     * Consume-once: reading clears it, so the same socket can never be handed to two turns.
+     */
+    private val adopted = java.util.concurrent.atomic.AtomicReference<CloudTurnConnection?>(null)
+
+    /** Offer [connection] to the next exchange. */
+    internal fun adopt(connection: CloudTurnConnection) {
+        adopted.set(connection)
+    }
+
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
         // Use a large bounded channel (4096 events) so the WebSocket listener can
         // buffer frames without silently dropping them. With an unbounded channel,
@@ -113,7 +125,12 @@ class WebSocketCloudTurnTransport(
                 emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
+            override fun onMessage(webSocket: WebSocket, text: String) = acceptText(text)
+
+            // Shared by the dialled socket and the adopted replay, so the two paths cannot drift:
+            // decoding and handshake validation happen in exactly one place. `webSocket` is unused
+            // because every branch works through `channel`.
+            fun acceptText(text: String) {
                 val event = CloudRouteEvents.decode(text)
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
@@ -176,10 +193,43 @@ class WebSocketCloudTurnTransport(
             }
         }
 
-        // The dial is funnelled through a seam so a turn can adopt a socket another coroutine
-        // opened. Without one, a socket that must outlive the call that opened it has nowhere to
-        // live: callbackFlow dials and closes within a single collection.
-        val socket = dial(request, listener)
+        // A connection opened for this utterance BEFORE the turn existed is consumed instead of
+        // dialled. It was opened early so the handshake could overlap the endpoint wait; dialling
+        // again here would hand back the latency the optimisation exists to save.
+        //
+        // Its listener has been writing undecoded events since before this turn existed, so they
+        // are replayed into THIS exchange's channel: decoding stays in one place, and the adopted
+        // path cannot drift from the dialled one. They are buffered because the socket can open,
+        // fail or close in the window between the early open and this turn adopting it.
+        val early = adopted.getAndSet(null)
+        val socket: WebSocket? = if (early != null) null else dial(request, listener)
+        if (early != null) {
+            early.events?.let { events ->
+                launch {
+                    for (raw in events) {
+                        when (raw) {
+                            // Through the same handler the dialled socket uses, so the adopted
+                            // path gets identical handshake validation instead of its own copy.
+                            is RawSocketEvent.Text -> listener.acceptText(raw.text)
+
+                            is RawSocketEvent.Failed -> {
+                                observer?.onConnectionFailed(frame.requestId)
+                                channel.trySend(CloudRouteEvent.Error(CloudRouteErrorCodes.CONNECTION_LOST, ""))
+                                channel.close()
+                                return@launch
+                            }
+
+                            is RawSocketEvent.Closed -> {
+                                channel.close()
+                                return@launch
+                            }
+
+                            RawSocketEvent.Opened -> Unit
+                        }
+                    }
+                }
+            }
+        }
 
         // Launch collection BEFORE awaitClose so it runs concurrently with the
         // socket being open. awaitClose suspends until the callbackFlow is
@@ -217,7 +267,10 @@ class WebSocketCloudTurnTransport(
         }
 
         awaitClose {
-            socket.cancel()
+            // An adopted socket belongs to its connection, not to this collection: the connection
+            // closes it on replacement, staleness or shutdown. Cancelling here would close a socket
+            // other bookkeeping still believes is held.
+            socket?.cancel()
             collectionJob.cancel()
         }
     }
@@ -285,7 +338,7 @@ class WebSocketCloudTurnTransport(
         is CloudTurnFrame.Authenticate -> CloudRouteJson.authenticateAdapter.toJson(this)
     }
 
-    private companion object {
+    internal companion object {
         const val ROUTE_PATH = "/api/v1/cloud/route"
     }
 }

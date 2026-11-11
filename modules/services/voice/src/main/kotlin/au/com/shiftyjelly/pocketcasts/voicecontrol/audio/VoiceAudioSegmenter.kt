@@ -120,18 +120,25 @@ fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentStartMs(): Long? {
 }
 
 /**
- * The monotonic instant (ms on the client's elapsedRealtime base) the segment's LAST sample was
- * CAPTURED — the acoustic end the timing table starts from. Same sample-accounted anchor as
- * [captureTimeOfSegmentStartMs], at the segment's end position instead of its start.
+ * The monotonic instant (ms) the segment's LAST SPEECH SAMPLE was CAPTURED — the acoustic end the
+ * timing table starts from. Anchored at the SPEECH end, not the end of the retained buffer: the
+ * buffer includes trailing silence and the drain, so anchoring there places the acoustic end AFTER
+ * the user stopped speaking and hides exactly the latency the table measures. The speech-end
+ * sample's stream position is `segmentEndStreamPosition - totalRetainedSamples + speechEndSample`,
+ * and the clock observation only supplies the instant that position is converted against.
  *
- * Null when either the accounted end position or a timestamp observation is missing: an absent
- * binding must stay absent — the timing table leaves the stage unmarked rather than substituting
- * "now", which would fold the drain delay into the user's time.
+ * Null when the speech-end evidence, the accounted end position or the timestamp observation is
+ * missing: an absent binding must stay absent — the timing table leaves the stage unmarked rather
+ * than substituting the buffer end or "now".
  */
 fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndMs(): Long? {
     val endPosition = segmentEndStreamPosition ?: return null
     val observation = captureClock ?: return null
-    return captureTimeNsForPosition(observation, endPosition)?.div(1_000_000L)
+    // 0 means the segmenter does not report the speech end — unknown, not "the first sample".
+    val speechEndSample = speechEndSample.takeIf { it > 0 } ?: return null
+    val totalRetainedSamples = frames.sumOf { it.samples.size.toLong() }
+    val speechEndStreamPosition = endPosition - totalRetainedSamples + speechEndSample
+    return captureTimeNsForPosition(observation, speechEndStreamPosition)?.div(1_000_000L)
 }
 
 enum class RejectionReason {

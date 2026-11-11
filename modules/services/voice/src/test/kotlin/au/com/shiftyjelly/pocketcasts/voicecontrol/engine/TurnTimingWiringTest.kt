@@ -71,11 +71,12 @@ class TurnTimingWiringTest {
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
                     speechOnsetSample = 0,
-                    speechEndSample = 0,
+                    // Speech fills the whole retained buffer (no drain silence), so the acoustic
+                    // end IS the segment end: 1600 - 1600 + 1600 = stream position 1600.
+                    speechEndSample = 1_600,
                     // Capture accounting: 1600 samples at 16k, segment end observed at stream
-                    // position 1600 when the clock read 1_000_000_000ns (t=1000ms on the
-                    // elapsedRealtime base). The acoustic end is therefore 1000ms — derived from
-                    // the accounting, not stamped "now".
+                    // position 1600 when the clock read 1_000_000_000ns (t=1000ms). The acoustic
+                    // end is therefore 1000ms — derived from the accounting, not stamped "now".
                     captureClock = longArrayOf(1600, 1_000_000_000L, 16_000, 1),
                     segmentEndStreamPosition = 1600,
                 ),

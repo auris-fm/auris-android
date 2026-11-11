@@ -36,7 +36,7 @@ class TrailingSilenceOpenControlTest {
         val segmenter = EnergyVoiceAudioSegmenter()
 
         assertEquals(VoiceSegmenterResult.SpeechStarted, segmenter.process(speechFrame))
-        assertEquals(VoiceSegmenterResult.SpeechContinuing, segmenter.process(speechFrame))
+        assertEquals(VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null), segmenter.process(speechFrame))
 
         // The FIRST silent frame is where an early connection can be opened; every later frame is
         // still inside the endpoint wait. Reporting only at SpeechEnded would give back the wait.
@@ -80,7 +80,7 @@ class TrailingSilenceOpenControlTest {
 
         // The user resumes: speech continues the same utterance, and the next pause is a new
         // onset. The engine keys the connection on the utterance tag, so this must not dial again.
-        assertEquals(VoiceSegmenterResult.SpeechContinuing, segmenter.process(speechFrame))
+        assertEquals(VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null), segmenter.process(speechFrame))
         assertEquals(VoiceSegmenterResult.TrailingSilenceBegan, segmenter.process(silentFrame))
     }
 }

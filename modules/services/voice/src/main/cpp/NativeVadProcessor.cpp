@@ -50,7 +50,8 @@ void NativeVadProcessor::stop() {
     {
         std::lock_guard<std::mutex> lock(mEventMutex);
         mPendingEvents.clear();
-        mPendingEvents.push_back(-1);
+        mCompletedSegments.clear();
+        mPendingEvents.push_back({-1, mUtteranceGeneration});
         mEventCv.notify_all();
     }
 
@@ -82,20 +83,40 @@ void NativeVadProcessor::stop() {
     LOGI("VAD processor thread stopped");
 }
 
-int NativeVadProcessor::waitForEvent(int32_t timeoutMs) {
+int NativeVadProcessor::waitForEvent(int32_t timeoutMs, int32_t* outGeneration) {
     std::unique_lock<std::mutex> lock(mEventMutex);
     if (mPendingEvents.empty()) {
         mEventCv.wait_for(lock, std::chrono::milliseconds(timeoutMs));
     }
     if (mPendingEvents.empty()) {
+        if (outGeneration != nullptr) *outGeneration = -1;
         return 0; // timeout
     }
     // FIFO: the early-wake events made the single slot a lossy publisher — a cutoff or
     // trailing-silence event published while the consumer slept OVERWROTE an unread one. A queue
     // delivers every event in the order it was published.
-    int event = mPendingEvents.front();
+    PendingEvent event = mPendingEvents.front();
     mPendingEvents.pop_front();
-    return event;
+    if (outGeneration != nullptr) *outGeneration = event.generation;
+    // An end event delivers ITS OWN completed snapshot, not the most recent one: two queued end
+    // events (a consumer that lagged a pause-resume-pause sequence) must each serve the segment
+    // they belong to, so the getters cannot hand back B's audio when the consumer asked for A's.
+    if (event.code == 2 && !mCompletedSegments.empty()) {
+        CompletedSegment segment = std::move(mCompletedSegments.front());
+        mCompletedSegments.pop_front();
+        std::lock_guard<std::mutex> speechLock(mSpeechMutex);
+        mSnapshotBuffer = std::move(segment.pcm);
+        mSnapshotSpeechOnsetSample = segment.onset;
+        mSnapshotSpeechEndSample = segment.endSample;
+        mSnapshotSpeechEndStreamPosition = segment.segmentEndStreamPosition;
+        mCompletedGeneration = segment.generation;
+    }
+    return event.code;
+}
+
+int32_t NativeVadProcessor::getCompletedGeneration() {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    return mCompletedGeneration;
 }
 
 bool NativeVadProcessor::awaitRunLoopExitForTest(int maxMs) {
@@ -344,7 +365,8 @@ void NativeVadProcessor::runLoop() {
             // shutdown: no error, no result, no state change, no recovery when the noise stops. A
             // distinct value is what makes the fault visible at the boundary.
             mPendingEvents.clear();
-            mPendingEvents.push_back(kFaultEvent); // fault: surfaced, not an ordinary end
+            mCompletedSegments.clear();
+            mPendingEvents.push_back({kFaultEvent, mUtteranceGeneration}); // fault: surfaced, not an ordinary end
             mFaultLatched = true; // preserve the terminal cause through loop exit
             // The processor is STOPPED by the fault: clear mActive BEFORE unlocking so a later
             // start() cannot report already-running against an exiting worker.
@@ -397,10 +419,19 @@ void NativeVadProcessor::runLoop() {
                     mEarlyWakeSignalled = false;
                 }
 
-                // Signal speech started.
-                std::lock_guard<std::mutex> lock(mEventMutex);
-                mPendingEvents.push_back(1); // speech started
-                mEventCv.notify_one();
+                // Signal speech started. The generation is read under the speech mutex: this
+                // event belongs to the utterance that just started, and only that lock owns
+                // consistent access to the generation counter.
+                int32_t startedGeneration;
+                {
+                    std::lock_guard<std::mutex> speechLock(mSpeechMutex);
+                    startedGeneration = mUtteranceGeneration;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mEventMutex);
+                    mPendingEvents.push_back({1, startedGeneration}); // speech started
+                    mEventCv.notify_one();
+                }
             }
 
             // Accumulate current frame. Under the lock, together with the end-sample marker and the
@@ -430,9 +461,18 @@ void NativeVadProcessor::runLoop() {
                 }
             }
             if (cutoffReached) {
-                std::lock_guard<std::mutex> lock(mEventMutex);
-                mPendingEvents.push_back(4); // early-wake cutoff reached
-                mEventCv.notify_one();
+                // The cutoff belongs to the utterance whose length crossed the window: the
+                // generation captured when the deciding state was read, under the speech mutex.
+                int32_t cutoffGeneration;
+                {
+                    std::lock_guard<std::mutex> speechLock(mSpeechMutex);
+                    cutoffGeneration = mUtteranceGeneration;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mEventMutex);
+                    mPendingEvents.push_back({4, cutoffGeneration}); // early-wake cutoff reached
+                    mEventCv.notify_one();
+                }
             }
             continue;
         }
@@ -449,9 +489,16 @@ void NativeVadProcessor::runLoop() {
             // engine opens an early connection on, outside the grace window. Published once, at
             // the transition, so it cannot flood the Kotlin side.
             if (mConsecutiveSilentFrames == 1) {
-                std::lock_guard<std::mutex> lock(mEventMutex);
-                mPendingEvents.push_back(3); // trailing silence began
-                mEventCv.notify_one();
+                int32_t silenceGeneration;
+                {
+                    std::lock_guard<std::mutex> speechLock(mSpeechMutex);
+                    silenceGeneration = mUtteranceGeneration;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mEventMutex);
+                    mPendingEvents.push_back({3, silenceGeneration}); // trailing silence began
+                    mEventCv.notify_one();
+                }
             }
 
             if (mConsecutiveSilentFrames < kSilenceTimeoutFrames) {
@@ -486,6 +533,7 @@ void NativeVadProcessor::runLoop() {
 
                 if (mDrainRemaining <= 0) {
                     // Drain complete — finalize the utterance.
+                    int32_t endedGeneration = -1;
 
                     // The finalize point IS the sample-accounting anchor: this thread just
                     // consumed the frame containing the segment's last sample, and the ring's read
@@ -515,6 +563,7 @@ void NativeVadProcessor::runLoop() {
                         // The generation changes HERE, under the same lock as the reset: a snapshot
                         // taken across this boundary carries a generation the engine can detect and
                         // drop, instead of half one utterance and half the next.
+                        endedGeneration = mUtteranceGeneration; // the utterance that just ENDED
                         mUtteranceGeneration++;
                         mEarlyWakeSignalled = false;
                         // Every field the snapshot reads is reset under this same lock, so no
@@ -529,9 +578,22 @@ void NativeVadProcessor::runLoop() {
                     mDrainRemaining = 0;
                     mContextCount = 0;
                     mContextHead = 0;
+                    // THIS utterance's completed segment, captured under the same lock as the
+                    // snapshot members: its OWN generation (pre-increment — the generation the
+                    // engine learned from its early snapshots for this utterance), PCM copy,
+                    // onset, speech end and the accounting anchor. Queued with the end event so
+                    // the consumer pops one coherent segment per event even when two ends are
+                    // queued.
+                    CompletedSegment completed;
+                    completed.generation = endedGeneration;
+                    completed.pcm = mSnapshotBuffer;
+                    completed.onset = mSnapshotSpeechOnsetSample;
+                    completed.endSample = mSnapshotSpeechEndSample;
+                    completed.segmentEndStreamPosition = mSnapshotSpeechEndStreamPosition;
 
                     std::lock_guard<std::mutex> lock(mEventMutex);
-                    mPendingEvents.push_back(2); // speech ended
+                    mCompletedSegments.push_back(std::move(completed));
+                    mPendingEvents.push_back({2, endedGeneration}); // speech ended
                     mEventCv.notify_one();
                 }
             }
@@ -553,7 +615,8 @@ void NativeVadProcessor::runLoop() {
         // exit gets the terminal stop sentinel.
         if (!mFaultLatched) {
             mPendingEvents.clear();
-            mPendingEvents.push_back(-1);
+            mCompletedSegments.clear();
+            mPendingEvents.push_back({-1, mUtteranceGeneration});
         }
         // FINAL ACT, after the terminal cause is settled: publish worker completion for the test
         // boundary (and any future observer). Set UNDER the event lock so an observer that sees

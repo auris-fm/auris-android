@@ -368,7 +368,24 @@ class VoiceAsrEngine @Inject constructor(
                             // determined while the user is still speaking. Score it as soon as that
                             // much audio exists: this is what lets the verdict exist at the trailing-
                             // silence onset, and the connection open there, outside grace too.
-                            scoreWakeEarly()
+                            // A cutoff event carries the generation of the utterance it belongs to.
+                            // The event queue is FIFO but the engine is async: a cutoff for utterance
+                            // A can be popped after A ended and B started. Acting on it would read
+                            // B's snapshot and accept B as A — so the event's generation is matched
+                            // BEFORE any score. Where no generation is known yet (no snapshot seen,
+                            // segmenters that do not report it), the snapshot check inside the score
+                            // remains the guard.
+                            val eventGeneration = result.utteranceGeneration
+                            val known = earlyUtteranceGeneration
+                            if (eventGeneration != null && known != null && eventGeneration != known) {
+                                Timber.i(
+                                    "[VoicePipeline] stale early-wake cutoff (gen %d, current %d); dropped",
+                                    eventGeneration,
+                                    known,
+                                )
+                            } else {
+                                scoreWakeEarly(expectedGeneration = eventGeneration)
+                            }
                         }
 
                         is VoiceSegmenterResult.TrailingSilenceBegan -> {
@@ -694,7 +711,7 @@ class VoiceAsrEngine @Inject constructor(
      * score, not an approximation of it. A negative result is cached too: re-scoring the same
      * window every frame would spend detector time on a decided question.
      */
-    private suspend fun scoreWakeEarly() {
+    private suspend fun scoreWakeEarly(expectedGeneration: Long? = null) {
         if (earlyWakeResult != null || earlyScoringRetired) return
         val reader = inProgressUtterance ?: return
         if (!wakeWordDetector.isReady) return
@@ -702,12 +719,23 @@ class VoiceAsrEngine @Inject constructor(
         // ONE snapshot call: generation, onset, size and PCM under one lock. A snapshot whose
         // generation does not match this utterance describes audio across a finalization boundary;
         // it is dropped and early scoring is retired for this utterance — no retry, because the
-        // endpoint path scores that utterance anyway.
+        // endpoint path scores that utterance anyway. An event-supplied expected generation must
+        // match too: the snapshot and the event that triggered this score must describe the SAME
+        // utterance, not merely both be "current".
         val header = LongArray(3)
         val buffer = ShortArray(EarlyWakeScore.CUTOFF_SAMPLES * 2)
         val copied = reader.readSnapshot(buffer, header)
         if (copied <= 0) return
         val generation = header[0]
+        if (expectedGeneration != null && generation != expectedGeneration) {
+            Timber.i(
+                "[VoicePipeline] snapshot gen %d does not match the cutoff's gen %d; dropping, endpoint will score",
+                generation,
+                expectedGeneration,
+            )
+            earlyScoringRetired = true
+            return
+        }
         val currentGeneration = earlyUtteranceGeneration
         when {
             currentGeneration == null -> earlyUtteranceGeneration = generation

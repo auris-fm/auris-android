@@ -273,7 +273,7 @@ class VoiceControlCaptureRestartTest {
         }
         override fun isCapturing() = capturing
 
-        override fun waitForVadEvent(timeoutMs: Int): Int {
+        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int {
             // Block while capture is live so the collected flow stays alive; return "no event"
             // once capture has ended so a disposed engine's loop exits promptly.
             val deadline = System.currentTimeMillis() + timeoutMs

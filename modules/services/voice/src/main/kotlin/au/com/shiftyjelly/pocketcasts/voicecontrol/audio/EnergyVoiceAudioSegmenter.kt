@@ -47,7 +47,7 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
             if (speechFrames == 1) {
                 speechStartTimeMs = System.currentTimeMillis()
             }
-            return if (speechFrames == 1) VoiceSegmenterResult.SpeechStarted else VoiceSegmenterResult.SpeechContinuing
+            return if (speechFrames == 1) VoiceSegmenterResult.SpeechStarted else VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null)
         }
 
         if (speechFrames > 0) {

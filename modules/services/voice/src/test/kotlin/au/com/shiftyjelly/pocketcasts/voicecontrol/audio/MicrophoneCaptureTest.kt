@@ -49,7 +49,7 @@ class MicrophoneCaptureTest {
 
         override fun isCapturing(): Boolean = capturing
 
-        override fun waitForVadEvent(timeoutMs: Int): Int = -1
+        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int = -1
 
         override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = 0
         override fun getSpeechPcm(buffer: ShortArray): Int = 0

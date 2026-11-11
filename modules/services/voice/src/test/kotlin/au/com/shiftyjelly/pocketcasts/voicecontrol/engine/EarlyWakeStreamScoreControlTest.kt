@@ -152,9 +152,9 @@ class EarlyWakeStreamScoreControlTest {
 
     private fun events() = listOf(
         VoiceSegmenterResult.SpeechStarted,
-        VoiceSegmenterResult.SpeechContinuing,
-        VoiceSegmenterResult.SpeechContinuing,
-        VoiceSegmenterResult.SpeechContinuing,
+        VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
+        VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
+        VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
         VoiceSegmenterResult.TrailingSilenceBegan,
         VoiceSegmenterResult.SpeechEnded(
             listOf(PcmAudioFrame(inProgressBuffer(), sampleRateHz)),
@@ -192,14 +192,15 @@ class EarlyWakeStreamScoreControlTest {
         renderer: AudioFeedbackRenderer,
         grace: GracePeriodSignal,
         opener: EarlyConnectionOpener?,
-        order: MutableList<String>,
+        order: MutableList<String>?,
+        eventsOverride: List<VoiceSegmenterResult>? = null,
     ): VoiceAsrEngine = VoiceAsrEngine(
         voiceAudioProcessor = mock<VoiceAudioProcessor>().also {
             whenever(it.attachCapture()).thenReturn(true)
             whenever(it.startProcessing()).thenReturn(
                 kotlinx.coroutines.flow.flow {
-                    events().forEach {
-                        order.add(it::class.simpleName.orEmpty())
+                    (eventsOverride ?: events()).forEach {
+                        order?.add(it::class.simpleName.orEmpty())
                         emit(it)
                     }
                 },
@@ -219,7 +220,11 @@ class EarlyWakeStreamScoreControlTest {
         inProgressUtterance = reader,
     )
 
-    private suspend fun startAndDrain(engine: VoiceAsrEngine, scope: kotlinx.coroutines.test.TestScope) {
+    private suspend fun startAndDrain(
+        engine: VoiceAsrEngine,
+        scope: kotlinx.coroutines.test.TestScope,
+        events: List<VoiceSegmenterResult>? = null,
+    ) {
         engine.scope = scope
         engine.start(
             backend(),
@@ -233,6 +238,55 @@ class EarlyWakeStreamScoreControlTest {
     }
 
     @Test
+    fun `a stale cutoff event for a finished utterance is dropped, not scored`() {
+        // The reader serves generation 1 (utterance B is live). A cutoff event carrying
+        // generation 0 (utterance A, already finished) arrives late -- the FIFO queue crossed the
+        // utterance boundary. Scoring it would read B's snapshot and accept B as A.
+        val detector = RecordingDetector()
+        val scored = java.util.concurrent.atomic.AtomicInteger()
+        kotlinx.coroutines.test.runTest {
+            val engine = buildEngine(
+                detector,
+                reader(generation = 1L),
+                mock(),
+                mock(),
+                null,
+                null,
+                eventsOverride = listOf(
+                    VoiceSegmenterResult.SpeechStarted,
+                    // Stale: A's cutoff arriving after B began.
+                    VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = 0L),
+                ),
+            )
+            startAndDrain(engine, this)
+        }
+        // The script has no endpoint event, so EVERY detector call would be the stale early score.
+        // The stale cutoff must score nothing.
+        assertEquals("a cutoff for a finished utterance must not reach the detector", 0, detector.windows.size)
+    }
+
+    @Test
+    fun `a cutoff whose generation matches the snapshot scores`() {
+        val detector = RecordingDetector()
+        kotlinx.coroutines.test.runTest {
+            val engine = buildEngine(
+                detector,
+                reader(generation = 7L),
+                mock(),
+                mock(),
+                null,
+                null,
+                eventsOverride = listOf(
+                    VoiceSegmenterResult.SpeechStarted,
+                    VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = 7L),
+                ),
+            )
+            startAndDrain(engine, this)
+        }
+        assertEquals("a matching cutoff reaches the detector once", 1, detector.windows.size)
+    }
+
+    @Test
     fun `a negative early result is cached, not re-scored on every frame`() {
         val detector = RecordingDetector(quiet = true)
         val order = mutableListOf<String>()
@@ -241,7 +295,7 @@ class EarlyWakeStreamScoreControlTest {
             startAndDrain(engine, this)
         }
 
-        // Three SpeechContinuing frames arrive; only the first may reach the detector. The second
+        // Three SpeechContinuing(utteranceGeneration = null) frames arrive; only the first may reach the detector. The second
         // call is the finished segment, which must still run: it strips wake audio.
         assertEquals(2, detector.windows.size)
     }

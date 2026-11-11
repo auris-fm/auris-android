@@ -7,7 +7,16 @@ interface VoiceAudioSegmenter {
 sealed interface VoiceSegmenterResult {
     data object Silence : VoiceSegmenterResult
     data object SpeechStarted : VoiceSegmenterResult
-    data object SpeechContinuing : VoiceSegmenterResult
+
+    /**
+     * The in-progress utterance crossed the early-wake window while still speaking.
+     *
+     * [utteranceGeneration] is the generation of the utterance the cutoff belongs to, straight
+     * from the native event. A consumer that has moved on to a later utterance drops the event
+     * instead of scoring or deciding on the wrong audio: a cutoff for utterance A arriving after
+     * B started must never read B's snapshot and accept B as A.
+     */
+    data class SpeechContinuing(val utteranceGeneration: Long?) : VoiceSegmenterResult
 
     /**
      * The first silent frame after speech: the utterance may be over, but the endpoint has not been
@@ -51,6 +60,13 @@ sealed interface VoiceSegmenterResult {
          * observation's frame position.
          */
         val segmentEndStreamPosition: Long? = null,
+        /**
+         * The generation of the utterance this completed segment belongs to, as carried by its
+         * end event. Native guarantees the PCM/onset/end fields of this same object ARE that
+         * utterance's completed snapshot, so a consumer can rely on their pairing instead of
+         * re-deriving it from shared latest-state getters.
+         */
+        val utteranceGeneration: Long? = null,
     ) : VoiceSegmenterResult
     data class Rejected(val reason: RejectionReason) : VoiceSegmenterResult
 }

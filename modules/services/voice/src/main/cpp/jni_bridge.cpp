@@ -259,16 +259,24 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCapt
 
 extern "C" JNIEXPORT jint JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeWaitForVadEvent(
-    JNIEnv* /*env*/,
+    JNIEnv* env,
     jclass /*clazz*/,
-    jint timeoutMs)
+    jint timeoutMs,
+    jlongArray generationOut)
 {
     NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return -1;
     }
-    const int result = processor->waitForEvent(static_cast<int32_t>(timeoutMs));
+    // Every event carries its utterance generation, so the Kotlin side can drop a delayed event
+    // for a finished utterance instead of mistaking it for one about the utterance in progress.
+    int32_t generation = -1;
+    const int result = processor->waitForEvent(static_cast<int32_t>(timeoutMs), &generation);
     gVadProcessor.release();
+    if (generationOut != nullptr && env->GetArrayLength(generationOut) > 0) {
+        jlong value = static_cast<jlong>(generation);
+        env->SetLongArrayRegion(generationOut, 0, 1, &value);
+    }
     return result;
 }
 

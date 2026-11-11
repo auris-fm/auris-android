@@ -28,8 +28,16 @@ public:
     void stop();    // join thread, reset state
 
     // Block until event. Returns: 1=speech started, 2=speech ended, 3=trailing silence began,
-    // 4=early-wake cutoff reached (needs setEarlyWakeCutoff), 0=timeout, -1=stopped
-    int waitForEvent(int32_t timeoutMs);
+    // 4=early-wake cutoff reached (needs setEarlyWakeCutoff), 0=timeout, -1=stopped.
+    // Every event carries the utterance generation it belongs to: waitForEvent installs the
+    // generation in [outGeneration] (never null). A consumer compares it against the generation
+    // it expects before acting, so a delayed event for a finished utterance cannot be mistaken
+    // for one about the utterance now in progress.
+    int waitForEvent(int32_t timeoutMs, int32_t* outGeneration);
+
+    // The generation of the COMPLETED segment waitForEvent installed last (its own, not the
+    // utterance now in progress). -1 before any end event was popped.
+    int32_t getCompletedGeneration();
 
     int32_t getSpeechPcmSize();
     int32_t getSpeechPcm(int16_t* outBuffer, int32_t maxSamples);
@@ -223,7 +231,27 @@ private:
      * a cutoff or trailing-silence event published while the consumer slept overwrote an unread
      * one, and the engine would miss the very moments the early-wake optimisation reacts to.
      */
-    std::deque<int> mPendingEvents;
+    struct PendingEvent {
+        int32_t code;
+        int32_t generation; // the utterance generation the event belongs to
+    };
+    std::deque<PendingEvent> mPendingEvents;
+
+    // A COMPLETED segment captured at finalize time. Queued per end event so a second end event
+    // cannot overwrite the first consumer's snapshot: the snapshot the getters serve belongs to
+    // the end event just popped, not to whatever utterance finished most recently.
+    struct CompletedSegment {
+        int32_t generation;
+        std::vector<int16_t> pcm;
+        int32_t onset;
+        int32_t endSample;
+        int64_t segmentEndStreamPosition;
+    };
+    std::deque<CompletedSegment> mCompletedSegments;
+
+    // The generation of the segment currently served by the completed-snapshot getters
+    // (getSpeechPcm/getSpeechOnsetSample/getSpeechEndSample/getSpeechEndStreamPosition).
+    int32_t mCompletedGeneration = -1;
 };
 
 #endif // POCKETCASTS_NATIVE_VAD_PROCESSOR_H

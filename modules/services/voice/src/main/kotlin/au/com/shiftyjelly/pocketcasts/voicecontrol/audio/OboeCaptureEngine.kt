@@ -83,7 +83,7 @@ internal object OboeNative {
      */
     external fun nativeGetVadDiagnostics(): LongArray
     external fun nativeSetVadDiagnosticsEnabled(enabled: Boolean)
-    external fun nativeWaitForVadEvent(timeoutMs: Int): Int
+    external fun nativeWaitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
 
     /** Ranged copy-out: fills [out] from native speech at offset [fromSample]; returns written. */
@@ -129,7 +129,7 @@ interface CaptureHardware {
 
     fun isCapturing(): Boolean
 
-    fun waitForVadEvent(timeoutMs: Int): Int
+    fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int
 
     fun getSpeechPcm(buffer: ShortArray): Int
 
@@ -165,7 +165,7 @@ class OboeCaptureHardware : CaptureHardware {
     override fun startInputStream(): Boolean = OboeNative.nativeStartInputStream()
     override fun closeInputCapture() = OboeNative.nativeCloseInputCapture()
     override fun isCapturing(): Boolean = OboeNative.nativeIsCapturing()
-    override fun waitForVadEvent(timeoutMs: Int): Int = OboeNative.nativeWaitForVadEvent(timeoutMs)
+    override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int = OboeNative.nativeWaitForVadEvent(timeoutMs, generationOut)
     override fun getSpeechPcm(buffer: ShortArray): Int = OboeNative.nativeGetSpeechPcm(buffer)
     override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = OboeNative.nativeGetSpeechPcmRange(out, fromSample)
     override fun getSpeechPcmSize(): Int = OboeNative.nativeGetSpeechPcmSize()
@@ -237,12 +237,17 @@ internal class OboeCaptureEngine(
     fun captureEvents(): Flow<VoiceSegmenterResult> = flow {
         try {
             while (currentCoroutineContext().isActive && !disposed) {
-                when (val event = hardware.waitForVadEvent(500)) {
+                // Every event carries the generation of the utterance it belongs to, read by the
+                // native pop under the same lock that installed its payload.
+                val generationOut = LongArray(1)
+                when (val event = hardware.waitForVadEvent(500, generationOut)) {
                     1 -> emit(VoiceSegmenterResult.SpeechStarted)
 
                     // The early-wake cutoff: the in-progress utterance passed the wake window's
                     // length, so the engine can score the wake word while the user is still speaking.
-                    4 -> emit(VoiceSegmenterResult.SpeechContinuing)
+                    // The generation travels with the event: a cutoff for a finished utterance is
+                    // dropped by the engine, not scored against the utterance now in progress.
+                    4 -> emit(VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = generationOut[0]))
 
                     // The first silent frame after speech: where an early connection opens, outside
                     // the grace window.
@@ -296,6 +301,10 @@ internal class OboeCaptureEngine(
                                         speechEndSample = speechEndSample,
                                         captureClock = clock,
                                         segmentEndStreamPosition = segmentEnd,
+                                        // The end event's own generation: native installed THIS
+                                        // event's completed snapshot at the pop, so the PCM,
+                                        // onset, end and accounting fields all belong to it.
+                                        utteranceGeneration = generationOut[0],
                                     ),
                                 )
                             }

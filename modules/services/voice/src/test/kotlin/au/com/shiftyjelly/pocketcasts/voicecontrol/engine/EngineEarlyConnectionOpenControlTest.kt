@@ -156,7 +156,7 @@ class EngineEarlyConnectionOpenControlTest {
             this,
             listOf(
                 VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechContinuing,
+                VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                 VoiceSegmenterResult.TrailingSilenceBegan,
                 VoiceSegmenterResult.SpeechEnded(listOf(PcmAudioFrame(shortArrayOf(100, 200), 16000))),
             ),
@@ -190,7 +190,7 @@ class EngineEarlyConnectionOpenControlTest {
                 listOf(
                     VoiceSegmenterResult.SpeechStarted,
                     VoiceSegmenterResult.TrailingSilenceBegan,
-                    VoiceSegmenterResult.SpeechContinuing,
+                    VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                     VoiceSegmenterResult.TrailingSilenceBegan,
                     VoiceSegmenterResult.SpeechEnded(listOf(PcmAudioFrame(shortArrayOf(100, 200), 16000))),
                 ),
@@ -214,7 +214,7 @@ class EngineEarlyConnectionOpenControlTest {
             this,
             listOf(
                 VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechContinuing,
+                VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                 VoiceSegmenterResult.TrailingSilenceBegan,
                 VoiceSegmenterResult.SpeechEnded(listOf(PcmAudioFrame(shortArrayOf(100, 200), 16000))),
             ),

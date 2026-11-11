@@ -83,6 +83,7 @@ constexpr int32_t kTestCutoff = 8 * kFrame;  // speech long enough to cross it b
 }  // namespace
 
 int main() {
+    int32_t gen = -1;
     std::printf("in-progress utterance snapshot + early-wake events\n");
 
     {
@@ -112,7 +113,7 @@ int main() {
         }
 
         // Wait for the onset, then look at the in-progress snapshot while speech is definitely running.
-        const int started = processor.waitForEvent(10000);
+        const int started = processor.waitForEvent(10000, &gen);
         check(started == 1, "speech onset is reported");
 
         // Read IMMEDIATELY after the onset event, without sleeping: the script's speech run is short
@@ -138,8 +139,8 @@ int main() {
         const int64_t liveGeneration = header[0];
 
         // Now let the segment close and confirm the partial view goes away.
-        check(processor.waitForEvent(10000) == 3, "trailing silence precedes the segment close (no cutoff configured)");
-        const int ended = processor.waitForEvent(15000);
+        check(processor.waitForEvent(10000, &gen) == 3, "trailing silence precedes the segment close (no cutoff configured)");
+        const int ended = processor.waitForEvent(15000, &gen);
         check(ended == 2, "speech end is reported");
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         std::fill(header, header + 3, static_cast<int64_t>(-1));
@@ -170,11 +171,78 @@ int main() {
             return 1;
         }
 
-        check(processor.waitForEvent(10000) == 1, "speech onset is reported (events run)");
-        check(processor.waitForEvent(10000) == 4, "the cutoff event fires once the utterance crosses the configured length");
-        check(processor.waitForEvent(10000) == 3, "trailing silence is reported on the first silent frame");
-        check(processor.waitForEvent(15000) == 2, "speech end is reported (events run)");
+        check(processor.waitForEvent(10000, &gen) == 1, "speech onset is reported (events run)");
+        check(processor.waitForEvent(10000, &gen) == 4, "the cutoff event fires once the utterance crosses the configured length");
+        check(processor.waitForEvent(10000, &gen) == 3, "trailing silence is reported on the first silent frame");
+        check(processor.waitForEvent(15000, &gen) == 2, "speech end is reported (events run)");
         // The cutoff event is once per utterance: no second one before the segment ends.
+        check(gen >= 0, "the cutoff event carries its utterance's generation");
+        processor.stop();
+    }
+
+    {
+        // EVENTS CARRY THEIR UTTERANCE'S GENERATION, AND AN END EVENT DELIVERS ITS OWN SNAPSHOT.
+        // Two utterances finalize while the consumer sleeps: when it finally pops, each end event
+        // must serve the PCM/onset/end of ITS utterance -- not the one that finished most
+        // recently -- and every event must name the utterance it belongs to. (Silence runs are
+        // long enough that the drain floor and the 7-frame silence timeout both fit, so A really
+        // closes before B starts.)
+        std::deque<bool> script;
+        appendFrames(script, 3, true);     // utterance A: short speech
+        appendFrames(script, 60, false);   // silence closing A (drain floor + timeout fit)
+        appendFrames(script, 20, true);    // utterance B
+        appendFrames(script, 60, false);   // silence closing B
+
+        FakeCapture capture;
+        capture.script = script;
+        NativeVadProcessor processor(&capture);
+        processor.setEarlyWakeCutoff(kTestCutoff);
+        if (!processor.start()) {
+            std::printf("FAIL  processor (pairing) did not start\n");
+            return 1;
+        }
+        // Let the whole script run before consuming anything: both finals happen first.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+
+        int32_t generationA = -1;
+        int32_t generationB = -1;
+        bool sawAEnd = false;
+        int32_t sizeA = -1;
+        // Phase 1: drain events until the first end; every event must carry ONE generation.
+        while (true) {
+            const int event = processor.waitForEvent(10000, &gen);
+            if (event == 0) { check(false, "pairing: events ran out before an end"); break; }
+            if (event == -1) break;
+            if (event == 1) {
+                check(gen >= 0, "onset carries a generation");
+                if (generationA == -1) generationA = gen;
+                else { check(gen != generationA, "B onset carries a NEW generation"); generationB = gen; }
+                continue;
+            }
+            if (event == 2) {
+                if (!sawAEnd) {
+                    check(gen == generationA, "A end carries A's generation");
+                    sawAEnd = true;
+                    sizeA = processor.getSpeechPcmSize();
+                    check(sizeA > 0, "A end event serves A's completed snapshot");
+                    check(processor.getCompletedGeneration() == generationA,
+                        "the served snapshot's generation is A's");
+                } else if (generationB != -1) {
+                    check(gen == generationB, "B end carries B's generation");
+                    const int32_t sizeB = processor.getSpeechPcmSize();
+                    check(sizeB > 0 && sizeB != sizeA,
+                        "after popping B's end event, the served snapshot is B's, not A's");
+                    check(processor.getCompletedGeneration() == generationB,
+                        "the served snapshot's generation followed the end event popped");
+                }
+                break;
+            }
+            // 3/4: must belong to whichever utterance is live.
+            if (gen >= 0) {
+                check(gen == (sawAEnd ? generationB : generationA),
+                    "mid-utterance event carries the live utterance's generation");
+            }
+        }
         processor.stop();
     }
 
@@ -194,13 +262,13 @@ int main() {
             std::printf("FAIL  processor (short) did not start\n");
             return 1;
         }
-        const int shortOnset = processor.waitForEvent(10000);
+        const int shortOnset = processor.waitForEvent(10000, &gen);
         check(shortOnset == 1, "short utterance: onset is reported");
-        const int shortTrail = processor.waitForEvent(10000);
+        const int shortTrail = processor.waitForEvent(10000, &gen);
         check(shortTrail == 3, "short utterance: trailing silence fires without a cutoff first");
         // The short script runs out before the ~55-frame endpoint: the loop ends with the stop
         // sentinel rather than a segment close. Either way no cutoff fired before trailing silence.
-        const int shortEnd = processor.waitForEvent(15000);
+        const int shortEnd = processor.waitForEvent(15000, &gen);
         std::printf("      short utterance final event=%d\n", shortEnd);
         // 0 = the script ran out and the loop still spins; the stop sentinel never had to arrive.
         // The property under test is only that no cutoff fired — asserted by the two checks above.

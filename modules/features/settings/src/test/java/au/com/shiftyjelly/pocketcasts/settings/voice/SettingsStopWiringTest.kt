@@ -186,11 +186,10 @@ class SettingsStopWiringTest {
             "the durable stop must still be the thing the marker is read from, inside the fenced read",
             source.substring(readFnIndex, readFnEnd).contains("collectionPermittedByLocalIntent()"),
         )
-        // And the fenced read is what the single writer accepts: its call site sits inside
-        // readMarkerFenced's body, not in some other function's.
+        // And the single writer must consume the fenced read itself, not some other source.
         assertTrue(
-            "the fenced read must reach the marker's single writer",
-            readFnIndex < acceptIndex,
+            "the single writer must consume readMarkerFenced()",
+            source.contains("acceptMarkerRead(readMarkerFenced())"),
         )
     }
 

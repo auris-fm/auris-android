@@ -104,6 +104,8 @@ class VoiceSharingSettingsViewModel(
      * THE shared owner-session source (the same authority snapshot the controller fences with).
      * The ViewModel is a process-wide singleton, so operation PRESENTATION must retire at the
      * account boundary too: account B must never see account A's failure copy (reviewer a2136dd9).
+||||||| /tmp/mfb
+     * account boundary too: account B must never see account A's failure copy.
      */
     private val ownerSession: () -> Long,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),

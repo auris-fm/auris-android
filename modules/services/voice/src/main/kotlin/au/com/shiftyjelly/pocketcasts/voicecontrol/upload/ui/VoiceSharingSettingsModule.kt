@@ -49,6 +49,11 @@ object VoiceSharingSettingsModule {
             // THE SAME shared session source the controller fences with: the presentation
             // boundary and the correctness boundary must move together (reviewer a2136dd9).
             ownerSession = { accountStartup.authoritySnapshot().session },
+||||||| /tmp/mfb
+            // The same shared session source the controller fences with: the presentation
+            // Boundary and the correctness boundary must move together.
+            ownerSession = { accountStartup.authoritySnapshot().session },
+            ownerSession = { accountStartup.lastCommittedSession() },
             // The membership GET the surface depends on: production-only request prefix. The
             // ordinary signed-in bearer is read by the operations layer itself.
             refreshProjection = { accountStartup.operations.refreshProjection() },

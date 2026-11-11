@@ -67,14 +67,38 @@ class VoiceSharingAccountStartup @Inject constructor(
     @Volatile
     var accountReadableListener: ((String, Long) -> Unit)? = null
 
+    /**
+     * The session as of the last projection-fence commit, captured INSIDE the commit hook.
+     *
+     * The authority read is a Binder lookup (AccountManager), and the settings surface's
+     * presentation fence used to run it on the main thread — once at construction and once per
+     * projection emission. This cache moves that lookup onto the commit path that already had
+     * the authority in hand, so presentation-side session questions become a plain volatile
+     * read. This is the PRESENTATION boundary only: correctness fencing (enroll/withdraw/delete,
+     * queue sends) keeps the LIVE owner snapshot through the controller, so a change observed
+     * between commits still fail-closes the durable work.
+     */
+    @Volatile
+    private var committedSession: Long = ownership.authoritySnapshot().session
+
+    /** The committed session, for presentation-side fences. Never re-reads the authority. */
+    fun lastCommittedSession(): Long = committedSession
+
     init {
         // State fence is the single commit point for every projection change (GET/enrollment/
         // withdrawal/401/session-end): post-commit mirror notification ONLY — no authority is
         // derived here; CollectionAuthority re-reads state + owner snapshot at each decision.
         state.onProjectionListener = { projection ->
             // Mirror notification only: the listener re-reads the live owner snapshot itself.
-            enrollmentEvidenceListener?.invoke(projection, ownership.authoritySnapshot().session)
+            val session = ownership.authoritySnapshot().session
+            committedSession = session
+            enrollmentEvidenceListener?.invoke(projection, session)
         }
+        // An authority move (login/logout/removal) is also a session commit, and it can happen
+        // with no projection emission: refresh the cache on the binding's transaction tail, so
+        // presentation fencing never survives on a dead session. (The controller's own authority
+        // re-checks stay authoritative either way.)
+        binding.authorityMovedListener = { committedSession = ownership.authoritySnapshot().session }
     }
 
     val operations: VoiceSharingAccountOperations by lazy {

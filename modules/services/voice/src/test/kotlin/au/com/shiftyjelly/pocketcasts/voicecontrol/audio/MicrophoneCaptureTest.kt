@@ -73,7 +73,7 @@ class MicrophoneCaptureTest {
     }
 
     // Lifecycle exit: onEngineFinished clears reference eligibility
-    // Only when the finishing engine still OWNS the active capture.
+    // only when the finishing engine still OWNS the active capture.
     @Test
     fun `a current engine finishing ends reference eligibility`() {
         val gate = EpisodeReferenceEligibility()
@@ -119,7 +119,7 @@ class MicrophoneCaptureTest {
         assertTrue(hardware.capturing)
 
         // The replacement stream is opened (its own generation) before the cancelled collector's
-        // Flow `finally` has run. Active engine is still the stale one at this point.
+        // flow `finally` has run. Active engine is still the stale one at this point.
         assertTrue(capture.openStreamForAcquisition() >= 0)
 
         // The stale collector's cleanup runs now. It must not stop the newly opened stream.

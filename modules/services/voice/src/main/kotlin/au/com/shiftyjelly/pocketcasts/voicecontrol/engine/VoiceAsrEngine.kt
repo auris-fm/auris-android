@@ -79,14 +79,14 @@ class VoiceAsrEngine @Inject constructor(
     private val audioFeedbackRenderer: AudioFeedbackRenderer,
     private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
     // Tests can substitute one. Production does not rely on this default: Dagger supplies every
-    // Constructor parameter (Kotlin defaults apply only at Kotlin call sites), and the real resolver
-    // Comes from VoiceControlModule.provideSpokenTemplateResolver.
+    // constructor parameter (Kotlin defaults apply only at Kotlin call sites), and the real resolver
+    // comes from VoiceControlModule.provideSpokenTemplateResolver.
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
     // Upload observation of the ACTUAL segment path. Optional only for Kotlin
-    // Test call sites; Dagger supplies the production pair. The live [collectionAuthority] is
-    // Consulted at EVERY retention decision — start admission, revalidation before handoff —
-    // So a start-time yes can never authorize retention after withdrawal/expiry/account change.
+    // test call sites; Dagger supplies the production pair. The live [collectionAuthority] is
+    // consulted at EVERY retention decision — start admission, revalidation before handoff —
+    // so a START-time YES can never authorize retention after withdrawal/expiry/account change.
     private val collectionAuthority: () -> AuthorityDecision,
     private val retentionSink: ContributionRetentionSink,
     private val segmentObserver: SegmentObserver,
@@ -99,14 +99,14 @@ class VoiceAsrEngine @Inject constructor(
     private var processingJob: Job? = null
 
     // EVERY processing job stop() cancelled that has not yet finished, exposed so service teardown
-    // Can await them all before releasing the ASR backend. These run on this engine's own
+    // can await them ALL before releasing the ASR backend. These run on this engine's OWN
     // `SupervisorJob + IO` scope, so joining the service scope's root does not cover them
     // A single slot is also not enough: with stop/start/stop the older native
-    // Call can still be running while a newer job exists, and dropping the older one would let
+    // call can still be running while a newer job exists, and dropping the older one would let
     // Teardown release the backend underneath it.
 
     /**
-     * The processing jobs this engine cancelled, so a caller can tell an expected cancellation from
+     * The processing jobs THIS ENGINE cancelled, so a caller can tell an expected cancellation from
      * a genuine failure: the service's teardown cancels them deliberately, and treating every
      * cancelled job as abnormal would report a normal shutdown as a held failure.
      */
@@ -126,9 +126,9 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal fun pruneConsumedBookkeeping(onlyKeep: Set<Job>) {
         // Scan the OWNERSHIP set, not the unfinished list. The completion
-        // Callback removes a job from `unfinished` the moment it finishes, so searching that list
-        // For completed jobs found the ones already gone and retained the maps forever: outcomes,
-        // Cancellation markers and ownership all leaked one entry per utterance.
+        // callback removes a job from `unfinished` the moment it finishes, so searching that list
+        // for completed jobs found the ones already gone and retained the maps forever: outcomes,
+        // cancellation markers and ownership all leaked one entry per utterance.
         val finished = ownedProcessingJobs.keys.filter { it.isCompleted && it !in onlyKeep }
         finished.forEach {
             outcomes.remove(it)
@@ -141,7 +141,7 @@ class VoiceAsrEngine @Inject constructor(
     private val cancelledJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
 
     // The cause each tracked processing job completed with, captured when it finished. Immutable
-    // Once recorded, so judging a job never depends on when the snapshot ran.
+    // once recorded, so judging a job never depends on when the snapshot ran.
     private val outcomes = java.util.concurrent.ConcurrentHashMap<Job, Throwable>()
 
     /** Every processing job this engine created, so a pre-snapshot failure still has an owner. */
@@ -183,7 +183,7 @@ class VoiceAsrEngine @Inject constructor(
     private var pendingExecutionContext: CaptureContext? = null
 
     /**
-     * one dispatch's identity. Reports are addressed by this token, never by the intent value:
+     * ONE DISPATCH's identity. Reports are addressed by this token, never by the intent value:
      * identical intents dispatched concurrently are different invocations with different captures.
      */
     data class InvocationToken(val id: Long, val captureId: java.util.UUID)
@@ -214,21 +214,21 @@ class VoiceAsrEngine @Inject constructor(
         playbackBufferProvider: () -> PlaybackReference,
         micExposureProvider: () -> MicExposure,
         // The dispatch handler receives the INVOCATION token for this specific dispatch, or null when
-        // The intent belongs to no retained capture. Results are reported back against that token.
+        // the intent belongs to no retained capture. Results are reported back against that token.
         onIntent: (VoiceIntent, InvocationToken?) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
-        // State the pipeline no longer backs. The job ends on an intentional stop too; the caller
-        // Scopes the reaction to its start generation so only an unexpected end is acted on.
+        // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
+        // scopes the reaction to its start generation so only an unexpected end is acted on.
         onTerminated: () -> Unit = {},
     ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
         // The handler receives the invocation token for THIS dispatch; the binding lives in
-        // InvokeHandler at the dispatch sites.
-        // The token binding happens inside invokeHandler at the dispatch sites, not by wrapping
-        // Here: the internal dispatch sites call invokeHandler directly, and a wrapper here would
-        // Run it twice — the inner call would see pendingExecutionContext already consumed and
-        // Hand the caller a null token (found by the overlapping-dispatch control).
+        // invokeHandler at the dispatch sites.
+        // The token binding happens INSIDE invokeHandler at the dispatch sites, NOT by wrapping
+        // here: the internal dispatch sites call invokeHandler directly, and a wrapper here would
+        // run it twice — the inner call would see pendingExecutionContext already consumed and
+        // hand the caller a null token (found by the overlapping-dispatch control).
         this.onIntent = onIntent
         this.currentRouteClass = audioRoute::class.simpleName ?: AudioRoute.Unknown::class.simpleName!!
         captureSessionIncarnation += 1
@@ -241,34 +241,34 @@ class VoiceAsrEngine @Inject constructor(
         started = scope.launch {
             Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
-            // Deliberately keeps it warm — but because the engine can be handed a backend that
-            // Was never prepared, and because a start that cannot be prepared must not run a
-            // Pipeline: an unprepared backend returns an empty result for every utterance
-            // Instead of failing, which is indistinguishable from speech it could not read.
+            // deliberately keeps it warm — but because the engine can be handed a backend that
+            // was never prepared, and because a start that cannot be prepared must not run a
+            // pipeline: an unprepared backend returns an empty result for every utterance
+            // instead of failing, which is indistinguishable from speech it could not read.
             val backendReady = backend.ensureReady()
             if (backendReady.isFailure) {
                 Timber.e(backendReady.exceptionOrNull(), "[VoicePipeline] ASR backend not ready — not listening")
                 return@launch
             }
             // Attach the native VAD pipeline to the confirmed stream before reporting the start
-            // As attached. The caller hands the stream over only on a true signal, so a start
-            // That ends here leaves the stream owned by the caller and closed, never live with
-            // No consumer.
+            // as attached. The caller hands the stream over only on a true signal, so a start
+            // that ends here leaves the stream owned by the caller and closed, never live with
+            // no consumer.
             //
-            // Sco ownership: a Bluetooth candidate is acquired before the engine starts, and the
-            // Stream opened by acquisition is the one this pipeline attaches to. Opening SCO here
-            // Would deadlock under the isolated-microphone rule (voice-control-core.md > Route
-            // Acquisition), so the engine does not perform its own SCO setup even when the route
-            // Is BluetoothA2dpOnly.
+            // SCO ownership: a Bluetooth candidate is ACQUIRED before the engine starts, and the
+            // stream opened by acquisition is the one this pipeline attaches to. Opening SCO here
+            // would deadlock under the isolated-microphone rule (voice-control-core.md > Route
+            // acquisition), so the engine does not perform its own SCO setup even when the route
+            // is BluetoothA2dpOnly.
             if (!voiceAudioProcessor.attachCapture()) {
                 Timber.e("[VoicePipeline] capture attach failed — not listening")
                 return@launch
             }
             attached.complete(true)
             // A Bluetooth candidate is acquired before the engine starts; the stream opened
-            // By acquisition is the one this pipeline attaches to. Opening SCO here would
-            // Deadlock under the isolated-microphone rule (voice-control-core.md > Route
-            // Acquisition).
+            // by acquisition is the one this pipeline attaches to. Opening SCO here would
+            // deadlock under the isolated-microphone rule (voice-control-core.md > Route
+            // acquisition).
             try {
                 var openContext: CaptureContext? = null
                 var accountedSamples = 0
@@ -276,12 +276,12 @@ class VoiceAsrEngine @Inject constructor(
                     when (result) {
                         is VoiceSegmenterResult.SpeechStarted -> {
                             // Freeze the capture context SYNCHRONOUSLY here — before any await
-                            // Boundary — and keep the issued value for every later stage of this
-                            // Capture. Refused captures yield null and are excluded downstream.
-                            // Admission before allocation: read only the native size counter, let
-                            // The observer reserve exact bytes; drain into an admitted array whose
-                            // Ownership then transfers to the sink. Refusal allocates NOTHING and
-                            // Leaves the recognition buffer untouched.
+                            // boundary — and keep the ISSUED value for every later stage of THIS
+                            // capture. Refused captures yield null and are excluded downstream.
+                            // ADMISSION BEFORE ALLOCATION: read only the native SIZE counter, let
+                            // the observer reserve exact bytes; drain into an admitted array whose
+                            // ownership then transfers to the sink. Refusal allocates NOTHING and
+                            // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
                             // Per-capture model provenance: the
                             // ACTUAL selected backend's model identity, frozen with the context.
@@ -292,34 +292,34 @@ class VoiceAsrEngine @Inject constructor(
                                 spec.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
                             )
                             // Translation provenance is NOT knowable at capture start (the stage may
-                            // Or may not run for this utterance); it is recorded when observed.
+                            // or may not run for this utterance); it is recorded when observed.
                             // ONE admission attempt, gated by consent/policy and the per-clip
-                            // Ceiling only (core c74d7e30). There is no allowance to provision,
-                            // No prepaid token to refill and no server round trip on this path:
-                            // The daily limit is metered server-side at acceptance of actual audio
-                            // Bytes. A refusal here is therefore FINAL for this utterance and
-                            // Means no eligible collection, never "waiting for a batch".
+                            // ceiling only (core c74d7e30). There is no allowance to provision,
+                            // no prepaid token to refill and no server round trip on this path:
+                            // the daily limit is metered server-side at acceptance of actual audio
+                            // bytes. A refusal here is therefore FINAL for this utterance and
+                            // means no eligible collection, never "waiting for a batch".
                             val admission = segmentObserver.speechStartedAdmitting(
                                 captureSessionIncarnation,
                                 currentRouteClass,
                                 initialSize,
                                 asrRef,
-                                // Real grace state frozen at segment start (spec phase 2):
-                                // Wake word required unless the follow-up grace window is active.
+                                // REAL GRACE STATE FROZEN AT SEGMENT START (spec phase 2):
+                                // wake word required unless the follow-up grace window is active.
                                 wakeRequired = !gracePeriodSignal.isActive.value,
                             )
                             openContext = admission?.context
                             if (admission != null) {
                                 // Lease-protected initial allocation (
                                 // release is addressed by the immutable handle —
-                                // Valid even if revocation closes this capture or a successor
-                                // Opens mid-copy. The admit token's charge leaves exactly once:
-                                // Transferred into the prefix on success, or returned here.
+                                // valid even if revocation closes this capture or a successor
+                                // opens mid-copy. The admit token's charge leaves EXACTLY ONCE:
+                                // transferred into the prefix on success, or returned here.
                                 var transferred = false
                                 try {
                                     val firstChunk = ShortArray(initialSize)
                                     val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
-                                    // Actual sink transfer result; drained valid count passed
+                                    // ACTUAL sink transfer result; drained VALID count passed
                                     // Separately from array capacity.
                                     transferred = segmentObserver.adoptFirstChunk(admission, firstChunk, copied)
                                     if (transferred) accountedSamples = copied
@@ -330,11 +330,11 @@ class VoiceAsrEngine @Inject constructor(
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {
-                            // Reserve-before-copy (blocker b3): read only the native size counter;
-                            // Admit the delta into collection ownership FIRST; allocate + drain the
-                            // Tail ONLY for an admitted delta; any failure releases the reservation.
+                            // RESERVE-BEFORE-COPY (blocker b3): read only the native SIZE counter;
+                            // admit the delta into collection ownership FIRST; allocate + drain the
+                            // tail ONLY for an admitted delta; any failure releases the reservation.
                             // Not retaining (gate off / cap-ended / refused capture): ZERO collection
-                            // Work — no peek array, no copy — recognition continues untouched.
+                            // work — no peek array, no copy — recognition continues untouched.
                             if (openContext != null && segmentObserver.isRetaining(openContext!!.captureId)) {
                                 val producedSize = voiceAudioProcessor.speechPcmSize()
                                 val deltaSamples = (producedSize - accountedSamples).coerceAtLeast(0)
@@ -345,7 +345,7 @@ class VoiceAsrEngine @Inject constructor(
                                         val delta = ShortArray(deltaSamples)
                                         val copied = voiceAudioProcessor.drainSpeechTail(delta, accountedSamples, producedSize)
                                         if (copied > 0) {
-                                            // Advance accounting only when the sink accepted the
+                                            // Advance accounting ONLY when the sink ACCEPTED the
                                             // Commit.
                                             transferred = segmentObserver.commitDelta(openContext!!, delta, copied, token)
                                             if (transferred) accountedSamples += copied
@@ -366,8 +366,8 @@ class VoiceAsrEngine @Inject constructor(
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
                             // Reserve-before-copy for the final tail too (blocker b3): the frames
-                            // Already exist (recognition owns them); collection copies ONLY after
-                            // Admitting the exact tail size, and releases on refusal/failure.
+                            // already exist (recognition owns them); collection copies ONLY after
+                            // admitting the exact tail size, and releases on refusal/failure.
                             if (openContext != null && totalSamples > accountedSamples &&
                                 segmentObserver.isRetaining(openContext!!.captureId)
                             ) {
@@ -405,26 +405,26 @@ class VoiceAsrEngine @Inject constructor(
             }
         }
         // If the job ends without ever attaching (backend not ready, native attach failure, or
-        // Cancellation before the body ran), report that the stream was never taken. Completing
-        // An already-completed true is a no-op.
+        // cancellation before the body ran), report that the stream was never taken. Completing
+        // an already-completed true is a no-op.
         processingJob = started
         started.invokeOnCompletion {
             attached.complete(false)
             onTerminated()
         }
         // Ownership and outcome at creation: registering only in stop() missed
-        // Work that finished and was pruned before the teardown ever looked, and gave a pre-snapshot
-        // Failure nowhere to live. Every processing job is owned and its terminal cause recorded the
-        // Moment it exists; stop() only decides which are cancelled by us.
+        // work that finished and was pruned before the teardown ever looked, and gave a pre-snapshot
+        // failure nowhere to live. Every processing job is owned and its terminal cause recorded the
+        // moment it exists; stop() only decides which are cancelled BY US.
         ownedProcessingJobs[started] = Unit
         started.invokeOnCompletion { cause -> outcomes[started] = cause ?: CLEAN_COMPLETION }
         Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
         return CaptureAttachment(attached)
     }
 
-    // The executor's actual result for a dispatched intent (spec audit): called by whoever ran the
-    // Action — the service, not the engine — with what the executor really reported. Anything the
-    // Executor never reports stays unobserved; a token that is no longer open is refused.
+    // THE EXECUTOR'S ACTUAL RESULT for a dispatched intent (spec audit): called by whoever ran the
+    // action — the service, not the engine — with what the executor really reported. Anything the
+    // executor never reports stays unobserved; a token that is no longer open is refused.
 
     /**
      * the executor's actual result for one dispatch, addressed by its token
@@ -434,7 +434,7 @@ class VoiceAsrEngine @Inject constructor(
      * or from a restarted lifecycle — is refused rather than attributed to some other capture.
      */
     // Test/diagnostic seam: opens the same invocation record a real dispatch would, so a control
-    // Can drive report/settle against the engine's ACTUAL structures. Never used in production.
+    // can drive report/settle against the engine's ACTUAL structures. Never used in production.
     internal fun openInvocationForTest(captureId: java.util.UUID, id: Long): InvocationToken {
         val token = InvocationToken(id = id, captureId = captureId)
         synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
@@ -442,8 +442,8 @@ class VoiceAsrEngine @Inject constructor(
     }
 
     internal fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean = synchronized(invocationLock) {
-        // The fact is recorded; the invocation stays open. Publication happens once, at explicit
-        // Settlement — a first fact no longer pre-empts a later observed failure, and the
+        // The FACT is recorded; the invocation stays OPEN. Publication happens once, at explicit
+        // settlement — a first fact no longer pre-empts a later observed failure, and the
         // Finalize boundary remains the single publication point.
         val record = openInvocations[token.id] ?: return false
         if (record.token != token) return false
@@ -465,8 +465,8 @@ class VoiceAsrEngine @Inject constructor(
      */
     private fun settleAndReport(token: InvocationToken): Boolean {
         // Validate and consume in one lock interval: a remove-then-restore
-        // Two-step window let a concurrent report/settle lose a fact or resurrect a stopped
-        // Invocation. Here the stored record must match the FULL token before it is consumed.
+        // two-step window let a concurrent report/settle lose a fact or resurrect a stopped
+        // invocation. Here the stored record must match the FULL token before it is consumed.
         val record: InvocationRecord? = synchronized(invocationLock) {
             val candidate = openInvocations[token.id]
             if (candidate != null && candidate.token == token) openInvocations.remove(token.id) else null
@@ -495,7 +495,7 @@ class VoiceAsrEngine @Inject constructor(
             open
         }
         // An abandoned invocation publishes its supported aggregate — the agreed fact, or the
-        // Explicit unknown when observations disagree — never an invented claim over known facts
+        // explicit unknown when observations disagree — never an invented claim over known facts
         // never silence over a loss.
         abandoned.forEach { finalizePublication(it.token, aggregateObservations(it.observations)) }
     }
@@ -516,7 +516,7 @@ class VoiceAsrEngine @Inject constructor(
             handler(intent, token)
         } catch (t: Throwable) {
             // A SYNCHRONOUS handler throw must not strand the token: settle it here so the
-            // Invocation finalizes (recorded fact or explicit unknown) exactly once.
+            // invocation finalizes (recorded fact or explicit unknown) exactly once.
             if (token != null) settleInvocation(token)
             throw t
         }
@@ -549,7 +549,7 @@ class VoiceAsrEngine @Inject constructor(
         val speechEndSample: Int = 0,
         val sampleRateHz: Int = 16000,
         /**
-         * minted at capture admission: the shared utterance identity for this
+         * MINTED AT CAPTURE ADMISSION: the shared utterance identity for this
          * logical turn. Created when the segment is admitted for transcription,
          * before ASR/trim/translation/routing, so every diagnostic and log from
          * this point forward can name the same request. Carried through to the
@@ -601,8 +601,8 @@ class VoiceAsrEngine @Inject constructor(
         }
 
         // Always run the wake-word detector — it's lightweight and must observe
-        // Every utterance so wake-word audio is always stripped and every
-        // Detection is acknowledged.
+        // every utterance so wake-word audio is always stripped and every
+        // detection is acknowledged.
         val wwResult = runCatching {
             wakeWordDetector.detect(
                 segment = floatSamples,
@@ -611,8 +611,8 @@ class VoiceAsrEngine @Inject constructor(
             )
         }.getOrElse { e ->
             Timber.w(e, "[VoicePipeline] wake detection failed, dropping segment")
-            // Exactly one terminal before exit: the capture completes with DetectorFailed —
-            // Not cancelled — so the wake observation state is recorded for this capture.
+            // Exactly ONE terminal before exit: the capture COMPLETES with DetectorFailed —
+            // not cancelled — so the wake observation state is recorded for this capture.
             segmentObserver.wakeCompleted(
                 context = capture,
                 speechOnsetSample = segment.speechOnsetSample,
@@ -629,7 +629,7 @@ class VoiceAsrEngine @Inject constructor(
             speechOnsetSample = segment.speechOnsetSample,
             speechEndSample = segment.speechEndSample,
             wakeState = if (wwResult.detected) SegmentObservation.WakeState.Detected else SegmentObservation.WakeState.NotDetected,
-            // Measured wake facts (spec phase 2): recorded whenever the detector measured them.
+            // MEASURED WAKE FACTS (spec phase 2): recorded whenever the detector measured them.
             wakeMeasurement = SegmentObservation.WakeMeasurement(
                 score = wwResult.confidence.takeUnless { it.isNaN() }?.toDouble(),
                 threshold = wwResult.threshold.takeUnless { it.isNaN() }?.toDouble(),
@@ -699,18 +699,18 @@ class VoiceAsrEngine @Inject constructor(
         val floatSamples = request.samples
 
         // Filter out playback bleed before transcribing. The player's reference window carries its
-        // Own timeline position, and the segment carries the capture clock, so the correlator can
-        // Compare the two at a SHARED instant instead of at raw buffer offsets. When the stream
-        // Reports no timestamp, the capture time stays unknown and the correlator falls back to
-        // Offset matching, which is the behaviour from before a clock existed.
+        // own timeline position, and the segment carries the capture clock, so the correlator can
+        // compare the two at a SHARED instant instead of at raw buffer offsets. When the stream
+        // reports no timestamp, the capture time stays unknown and the correlator falls back to
+        // offset matching, which is the behaviour from before a clock existed.
         val playbackReference = playbackBufferProvider?.invoke()
             ?: PlaybackReference(FloatArray(0), sampleRateHz, startPositionMs = null)
         // Named `Ms` because the correlator's clock is in milliseconds: the capture observation is
-        // Nanoseconds and the conversion happens here, so a reader cannot pair the two domains by
-        // Accident. The comment on the helper says the same thing at the point of the division.
+        // nanoseconds and the conversion happens here, so a reader cannot pair the two domains by
+        // accident. The comment on the helper says the same thing at the point of the division.
         // The anchor describes SAMPLE 0 of the buffer the filter receives (pre-roll included):
-        // The correlator aligns the whole buffer against the reference window, so the anchor must
-        // Be the buffer's own start, not the speech onset inside it.
+        // the correlator aligns the whole buffer against the reference window, so the anchor must
+        // be the buffer's own start, not the speech onset inside it.
         val micPositionMs = segment.captureTimeOfSegmentStartMs()
         if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference, micPositionMs)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
@@ -719,8 +719,8 @@ class VoiceAsrEngine @Inject constructor(
         }
 
         // P1: freeze the invoked backend's verified loaded identity at the
-        // Actual invocation — carried independently of the result, so failed/empty invocations
-        // Keep provenance and a replacement between SpeechStarted and here cannot misattribute.
+        // actual invocation — carried independently of the result, so failed/empty invocations
+        // keep provenance and a replacement between SpeechStarted and here cannot misattribute.
         val invokedIdentity = verifiedLoadedIdentity(b)
         request.capture?.let { segmentObserver.noteAsrInvocation(it, invokedIdentity) }
         // ASR
@@ -734,7 +734,7 @@ class VoiceAsrEngine @Inject constructor(
             throw ce
         } catch (t: Throwable) {
             // A known provider failure is a RECORDED fact: failed/provider_error,
-            // Never a wait-expiry unknown. The AsrFailed join is a publishable terminal.
+            // never a wait-expiry unknown. The AsrFailed join is a publishable terminal.
             request.capture?.let { joinOutcome(CollectionOutcome.AsrFailed(it.captureId)) }
             Timber.w(t, "[VoicePipeline] asr provider failed")
             return
@@ -764,19 +764,19 @@ class VoiceAsrEngine @Inject constructor(
                 if (request.wakePositive) "wake-only" else "empty",
             )
             // P1: command trimming may remove recognized wake text, so a
-            // Wake-only drop is not necessarily an empty recognition. Only a genuinely empty
-            // Raw result is completed/empty_result; otherwise the ACTUAL transcript is
-            // Preserved as the recognized fact (normal trimming stays a pipeline behavior,
-            // Never an erasure of the observed output).
+            // wake-only drop is NOT necessarily an empty recognition. Only a GENUINELY empty
+            // raw result is completed/empty_result; otherwise the ACTUAL transcript is
+            // preserved as the recognized fact (normal trimming stays a pipeline behavior,
+            // never an erasure of the observed output).
             if (asrResult.text.isNotBlank()) {
                 request.capture?.let {
                     // The observed wake-positive
-                    // Trim consumed everything — raw text existed and the trimmed command
-                    // Transcript is empty — so routing never ran: not_run/wake_only. The
-                    // Time-based isWakeOnly arm of this drop (short speech, command text intact)
-                    // Must NOT be typed wake_only; that gate is the transcript emptiness itself.
+                    // trim consumed everything — raw text existed and the trimmed command
+                    // transcript is EMPTY — so ROUTING never ran: not_run/wake_only. The
+                    // time-based isWakeOnly arm of this drop (short speech, command text intact)
+                    // must NOT be typed wake_only; that gate is the transcript emptiness itself.
                     // Joined FIRST so Recognized stays the candidate outcome: the transcript fact
-                    // Outranks the routing absence, and provenance reads both from the history.
+                    // outranks the routing absence, and provenance reads both from the history.
                     if (transcript.isBlank() && WakeOnlyRoutingEmission.enabled) {
                         joinOutcome(CollectionOutcome.RoutingNone(it.captureId, "wake_only"))
                     }
@@ -795,10 +795,10 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
         // Task #78: a transcript with no content -- punctuation, symbols or whitespace only,
-        // After the wake trim -- is not a user request. Discard it silently BEFORE translation,
-        // Routing or any feedback: no dialog consumption, no grace extension, no error cue.
+        // after the wake trim -- is not a user request. Discard it silently BEFORE translation,
+        // routing or any feedback: no dialog consumption, no grace extension, no error cue.
         // Content is any Unicode letter or number, so CJK particles (停, 嗯) and digit
-        // Lookalikes (², ½) count as content while ".", "…" and "?!" do not.
+        // lookalikes (², ½) count as content while ".", "…" and "?!" do not.
         if (!hasLetterOrNumber(transcript)) {
             Timber.i(
                 "[VoicePipeline] asr %s %dms lang=%s id=%s '%s'%s → drop (non-content)",
@@ -809,8 +809,8 @@ class VoiceAsrEngine @Inject constructor(
                 transcript,
                 trimNote?.let { " $it" } ?: "",
             )
-            // No usable command text, but the backend did observe this transcript and did measure a
-            // Language. Both are facts: the command is discarded, the observation is not, so they
+            // No usable command text, but the backend DID observe this transcript and DID measure a
+            // language. Both are facts: the command is discarded, the observation is not, so they
             // Travel with the non-content outcome instead of dying here. The text recorded is the
             // RAW result — the observation is what ASR produced, and a trim is a pipeline behaviour,
             // never an erasure of the output.
@@ -826,11 +826,11 @@ class VoiceAsrEngine @Inject constructor(
             } ?: Timber.i("voice-capture publish: refused reason=no-capture-context stage=non-content")
             return
         }
-        // Recognized: the actual trimmed transcript + detected language of this capture.
+        // Recognized: the ACTUAL trimmed transcript + detected language of THIS capture.
         request.capture?.let { joinOutcome(CollectionOutcome.Recognized(it.captureId, transcript, asrResult.detectedLanguage)) }
             ?: Timber.i("voice-capture publish: refused reason=no-capture-context stage=recognized")
         // Translate to English when the ASR backend did not already translate and
-        // The detected language is not English (the SenseVoice CJK path).
+        // the detected language is not English (the SenseVoice CJK path).
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
         val trimmedResult = asrResult.copy(text = transcript)
         val routePrep = prepareRoutingInput(trimmedResult, b)
@@ -869,7 +869,7 @@ class VoiceAsrEngine @Inject constructor(
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         // Printing post-translate fields first made lines like
         // Lang=en 'Play.' translate=yue→en '播放。'
-        // Read as English ASR that somehow translated into Chinese.
+        // read as English ASR that somehow translated into Chinese.
         Timber.i(
             "[VoicePipeline] asr %s %dms lang=%s id=%s '%s'%s%s",
             b::class.simpleName,
@@ -887,7 +887,7 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
-        // Segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
+        // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
         processUtterance(routePrep.input!!, addressed = request.wakePositive, capture = request.capture, admittedId = request.admittedId)
     }
@@ -948,16 +948,16 @@ class VoiceAsrEngine @Inject constructor(
             capture?.let { joinOutcome(CollectionOutcome.RoutingFailed(it.captureId, ROUTER_UNAVAILABLE)) }
             // The router never ran, which is the same class as the router's own
             // `model_not_loaded`: a turn happened and nothing an answer it. Say
-            // So — silence here is the complaint this change exists to remove.
+            // so — silence here is the complaint this change exists to remove.
             // Deliberately not escalated: a capability failure would turn a
-            // Broken install into cloud traffic (see CloudEscalationPolicy).
+            // broken install into cloud traffic (see CloudEscalationPolicy).
             audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
             return
         }
 
         // P1: the router identity is claimed only when routing
-        // Actually runs, bound to the recognizer actually called (`recognizer`, not another
-        // Component's load state) — its own verified loader evidence.
+        // ACTUALLY RUNS, bound to the recognizer ACTUALLY CALLED (`recognizer`, not another
+        // component's load state) — its own verified loader evidence.
         capture?.let { ctxCap ->
             recognizer.loadedModelRef()?.let { ref ->
                 segmentObserver.noteRouterInvocation(ctxCap, ref)
@@ -969,16 +969,16 @@ class VoiceAsrEngine @Inject constructor(
             listeningMode = currentMode,
             micExposure = micExposureProvider?.invoke() ?: MicExposure.Exposed,
         )
-        // Captured before the recognition suspends. Recognition can take seconds, and a wake that
-        // Arrives while it runs opens a NEW window: stamping the intent afterwards would attach it to
-        // The window that opened during the wait, so a request issued before a successor wake would
-        // Act as though it belonged to the successor.
+        // CAPTURED BEFORE the recognition suspends. Recognition can take seconds, and a wake that
+        // arrives while it runs opens a NEW window: stamping the intent afterwards would attach it to
+        // the window that opened during the wait, so a request issued before a successor wake would
+        // act as though it belonged to the successor.
         val windowAtRequest = gracePeriodSignal.capturedGeneration()
-        // The admitted identity arrives from capture admission (TranscribeRequest.admittedId),
-        // Minted BEFORE ASR/trim/translation so every diagnostic from that point forward names
-        // The same request. A retry of the same request reuses this value; two separate user acts
-        // That happen to say the same words do not. The dialog path mints its own for
-        // Clarification flows; this is the producer for a plain utterance.
+        // THE ADMITTED IDENTITY arrives from capture admission (TranscribeRequest.admittedId),
+        // minted BEFORE ASR/trim/translation so every diagnostic from that point forward names
+        // the same request. A retry of the same request reuses this value; two separate user acts
+        // that happen to say the same words do not. The dialog path mints its own for
+        // clarification flows; this is the producer for a plain utterance.
         val outcome = recognizer.recognize(input, ctx, admittedId)
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
@@ -992,7 +992,7 @@ class VoiceAsrEngine @Inject constructor(
                 input.routerTranscript,
             )
             // A cloud turn outlives the window it was issued in, so it carries
-            // That window's identity and cannot extend a later one.
+            // that window's identity and cannot extend a later one.
             routed(intentCategory(intent))
             pendingExecutionContext = capture
             invokeHandler(
@@ -1011,7 +1011,7 @@ class VoiceAsrEngine @Inject constructor(
                     )
                     .stampedForWindow(windowAtRequest)
                     // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
-                    // Prepared once and may be retried. A local intent has no wire identity to reuse.
+                    // prepared once and may be retried. A local intent has no wire identity to reuse.
                     .let { it.withLogicalRequest(admittedId) },
             )
             return
@@ -1028,24 +1028,24 @@ class VoiceAsrEngine @Inject constructor(
         )
 
         // P1: the recognizer's OWN reported decision travels — a null
-        // Intent is NOT always no_candidates (it may be validation or a model failure), and
-        // The observation stream is NOT closed: a later cloud escalation can still supply
-        // Its normal outcome. NONTERMINAL fact.
+        // intent is NOT always no_candidates (it may be validation or a model failure), and
+        // the observation stream is NOT closed: a later cloud escalation can still supply
+        // its normal outcome. NONTERMINAL fact.
         capture?.let { joinOutcome(CollectionOutcome.RoutingNone(it.captureId, diagnostic?.reason)) }
 
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
         when (CloudEscalationPolicy.decide(reason, addressed)) {
             // A rejection, not a failure. A wake-negative capture lands here — a follow-up the wake
-            // Did not cover in its own segment, or speech caught from the room.
+            // did not cover in its own segment, or speech caught from the room.
             // Heard something we could not route and the user was not addressing us: a tone is
-            // All that is warranted.
+            // all that is warranted.
             CloudEscalation.EARCON -> audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
 
             CloudEscalation.SILENT -> Unit
 
             // They addressed us and we could not place it: say so in their language, falling back
-            // To the earcon in a locale this build has no line for.
+            // to the earcon in a locale this build has no line for.
             CloudEscalation.SPEAK_UNROUTED -> {
                 val line = SpokenLine.forKey(
                     KEY_CLOUD_UNROUTED,
@@ -1060,17 +1060,17 @@ class VoiceAsrEngine @Inject constructor(
             }
 
             // Nothing was sent, but a turn happened: the earcon table already
-            // Requires a tone for this case.
+            // requires a tone for this case.
             CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
 
             // The client has no answer of its own, so the service gets asked —
-            // Through the same handler a chosen `cloud_route` uses, so
-            // Superseded-turn cancellation and the auto-pause obligation apply.
+            // through the same handler a chosen `cloud_route` uses, so
+            // superseded-turn cancellation and the auto-pause obligation apply.
             CloudEscalation.DISPATCH -> {
-                // The origin is the one captured at registration, not the window that happens to be
-                // Live now. Recognition can take seconds, and a wake arriving meanwhile opens a NEW
-                // Window: escalating under that window would let OLD recognition consume its
-                // Successor's conversation. A stale origin is rejected before dispatch.
+                // THE ORIGIN IS THE ONE CAPTURED AT REGISTRATION, not the window that happens to be
+                // live now. Recognition can take seconds, and a wake arriving meanwhile opens a NEW
+                // window: escalating under that window would let OLD recognition consume its
+                // successor's conversation. A stale origin is rejected before dispatch.
                 if (!gracePeriodSignal.isCurrent(windowAtRequest)) {
                     Timber.i(
                         "[VoicePipeline] cloud escalation skipped: origin %d is no longer live",
@@ -1088,13 +1088,13 @@ class VoiceAsrEngine @Inject constructor(
                         request = input.sourceTranscript ?: input.routerTranscript,
                         sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
                         tier = VoiceIntent.CloudTier.Unknown,
-                        // Stamped with the captured origin, matching the window this recognition was
-                        // Issued under -- the same value the chosen-route path uses.
+                        // STAMPED WITH THE CAPTURED ORIGIN, matching the window this recognition was
+                        // issued under -- the same value the chosen-route path uses.
                         windowGeneration = windowAtRequest,
                         origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
-                        // The registered identity, not a second one: this escalation belongs to the same
-                        // Logical request as the recognition it follows, so a retry of that request
-                        // Names one identity rather than two.
+                        // THE REGISTERED IDENTITY, not a second one: this escalation belongs to the SAME
+                        // logical request as the recognition it follows, so a retry of that request
+                        // names one identity rather than two.
                         logicalRequestId = admittedId,
                     ),
                 )
@@ -1124,10 +1124,10 @@ class VoiceAsrEngine @Inject constructor(
                 translateNote = "translate=skip(backend)",
                 dropWithError = false,
                 // P1: the SEPARATE translation stage is skipped because the
-                // Invoked backend produced the English text in the SAME transcribe call (observed
-                // Output above). Capability alone never asserts a produced translation — but the
-                // Backend's actual English output for this invocation is the observed fact, and
-                // The skip of the separate stage is a known fact in the owning vocabulary.
+                // invoked backend produced the English text in the SAME transcribe call (observed
+                // output above). Capability alone never asserts a produced translation — but the
+                // backend's ACTUAL English output for THIS invocation is the observed fact, and
+                // the skip of the separate stage is a known fact in the owning vocabulary.
                 translationSkipReason = "backend_handles_translation",
             )
         }
@@ -1178,7 +1178,7 @@ class VoiceAsrEngine @Inject constructor(
             )
         }
         if (translated.isBlank()) {
-            // P1: the stage ran and returned invalid (blank) output — known failure.
+            // P1: the stage RAN and returned invalid (blank) output — known FAILURE.
             return RoutePrep(
                 input = null,
                 translateNote = "translate=blank($detected)",
@@ -1189,7 +1189,7 @@ class VoiceAsrEngine @Inject constructor(
         // Reject no-op "translations" that would mislabel CJK as English.
         if (translated == trimmed.text) {
             // P1: a no-op string does not establish source/target equality — the stage ran
-            // And produced invalid output: known failure.
+            // and produced INVALID output: known FAILURE.
             return RoutePrep(
                 input = null,
                 translateNote = "translate=noop($detected)",
@@ -1207,11 +1207,11 @@ class VoiceAsrEngine @Inject constructor(
             translateNote = "translate=$detected→en '$translated'",
             dropWithError = false,
             // A translated RESULT was observed; the on-device model's own identity/version is not
-            // Observable here, so the model is honest absence rather than a fixed label.
+            // observable here, so the model is honest absence rather than a fixed label.
             translation = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
                 model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
                 producedResult = true,
-                // The observed result text and the target language travel as separate fields
+                // The OBSERVED result text and the target language travel as SEPARATE fields
                 // the record schema has translated_text AND target_language.
                 translatedText = translated,
                 targetLanguage = "en",
@@ -1225,7 +1225,7 @@ class VoiceAsrEngine @Inject constructor(
      * AND version, the result is [ModelRef.None]; an empty version on a Named ref is never minted.
      */
     private fun verifiedLoadedIdentity(backend: AsrBackend): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef = // P1: only the backend's own successful-load evidence counts; a
-        // Configured requiredModel is a requirement, not evidence. Absence → None.
+        // configured requiredModel is a requirement, not evidence. Absence → None.
         backend.loadedModelRef() ?: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None
 
     /** The selected backend's manifest identity, when it is the component translating. */
@@ -1260,31 +1260,31 @@ class VoiceAsrEngine @Inject constructor(
 
     fun stop() {
         // Listening closure: discard ONLY the current partial through the same serialized
-        // Observer lifecycle (one monitor guards pipeline events and external signals alike);
-        // Never resume capture to complete an example. Completed contributions survive.
+        // observer lifecycle (one monitor guards pipeline events and external signals alike);
+        // never resume capture to complete an example. Completed contributions survive.
         segmentObserver.listeningClosed("pipeline-stopped")
         // Every open invocation ends with the lifecycle: no result can cross a stop/restart.
         clearInvocationOwnership()
         // Keep the processing job so the SERVICE teardown can await it: this job runs on the
-        // Engine's own SupervisorJob+io scope, so cancelling serviceScope's root does not wait for
+        // engine's OWN SupervisorJob+IO scope, so cancelling serviceScope's root does not wait for
         // It. A noncooperative ASR/native call or its `finally` can otherwise
-        // Outlive stop() and overlap VoiceControlService's backend release.
+        // outlive stop() and overlap VoiceControlService's backend release.
         processingJob?.let { cancelled ->
             // Prune finished entries so a long-lived service does not accumulate them, then track
-            // This one until it actually finishes.
+            // this one until it actually finishes.
             unfinished.removeAll { it.isCompleted }
             unfinished.add(cancelled)
             // Only a job that was still running counts as cancelled by us: a job
-            // That had already failed or been cancelled elsewhere keeps its own outcome, and
-            // Relabelling it as expected shutdown would hide a real failure.
+            // that had already failed or been cancelled elsewhere keeps its own outcome, and
+            // relabelling it as expected shutdown would hide a real failure.
             if (cancelled.isActive) {
                 cancelledJobs.add(cancelled)
             }
-            // Capture the outcome at registration. Waiting until the shutdown snapshot misses jobs
-            // That finished (and were pruned) before it, and would replay the outcome later.
+            // Capture the outcome AT REGISTRATION. Waiting until the shutdown snapshot misses jobs
+            // that finished (and were pruned) before it, and would replay the outcome later.
             cancelled.invokeOnCompletion { cause ->
-                // ConcurrentHashMap rejects null values, and a clean completion has no cause, so the
-                // Entries are typed nullable and store a sentinel for "finished cleanly".
+                // ConcurrentHashMap REJECTS null values, and a CLEAN completion has no cause, so the
+                // entries are typed nullable and store a sentinel for "finished cleanly".
                 outcomes[cancelled] = cause ?: CLEAN_COMPLETION
                 unfinished.remove(cancelled)
             }
@@ -1292,12 +1292,12 @@ class VoiceAsrEngine @Inject constructor(
         processingJob?.cancel()
         processingJob = null
         // Tear down native capture directly too: the processing job's flow `finally` only runs
-        // When the event loop was collected, and a capture attached but never collected must
-        // Still be stopped. Idempotent with the flow's own teardown.
+        // when the event loop was collected, and a capture attached but never collected must
+        // still be stopped. Idempotent with the flow's own teardown.
         voiceAudioProcessor.stopProcessing()
         // Listening pauses are frequent (gate conflicts, route changes), so the backend is
-        // Deliberately kept warm here rather than released: releasing it would force a full
-        // Model reload on the next start, and everything spoken during that reload is lost.
+        // deliberately kept warm here rather than released: releasing it would force a full
+        // model reload on the next start, and everything spoken during that reload is lost.
         // The ASR backend is owned by VoiceControlService and released in its teardown.
         backend = null
         Timber.i("[VoicePipeline] engine stopped")

@@ -105,8 +105,8 @@ class VoiceControlCaptureRestartTest {
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         testScheduler = kotlinx.coroutines.test.TestCoroutineScheduler()
         // Before anything touches Dispatchers.Main: production's serviceScope uses Main.immediate;
-        // A TestDispatcher-backed Main makes its delay()/withTimeoutOrNull continuations resumable
-        // By pumping the shared scheduler from the test thread (the pattern
+        // a TestDispatcher-backed Main makes its delay()/withTimeoutOrNull continuations resumable
+        // by pumping the shared scheduler from the test thread (the pattern
         // VoiceControlServiceAcquisitionTest relies on).
         Dispatchers.setMain(kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler))
     }
@@ -155,15 +155,15 @@ class VoiceControlCaptureRestartTest {
         override fun startBluetoothSco() {
             scoStarts++
             // Asynchronous establishment: see the class doc. The flag flips on the timer thread;
-            // The state-changed broadcast is posted to the MAIN looper (platform broadcasts are
-            // Delivered on the main thread) and drained when the test pumps `idle()`.
+            // the state-changed broadcast is posted to the MAIN looper (platform broadcasts are
+            // delivered on the main thread) and drained when the test pumps `idle()`.
             Thread {
                 try {
                     Thread.sleep(150)
                     scoLinkUp = true
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
                         // Update the shadow audio manager so the monitor observes an active SCO
-                        // Headset and transitions availability from BluetoothA2dpOnly to Headset.
+                        // headset and transitions availability from BluetoothA2dpOnly to Headset.
                         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
                         val am = app.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         setShadowBluetoothScoOn(am, true)
@@ -215,7 +215,7 @@ class VoiceControlCaptureRestartTest {
         override fun clearCommunicationDevice() = Unit
 
         // Production awaits MODE_IN_COMMUNICATION before confirming an SCO capture stream; the
-        // Shadow implements setMode/getMode, so keep the real semantics here.
+        // shadow implements setMode/getMode, so keep the real semantics here.
         override fun audioMode(): Int = audioManager.mode
         override fun setAudioMode(mode: Int) {
             modeSets++
@@ -223,7 +223,7 @@ class VoiceControlCaptureRestartTest {
             audioManager.mode = mode
         }
 
-        // Device truth: once the hfp link is up, the opened stream selects the sco input device.
+        // Device truth: once the HFP link is up, the opened stream selects the SCO input device.
         override fun deviceType(deviceId: Int): Int? = if (deviceId == SCO_INPUT_ID) AudioDeviceInfo.TYPE_BLUETOOTH_SCO else null
 
         override fun openInputStream(): Int = microphoneCapture.openStreamForAcquisition()
@@ -244,7 +244,7 @@ class VoiceControlCaptureRestartTest {
 
         override fun startCaptureAndVad(sampleRate: Int, channels: Int, assetManager: android.content.res.AssetManager): Boolean {
             // Native attach only succeeds on a RUNNING stream (AAudio state check); production
-            // Guarantees start-before-attach, so the fake enforces the same contract.
+            // guarantees start-before-attach, so the fake enforces the same contract.
             if (!capturing) return false
             attachCount++
             return true
@@ -257,8 +257,8 @@ class VoiceControlCaptureRestartTest {
             capturing = false
         }
         override fun openInputCapture(sampleRate: Int, channels: Int): Int {
-            // Mirror the platform contract: the hfp input is selectable only while the sco link
-            // Exists; opening before establishment returns no device on real hardware too.
+            // Mirror the platform contract: the HFP input is selectable only while the SCO link
+            // exists; opening before establishment returns no device on real hardware too.
             if (!scoReady()) return -1
             openCount++
             return 41
@@ -275,7 +275,7 @@ class VoiceControlCaptureRestartTest {
 
         override fun waitForVadEvent(timeoutMs: Int): Int {
             // Block while capture is live so the collected flow stays alive; return "no event"
-            // Once capture has ended so a disposed engine's loop exits promptly.
+            // once capture has ended so a disposed engine's loop exits promptly.
             val deadline = System.currentTimeMillis() + timeoutMs
             while (capturing && System.currentTimeMillis() < deadline) {
                 Thread.sleep(5)
@@ -387,13 +387,13 @@ class VoiceControlCaptureRestartTest {
         }
         try {
             // Drive the test scheduler, Robolectric's shadow main looper, and real dispatcher
-            // Threads until the watcher settles. Production code uses Dispatchers.IO (real threads)
-            // And posts broadcasts via Handler(Looper.getMainLooper()) — all three must be pumped.
+            // threads until the watcher settles. Production code uses Dispatchers.IO (real threads)
+            // and posts broadcasts via Handler(Looper.getMainLooper()) — all three must be pumped.
             while (!outcome.isCompleted) {
                 testScheduler.runCurrent()
                 testScheduler.advanceTimeBy(25.milliseconds)
                 // Drain at most one pending main-looper task per pump cycle to avoid infinite
-                // Idle loops when production code continuously schedules work.
+                // idle loops when production code continuously schedules work.
                 runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
                 Thread.sleep(10)
                 kotlinx.coroutines.yield()
@@ -427,7 +427,7 @@ class VoiceControlCaptureRestartTest {
         )
 
         // Late-wired: FakeHardware refuses an input capture while the SCO link is down (device
-        // Contract: the HFP microphone is not selectable on a closed link).
+        // contract: the HFP microphone is not selectable on a closed link).
         var scoLinkUp: () -> Boolean = { false }
         val hardware = FakeHardware(scoReady = { scoLinkUp() })
         val microphoneCapture = MicrophoneCapture(
@@ -458,9 +458,9 @@ class VoiceControlCaptureRestartTest {
 
         val playbackBufferRecorder = PlaybackBufferRecorder(FingerprintPcmTap())
         // Device parity: the AirPods connected earlier, so by the time voice control starts the
-        // Platform enumerates A2DP output plus the idle sco input pair (the hfp input device exists
-        // While the profile is idle; the mic becomes SELECTABLE only once startBluetoothSco brings
-        // The link up). The monitor's ctor reads the tables as they are NOW, so seed them first.
+        // platform enumerates A2DP output plus the idle SCO input pair (the HFP input device exists
+        // while the profile is idle; the mic becomes SELECTABLE only once startBluetoothSco brings
+        // the link up). The monitor's ctor reads the tables as they are NOW, so seed them first.
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
         val scoPlatform = FakeScoPlatform(microphoneCapture).also { scoLinkUp = { it.scoLinkUp } }
         val acquisition = RouteAcquisition(scoPlatform, timeoutMs = 6_000L, pollIntervalMs = 10L)
@@ -473,14 +473,14 @@ class VoiceControlCaptureRestartTest {
         whenever(notificationManager.createDownloadingNotification()).thenReturn(mock(Notification::class.java))
 
         // The controller's own start/stop bookkeeping is irrelevant here (and its stop hook would
-        // Re-enter the harness); a mock records that the service confirmed running.
+        // re-enter the harness); a mock records that the service confirmed running.
         // Plain construction (the Render/Acquisition tests' pattern): Robolectric's buildService
-        // Would run Hilt's onCreate injection, which needs an @HiltAndroidApp application; this
-        // Harness supplies every injected field itself. AttachBaseContext via reflection so
-        // FilesDir/checkSelfPermission work.
+        // would run Hilt's onCreate injection, which needs an @HiltAndroidApp application; this
+        // harness supplies every injected field itself. attachBaseContext via reflection so
+        // filesDir/checkSelfPermission work.
         val service = VoiceControlService()
-        // Android.app.Service overrides attachBaseContext (final); ContextWrapper's is the one
-        // That actually stores the base.
+        // android.app.Service overrides attachBaseContext (final); ContextWrapper's is the one
+        // that actually stores the base.
         android.content.ContextWrapper::class.java.getDeclaredMethod(
             "attachBaseContext",
             Context::class.java,
@@ -522,27 +522,27 @@ class VoiceControlCaptureRestartTest {
         val generationField = engineStartProbe.javaClass.getDeclaredField("startGeneration").apply { isAccessible = true }
 
         // Drive the production entry point. Robolectric's ShadowService accepts startForeground on
-        // An unattached-notification context, and the notification manager creates its channel.
+        // an unattached-notification context, and the notification manager creates its channel.
         // Dispatchers.Main must be a TestDispatcher for the shared scheduler: production's
-        // ServiceScope uses Main.immediate, whose delay() falls back to the real DefaultExecutor
-        // When Main is not a TestDispatcher -- and that executor does not run while the Robolectric
-        // Main thread sits inside runBlocking. With the shared scheduler, acquisition's poll-delay
-        // Resumes on this thread during idle().
+        // serviceScope uses Main.immediate, whose delay() falls back to the real DefaultExecutor
+        // when Main is not a TestDispatcher -- and that executor does not run while the Robolectric
+        // main thread sits inside runBlocking. With the shared scheduler, acquisition's poll-delay
+        // resumes on this thread during idle().
         try {
-            // OnStartCommand is package-private in android.app.Service; call it reflectively.
+            // onStartCommand is package-private in android.app.Service; call it reflectively.
             VoiceControlService::class.java.getDeclaredMethod(
                 "onStartCommand",
                 Intent::class.java,
                 Int::class.javaPrimitiveType,
                 Int::class.javaPrimitiveType,
             ).apply { isAccessible = true }.invoke(service, null, 0, 1)
-            // StartVoiceControl launches model prep on Dispatchers.IO and installs the observer on
+            // startVoiceControl launches model prep on Dispatchers.IO and installs the observer on
             // Main afterwards; wait for the observer job to exist.
             awaitState("observer install") { getField(service, "modeJob") != null }
 
-            // Phase 1: gate allowed + candidate present -> off branch acquires externally: sco
-            // Opens, input stream opens+starts, confirmed selection publishes Headset, observer
-            // Starts the engine, which attaches VAD.
+            // Phase 1: gate allowed + candidate present -> OFF branch acquires externally: SCO
+            // opens, input stream opens+starts, confirmed selection publishes Headset, observer
+            // starts the engine, which attaches VAD.
             println("[REPRO] pre-attach: capturing=${hardware.isCapturing()} route=${monitor.route.value} avail=${monitor.availability.value}")
             awaitState(
                 "first VAD attach",
@@ -555,16 +555,16 @@ class VoiceControlCaptureRestartTest {
             assertEquals(1, hardware.attachCount)
 
             // Phase 2: the transient conflict — other_app_playing blocks. The observer stops the
-            // Engine (vad teardown) and releases routing (sco off).
+            // engine (VAD teardown) and releases routing (SCO off).
             otherAppRule.block("other_app_playing")
             awaitState("first VAD teardown") { hardware.vadStopCount >= 1 }
 
             // Phase 3: the conflict clears BEFORE anything else settles — the same churn the owner
-            // Saw (a command response keeps music active for a moment).
+            // saw (a command response keeps music active for a moment).
             otherAppRule.allow()
 
             // Phase 4: the restart cycle completes: a SECOND acquisition opens a stream, the
-            // Engine starts again, VAD attaches a second time.
+            // engine starts again, VAD attaches a second time.
             awaitState(
                 "second VAD attach (the restart cycle)",
                 probe = {
@@ -579,16 +579,16 @@ class VoiceControlCaptureRestartTest {
             println("[REPRO] Phase4 final: attach=$finalAttach vadStop=$finalVadStop open=$finalOpen close=$finalClose mode=${policy.mode.value}")
             assertEquals("attachCount", 2, finalAttach)
             // The second VAD is still active at this point — only the first was torn down.
-            // VadStopCount==1 is correct: the first VAD stopped during the conflict,
-            // The second VAD is still running.
+            // vadStopCount==1 is correct: the first VAD stopped during the conflict,
+            // the second VAD is still running.
             assertEquals("vadStopCount", 1, finalVadStop)
             assertEquals("openCount", 2, finalOpen)
             // Both streams were handed off to the engine via RouteAcquisition.handOffStream().
             // After handoff, release() skips closeInputStream — the engine owns teardown
             // (RouteAcquisition.kt:293). The first capture WAS torn down through engine stop
             // (nativeStopCaptureAndVad deletes gCapture), but that path does not call
-            // CloseInputCapture counted by FakeHardware. CloseCount tracks explicit
-            // CloseInputStream calls only, not all stream teardown.
+            // closeInputCapture counted by FakeHardware. closeCount tracks explicit
+            // closeInputStream calls only, not all stream teardown.
             assertEquals("closeCount (explicit close, not engine teardown)", 0, finalClose)
         } finally {
             runCatching {

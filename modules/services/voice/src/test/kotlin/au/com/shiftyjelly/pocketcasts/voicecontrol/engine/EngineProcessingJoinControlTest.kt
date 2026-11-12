@@ -44,16 +44,16 @@ import org.mockito.Mockito.`when`
 import org.mockito.stubbing.Answer
 
 /**
- * engine processing join control.
+ * ENGINE PROCESSING JOIN CONTROL.
  *
  * Reviewer caught a false claim I made: I wrote that `VoiceAsrEngine.stop` is
  * "synchronous for the engine's own resources". It is not. The engine runs its processing work on
- * its own `SupervisorJob + Dispatchers.io` scope (`VoiceAsrEngine.scope`), so cancelling the service
+ * its OWN `SupervisorJob + Dispatchers.IO` scope (`VoiceAsrEngine.scope`), so cancelling the service
  * scope's root cannot wait for it. A noncooperative ASR/native call, or that job's `finally`, can
  * outlive `stop` and overlap `VoiceControlService`'s ASR backend release.
  *
  * `stop` therefore keeps the cancelled job in [VoiceAsrEngine.stoppedProcessingJob] and the service
- * teardown joins it before releasing anything. This control exercises the real engine (constructed
+ * teardown joins it BEFORE releasing anything. This control exercises the REAL engine (constructed
  * with a real `VoiceAsrEngine` and a test scope) rather than modelling it:
  *
  * - [stop] hands back the processing job it cancelled, and
@@ -65,7 +65,7 @@ import org.mockito.stubbing.Answer
  */
 class EngineProcessingJoinControlTest {
     // VoiceAudioProcessor is a FINAL class, so it is mocked rather than implemented (the existing
-    // VoiceAsrEngineTest does the same). StartProcessing() returns the flow the engine collects.
+    // VoiceAsrEngineTest does the same). startProcessing() returns the flow the engine collects.
     private val processingFlow = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
     private val processor = mock(VoiceAudioProcessor::class.java).also {
         `when`(it.startProcessing()).thenReturn(processingFlow)
@@ -74,7 +74,7 @@ class EngineProcessingJoinControlTest {
     }
     private val backend = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend::class.java)
 
-    // EnsureReady() is suspend, so it is stubbed under runBlocking rather than in a field initializer.
+    // ensureReady() is suspend, so it is stubbed under runBlocking rather than in a field initializer.
     private fun readyBackend() = runBlocking {
         `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
         backend
@@ -129,14 +129,14 @@ class EngineProcessingJoinControlTest {
                     kotlinx.coroutines.delay(10)
                 }
             }
-            // Root-caused flake. The old assertion read `unfinishedProcessingJobs` after stop, but
-            // That list's completion callback removes a job the moment it finishes -- so under load
-            // The assertion raced the removal and lost, failing a stop that had done exactly the
-            // Right thing. The surface production teardown actually consumes is the OWNERSHIP set
+            // ROOT-CAUSED FLAKE. The old assertion read `unfinishedProcessingJobs` after stop, but
+            // that list's completion callback removes a job the moment it finishes -- so under load
+            // the assertion raced the removal and lost, failing a stop that had done exactly the
+            // right thing. The surface production teardown actually consumes is the OWNERSHIP set
             // (`ownedJobs`), which is registered at job CREATION and outlives completion; the
-            // Unfinished list is only the still-running subset. The deterministic claim is:
-            // After stop, the engine still owns the launched processing job, so teardown can
-            // Classify and await it -- and that job's completion is observable.
+            // unfinished list is only the still-running subset. The deterministic claim is:
+            // after stop, the engine still owns the launched processing job, so teardown can
+            // classify and await it -- and that job's completion is observable.
             engine.stop()
             val owned = engine.ownedJobs
             assertTrue(
@@ -155,8 +155,8 @@ class EngineProcessingJoinControlTest {
     @Test
     fun `a processing job that already FAILED is not relabelled as engine-cancelled`() = runBlocking {
         // stop() references the current processing job even when it has already
-        // Failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
-        // Expected shutdown and hide it from the quiescence verdict.
+        // failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
+        // expected shutdown and hide it from the quiescence verdict.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val died = CompletableDeferred<Unit>()
         `when`(processor.startProcessing()).thenReturn(
@@ -210,8 +210,8 @@ class EngineProcessingJoinControlTest {
     @Test
     fun `both jobs stay retained while each is held, then prune independently`() = runBlocking {
         // job #2 could COMPLETE and be pruned before the size assertion, making
-        // It flaky. So BOTH completions are held: capture distinct identities, assert exact
-        // Retention while both are held, then release each one and assert it prunes on its own.
+        // it flaky. So BOTH completions are held: capture distinct identities, assert exact
+        // retention while both are held, then release each one and assert it prunes on its own.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val holdFirst = CompletableDeferred<Unit>()
         val holdSecond = CompletableDeferred<Unit>()
@@ -219,7 +219,7 @@ class EngineProcessingJoinControlTest {
         val secondEntered = CompletableDeferred<Unit>()
         var starts = 0
         // A FRESH flow per start: sharing one MutableSharedFlow meant the second collection never
-        // Reached its own onCompletion, and the test hung instead of proving anything.
+        // reached its own onCompletion, and the test hung instead of proving anything.
         val flowStarted = CompletableDeferred<Unit>()
         `when`(processor.startProcessing()).thenAnswer {
             val n = ++starts
@@ -308,9 +308,9 @@ class EngineProcessingJoinControlTest {
     @Test
     fun `a join of the engine processing jobs waits for the real processing flow to finish`() = runBlocking {
         // the previous version held a SIBLING job in the test scope and joined it
-        // In the test, so it proved nothing about production. This version holds the REAL processing
-        // Flow — the one the engine's own launch collects — so the join under test is over the
-        // Production job, and the barrier is that job's actual finalization.
+        // in the test, so it proved nothing about production. This version holds the REAL processing
+        // flow — the one the engine's own launch collects — so the join under test is over the
+        // production job, and the barrier is that job's actual finalization.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val heldFlow = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
         val flowStarted = CompletableDeferred<Unit>()
@@ -319,7 +319,7 @@ class EngineProcessingJoinControlTest {
             heldFlow.onEach { flowStarted.complete(Unit) }
                 .onCompletion {
                     // The engine's processing job reaches here only when the flow ends. Hold it, the
-                    // Way a noncooperative native call would, and make it observable.
+                    // way a noncooperative native call would, and make it observable.
                     withContext(NonCancellable) { releaseFlow.await() }
                 },
         )
@@ -338,7 +338,7 @@ class EngineProcessingJoinControlTest {
             val jobs = engine.unfinishedProcessingJobs
             assertTrue("stop must expose the processing job(s) it cancelled", jobs.isNotEmpty())
 
-            // The subject: the same joins the service teardown performs before releasing.
+            // THE SUBJECT: the same joins the service teardown performs before releasing.
             val joinerStarted = CompletableDeferred<Unit>()
             val joiner = CoroutineScope(Dispatchers.IO).launch {
                 withContext(NonCancellable) {

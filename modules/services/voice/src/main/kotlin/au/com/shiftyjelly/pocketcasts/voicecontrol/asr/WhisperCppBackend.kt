@@ -65,21 +65,21 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
         val file = modelFile
         if (file == null || !file.exists() || file.length() <= 0) {
             // P1: EVERY failed-init return drops prior evidence, including
-            // The missing/empty-file path.
+            // the missing/empty-file path.
             clearLoadEvidence()
             return@withContext Result.failure(IllegalStateException("Whisper model not found or empty"))
         }
         // P1: provenance cleared for this attempt before any native call, so
-        // A native failure — including one that surfaces as an error rather than a return value —
-        // Cannot leave earlier evidence standing.
+        // a native failure — including one that surfaces as an error rather than a return value —
+        // cannot leave earlier evidence standing.
         clearLoadEvidence()
         try {
             val cacheFile = java.io.File(file.parentFile, "vulkan_pipeline_cache.bin")
             WhisperNative.setPipelineCachePath(cacheFile.absolutePath)
             if (WhisperNative.init(file.absolutePath)) {
                 // P1: successful native init of THIS artifact is
-                // This backend's own load evidence; the citable identity comes from the verified
-                // Handoff, and must have arrived WITH this same file.
+                // this backend's own load evidence; the citable identity comes from the verified
+                // handoff, and must have arrived WITH this same file.
                 loadVerified = true
                 Result.success(Unit)
             } else {
@@ -151,13 +151,13 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
      * P1: the manifest identity that arrived WITH the file at the wiring
      * boundary, because ModelManager had already verified those bytes against it. This backend
      * does not hash anything itself; it records what the handoff asserted and may cite it only
-     * after its own successful native initialization of that same file.
+     * after its own successful native initialization of THAT SAME file.
      */
     private var handoffManifestId: String? = null
 
     // P1: the artifact DOES have a pinned identity such as
     // `whisper.cpp-ggml-small-q5_1@5359861c…`; the identity is known only when the verified
-    // Handoff delivered it AND this backend's own native init of that same file succeeded.
+    // handoff delivered it AND this backend's own native init of that same file succeeded.
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
         if (!loadVerified) return null
         val id = handoffManifestId ?: return null
@@ -168,10 +168,10 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
         files = listOf(
             ModelFile(
                 // Pinned revision: resolve/main is mutable, so the
-                // Artifact URL names the exact repo revision (ggerganov/whisper.cpp @ 5359861c…,
-                // LastModified 2024-10-29), served through the mirror per workspace instruction.
-                // Sha256 is the file's lfs oid at that revision, so an existing cache is
-                // Re-verified before it can be labeled with the pinned manifest identity.
+                // artifact URL names the exact repo revision (ggerganov/whisper.cpp @ 5359861c…,
+                // lastModified 2024-10-29), served through the mirror per workspace instruction.
+                // sha256 is the file's LFS oid at that revision, so an EXISTING cache is
+                // re-verified before it can be labeled with the pinned manifest identity.
                 url = "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin",
                 filename = "ggml-small-q5_1.bin",
                 sha256 = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
@@ -189,7 +189,7 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
 
     override fun release() {
         // P1: drop provenance BEFORE the native free, so a throwing release
-        // Cannot leave a citable identity behind.
+        // cannot leave a citable identity behind.
         clearProvenance()
         WhisperNative.freeModel()
     }

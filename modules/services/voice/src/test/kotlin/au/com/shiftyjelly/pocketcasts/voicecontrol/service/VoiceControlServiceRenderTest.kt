@@ -41,13 +41,13 @@ class VoiceControlServiceRenderTest {
             service.renderWithFailureHandling(noopIntent())
 
             // The service must have installed the production handler, so a delivery failure reaches
-            // The user-visible feedback path rather than the renderer's default log.
+            // the user-visible feedback path rather than the renderer's default log.
             assertNotNull("the service must arm failure handling", renderer.onPlaybackFailure)
             renderer.onPlaybackFailure(IllegalStateException("delivery failed"))
             verify(earconPlayer).play(EarconId.ERROR)
         } finally {
             // Only the renderer is released: the service's own teardown touches dependencies this
-            // Focused test does not stand up, and it is not part of the connection under test.
+            // focused test does not stand up, and it is not part of the connection under test.
             renderer.release()
         }
     }
@@ -68,8 +68,8 @@ class VoiceControlServiceRenderTest {
     @Test
     fun `the executor writes the REQUEST-OWNED outcome the caller minted`() = runTest {
         // : the value must belong to the REQUEST, not to a slot on the executor. The caller mints
-        // The holder and passes it in, so two concurrent turns cannot race for one field -- and this case
-        // Reads back the holder the CALLER would read.
+        // the holder and passes it in, so two concurrent turns cannot race for one field -- and this case
+        // reads back the holder the CALLER would read.
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
         val service = VoiceControlService().apply {
@@ -156,7 +156,7 @@ class VoiceControlServiceRenderTest {
                 failure = t
             }
             assertEquals("a stop must leave the renderer usable, not disposed", null, failure)
-            // And it must actually reach the player rather than being refused by terminal state.
+            // and it must actually reach the player rather than being refused by terminal state.
             verify(earconPlayer, org.mockito.Mockito.atLeastOnce()).play(EarconId.ERROR)
         } finally {
             renderer.release()

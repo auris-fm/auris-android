@@ -34,6 +34,9 @@ class AurisAuthClient(
         if (base.isBlank()) return@withContext AurisAuthResult.Unavailable
         val request = Request.Builder()
             .url(base + path)
+            // EVERY Auris request carries the platform agent (spec): the server's `platform=` log
+            // line classifies the request from this header, so sign-in and refresh carry it too.
+            .header("User-Agent", au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.PC_INTERNAL_USER_AGENT)
             .post(body.toRequestBody(JSON_MEDIA_TYPE))
             .build()
         try {

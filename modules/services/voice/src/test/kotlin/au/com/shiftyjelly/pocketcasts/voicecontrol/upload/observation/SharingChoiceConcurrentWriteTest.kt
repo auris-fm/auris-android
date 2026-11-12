@@ -95,12 +95,13 @@ class SharingChoiceConcurrentWriteTest {
         }
     }
 
-    /** A surviving default temp path shared by both writers is the defect; after the fix none remains. */
+    /** A surviving temp path — default `.tmp` OR unique `.tmp.<uuid>` — is the defect; none remains. */
     @Test
     fun `no temp file survives a completed write`() {
         val persistence = FileSharingChoicePersistence(context, noopDirectorySync())
         assertTrue(persistence.write(choice("epoch-clean")))
-        val leftovers = context.filesDir.listFiles().orEmpty().filter { it.name.endsWith(".tmp") }
+        val leftovers = context.filesDir.listFiles().orEmpty()
+            .filter { it.name.endsWith(".tmp") || ".tmp." in it.name }
         assertTrue("temp files must not survive: ${leftovers.map { it.name }}", leftovers.isEmpty())
     }
 

@@ -8,16 +8,14 @@ import com.squareup.moshi.JsonClass
  * (final contract: task #33). The exchanged credential is the account session
  * the app already holds at login — the client never invents a subject.
  */
+/**
+ * The sign-in body carries ONLY the credential. The former optional `device`
+ * block is removed (owner + spec, server cleanup on 135): the server ignored it,
+ * and the platform reaches the server on every request via the User-Agent.
+ */
 @JsonClass(generateAdapter = true)
 internal data class AurisTokenRequest(
     val credential: String,
-    val device: AurisDeviceInfo? = null,
-)
-
-@JsonClass(generateAdapter = true)
-data class AurisDeviceInfo(
-    val platform: String,
-    @Json(name = "app_version") val appVersion: String? = null,
 )
 
 @JsonClass(generateAdapter = true)

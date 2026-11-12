@@ -446,6 +446,55 @@ class VoiceSharingAccountOperationsTest {
         )
     }
 
+    /**
+     * THE OWNER'S TAP (spec follow-up on the Pixel bug): a refresh issued BEFORE the tap but
+     * delivered BEFORE the tap's answer must not throw the tap's own successful answer away. The
+     * publication-count fence protects STALE REFRESHES, not fresh mutations: a mutation's own answer
+     * carries the account/session fence and wins over any publication that merely landed earlier.
+     */
+    @Test
+    fun `a tap's PUT answer wins over a refresh issued before it and delivered before the answer`() = runTest {
+        val saved = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.InMemoryChoicePersistence(),
+        )
+        val ops = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = owner,
+            aurisToken = ownerToken(owner),
+            onCredentialInvalid = { },
+            onAurisCredentialRefused = { },
+            savedSharingChoice = saved,
+        )
+        issueBearer("Bearer token-a")
+        // The refresh is issued first and its answer returns while the tap is in flight.
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-stale")),
+        )
+        val refresh = async(kotlinx.coroutines.Dispatchers.IO) { ops.refreshProjection() }
+        // DETERMINISTIC ORDER: the GET has reached the server before the tap is issued, so the
+        // stale answer cannot be handed to the PUT by dispatch accident.
+        server.takeRequest(5, TimeUnit.SECONDS)!!
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-tap", disclosure = "v3")),
+        )
+        val outcome = ops.enroll(acceptedDisclosureVersion = "v3")
+        refresh.await()
+        // (No premise on the refresh's own outcome: whichever apply lands first wins the count race,
+        // but the invariant under test is only that the tap's answer survives in the end.)
+        assertTrue(
+            "the tap's own successful answer must not be discarded by the earlier refresh: $outcome",
+            outcome is VoiceSharingMutationResult.Applied,
+        )
+        assertTrue("the surface state is enrolled", state.projection.value?.voiceSharingEnrolled == true)
+        assertEquals("epoch-tap", state.projection.value?.enrollmentEpoch)
+        assertEquals(
+            "the durable choice holds the tap's epoch",
+            "epoch-tap",
+            saved.read("user@example.com")?.epoch,
+        )
+    }
+
     @Test
     fun `CONTROL - a GET issued after the withdrawal and delivered after it does apply`() = runTest {
         val saved = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore(

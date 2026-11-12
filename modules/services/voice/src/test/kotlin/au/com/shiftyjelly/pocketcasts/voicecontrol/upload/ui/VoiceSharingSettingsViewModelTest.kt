@@ -108,7 +108,32 @@ class VoiceSharingSettingsViewModelTest {
         cancelInFlightUpload: () -> Unit = {},
         ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = mainDispatcher,
         markerRead: (suspend () -> Boolean)? = null,
+        savedChoice: (suspend () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?)? = null,
     ): VoiceSharingSettingsViewModel {
+        // Mirrors what the production store holds given the projection the test published: apply()
+        // persists exactly this rule (enrolled+epoch+disclosure -> ENROLLED, withdrawn -> WITHDRAWN,
+        // else NOT_ENROLLED). Tests override with an explicit provider to stage divergence.
+        val effectiveChoice = savedChoice ?: {
+            val p = projection.value
+            when {
+                p != null && p.voiceSharingEnrolled &&
+                    p.enrollmentEpoch != null && p.acceptedDisclosureVersion != null ->
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                        account = "user@example.com",
+                        state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+                        epoch = p.enrollmentEpoch,
+                        acceptedDisclosureVersion = p.acceptedDisclosureVersion,
+                    )
+                p != null && p.withdrawalState == WithdrawalState.WITHDRAWN ->
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                        account = "user@example.com",
+                        state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.WITHDRAWN,
+                        epoch = null,
+                        acceptedDisclosureVersion = null,
+                    )
+                else -> null
+            }
+        }
         val effective = scope ?: kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
         ).also { scopes += it }
@@ -135,6 +160,7 @@ class VoiceSharingSettingsViewModelTest {
             cancelInFlightUpload = cancelInFlightUpload,
             ioDispatcher = ioDispatcher,
             markerRead = markerRead,
+            savedChoice = effectiveChoice,
         )
     }
     @Test
@@ -258,6 +284,63 @@ class VoiceSharingSettingsViewModelTest {
             ioExecutor.shutdownNow()
         }
     }
+    /**
+     * ONE LOCAL TRUTH (spec, owner's Pixel consent bug): the switch renders the DURABLE choice —
+     * the same record capture/upload admission reads — not the in-memory projection. Here the
+     * durable choice says ENROLLED while the projection (a stale server refresh) says not-enrolled:
+     * the surface must show ON, matching what admission would do.
+     */
+    @Test
+    fun `the switch renders the durable choice, not the projection`() = runTest(mainDispatcher) {
+        val vm = viewModel(
+            markerRead = { true },
+            savedChoice = {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                    account = "user@example.com",
+                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+                    epoch = "epoch-2",
+                    acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
+                )
+            },
+        )
+        setProjection(
+            VoiceSharingAccountProjection(
+                plan = VoiceSharingPlan.PRO,
+                voiceSharingEnrolled = false,
+                enrollmentEpoch = null,
+                acceptedDisclosureVersion = null,
+                withdrawalState = WithdrawalState.ACTIVE,
+            ),
+        )
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { kotlinx.coroutines.yield() }
+        assertTrue(
+            "the durable consent is ON, so the switch must be ON: ${vm.state.value.enrolled}",
+            vm.state.value.enrolled,
+        )
+    }
+
+    /** Companion control: a durable WITHDRAWN choice must show OFF even when the projection says enrolled. */
+    @Test
+    fun `the switch renders OFF when the durable choice is withdrawn`() = runTest(mainDispatcher) {
+        val vm = viewModel(
+            markerRead = { true },
+            savedChoice = {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                    account = "user@example.com",
+                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.WITHDRAWN,
+                    epoch = null,
+                    acceptedDisclosureVersion = null,
+                )
+            },
+        )
+        setProjection(enrolledProjection())
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { kotlinx.coroutines.yield() }
+        assertTrue(
+            "the durable consent is OFF, so the switch must be OFF: ${vm.state.value.enrolled}",
+            !vm.state.value.enrolled,
+        )
+    }
+
     @Test
     fun `disclosure copy is the exact build constants the consent version names`() = runTest(mainDispatcher) {
         val state = viewModel().state.value
@@ -953,10 +1036,23 @@ class VoiceSharingSettingsViewModelTest {
         }
         val hasTasks: Boolean get() = queue.isNotEmpty()
     }
+    /**
+     * ONE LOCAL TRUTH, the owner's Pixel bug in test form: an unenrolling PROJECTION alone must not
+     * flip the switch off while the durable choice still says ENROLLED — that mismatch is exactly
+     * what let capture run "while the switch showed off". The switch follows the durable record:
+     * it turns off only when the record itself is withdrawn, never from a projection render.
+     */
     @Test
-    fun `an unenrolling projection retires the published value with no io completion`() = runTest(mainDispatcher) {
+    fun `an unenrolling projection alone does not turn the switch off while the durable choice stands`() = runTest(mainDispatcher) {
         val io = GatedDispatcher()
         setProjection(enrolledProjection())
+        var durable: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? =
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                account = "user@example.com",
+                state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+                epoch = "epoch-2",
+                acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
+            )
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
             enrollOperation = { enrollGate.await() },
@@ -972,14 +1068,35 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { 1L },
             ioDispatcher = io,
             markerRead = { true },
+            savedChoice = { durable },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
         mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("PREMISE: enrolled under an enrolled projection", vm.state.value.enrolled)
+        while (io.hasTasks) {
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
+        assertTrue("PREMISE: enrolled under an enrolled projection and a durable consent", vm.state.value.enrolled)
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
         mainDispatcher.scheduler.runCurrent()
+        while (io.hasTasks) {
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
+        assertTrue(
+            "a stale not-enrolled projection must not turn the switch off while the durable choice says enrolled",
+            vm.state.value.enrolled,
+        )
+        durable = null // the server's answer updates the durable record (apply persists it)
+        // A new server answer is what triggers the next fenced read of the record.
+        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED, enrollmentEpoch = "epoch-stale-refresh"))
+        mainDispatcher.scheduler.advanceUntilIdle()
+        while (io.hasTasks) {
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
         assertFalse(
-            "the unenrolled projection must be visible without waiting for any marker read",
+            "once the durable record no longer holds consent, the switch is off",
             vm.state.value.enrolled,
         )
     }
@@ -1001,6 +1118,14 @@ class VoiceSharingSettingsViewModelTest {
             withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
             ioDispatcher = io,
+            savedChoice = {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                    account = "user@example.com",
+                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+                    epoch = "epoch-2",
+                    acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
+                )
+            },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -1010,10 +1135,11 @@ class VoiceSharingSettingsViewModelTest {
         }
         assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
         vm.withdraw()
-        repeat(3) {
+        // Alternate main-task and parked-io progress until quiescent: the withdraw launch, its two
+        // fenced reads (marker then durable choice) and the stop write each hop between them.
+        repeat(30) {
             mainDispatcher.scheduler.runCurrent()
-            io.runOldest()
-            mainDispatcher.scheduler.runCurrent()
+            if (io.hasTasks) io.runOldest()
         }
         assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
         setProjection(enrolledProjection().copy(enrollmentEpoch = "epoch-3"))
@@ -1050,11 +1176,23 @@ class VoiceSharingSettingsViewModelTest {
             ownerSession = { 1L },
             ioDispatcher = io,
             markerRead = markerRead,
+            savedChoice = {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                    account = "user@example.com",
+                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+                    epoch = "epoch-2",
+                    acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
+                )
+            },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
         mainDispatcher.scheduler.advanceUntilIdle()
         parked[1].complete(Unit) // the LATEST init read completes: the fail-closed seed gets the real marker
         mainDispatcher.scheduler.advanceUntilIdle()
+        while (io.hasTasks) {
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
         assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
         assertEquals("PREMISE: both init collector refreshes are parked", 2, parked.size)
         vm.withdraw()
@@ -1071,6 +1209,10 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals(4, parked.size)
         parked[3].complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
+        while (io.hasTasks) { // the fenced read now also carries the durable choice on the io queue
+            io.runOldest()
+            mainDispatcher.scheduler.runCurrent()
+        }
         assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
         assertTrue(
             "PREMISE: the pre-stop read is still parked, so completing it must resume it",

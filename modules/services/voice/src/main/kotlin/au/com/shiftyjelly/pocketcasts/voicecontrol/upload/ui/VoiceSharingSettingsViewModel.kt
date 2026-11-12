@@ -23,6 +23,7 @@ data class VoiceSharingSettingsUiState(
     val failedOperation: FailedOperation = FailedOperation.NONE,
     val pendingOperation: PendingOperation = PendingOperation.NONE,
     val projectionObserved: Boolean,
+    val durableChoiceKnown: Boolean = false,
     val deletionRequested: Boolean = false,
     val deleteAvailable: Boolean = false,
     val deleteConfirmationOpen: Boolean = false,
@@ -45,6 +46,7 @@ class VoiceSharingSettingsViewModel(
     private val cancelInFlightUpload: () -> Unit = {},
     private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
     private val markerRead: (suspend () -> Boolean)? = null,
+    private val savedChoice: (suspend () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?)? = null,
 ) {
     private var lastFailedOperation = FailedOperation.NONE
     private var pendingOperation = PendingOperation.NONE
@@ -59,6 +61,13 @@ class VoiceSharingSettingsViewModel(
     /** Fail-closed seed: the real marker arrives from the collectors' IO read (no main-thread disk read at construction). */
     private var lastRenderedMarker: Boolean = false
     private var markerReadGeneration = 0L
+    /**
+     * ONE LOCAL TRUTH (owner's Pixel consent bug): the switch renders the DURABLE choice — the same
+     * SavedSharingChoiceStore record capture/upload admission reads — never the in-memory projection
+     * alone. Fail-closed null until the first IO read lands. Every server answer updates the store,
+     * so re-reading it here keeps the switch on exactly what admission would act on.
+     */
+    private var lastRenderedChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? = null
     private val mutableState = MutableStateFlow(render())
     val state: StateFlow<VoiceSharingSettingsUiState> = mutableState.asStateFlow()
     init {
@@ -190,18 +199,26 @@ class VoiceSharingSettingsViewModel(
     private fun refreshEnrolled() {
         scope.launch { acceptMarkerRead(readMarkerFenced()) }
     }
-    private suspend fun readMarkerFenced(): Pair<Long, Boolean> {
+    private suspend fun readMarkerFenced(): FencedFacts {
         val generation = ++markerReadGeneration
         val marker = markerRead?.invoke()
             ?: withContext(ioDispatcher) { withdrawalIntent.collectionPermittedByLocalIntent() }
-        return generation to marker
+        val choice = withContext(ioDispatcher) { savedChoice?.invoke() }
+        return FencedFacts(generation, marker, choice)
     }
-    private fun acceptMarkerRead(read: Pair<Long, Boolean>) {
-        val (generation, marker) = read
-        if (generation != markerReadGeneration) return
-        lastRenderedMarker = marker
+    private fun acceptMarkerRead(read: FencedFacts) {
+        if (read.generation != markerReadGeneration) return
+        lastRenderedMarker = read.marker
+        lastRenderedChoice = read.choice
         mutableState.value = render()
     }
+
+    /** The fenced render inputs: marker generation, the local stop marker, the durable choice. */
+    private data class FencedFacts(
+        val generation: Long,
+        val marker: Boolean,
+        val choice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?,
+    )
     private suspend fun applyWithdrawalOutcome(outcome: EnrollmentOutcome, generation: Long) {
         when (outcome) {
             is EnrollmentOutcome.Applied -> {
@@ -329,6 +346,7 @@ class VoiceSharingSettingsViewModel(
             enrolled = enrolled,
             pending = pendingOperation != PendingOperation.NONE,
             projectionObserved = projection.value != null,
+            durableChoiceKnown = lastRenderedChoice != null,
             deletionRequested = deletionRequested,
             deletionFailed = deletionFailed,
             deleteAvailable = isDeleteAvailable(),
@@ -344,9 +362,10 @@ class VoiceSharingSettingsViewModel(
     }
     private fun currentProjection(): VoiceSharingAccountProjection? = projection.value
     private fun isEnrolled(): Boolean {
-        val p = currentProjection() ?: return false
-        return p.voiceSharingEnrolled &&
-            p.withdrawalState == WithdrawalState.ACTIVE &&
+        // The DURABLE choice is the switch's truth (spec one-local-truth): the same record admission
+        // reads. The projection only reports whether a server answer was ever observed. Fail closed:
+        // no durable record, no consent.
+        return lastRenderedChoice?.state == au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED &&
             lastRenderedMarker
     }
     private fun isDeleteAvailable(): Boolean {

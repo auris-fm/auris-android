@@ -25,7 +25,7 @@ class AurisAuthClient(
     /** The environment this client talks to; a token is only valid for it. */
     val origin: String = baseUrl.trimEnd('/')
 
-    suspend fun exchange(credential: String, device: AurisDeviceInfo? = null): AurisAuthResult = post(AuthPaths.TOKEN, CloudRouteJson.aurisTokenRequestAdapter.toJson(AurisTokenRequest(credential, device)))
+    suspend fun exchange(credential: String): AurisAuthResult = post(AuthPaths.TOKEN, CloudRouteJson.aurisTokenRequestAdapter.toJson(AurisTokenRequest(credential)))
 
     suspend fun refresh(refreshToken: String): AurisAuthResult = post(AuthPaths.REFRESH, CloudRouteJson.aurisRefreshRequestAdapter.toJson(AurisRefreshRequest(refreshToken)))
 

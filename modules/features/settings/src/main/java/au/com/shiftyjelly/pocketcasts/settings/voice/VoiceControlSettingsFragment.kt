@@ -194,9 +194,10 @@ class VoiceControlSettingsFragment : BaseFragment() {
             // reviewed ViewModel — durable presentation, tap-time session capture, fenced outcome
             // effects and the local-stop-first withdrawal all live there now.
             val sharingState by voiceSharingSettings.state.collectAsStateWithLifecycle()
-            // The section only renders when it can be truthful: policy available AND an account
-            // projection actually observed (no switch without a projection to read it against).
-            val sharing = if (sharingState.settingAvailable && sharingState.projectionObserved) sharingState else null
+            // The section only renders when it can be truthful: policy available AND a real state
+            // observed — a server projection OR the durable choice itself (ONE LOCAL TRUTH: the
+            // switch must render from the durable record even before any projection has landed).
+            val sharing = if (sharingState.settingAvailable && (sharingState.projectionObserved || sharingState.durableChoiceKnown)) sharingState else null
             // The destructive confirmation is OWNED BY THE VIEWMODEL and bound to the session that
             // opened it (reviewer 20b681f0): confirming after an account switch is rejected, never
             // silently re-owned by the new account.

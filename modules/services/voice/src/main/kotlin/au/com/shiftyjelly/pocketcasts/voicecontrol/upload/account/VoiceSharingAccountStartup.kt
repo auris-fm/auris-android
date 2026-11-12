@@ -77,6 +77,10 @@ class VoiceSharingAccountStartup @Inject constructor(
      */
     fun ownerSessionGeneration(): Long = ownership.sessionGeneration()
 
+    /** The signed-in account's name, or null. The durable choice is per-account; callers must never
+     *  read one account's record for another. */
+    fun currentAccountName(): String? = ownership.authoritySnapshot().accountName
+
     init {
         // State fence is the single commit point for every projection change (GET/enrollment/
         // withdrawal/401/session-end): post-commit mirror notification ONLY — no authority is

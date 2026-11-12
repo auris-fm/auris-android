@@ -31,7 +31,6 @@ class AurisTokenProvider(
     /** Null when auth is not configured for this build/environment. */
     private val clientProvider: () -> AurisAuthClient?,
     private val credentialProvider: AurisAccountCredentialProviding,
-    private val device: AurisDeviceInfo? = AurisDeviceInfo(platform = PLATFORM_ANDROID),
     private val clock: () -> Long = System::currentTimeMillis,
 ) : AurisScopedTokenProviding {
 
@@ -194,7 +193,7 @@ class AurisTokenProvider(
             }
         }
         val credential = credentialProvider.credential() ?: return Acquisition.Definitive
-        return acquire(client.exchange(credential, device))
+        return acquire(client.exchange(credential))
     }
 
     private fun acquire(result: AurisAuthResult): Acquisition = when (result) {
@@ -239,7 +238,6 @@ class AurisTokenProvider(
     }
 
     private companion object {
-        const val PLATFORM_ANDROID = "android"
 
         /** Refresh slightly before expiry so an in-flight request never races it. */
         const val EXPIRY_SKEW_MS = 30_000L

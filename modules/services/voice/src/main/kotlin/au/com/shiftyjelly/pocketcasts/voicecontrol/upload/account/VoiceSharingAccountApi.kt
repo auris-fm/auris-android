@@ -60,7 +60,7 @@ class VoiceSharingAccountOperations(
         val request = issue(Route.GET, null) ?: return false
         return when (val outcome = execute(request.op) { b, _ -> api.getVoiceSharing(b) }) {
             is Outcome.Body -> {
-                val applied = apply(outcome.json, request.issued)
+                val applied = apply(outcome.json, request.issued, fromRefresh = true)
                 state.onRefreshObserved?.invoke(
                     VoiceSharingRefreshDiagnostic(kind = VoiceSharingRefreshDiagnostic.Kind.APPLIED, status = null, bodyBytes = outcome.json.length, requestIds = outcome.requestIds, detail = applied.toString()),
                 )
@@ -101,14 +101,24 @@ class VoiceSharingAccountOperations(
     suspend fun withdraw(): VoiceSharingMutationResult = setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null)
     private fun appliedOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        return if (apply(json, issued)) VoiceSharingMutationResult.Applied(projection) else VoiceSharingMutationResult.Failure
+        return if (apply(json, issued, fromRefresh = false)) {
+            VoiceSharingMutationResult.Applied(projection)
+        } else VoiceSharingMutationResult.Failure
     }
-    private fun apply(json: String, issued: Issued): Boolean = ownership.transaction {
+
+    /**
+     * The publication-count fence is a REFRESH fence only. A refresh answer that lands after a newer
+     * publication is stale and is discarded — that is what keeps a pre-withdrawal GET from
+     * republishing enrollment. A MUTATION's own answer (the owner's tap) is never stale in that
+     * sense: it carries the account/session fence, and a refresh that merely landed earlier must not
+     * throw it away (owner Pixel test: twelve successful taps, every answer discarded client-side).
+     */
+    private fun apply(json: String, issued: Issued, fromRefresh: Boolean): Boolean = ownership.transaction {
         val current = ownership.authoritySnapshot()
         if (current.accountName != issued.accountName || current.session != issued.session) {
             return@transaction false // a different account (or a new login) owns the answer now
         }
-        if (state.publicationCount() != issued.publication) {
+        if (fromRefresh && state.publicationCount() != issued.publication) {
             return@transaction false // a newer answer already landed
         }
         val projection = state.parseProjection(json) ?: return@transaction false

@@ -20,6 +20,7 @@ object VoiceSharingSettingsModule {
     fun provideVoiceSharingSettingsViewModel(
         accountStartup: VoiceSharingAccountStartup,
         withdrawalIntent: LocalWithdrawalIntentStore,
+        savedChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
         queue: FolderQueue,
         uploaderLoop: UploaderLoop,
     ): VoiceSharingSettingsViewModel {
@@ -33,6 +34,10 @@ object VoiceSharingSettingsModule {
             ownerSession = { accountStartup.ownerSessionGeneration() },
             refreshProjection = { accountStartup.operations.refreshProjection() },
             cancelInFlightUpload = uploaderLoop::cancelInFlight,
+            savedChoice = {
+                val account = accountStartup.currentAccountName()
+                if (account.isNullOrBlank()) null else savedChoice.read(account)
+            },
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
     }

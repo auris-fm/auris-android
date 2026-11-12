@@ -169,6 +169,15 @@ object VoiceUploadQueueModule {
         // stalled write: interrupting the coroutine cannot, because the write never returns.
         client = client.newBuilder()
             .callTimeout(RecordingUploader.CALL_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            // THE PLATFORM AGENT (spec, `platform=` log line): the raw client carries NO User-Agent,
+            // so the server logged uploads as platform=unknown. Send the same scoped internal agent
+            // the account routes already use.
+            .addInterceptor { chain ->
+                val request = chain.request().newBuilder()
+                    .header("User-Agent", au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.PC_INTERNAL_USER_AGENT)
+                    .build()
+                chain.proceed(request)
+            }
             .build(),
         // How a credential is obtained is decided here, once, so there is no second place that
         // could choose differently: asking serves a fresh cached token or obtains a new one, while

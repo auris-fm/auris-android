@@ -1350,8 +1350,6 @@ class VoiceControlService : Service() {
                     mediaSession?.isActive = false
                     mediaSession?.release()
                     mediaSession = null
-                    // REMOVED WITH THE SESSION. A binding left behind would point the manager at a sink whose
-                    // session has ended, and one cleared too early would lose the notifications it exists for.
                     // REMOVED WITH THE SESSION, both hooks: one left behind would report into a session that has
                     // ended, and the failure receiver is the same shape of leak.
                     voicePlaybackIntentExecutor.unbindDialogAbandonment()

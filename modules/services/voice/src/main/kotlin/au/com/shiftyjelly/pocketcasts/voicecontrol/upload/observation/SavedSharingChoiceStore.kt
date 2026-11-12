@@ -95,10 +95,6 @@ class SavedSharingChoiceStore(
     }
 
     /**
-     * The choice for [account], or null unless this account is enrolled with a real epoch and an
-     * accepted disclosure. This is the ONE question admission asks.
-     */
-    /**
      * Whether the account has ANY durable record, whatever its state. VISIBILITY ONLY (Settings row
      * shown/hidden): "sharing is off" is a known durable state, so an offline start with a WITHDRAWN
      * record must still show the row. The switch's VALUE comes from [enrolledChoiceFor], which keeps
@@ -109,6 +105,10 @@ class SavedSharingChoiceStore(
         return persistence.read(account)?.takeIf { it.account == account }
     }
 
+    /**
+     * The choice for [account], or null unless this account is enrolled with a real epoch and an
+     * accepted disclosure. This is the ONE question admission asks.
+     */
     fun enrolledChoiceFor(account: String?): SavedSharingChoice? {
         if (account.isNullOrBlank()) return null
         val choice = persistence.read(account) ?: return null

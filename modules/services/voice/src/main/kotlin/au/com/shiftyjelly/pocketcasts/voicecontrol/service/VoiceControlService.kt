@@ -1173,18 +1173,6 @@ class VoiceControlService : Service() {
                 // here makes that work visible to the snapshot below instead of racing it.
                 // FAIL CLOSED (reviewers 1092c632 + 9294defb): a failed final stop, round
                 // exhaustion, or anything still unfinished at release time all mean the released
-                // resources might still be in use. Only Settled permits release.
-                // Their own join. Snapshot them only now, after the service children have finished
-                // the engine's stop() is called from several service children,
-                // And a child that ran during this teardown may have cancelled a job that did not
-                // Exist when the teardown started. Sampling before the join made that job
-                // Invisible and let the backend be released under it.
-                // Unconditional final stop before the snapshot: a child could
-                // Have left the engine with live work that no earlier stop() cancelled. Stopping
-                // Here makes that work visible to the snapshot below instead of racing it.
-                // Fail closed (reviewers 1092c632 + 9294defb): a failed final stop, round
-                // Exhaustion, or anything still unfinished at release time all mean the released
-                // Resources might still be in use. Only Settled permits release.
                 val verdict = EngineQuiescence.settle(
                     stop = { voiceAsrEngine.get().stop() },
                     unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },

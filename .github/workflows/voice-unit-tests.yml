@@ -23,7 +23,6 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      # the ordinary code-test suite is SELF-CONTAINED — no external repository
       - name: Run voice module Robolectric unit tests (self-contained)
         shell: bash
         run: set -o pipefail; ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log

@@ -14,6 +14,23 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+/**
+ * The sharing switch is ONE desired-state operation (spec: `PUT /api/v1/account/voice-sharing`).
+ *
+ * What this suite holds:
+ *  - turning it on and off are the SAME request shape, differing only in the desired state and the
+ *    disclosure version that is required when turning it on;
+ *  - repeating a state is a no-op on the wire contract (the idempotency claim the spec makes), so a
+ *    retry after a network failure can simply resend what the user asked for;
+ *  - the last-read `membership_revision` travels as `If-Match`, and a stale one comes back as 409
+ *    with the server's current state rather than overwriting a newer choice.
+ * - turning it on and off are the SAME request shape, differing only in the desired state and the
+ * disclosure version that is required when turning it on;
+ * - repeating a state is a no-op on the wire contract (the idempotency claim the spec makes), so a
+ * retry after a network failure can simply resend what the user asked for;
+ * - the last-read `membership_revision` travels as `If-Match`, and a stale one comes back as 409
+ * with the server's current state rather than overwriting a newer choice.
+ */
 @RunWith(RobolectricTestRunner::class)
 class VoiceSharingSwitchPutTest {
 
@@ -22,11 +39,15 @@ class VoiceSharingSwitchPutTest {
     private lateinit var state: VoiceSharingAccountState
     private lateinit var owner: TestOwner
     private lateinit var operations: VoiceSharingAccountOperations
+    /** The requests the control asserts on, recorded by the dispatcher as it answers. */
     private val requests = ConcurrentLinkedQueue<RecordedRequest>()
+    /** The exact bytes of those requests, in the same order. */
     private val bodies = ConcurrentLinkedQueue<String>()
 
     @Before
     fun setUp() {
+        // Robolectric does not build a fresh instance per test, so every control is reset here. The
+        // QUEUE matters most: a leftover answer would be spent by the next test's seeding read.
         requests.clear()
         bodies.clear()
         queue.clear()
@@ -37,9 +58,13 @@ class VoiceSharingSwitchPutTest {
             okhttp3.OkHttpClient(),
         )
 
+        // Answers come from this control's own queue so a test says what each request gets; the
+        // production queue is never swapped underneath a running call.
         state = VoiceSharingAccountState()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
+                // Recorded before the answer is handed back, so a control that drains after the call
+                // has returned always sees it; the body is read here for the same reason.
                 requests.add(request)
                 bodies.add(request.body.readUtf8())
                 return queue.poll() ?: MockResponse().setResponseCode(500)
@@ -76,8 +101,11 @@ class VoiceSharingSwitchPutTest {
         append("\"accepted_disclosure_version\":${disclosure?.let { "\"$it\"" } ?: "null"},")
         append("\"withdrawal_state\":\"$withdrawal\"}")
     }.toString()
+    /** Answers the NEXT requests with the given bodies. */
     private fun enqueue(vararg responses: MockResponse) = responses.forEach { answer(it) }
+    /** Answers the next request with [response]: the dispatcher's own queue, in order. */
     private fun answer(response: MockResponse) = queue.add(response)
+    /** Stands in for the server's queue so a control can decide what each request gets. */
     private val queue = ConcurrentLinkedQueue<MockResponse>()
 
     private fun okProjection(enrolled: Boolean, revision: String = "unused") = MockResponse()
@@ -87,6 +115,7 @@ class VoiceSharingSwitchPutTest {
     private suspend fun seedCurrent(enrolled: Boolean, revision: String) {
         answer(okProjection(enrolled, revision))
         assertTrue("the current state must be readable", operations.refreshProjection())
+        // The seeding GET is answered above; its request is not what these controls are about.
         requests.clear()
         bodies.clear()
     }
@@ -99,6 +128,8 @@ class VoiceSharingSwitchPutTest {
         val result = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
 
         assertTrue("the switch must apply", result is VoiceSharingMutationResult.Applied)
+        // Read AFTER the call returns: the dispatcher records the request on its own thread as it
+        // answers, so reading any earlier can see the answer before the record.
         val put = requests.single()
         assertEquals("PUT", put.method)
         assertEquals("/api/v1/account/voice-sharing", put.path)
@@ -116,6 +147,8 @@ class VoiceSharingSwitchPutTest {
         val result = operations.setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null)
 
         assertTrue("the withdrawal must apply", result is VoiceSharingMutationResult.Applied)
+        // Read AFTER the call returns: the dispatcher records the request on its own thread as it
+        // Answers, so reading any earlier can see the answer before the record.
         val put = requests.single()
         assertEquals("PUT", put.method)
         assertNull("a withdrawal carries no precondition either", put.headers["If-Match"])
@@ -124,6 +157,12 @@ class VoiceSharingSwitchPutTest {
 
     @Test
     fun `repeating the same desired state sends the same request and is applied again`() = runTest {
+        // The spec's idempotency claim: a second "on" changes nothing server-side, which is what makes
+        // a plain resend after a network failure safe. The client's job is only to send it again,
+        // unchanged.
+        // Theidempotency claim: a second "on" changes nothing server-side, which is what makes
+        // A plain resend after a network failure safe. The client's job is only to send it again,
+        // Unchanged.
         seedCurrent(enrolled = true, revision = "rev-2")
         enqueue(okProjection(enrolled = true, revision = "rev-2"))
         assertTrue(operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1") is VoiceSharingMutationResult.Applied)
@@ -137,6 +176,10 @@ class VoiceSharingSwitchPutTest {
 
     @Test
     fun `network failure keeps the user's choice and a resend lands the same desired state`() = runTest {
+        // A failed switch is NOT a silent success: the caller learns the answer failed, keeps the
+        // user's choice locally, and resends. The server sees the same desired state either way.
+        // A failed switch is NOT a silent success: the caller learns the answer failed, keeps the
+        // User's choice locally, and resends. The server sees the same desired state either way.
         seedCurrent(enrolled = false, revision = "rev-1")
         enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AT_START))
         val failed = operations.setVoiceSharing(enrolled = true, acceptedDisclosureVersion = "voice-sharing-v1")
@@ -150,6 +193,9 @@ class VoiceSharingSwitchPutTest {
     }
 
     @Test
+        // The revision can disappear between the read and the freeze: a lifecycle clear empties the
+        // Projection while the bearer is being acquired. Frozen() must refuse rather than emit a
+        // SWITCH with no If-Match.
     fun `an account switch while the request is in flight refuses it instead of relabelling it`() = runTest {
         seedCurrent(enrolled = false, revision = "rev-1")
         enqueue(okProjection(enrolled = true, revision = "rev-2"))
@@ -159,6 +205,8 @@ class VoiceSharingSwitchPutTest {
             state = state,
             currentAccountName = { owner.accountName },
             aurisToken = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+                // The bearer read is the suspension point between capturing the owner and sending,
+                // so the account switch is injected here.
                 override suspend fun currentToken(): String? {
                     if (!switched) {
                         switched = true

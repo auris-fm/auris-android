@@ -123,7 +123,11 @@ class VoiceAsrEngineTest {
     }
 
     init {
+        // The engine reads the grace window to decide whether the user was addressing us, so the
+        // mock has to answer. Default false = the window is shut: a capture from the room.
         `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        // By default the native capture pipeline attaches. Tests that exercise a failed or
+        // cancelled start override this with false.
         `when`(voiceAudioProcessor.attachCapture()).thenReturn(true)
         `when`(voiceAudioProcessor.peekSpeechDelta(any())).thenReturn(0 to ShortArray(0))
     }
@@ -136,6 +140,7 @@ class VoiceAsrEngineTest {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(captureFlow)
+        // Default: wake word not detected (allows segments through during grace)
         kotlinx.coroutines.runBlocking {
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
@@ -179,6 +184,8 @@ class VoiceAsrEngineTest {
     @Test
     fun `a processing flow that ends reports termination`() = runTest {
         createEngine()
+        // The pipeline exiting on its own (a backend failure, a stream that stops) must reach the
+        // service so it can clear capture state instead of reporting a listening engine forever.
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(VoiceSegmenterResult.Silence))
         var terminated = false
 
@@ -197,8 +204,12 @@ class VoiceAsrEngineTest {
         assertTrue("the service must learn when the pipeline ends", terminated)
     }
 
+    // ── The backend must be prepared on every start, not just the first ──
     @Test
     fun `a finished processing job stays owned until pruned, and pruning forgets it`() = runTest {
+        // stop() releases the backend and drops it, leaving the recogniser null.
+        // If a restart does not prepare it again, every later transcription returns
+        // empty in ~0ms and voice recognition is silently dead for the whole process.
         createEngine()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(VoiceSegmenterResult.Silence))
         startEngine(AudioRoute.Speaker)
@@ -224,6 +235,9 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a pipeline that never attaches reports termination`() = runTest {
+        // Listening pauses are frequent (gate conflicts, route changes). Releasing here would
+        // force a full model reload on the next start, and everything said during that reload
+        // is lost. The service owns teardown and releases the backend there.
         createEngine()
         `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
         var terminated = false
@@ -243,6 +257,7 @@ class VoiceAsrEngineTest {
         assertTrue("a start that ends before attaching must report termination", terminated)
     }
 
+    // ── Speaker / WiredHeadset routes: no SCO ──────────────────────────
     @Test
     fun `start prepares the ASR backend`() = runTest {
         createEngine()
@@ -256,6 +271,7 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    // ── Bluetooth route: acquisition owns SCO; the engine captures the opened stream ──
     @Test
     fun `a restarted engine prepares the ASR backend again`() = runTest {
         createEngine()
@@ -347,11 +363,15 @@ class VoiceAsrEngineTest {
                 org.mockito.ArgumentMatchers.anyInt(),
             ),
         ).thenAnswer { inv ->
+            // The worker enters the write and STAYS there until the test releases it. Nothing in
+            // this control counts the release; the assertions below run inside the hold.
             enteredWrite.countDown()
             assertTrue("test bug: the held write was never released", holdWrite.await(10, java.util.concurrent.TimeUnit.SECONDS))
             inv.getArgument<Int>(2) // accept everything, once released
         }
 
+        // The REAL application context, not the class's mocked one: EarconPlayer resolves clips and
+        // the AudioTrack factory off it, and a bare mock answers null to applicationContext.
         val appContext = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         val player = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer(appContext)
         player.trackFactoryForTest = { track }
@@ -363,6 +383,10 @@ class VoiceAsrEngineTest {
 
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        // 100 ms of audio. speechEndSample stays 0 (the production default for segmenters that do not
+        // report it), which the engine reads as UNKNOWN -- so the wake-only drop at :334 cannot fire:
+        // it requires speechEndSample > 0. Stated explicitly because leaving it implicit let a later
+        // default change silently alter what this test proves.
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
             flowOf(
                 VoiceSegmenterResult.SpeechEnded(
@@ -375,6 +399,10 @@ class VoiceAsrEngineTest {
 
         `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
 
+        // `detect` is SUSPEND: Mockito can only intercept the stub when the call is registered inside
+        // a coroutine (same pattern as createEngineWithSpeech). Stubbed bare it answers null, the
+        // engine's runCatching swallows the NPE as "wake detection failed", and the segment is dropped
+        // BEFORE ASR -- which would make "recognizer never called" pass for entirely the wrong reason.
         kotlinx.coroutines.runBlocking {
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = true, confidence = 0.95f, completionSample = 800, threshold = 0.812f),
@@ -397,6 +425,8 @@ class VoiceAsrEngineTest {
 
         val handledIntents = mutableListOf<VoiceIntent>()
 
+        // Unconfined test dispatcher (MainCoroutineRule): the collect body runs inline as frames
+        // arrive, so by the time start() has returned the engine is parked INSIDE the held write.
         engine.scope = this
 
         engine.start(
@@ -408,12 +438,16 @@ class VoiceAsrEngineTest {
             onIntent = { intent, _ -> handledIntents += intent },
         )
 
+        // The cue reaches AudioTrack.write on the PLAYER'S OWN thread via submit(), so it must be
+        // scheduled before the precondition can hold.
         advanceUntilIdle()
         try {
+            // PRECONDITION, asserted before any claim: the cue's own write is genuinely in progress.
             assertTrue(
                 "precondition: the real player must be INSIDE the accepted cue write",
                 enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
             )
+            // POSITIVE assertions, all made WHILE the write is still held (holdWrite has not counted down).
             assertEquals(
                 "ASR must reach the recognizer while the acknowledgement cue is still being written",
                 listOf("ensureReady", "recognize:pause"),
@@ -431,8 +465,17 @@ class VoiceAsrEngineTest {
         }
     }
 
+    // ── Capture-anchor binding, through the production filter call ──
     @Test
     fun `the filter receives the segment buffer start position, not the speech onset`() = runTest {
+        // REVIEWER (round 3 slice binding): the engine hands the WHOLE segment to
+        // UtteranceFilter.shouldProcessReference, so the mic position it supplies must describe
+        // SAMPLE 0 of that buffer -- including the pre-roll before the speech onset. This segment
+        // is 2 s long with speech starting only at offset 24 000 (1.5 s); its accounted end is at
+        // absolute ring position 32 000 and the clock was observed exactly there. Sample 0 is
+        // therefore at 8 000 ms on the clock; an onset-anchored value would be 9 500 ms. Asserted
+        // against the PRODUCTION filter call (the mock capturing the real argument), not the
+        // helper alone, so the binding cannot drift from what the correlator consumes.
         val capturedMicPositionMs = mutableListOf<Long?>()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -495,6 +538,7 @@ class VoiceAsrEngineTest {
         }
     }
 
+    // ── Task #78: non-content ASR output is silently discarded before any routing ──
     private fun speechSegment(): Flow<VoiceSegmenterResult> = flowOf(
         VoiceSegmenterResult.SpeechEnded(
             listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
@@ -539,6 +583,8 @@ class VoiceAsrEngineTest {
     }
 
     private fun discardAsserts(recognizer: RecordingRecognizer, handled: List<VoiceIntent>) {
+        // Silent discard: the transcript reached ASR, nothing asked the recognizer for a verdict,
+        // nothing was routed, and no cue (error included) was played.
         assertEquals("routing was never entered", emptyList<String>(), recognizer.calls)
         assertTrue("the recognizer was never even asked to load", !recognizer.readyAsked)
         assertEquals("nothing routed", emptyList<VoiceIntent>(), handled)
@@ -548,6 +594,9 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a punctuation-only transcript is silently discarded before routing`() = runTest {
+        // PRODUCTION-ENTRY comparison for the discard guard: with the SAME wake state (no wake
+        // detected) and the same Continuous mode, a content transcript routes. Without this, the
+        // punctuation cases above would pass equally for a guard that swallowed every no-wake turn.
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         this.nondiscardFixture(recognizer)
         val handled = mutableListOf<VoiceIntent>()
@@ -567,6 +616,10 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a whitespace-only transcript is silently discarded before routing`() = runTest {
+        // The rule is applied to the WAKE-TRIMMED text, not the raw one: the tokens under the wake
+        // band are dropped by WakeTranscriptTrimmer, leaving only "..." — which is not a request.
+        // (In-process backends emit tokens; without them the trimmer keeps the raw text, so this
+        // control supplies the timestamps that make the trim happen.)
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         this.nondiscardFixture(recognizer)
         val handled = mutableListOf<VoiceIntent>()
@@ -586,6 +639,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a no-wake transcript still routes exactly as before`() = runTest {
+        // Unicode nuance from the shared rule: ² (No) and ½ (No) are numbers, so they are content.
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         this.nondiscardFixture(recognizer, wakeDetected = false)
         val handled = mutableListOf<VoiceIntent>()
@@ -606,6 +660,8 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a wake-trimmed non-content remainder is discarded, not treated as a command`() = runTest {
+        // U+20000 (𠀀) is a CJK Unified Ideograph Extension B letter, encoded as a surrogate pair
+        // in UTF-16. A Char-unit iteration would miss it; code-point iteration must not.
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         this.nondiscardFixture(recognizer, wakeDetected = true)
         val handled = mutableListOf<VoiceIntent>()
@@ -632,6 +688,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `numeric content such as a square or fraction mark is not discarded`() = runTest {
+        // U+1D7DF (𝟟) is MATHEMATICAL BOLD DIGIT NINE, category Nd, outside the BMP.
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         this.nondiscardFixture(recognizer, wakeDetected = true)
         val handled = mutableListOf<VoiceIntent>()
@@ -690,18 +747,26 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a punctuation-only discard followed by content on the same engine routes the second`() = runTest {
+        // SAME-ENGINE CLEANUP CONTROL: a punctuation-only utterance is silently discarded,
+        // then a content-bearing utterance arrives on the SAME running engine. The discard
+        // must not leave state that prevents the next capture from routing normally.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
+        // CAPTURE BASELINE: the timer job armed by the wake, BEFORE any utterance processing.
+        // If either the discard or the content routing spuriously calls onCommandRecognized,
+        // the timer will be cancelled and re-created (different job reference).
         val preDiscardTimerJob = signal.timerJobForTest()
         assertNotNull("wake armed a timer", preDiscardTimerJob)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
             flowOf(
+                // First: punctuation only — should be discarded
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
                     speechOnsetSample = 2,
                 ),
+                // Second: real content — should route
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(400, 300, 200, 100), 16000)),
                     speechOnsetSample = 2,
@@ -737,6 +802,8 @@ class VoiceAsrEngineTest {
         engine.scope = this
 
         engine.start(
+            // First segment returns "…" in Cantonese (punctuation only, non-English so that
+            // bypassing the guard WOULD trigger translation). Second returns "pause" in English.
             backend = object : AsrBackend {
                 private var callCount = 0
                 override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
@@ -745,6 +812,10 @@ class VoiceAsrEngineTest {
                     return if (callCount == 1) {
                         AsrResult("\u2026", detectedLanguage = "yue") // "…" in Cantonese
                     } else {
+                        // ASSERTION POINT: the discard has fully processed. The timer job must
+                        // still be the same instance that was armed by the wake BEFORE any
+                        // utterance processing. If the discard called onCommandRecognized,
+                        // it would have cancelled and re-created the timer.
                         assertSame(
                             "discard did not re-arm the grace timer",
                             preDiscardTimerJob,
@@ -772,15 +843,29 @@ class VoiceAsrEngineTest {
         )
 
         assertEquals(VoiceIntent.Playback.Pause, intents.single())
+        // DISCARD-SPECIFIC OBSERVATIONS:
+        // 1. Translation was NOT invoked for the discarded yue transcript: the guard fires
+        //    BEFORE prepareRoutingInput, so ensureReady/translate are never called for it.
+        //    If the guard were bypassed, the Cantonese "…" would trigger translation.
         verify(translationStage, never()).ensureReady("yue")
         verify(translationStage, never()).translate(any(), eq("yue"))
+        // 2. Grace timer observation: the timer job armed by the wake (captured BEFORE
+        //    engine.start) must survive BOTH the discard and the content routing.
+        //    The mid-processing assertion inside the backend's second transcribe already
+        //    verified the discard didn't re-arm. This final assertion verifies the content
+        //    routing also didn't re-arm.
         assertSame(
             "grace timer was not re-armed by either discard or content routing",
             preDiscardTimerJob,
             signal.timerJobForTest(),
         )
+        // 3. No error earcon for the discard (silent), and no error for the successful route.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
+        // 4. MUTATION RECEIPT: if the punctuation transcript were admitted to routing (guard
+        //    bypassed), the RecordingRecognizer would return Pause for it too, producing TWO
+        //    intents. The single-intent result proves the guard, not recognizer filtering,
+        //    prevented the first utterance from reaching the router.
         assertEquals(
             "recognizer was consulted exactly once (for the content utterance only)",
             1,
@@ -863,6 +948,10 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `playback bleed is dropped before transcription and produces no accepted activity`() = runTest {
+        // The acceptance property for echo, at the level where it is decided: a segment the bleed
+        // filter rejects must not reach ASR, the recognizer, or feedback, so no transcript, no intent,
+        // no request and no spend can follow. The filter's own return value is covered separately; this
+        // is the consequence, which is what "no accepted activity" means.
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         val backend = FakeAsrBackend("pause")
         var resets = 0
@@ -876,7 +965,10 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
+        // The filter refuses this segment: it is the playback the app itself submitted, returning to
+        // the mic. No speaker diarization runs (hasSpeakerId=false), so the bleed check is what decides.
         `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(false)
+        // Counted so the row's "no reset" half is observed rather than assumed.
         `when`(utteranceFilter.reset()).thenAnswer { resets += 1 }
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
@@ -916,26 +1008,42 @@ class VoiceAsrEngineTest {
             0,
             backend.transcribeCalls,
         )
+        // A dropped segment must not be treated as a listening session beginning, which would reset the
+        // session's speaker target. start() resets once, before processing, so exactly one reset is the
+        // drop adding none of its own.
         assertEquals("a rejected segment must not reset the session filter", 1, resets)
+        // The two effects the acceptance row names, read directly rather than through behaviour that a
+        // mock would have to reproduce. The drop path ends in a bare `return` between the wake handling
+        // and the ASR, so nothing below it may touch grace: no window opened or reset, and no dispatch
+        // allowance spent. These are `never` because a single call is the defect.
         verify(gracePeriodSignal, never()).onWakeWordDetected()
         verify(gracePeriodSignal, never()).onCommandRecognized(any())
 
         engine.stop()
     }
 
+    // ── Escalation on a routing failure ───────────────────────────────
     @Test
     fun `a routing failure escalates to the cloud with the transcript verbatim`() = runTest {
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_MAPPER_OR_DIALOG_FAILED,
             transcript = "what did the guests say about sleep and memory",
         )
+        // Through the same handler a chosen cloud_route uses, so turn ownership
+        // and the auto-pause obligation still apply.
         assertEquals(
             listOf(
                 VoiceIntent.CloudRoute(
                     request = "what did the guests say about sleep and memory",
                     tier = VoiceIntent.CloudTier.Unknown,
+                    // Issued under the open window the helper opened, so handling
+                    // it cannot re-arm that window's allowance or reopen a later
+                    // one; and marked as the fallback, which must not restore it.
                     windowGeneration = 1L,
                     origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                    // MINTED AT INPUT REGISTRATION: an ordinary cloud dispatch carries its own logical
+                    // identity, before the recognition suspends. Asserted separately below rather than
+                    // as a literal, since it is generated per dispatch.
                     logicalRequestId = (intents.single() as VoiceIntent.CloudRoute).logicalRequestId,
                 ),
             ),
@@ -946,6 +1054,8 @@ class VoiceAsrEngineTest {
                 "name the same request (id=${(intents.single() as VoiceIntent.CloudRoute).logicalRequestId})",
             !(intents.single() as VoiceIntent.CloudRoute).logicalRequestId.isNullOrBlank(),
         )
+        // Escalating is not an error, so no error tone: the answer (or the
+        // cloud path's own failure tone) is what the user hears.
         verify(audioFeedbackRenderer, never()).submitEarcon(any())
 
         engine.stop()
@@ -953,7 +1063,11 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a no_match from a wake-detected segment speaks the unclear-command line`() = runTest {
+        // The other side of the spec's rule: the user was addressing us and we could not route it,
+        // so they hear the line rather than a tone. Without a resolver holding the key the engine
+        // falls back to that same earcon, which is what made this path untestable before.
         val resolver = SpokenTemplateResolver(
+            // The engine's KEY_CLOUD_UNROUTED is private to its companion, so the key is spelled out.
             mapOf("pipeline.unclear_command" to "I didn't catch that."),
         )
         val (engine, intents) = startFailingEngine(
@@ -966,6 +1080,8 @@ class VoiceAsrEngineTest {
 
         verify(audioFeedbackRenderer).render(VoiceResponse.Spoken("I didn't catch that."))
 
+        // The WAKE_WORD cue is expected here — it acknowledges the detection. What must not happen
+        // is the error tone, because that would mean the engine had no line to speak.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
@@ -973,6 +1089,11 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a capture inside the completion band is dropped as the wake word alone`() = runTest {
+        // The timing path: the transcript is not empty, so nothing else drops this capture — the
+        // detector's completion band covering the speech is what says the user only said the wake
+        // word. 120ms at 16kHz is 1920 samples, so 5000 is inside 4000 + 1920.
+        // The resolver matters: with an empty one, a capture that escaped the drop would fall back
+        // to the earcon and never call render — so the test would pass even with the predicate gone.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
@@ -985,6 +1106,8 @@ class VoiceAsrEngineTest {
         assertTrue(intents.isEmpty())
         verify(audioFeedbackRenderer, never()).render(any(), any(), any())
 
+        // No ERROR tone either: that is what the missing-line fallback would play if this capture
+        // had reached the router. The WAKE_WORD cue is expected and not asserted against.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
@@ -992,6 +1115,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a capture outside the completion band routes, because speech followed the wake word`() = runTest {
+        // Same shape with the speech ending well past the band: someone said something.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
@@ -1009,6 +1133,9 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a segment with no end sample is unknown, not wake-only`() = runTest {
+        // speechEndSample 0 means the segmenter does not report it (the energy path). Treating that
+        // as "nothing was said" would silence every turn it produces, so the guard must keep it
+        // out of the wake-only branch even with an empty-looking band.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
@@ -1026,6 +1153,11 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a no_match from the room keeps the earcon and stays local`() = runTest {
+        // A wake-negative capture: the microphone caught the room, not a request to us. It must not
+        // spend the window (measured: it did, on every wake), it must not be answered with words,
+        // and a soft tone is what the spec asks for instead of silence.
+        // The resolver matters here too: with an empty one, an inverted `addressed` flag would take
+        // the missing-line earcon fallback and still pass. A real line makes inversion observable.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
@@ -1033,6 +1165,9 @@ class VoiceAsrEngineTest {
                 mapOf("pipeline.unclear_command" to "I didn't catch that."),
             ),
         )
+        // An empty question must not be posted. (This utterance is dropped
+        // before routing at all, which is why the policy test — not this one —
+        // owns the blank-transcript rule.)
         assertTrue(intents.isEmpty())
         verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
@@ -1046,6 +1181,8 @@ class VoiceAsrEngineTest {
             reason = RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT,
             transcript = "",
         )
+        // Escalating this would turn a broken install into cloud traffic and
+        // make "the model never loaded" look like a healthy turn.
         assertTrue(intents.isEmpty())
         engine.stop()
     }
@@ -1065,6 +1202,8 @@ class VoiceAsrEngineTest {
     @Test
     fun `independent utterances in one grace window each dispatch once`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        // The bound is per user act, so the window has to be open for either
+        // dispatch to be allowed at all.
         signal.onWakeWordDetected()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -1124,6 +1263,10 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `an escalation after a successor wake is refused and spends no allowance`() = runTest {
+        // @reviewer's suspension case: recognition begins in generation 1, a successor wake opens
+        // generation 2 WHILE it is suspended, and it then returns no intent. The escalation must be
+        // refused -- it belongs to a window that is no longer live, and dispatching under the successor
+        // would let old recognition spend the successor's allowance.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -1148,6 +1291,7 @@ class VoiceAsrEngineTest {
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
+            // The successor wake lands WHILE recognition is suspended.
             intentRecognizer = SuccessorWakeRecognizer(
                 reason = RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
             ) { signal.onWakeWordDetected() },
@@ -1177,6 +1321,12 @@ class VoiceAsrEngineTest {
                 "(intents=${intents.map { (it as? VoiceIntent.CloudRoute)?.windowGeneration }})",
             intents.none { it is VoiceIntent.CloudRoute },
         )
+        // THE ALLOWANCE ITSELF IS PINNED AT THE SIGNAL, not here: driving it through the engine
+        // entangles it with the engine's own lifecycle, and in this fixture the window is already
+        // inactive by the time the assertion would run -- so liveness fails for a reason
+        // that has nothing to do with the claim. `GracePeriodSignalTest` asserts the property directly,
+        // where the window state is controlled: a claim for a superseded window is refused AND the
+        // successor's allowance survives it.
         engine.stop()
     }
 
@@ -1225,6 +1375,9 @@ class VoiceAsrEngineTest {
         )
         advanceUntilIdle()
 
+        // Same class as the router's `model_not_loaded`: the turn happened, so
+        // it gets a tone rather than silence — and stays local, because a
+        // capability failure is not something to spend a server call on.
         assertTrue(intents.isEmpty())
         assertEquals(0, recognizer.recognizes)
         verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
@@ -1233,6 +1386,11 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a bare wake phrase is rejected silently`() = runTest {
+        // The router is consulted and rejects it (`no_match`), which is a
+        // deliberate rejection rather than a failure: nothing is dispatched, no
+        // window is spent, and nothing beeps. The guard that tried to keep the
+        // phrase out of the router measured the buffer rather than the words and
+        // was deleted; this is the behaviour that replaced it.
         val recognizer = RecordingRecognizer(null)
         val engine = startTokenless(recognizer, "Hi, allri.")
 
@@ -1242,6 +1400,7 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    /** One wake-positive utterance, for the rejection cases. */
     private suspend fun TestScope.startTokenless(
         recognizer: VoiceRecognizer,
         transcript: String,
@@ -1293,11 +1452,16 @@ class VoiceAsrEngineTest {
         return engine
     }
 
+    /**
+     * Drives one failed utterance through the engine in an open window and
+     * returns the intents the handler saw.
+     */
     private suspend fun TestScope.startFailingEngine(
         reason: String,
         transcript: String,
         wakeDetected: Boolean = false,
         templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
+        // SpokenLine only speaks for an English locale, so a test that expects speech must say so.
         currentLocale: () -> Locale = { Locale.ENGLISH },
         speechEndSample: Int = 0,
         completionSample: Int = 4000,
@@ -1322,6 +1486,7 @@ class VoiceAsrEngineTest {
             ),
         )
         val intents = mutableListOf<VoiceIntent>()
+        // A real signal, so the window budget under test is the real one.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
         val engine = VoiceAsrEngine(
@@ -1353,8 +1518,10 @@ class VoiceAsrEngineTest {
         return engine to intents
     }
 
+    // ── Translation stage wiring ───────────────────────────────────────
     @Test
     fun `non-English transcript translated by stage before intent routing when backend cannot translate`() = runTest {
+        // Production Canary returns English text with configured src lang (de/es/fr), not "en".
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -1574,6 +1741,9 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `asr log keeps source lang and text with english only in translate note`() = runTest {
+        // Merlin's Pixel line was confusing because post-translate fields were printed first:
+        //   lang=en 'Play.' translate=yue→en '播放。'
+        // Desired left-to-right story: ASR first, English result in the translate note.
         val logs = mutableListOf<String>()
         val tree = object : timber.log.Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
@@ -1765,6 +1935,7 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    // ── Wake-word detection paths ──────────────────────────────────────
     private fun CoroutineScope.createEngineWithSpeech(
         recognizer: VoiceRecognizer,
         wakeWordResult: WakeWordResult,
@@ -1961,12 +2132,20 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
         verify(gracePeriodSignal).onWakeWordDetected()
         verify(audioFeedbackRenderer).submitEarcon(EarconId.WAKE_WORD)
+        // Nothing was asked: a wake-only capture starts the session, it is not a
+        // question that failed, so it plays nothing beyond the wake earcon.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
         assertTrue("Expected no intent routing, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()
     }
 
+    // ── Capture attachment gates the stream hand-off ─────────────────
+    //
+    // A confirmed stream is only handed to the engine once the native VAD pipeline has
+    // attached. A start that ends before attaching (backend failure, cancellation) must
+    // leave the stream owned by the caller so it can be closed — never a live microphone
+    // with no consumer.
     @Test
     fun `negative detection in WakeWord mode drops segment`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
@@ -2038,6 +2217,7 @@ class VoiceAsrEngineTest {
         val platform = FakeAcquisitionPlatform()
         val acquisition = RouteAcquisition(platform, timeoutMs = 1_000L, pollIntervalMs = 10L)
 
+        // The service sequence: confirm the external stream, start the engine, wait for attach.
         assertTrue(acquisition.confirmCaptureStream())
         val attachment = engine.start(
             backend = backend,
@@ -2050,6 +2230,7 @@ class VoiceAsrEngineTest {
 
         assertFalse("the pipeline never attached capture", attachment.await())
         verify(voiceAudioProcessor, never()).startProcessing()
+        // The engine never took the stream, so the service releases it and it must be closed.
         acquisition.release()
         assertEquals("the confirmed stream must be closed", 1, platform.closeCalls)
         assertFalse("no capture stream is left open", acquisition.hasConfirmedStream)
@@ -2075,12 +2256,18 @@ class VoiceAsrEngineTest {
         assertTrue("the pipeline attached capture", attachment.await())
         acquisition.handOffStream()
         acquisition.release()
+        // Handed off: the engine owns the live stream, so release must not close it.
         assertEquals(0, platform.closeCalls)
 
         engine.stop()
     }
     @Test
     fun `a chosen-route dispatch after a successor wake carries the original window and admitted ID`() = runTest {
+        // STALE-ID NEGATIVE CONTROL: recognition begins in generation 1 and mints admitted ID-A.
+        // A successor wake opens generation 2 WHILE recognition is suspended. The recognition then
+        // returns a successful cloud intent. The dispatch must carry generation 1's window stamp and
+        // ID-A — NOT generation 2's window or a new ID. This proves the admitted identity is bound
+        // to the original recognition, not the successor window.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -2108,6 +2295,7 @@ class VoiceAsrEngineTest {
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
+            // Triggers a successor wake during recognition, then returns a successful cloud intent.
             intentRecognizer = recognizer,
             wakeWordDetector = wakeWordDetector,
             gracePeriodSignal = signal,
@@ -2139,6 +2327,7 @@ class VoiceAsrEngineTest {
             "the dispatch carries an admitted identity",
             !cloud.logicalRequestId.isNullOrBlank(),
         )
+        // The successor wake advanced the generation to 2, but the dispatch stays at generation 1.
         assertNotNull("dispatch must carry a window generation", cloud.windowGeneration)
         assertTrue(
             "the signal advanced past the dispatch's window (successor opened)",
@@ -2155,6 +2344,10 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `engine stamps a dialog-completed cloud route with the current utterance admitted ID`() = runTest {
+        // ENGINE STAMPING CONTROL: when the router returns a CloudRoute WITHOUT a logicalRequestId
+        // (as dialog completion does), the engine must stamp it with the current utterance's
+        // admittedId via withLogicalRequest. This proves the engine is the identity owner —
+        // not the router, not the dialog manager.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -2177,6 +2370,7 @@ class VoiceAsrEngineTest {
         )
         val intents = mutableListOf<VoiceIntent>()
         var receivedAdmittedId: String? = null
+        // Returns a CloudRoute WITHOUT logicalRequestId (simulating dialog completion).
         val recognizer = object : VoiceRecognizer {
             override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
             override suspend fun recognize(
@@ -2238,6 +2432,10 @@ class VoiceAsrEngineTest {
     }
     @Test
     fun `engine-stamped dialog completion flows through sink to CloudTurnRoute authenticate frame`() = runTest {
+        // COMPOSED ENGINE→ROUTE CONTROL: a real dialog begins with utterance A, then the engine
+        // processes utterance B which completes the dialog. The real dialog manager returns a
+        // CloudRoute without logicalRequestId. The engine stamps it with B's admittedId.
+        // The stamped intent is driven through real CloudRouteSink → CloudTurnRoute.
         val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
@@ -2259,6 +2457,7 @@ class VoiceAsrEngineTest {
                 completionSample = 4000,
             ),
         )
+        // Set up a REAL dialog manager with a pending dialog begun by utterance A.
         val dialogManager = au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager(
             au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper(),
         )
@@ -2276,8 +2475,10 @@ class VoiceAsrEngineTest {
         )
 
         assertEquals(admittedA, dialogManager.pendingDialog?.logicalRequestId)
+        // Capture the engine-stamped intent.
         val engineIntents = mutableListOf<VoiceIntent>()
         var engineAdmittedId: String? = null
+        // The recognizer uses the REAL dialog manager to complete the dialog with utterance B.
         val recognizer = object : VoiceRecognizer {
             override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
             override suspend fun recognize(
@@ -2286,6 +2487,7 @@ class VoiceAsrEngineTest {
                 logicalRequestId: String,
             ): VoiceRecognizeResult {
                 engineAdmittedId = logicalRequestId
+                // Complete the real dialog with this utterance (B).
                 val completedIntent = dialogManager.resolve(
                     "What is the weather?",
                     "<start_function_call>call:dialog_control{action:<escape>provide_slot<escape>}<end_function_call>",
@@ -2325,6 +2527,7 @@ class VoiceAsrEngineTest {
         )
         advanceUntilIdle()
         engine.stop()
+        // Step 1: Engine stamped the dialog-completed route with the utterance's admitted ID.
         assertNotNull("engine minted an admitted ID", engineAdmittedId)
         assertEquals("exactly one intent dispatched", 1, engineIntents.size)
         val stampedCloud = engineIntents.single() as VoiceIntent.CloudRoute
@@ -2333,6 +2536,7 @@ class VoiceAsrEngineTest {
             engineAdmittedId,
             stampedCloud.logicalRequestId,
         )
+        // Step 2: Drive the engine-stamped intent through real sink → real WebSocket transport.
         val sentTextFrames = mutableListOf<String>()
         val mockSocket = object : okhttp3.WebSocket {
             override fun cancel() = Unit
@@ -2421,6 +2625,7 @@ class VoiceAsrEngineTest {
             sourceLanguage = null,
         )!!
         sink.dispatchPrepared(prepared)
+        // Step 3: Verify the encoded wire frame carries the engine-stamped ID.
         assertTrue("at least one text frame sent", sentTextFrames.isNotEmpty())
         val encodedFrame = sentTextFrames.first()
         assertTrue(
@@ -2433,6 +2638,7 @@ class VoiceAsrEngineTest {
         )
     }
 
+    /** A router that cannot load its model at all. */
     private class NotReadyRecognizer : VoiceRecognizer {
         var recognizes = 0
 
@@ -2450,6 +2656,10 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
+    /** Reports a routing failure the way the router does: no intent, plus why. */
+    // A recognizer that opens a SUCCESSOR wake window while recognition is suspended, then reports no
+    // intent. Recognition takes real time, so this is the ordinary shape of a wake arriving during it --
+    // and the escalation that follows must not act under the new window.
     private class SuccessorWakeRecognizer(
         private val reason: String,
         private val onSuspended: () -> Unit,
@@ -2484,6 +2694,9 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
+    // A recognizer that opens a SUCCESSOR wake window while recognition is suspended, then returns
+    // a successful cloud intent. Used to verify the dispatch carries the ORIGINAL generation's
+    // window stamp and admitted ID — not the successor's.
     private class SuccessorWakeWithCloudResultRecognizer(
         private val onSuspended: () -> Unit,
         private val currentGeneration: () -> Long,
@@ -2499,6 +2712,7 @@ class VoiceAsrEngineTest {
             logicalRequestId: String,
         ): VoiceRecognizeResult {
             receivedLogicalRequestId = logicalRequestId
+            // Open the successor window while this recognition is in flight.
             onSuspended()
             return VoiceRecognizeResult(
                 intent = VoiceIntent.CloudRoute(
@@ -2700,6 +2914,7 @@ class VoiceAsrEngineTest {
     ) : VoiceRecognizer {
         val calls = mutableListOf<String>()
         val inputs = mutableListOf<IntentRoutingInput>()
+        /** True once ensureReady has been asked, so a case can assert the recognizer was CONSULTED. */
         var readyAsked = false
             private set
 
@@ -2726,6 +2941,7 @@ class VoiceAsrEngineTest {
         private val tokens: List<AsrToken>? = null,
         private val detectedLanguage: String? = null,
     ) : AsrBackend {
+        /** Counted so a test can assert a segment never reached transcription. */
         var transcribeCalls = 0
             private set
 

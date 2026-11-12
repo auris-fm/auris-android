@@ -28,6 +28,11 @@ import retrofit2.Response
 import retrofit2.Retrofit
 
 /** Minimal account owner for the operations suite: an account name, a session token and a bearer. */
+/**
+ * Full-shape test CredentialOwnershipOwner: mirrors the real owner's contract (one lock, one
+ * immutable snapshot, conditional refresh, owner-transaction 401, narrow binding) so the
+ * focused controls run against the ACTUAL shape of the production boundary.
+ */
 internal class TestOwner(
     @Volatile var accountName: String? = "user@example.com",
 ) {
@@ -38,16 +43,19 @@ internal class TestOwner(
 
     fun sessionGeneration(): Long = synchronized(lock) { session }
 
+    // ---- test drive helpers (simulate the owner's real writes) ----
     fun issueToken(value: String) = synchronized(lock) {
         token = AccessToken(value)
     }
 
+    /** A DIFFERENT person signs in: new account name, new session, new credential. */
     fun switchAccount(to: String, token: String) = synchronized(lock) {
         accountName = to
         this.token = AccessToken(token)
         session += 1
     }
 
+    /** W2-equivalent: logout. */
     fun logout() = synchronized(lock) {
         accountName = null
         token = null
@@ -62,6 +70,27 @@ internal fun ownerToken(owner: TestOwner): au.com.shiftyjelly.pocketcasts.reposi
     override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.token?.value)
 }
 
+/**
+ * Task 2 routes/operations controls (real HTTP boundary via MockWebServer):
+ *
+ * - A current-session GET must succeed before any authority operation: enrollment with no
+ *   current projection issues NO network call.
+ * - Request bodies follow the contract exactly: enrollment carries a fresh request_id UUID,
+ *   expected_membership_revision (the CURRENT revision captured BEFORE the call), and
+ *   accepted_disclosure_version; withdrawal carries request_id, expected_revision and the
+ *   nullable epoch; deletion is a distinct DELETE returning 202 deletion_pending — withdrawal
+ *   is never deletion.
+ * - Per-operation identity: a bounded immutable retry reuses the SAME request_id and the SAME
+ *   captured revision; the session token is captured BEFORE the await, so a session ended while
+ *   the call is in flight cannot have its response applied.
+ * expected_membership_revision (the current revision captured before the call), and
+ * accepted_disclosure_version; withdrawal carries request_id, expected_revision and the
+ * nullable epoch; deletion is a distinct DELETE returning 202 deletion_pending — withdrawal
+ * is never deletion.
+ * - Per-operation identity: a bounded immutable retry reuses the same request_id and the same
+ * captured revision; the session token is captured BEFORE the await, so a session ended while
+ * the call is in flight cannot have its response applied.
+ */
 class VoiceSharingAccountOperationsTest {
 
     private lateinit var server: MockWebServer
@@ -76,6 +105,8 @@ class VoiceSharingAccountOperationsTest {
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         state = VoiceSharingAccountState()
         owner = TestOwner()
+        // The suites issue a bearer per test; start from a published one so the fixture is
+        // credential-complete (the bearer SOURCE is asserted in VoiceSharingAurisBearerTest).
         owner.issueToken("fixture-bearer")
         operations = VoiceSharingAccountOperations(
             api = api,
@@ -94,6 +125,7 @@ class VoiceSharingAccountOperationsTest {
 
     private fun assertApplied(result: VoiceSharingMutationResult) = assertTrue(result is VoiceSharingMutationResult.Applied)
 
+    /** Owner-published credential (W3-equivalent); the mirror follows. */
     private fun issueBearer(value: String) {
         owner.issueToken(value.removePrefix("Bearer "))
     }
@@ -115,6 +147,8 @@ class VoiceSharingAccountOperationsTest {
     private fun enqueueProjection(epoch: String = "epoch-1", enrolled: Boolean = false) {
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
+                // A withdrawn account still carries the epoch it was enrolled under, without
+                // consent: the seed a test needs when what follows must be the FIRST consent.
                 if (enrolled) {
                     projectionJson(withdrawal = "active", enrolled = true, epoch = epoch, disclosure = "v3")
                 } else {
@@ -124,6 +158,7 @@ class VoiceSharingAccountOperationsTest {
         )
     }
 
+    /** Transport that always throws [HttpException]; no HTTP response object is ever produced. */
     private class ThrowingHttpException(private val code: Int) : VoiceSharingAccountApi {
         var calls = 0
 
@@ -141,6 +176,7 @@ class VoiceSharingAccountOperationsTest {
 
     @Test
     fun `current-session GET applies the projection and hits the account route`() = runTest {
+        // 1. current-session GET first.
         enqueueProjection()
         assertTrue(operations.refreshProjection())
 
@@ -170,11 +206,13 @@ class VoiceSharingAccountOperationsTest {
             "{\"enrolled\":true,\"disclosure_version\":\"v3\"}",
             posted.body.readUtf8(),
         )
+        // The enrollment response (new projection) replaced the GET projection.
         assertEquals("epoch-2", state.projection.value!!.enrollmentEpoch)
     }
 
     @Test
     fun `withdrawal posts revision and epoch - distinct from deletion`() = runTest {
+        // Seed a current projection with an epoch; then the withdrawal's own projection.
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
                 projectionJson(epoch = "epoch-9", enrolled = true, disclosure = "v3", withdrawal = "active"),
@@ -190,12 +228,14 @@ class VoiceSharingAccountOperationsTest {
         assertApplied(operations.withdraw())
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
+        // Withdrawal is the SAME switch turned off: no disclosure claimed, no precondition.
         assertEquals("PUT", posted.method)
         assertEquals("/api/v1/account/voice-sharing", posted.path)
         assertTrue("no precondition is sent: ${posted.headers}", posted.headers.values("If-Match").isEmpty())
         val body = posted.body.readUtf8()
         assertTrue(body.contains("\"enrolled\":false"))
         assertTrue("no disclosure is claimed when turning sharing off: $body", !body.contains("disclosure"))
+        // Withdrawal applies a membership projection; it never deletes data.
         assertEquals(WithdrawalState.WITHDRAWN, state.projection.value!!.withdrawalState)
     }
 
@@ -211,7 +251,9 @@ class VoiceSharingAccountOperationsTest {
         val deleted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("DELETE", deleted.method)
         assertTrue(deleted.path!!.startsWith("/api/v1/account/voice-sharing/data"))
+        // No request id and no body: deletion is one synchronous call, not a workflow to follow.
         assertEquals("", deleted.body.readUtf8())
+        // Deletion never touches the membership projection.
         assertEquals(WithdrawalState.NOT_ENROLLED, state.projection.value!!.withdrawalState)
     }
 
@@ -458,6 +500,7 @@ class VoiceSharingAccountOperationsTest {
 
         putLatch.complete(Unit)
         val outcome = enroll.await()
+        // JSON null / non-string / EMPTY cutoff values: all malformed, never tolerated.
         assertTrue(
             "the tap's own successful answer must not be discarded by the earlier refresh: $outcome",
             outcome is VoiceSharingMutationResult.Applied,
@@ -486,6 +529,7 @@ class VoiceSharingAccountOperationsTest {
             savedSharingChoice = saved,
         )
         issueBearer("token-a")
+        // A's enrollment pauses on the wire long enough for a DIFFERENT person to sign in.
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-stale")),
         )

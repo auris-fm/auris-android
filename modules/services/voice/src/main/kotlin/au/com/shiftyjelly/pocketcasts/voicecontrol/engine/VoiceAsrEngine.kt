@@ -792,6 +792,9 @@ class VoiceAsrEngine @Inject constructor(
                 // With it: a measured fact dies here otherwise.
                 joinOutcome(CollectionOutcome.NotCollected(captureId, "empty", asrResult.detectedLanguage))
             }
+            // No leftover command after the wake: the session started and
+            // nothing was asked, so nothing is reported. (The WAKE_WORD earcon
+            // already acknowledged detection.)
             return
         }
         // Task #78: a transcript with no content -- punctuation, symbols or whitespace only,

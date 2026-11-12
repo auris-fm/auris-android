@@ -205,6 +205,7 @@ class EarconPlayerTest {
         // The missing-resource path still has to be safe. Play through a player whose context cannot
         // Resolve any earcon resource, which is exactly the "assets not present" condition.
         val unresolvable = EarconPlayer(MissingResourceContext(context))
+        // When assets are not present, play should return false, not crash
         assertNull(
             "an unresolvable earcon resource must return false, not throw",
             unresolvable.play(EarconId.SUCCESS),

@@ -3929,7 +3929,7 @@ class CloudRouteSinkTest {
             emptyList<String>(),
             unconfirmed,
         )
-        // TheOTHER terminal path, and the same policy applies: the frame is what activates the
+        // The spec's OTHER terminal path, and the same policy applies: the frame is what activates the
         // hold, so the confirmed turn takes the user's place and the unconfirmed one does not.
         assertEquals(
             "on a SUCCESSFUL termination the confirmed hold is likewise taken and superseded " +

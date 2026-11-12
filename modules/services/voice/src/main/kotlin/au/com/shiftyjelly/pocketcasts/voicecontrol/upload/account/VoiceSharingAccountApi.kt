@@ -169,11 +169,9 @@ class VoiceSharingAccountOperations(
             else -> store.recordNotEnrolled(account)
         }
         if (persisted == false) {
-            // WHY it failed (owner Pixel test): the bare latch could not be diagnosed from a device.
-            android.util.Log.w(
-                "VoiceSharingChoice",
-                "voice-sharing choice persist: outcome=failed latched reason=${store.lastFailureReason ?: "unknown"}",
-            )
+            // Prefs keep the new value in memory even on a failed commit, so there is no latch to
+            // diagnose: this is observability only.
+            android.util.Log.w("VoiceSharingChoice", "voice-sharing choice persist: commit failed; in-memory value stands")
         }
     }
     suspend fun deleteData(): Boolean {

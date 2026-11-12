@@ -3,12 +3,12 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentDisclosure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.InMemoryChoicePersistence
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoicePersistence
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -24,11 +25,12 @@ import org.junit.rules.TestWatcher
 import org.junit.runner.Description
 
 /**
- * THE SWITCH READS EFFECTIVE CONSENT (Reviewer on `c2ce670cc7`): the Settings surface must use the
- * SAME read admission uses — [SavedSharingChoiceStore.enrolledChoiceFor], which refuses when the
- * account's persist FAILED — not the raw file read. A failed write can leave a stale ENROLLED file
- * on disk while the user's latest instruction did not land; admission refuses capture in that
- * state, so the switch must read off.
+ * THE SWITCH READS EFFECTIVE CONSENT (Reviewer on `c2ce670cc7`): the Settings surface uses the
+ * SAME read admission uses — [SavedSharingChoiceStore.enrolledChoiceFor], which admits only a real
+ * ENROLLED record with epoch and accepted disclosure. The store carries no persist latch since the
+ * SharedPreferences migration (2026-11-12): a failed `commit()` is logged, the in-memory value
+ * stands, and there is nothing to refuse. What admission refuses — no record, or a record without
+ * provenance — the switch must also show off.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SettingsSwitchEffectiveConsentTest {
@@ -45,34 +47,8 @@ class SettingsSwitchEffectiveConsentTest {
         }
     }
 
-    /** Holds a good ENROLLED record once, then refuses every further write. */
-    private class FailsAfterFirstWrite : SharingChoicePersistence {
-        private var writes = 0
-        private var last: SavedSharingChoice? = null
-        override fun read(account: String): SavedSharingChoice? = last?.takeIf { it.account == account }
-        override fun write(choice: SavedSharingChoice): Boolean {
-            writes += 1
-            if (writes > 1) return false
-            last = choice
-            return true
-        }
-        override fun lastFailureReason(): String? = if (writes > 1) "injected persistence failure" else null
-    }
-
-    @Test
-    fun `a failed persist leaves the switch off even though the file still holds ENROLLED`() = runTest {
-        val store = SavedSharingChoiceStore(FailsAfterFirstWrite())
-        assertTrue("PREMISE: the enroll lands", store.recordEnrolled("user@example.com", "epoch-1", EnrollmentDisclosure.VERSION))
-        // The user's latest instruction (withdraw) FAILS to persist: the file still holds ENROLLED…
-        assertFalse("PREMISE: the withdrawal write fails", store.recordWithdrawn("user@example.com"))
-        // …and the effective-consent read refuses it, exactly as admission does.
-        assertNull(store.enrolledChoiceFor("user@example.com"))
-
-        // The provider below IS the production wiring's expression (VoiceSharingSettingsModule):
-        // the switch must compose from enrolledChoiceFor, not read().
-        val durableChoice: suspend () -> SavedSharingChoice? =
-            VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" }
-        val vm = VoiceSharingSettingsViewModel(
+    private fun viewModelWith(store: SavedSharingChoiceStore): VoiceSharingSettingsViewModel =
+        VoiceSharingSettingsViewModel(
             projection = kotlinx.coroutines.flow.MutableStateFlow(null),
             enrollmentController = EnrollmentController(
                 enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
@@ -86,14 +62,43 @@ class SettingsSwitchEffectiveConsentTest {
                 override fun write(requested: Boolean): Boolean = true
             }),
             ownerSession = { 1L },
+            ioDispatcher = Dispatchers.Main,
             markerRead = { true },
-            savedChoice = durableChoice,
+            savedChoice = VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" },
+            knownChoice = VoiceSharingSettingsModule.knownChoiceProvider(store) { "user@example.com" },
         )
+
+    @Test
+    fun `an ENROLLED record with real provenance shows the switch on`() = runTest {
+        val store = SavedSharingChoiceStore(InMemoryChoicePersistence())
+        assertTrue(store.recordEnrolled("user@example.com", "epoch-1", EnrollmentDisclosure.VERSION))
+        val vm = viewModelWith(store)
         mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse(
-            "admission refuses capture on a failed persist, so the switch must read off",
+        assertTrue(
+            "the same record admission acts on shows the switch on",
             vm.state.value.enrolled,
         )
+    }
+
+    @Test
+    fun `a state without provenance never shows the switch on`() = runTest {
+        val store = SavedSharingChoiceStore(InMemoryChoicePersistence())
+        assertTrue(store.recordNotEnrolled("user@example.com"))
+        assertNull("admission refuses: no provenance", store.enrolledChoiceFor("user@example.com"))
+        val vm = viewModelWith(store)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse("the switch reads what admission reads: off", vm.state.value.enrolled)
+    }
+
+    @Test
+    fun `a withdrawal keeps the record visible but the switch off`() = runTest {
+        val store = SavedSharingChoiceStore(InMemoryChoicePersistence())
+        assertTrue(store.recordEnrolled("user@example.com", "epoch-1", EnrollmentDisclosure.VERSION))
+        assertTrue(store.recordWithdrawn("user@example.com"))
+        assertNull(store.enrolledChoiceFor("user@example.com"))
+        val vm = viewModelWith(store)
+        mainDispatcher.scheduler.advanceUntilIdle()
+        assertFalse(vm.state.value.enrolled)
     }
 }
 

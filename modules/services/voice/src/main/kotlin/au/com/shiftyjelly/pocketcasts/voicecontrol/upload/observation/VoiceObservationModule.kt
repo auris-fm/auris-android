@@ -42,10 +42,7 @@ object VoiceObservationModule {
     @Singleton
     fun provideSharingChoicePersistence(
         @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
-    ): SharingChoicePersistence = FileSharingChoicePersistence(
-        context,
-        directorySync = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.fs.DirectorySync.PRODUCTION,
-    )
+    ): SharingChoicePersistence = SharedPreferencesChoicePersistence(context)
 
     @Provides
     @Singleton
@@ -200,10 +197,7 @@ object VoiceObservationModule {
     @Singleton
     fun provideWithdrawalIntentPersistence(
         @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
-    ): WithdrawalIntentPersistence = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.FileWithdrawalIntentPersistence(
-        context,
-        directorySyncOverride = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.fs.DirectorySync.PRODUCTION,
-    )
+    ): WithdrawalIntentPersistence = SharedPreferencesWithdrawalIntentPersistence(context)
 
     /**
      * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change and the

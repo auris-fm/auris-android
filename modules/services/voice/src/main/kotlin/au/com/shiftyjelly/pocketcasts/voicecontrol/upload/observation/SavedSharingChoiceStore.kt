@@ -1,9 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
-import android.content.Context
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.fs.DirectorySync
-import java.io.File
-import java.io.FileOutputStream
 
 /**
  * The signed-in account's ORDINARY sharing choice and real enrollment provenance, held durably.
@@ -31,18 +27,6 @@ import java.io.FileOutputStream
 class SavedSharingChoiceStore(
     private val persistence: SharingChoicePersistence,
 ) {
-    /**
-     * FAILED-PERSIST LATCH (@spec 3f1e939a, per-account @spec 57cef12c). Once an account's write
-     * reports failure, THAT account's consent reads refuse until THAT account's write SUCCEEDS:
-     * the file may still hold a stale ENROLLED record while the user's latest instruction for the
-     * account (withdrawn / not enrolled) did not land. Logging the failure is not enough — a log
-     * cannot stop a capture.
-     *
-     * Scope is deliberately PER ACCOUNT: a global latch let a successful write for account B clear
-     * a failed stop for account A, after which A read its stale enrolled file. A's latch is A's.
-     */
-    private val persistFailedAccounts = java.util.Collections.synchronizedSet(HashSet<String>())
-
     /** The stored choice for [account], or null when nothing is saved or the file is unusable. */
     fun read(account: String): SavedSharingChoice? = persistence.read(account)
 
@@ -58,10 +42,7 @@ class SavedSharingChoiceStore(
         epoch: String,
         acceptedDisclosureVersion: String,
     ): Boolean {
-        if (account.isBlank() || epoch.isBlank() || acceptedDisclosureVersion.isBlank()) {
-            lastFailureReason = "blank field: account=${account.isBlank()} epoch=${epoch.isBlank()} disclosure=${acceptedDisclosureVersion.isBlank()}"
-            return false
-        }
+        if (account.isBlank() || epoch.isBlank() || acceptedDisclosureVersion.isBlank()) return false
         val written = persistence.write(
             SavedSharingChoice(
                 account = account,
@@ -70,20 +51,8 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = acceptedDisclosureVersion,
             ),
         )
-        if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
-        lastFailureReason = if (written) null else persistence.lastFailureReason()
         return written
     }
-
-    /**
-     * WHY the last write failed, for the latch log (owner Pixel test): a latch that only says
-     * "failed" cannot be diagnosed from a device. Set on every failed record write and cleared by
-     * the next successful one. Observability only - it never feeds a consent decision.
-     */
-    @Volatile
-    @androidx.annotation.VisibleForTesting
-    var lastFailureReason: String? = null
-        private set
 
     /**
      * Record a server answer of NOT ENROLLED. Nothing the user decided at a surface produced
@@ -92,10 +61,7 @@ class SavedSharingChoiceStore(
      * is fabricated — the record simply fails every consent read.
      */
     fun recordNotEnrolled(account: String): Boolean {
-        if (account.isBlank()) {
-            lastFailureReason = "blank account"
-            return false
-        }
+        if (account.isBlank()) return false
         val written = persistence.write(
             SavedSharingChoice(
                 account = account,
@@ -104,8 +70,6 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = null,
             ),
         )
-        if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
-        lastFailureReason = if (written) null else persistence.lastFailureReason()
         return written
     }
 
@@ -115,10 +79,7 @@ class SavedSharingChoiceStore(
      * consent state changes, which is the single fact the user actually decided.
      */
     fun recordWithdrawn(account: String): Boolean {
-        if (account.isBlank()) {
-            lastFailureReason = "blank account"
-            return false
-        }
+        if (account.isBlank()) return false
         val previous = persistence.read(account)
         val written = persistence.write(
             SavedSharingChoice(
@@ -130,8 +91,6 @@ class SavedSharingChoiceStore(
                 acceptedDisclosureVersion = previous?.takeIf { it.account == account }?.acceptedDisclosureVersion,
             ),
         )
-        if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
-        lastFailureReason = if (written) null else persistence.lastFailureReason()
         return written
     }
 
@@ -152,9 +111,6 @@ class SavedSharingChoiceStore(
 
     fun enrolledChoiceFor(account: String?): SavedSharingChoice? {
         if (account.isNullOrBlank()) return null
-        // A persist that failed for THIS account leaves the file's meaning unknown relative to the
-        // user's latest instruction for it: refuse until a write for the account succeeds.
-        if (account in persistFailedAccounts) return null
         val choice = persistence.read(account) ?: return null
         if (choice.account != account) return null
         if (choice.state != SharingChoiceState.ENROLLED) return null
@@ -178,123 +134,6 @@ interface SharingChoicePersistence {
     /** The saved record for [account], or null. Per-account: one account's record is never read for another. */
     fun read(account: String): SavedSharingChoice?
 
-    /** Returns TRUE only when the record is durably in place. */
+    /** Returns TRUE only when the record is durably in place. A false result is only logged. */
     fun write(choice: SavedSharingChoice): Boolean
-
-    /** Why the most recent [write] on this instance failed, or null after a success. Diagnostics. */
-    fun lastFailureReason(): String? = null
-}
-
-/**
- * File-backed record with the same atomic-replace discipline the withdrawal marker already uses:
- * write the whole record to a temp file, flush and fsync it, rename OVER the target (POSIX rename is
- * atomic, so a reader sees the old or the new record and never a partial or absent one), then fsync
- * the containing directory so the rename itself survives power loss.
- *
- * Format is one line, tab-separated, deliberately tiny. Field order is fixed:
- * `account \t state \t epoch \t disclosure`. Blank/absent values are written as `-`.
- *
- * FAILS CLOSED. Anything unparseable, truncated, or unrecognised reads as null - never as consent.
- */
-class FileSharingChoicePersistence(
-    @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
-    private val directorySync: DirectorySync = DirectorySync.PRODUCTION,
-) : SharingChoicePersistence {
-    /**
-     * ONE FILE PER ACCOUNT (@spec 2e87df12, finding 3). A single global record made account A's
-     * consent depend on whatever account B did last: switching A→B→A would leave A needing another
-     * server roundtrip before ordinary collection worked again. With per-account files, A's record
-     * is untouched while B is live, and A returns to exactly the choice A itself made.
-     */
-    private fun fileFor(account: String): File = File(context.filesDir, "voice-sharing-choice-" + sha256(account))
-
-    /**
-     * A UNIQUE temp path per write (@owner Pixel test, nine `persist: failed latched` lines during
-     * fast taps). The previous fixed `<record>.tmp` was shared by every concurrent writer: writer B
-     * truncated A's in-flight temp, so A renamed a partial record or failed with ENOENT after B had
-     * already renamed it away. Each write now owns its temp file, so overlapping writes each publish
-     * one whole record and the last rename wins.
-     */
-    private fun tempFileFor(account: String): File = File(
-        context.filesDir,
-        "voice-sharing-choice-" + sha256(account) + ".tmp." + java.util.UUID.randomUUID(),
-    )
-
-    private fun sha256(text: String): String = java.security.MessageDigest.getInstance("SHA-256")
-        .digest(text.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it) }
-
-    override fun read(account: String): SavedSharingChoice? {
-        val file = fileFor(account)
-        if (!file.exists()) return null
-        return try {
-            decode(file.readText(Charsets.UTF_8))?.takeIf { it.account == account }
-        } catch (e: Exception) {
-            // Cannot read our own record: report "nothing saved" and let admission refuse.
-            null
-        }
-    }
-
-    @Volatile
-    private var failureReason: String? = null
-
-    override fun lastFailureReason(): String? = failureReason
-
-    private fun failed(reason: String): Boolean {
-        failureReason = reason
-        return false
-    }
-
-    override fun write(choice: SavedSharingChoice): Boolean {
-        val file = fileFor(choice.account)
-        val tempFile = tempFileFor(choice.account)
-        val dir = file.parentFile ?: return failed("no parent directory for ${file.name}")
-        return try {
-            dir.mkdirs()
-            FileOutputStream(tempFile).use { out ->
-                out.write(encode(choice).toByteArray(Charsets.UTF_8))
-                out.flush()
-                out.fd.sync()
-            }
-            if (!tempFile.renameTo(file)) {
-                tempFile.delete()
-                // The rename failed, so the record on disk is whatever it was before this call.
-                failed("rename failed: ${tempFile.name} -> ${file.name}")
-            } else {
-                // The rename is only durable relative to its directory entry. A sync FAILURE throws
-                // and is reported as a failed write, never swallowed as success.
-                directorySync.sync(dir)
-                failureReason = null
-                true
-            }
-        } catch (e: Exception) {
-            tempFile.delete()
-            failed("exception ${e.javaClass.simpleName}: ${e.message}")
-        }
-    }
-
-    private fun encode(choice: SavedSharingChoice): String = listOf(
-        choice.account,
-        choice.state.name,
-        choice.epoch ?: ABSENT,
-        choice.acceptedDisclosureVersion ?: ABSENT,
-    ).joinToString(SEPARATOR) + "\n"
-
-    private fun decode(text: String): SavedSharingChoice? {
-        val fields = text.trim().split(SEPARATOR)
-        if (fields.size != 4) return null
-        val account = fields[0].takeIf { it.isNotBlank() && it != ABSENT } ?: return null
-        val state = SharingChoiceState.entries.firstOrNull { it.name == fields[1] } ?: return null
-        return SavedSharingChoice(
-            account = account,
-            state = state,
-            epoch = fields[2].takeIf { it != ABSENT },
-            acceptedDisclosureVersion = fields[3].takeIf { it != ABSENT },
-        )
-    }
-
-    private companion object {
-        const val SEPARATOR = "\t"
-        const val ABSENT = "-"
-    }
 }

@@ -83,7 +83,7 @@ class VoiceAsrEngine @Inject constructor(
     // Comes from VoiceControlModule.provideSpokenTemplateResolver.
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
-    // Upload observation of the ACTUAL segment path (plan Task 3). Optional only for Kotlin
+    // Upload observation of the ACTUAL segment path. Optional only for Kotlin
     // Test call sites; Dagger supplies the production pair. The live [collectionAuthority] is
     // Consulted at EVERY retention decision — start admission, revalidation before handoff —
     // So a start-time yes can never authorize retention after withdrawal/expiry/account change.
@@ -917,7 +917,7 @@ class VoiceAsrEngine @Inject constructor(
     }
 
     /**
-     * The name this intent publishes as `routing.predicted_intent` (plan Task 4).
+     * The name this intent publishes as `routing.predicted_intent`.
      *
      * The upload spec fixes the value as `<tool>.<action>` from the Voice Intents tool schema, or
      * `cloud_route` alone, derived from the intent's type and action and never from its arguments.

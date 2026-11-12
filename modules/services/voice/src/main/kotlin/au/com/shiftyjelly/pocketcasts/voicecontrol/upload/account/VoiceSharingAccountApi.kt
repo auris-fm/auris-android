@@ -143,14 +143,16 @@ class VoiceSharingAccountOperations(
         fromRefresh: Boolean,
         applyUnderGuard: (() -> Boolean) -> Boolean = { it() },
     ): Boolean {
-        if (currentAccountName() != issued.accountName) {
+        // ONE account read for the whole decision (bot review 5f2dd8e55b): a second read could
+        // land after an account switch and persist the old account's answer under the new one.
+        val account = currentAccountName()
+        if (account != issued.accountName) {
             return false // a different account owns the answer now
         }
         if (fromRefresh && state.publicationCount() != issued.publication) {
             return false // a newer answer already landed
         }
         val projection = state.parseProjection(json) ?: return false
-        val account = currentAccountName()
         val wouldEnroll = projection.voiceSharingEnrolled &&
             projection.enrollmentEpoch != null &&
             projection.acceptedDisclosureVersion != null

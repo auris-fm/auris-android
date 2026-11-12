@@ -147,6 +147,10 @@ class VoiceSharingAccountStartup @Inject constructor(
             if (after != lastSeenAccount) {
                 lastSeenAccount = after
                 sessionGenerationCounter.incrementAndGet()
+                // The old session's projection must not survive into the next account: the row and
+                // "Delete shared data" read this projection, so it dies with the session (bot
+                // review 5f2dd8e55b; the deleted session coordinator used to own this clear()).
+                state.clear()
                 sessionEndedListener?.invoke()
             }
             authorityMovedListener?.invoke()
@@ -161,6 +165,7 @@ class VoiceSharingAccountStartup @Inject constructor(
         if (after != lastSeenAccount) {
             lastSeenAccount = after
             sessionGenerationCounter.incrementAndGet()
+            state.clear() // session-end projection dies here; see the account listener above
             sessionEndedListener?.invoke()
         }
         after?.let { refreshOrdinaryChoiceIfUnsaved(it) }

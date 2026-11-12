@@ -15,8 +15,9 @@ class CloudRouteErrorCodesTest {
     }
 
     @Test
-    fun `locally minted codes keep their diagnostic value`() {
-        // Against the constant the producer emits, not a fresh literal: a
+    fun `codes recognised only for normalization keep their diagnostic value`() {
+        // `invalid_request` and `http_<status>` are never minted by the client, only
+        // recognised for log normalization. Against the constant, not a fresh literal: a
         // rename then fails here instead of silently breaking the allowlist.
         assertEquals(
             CloudRouteErrorCodes.INVALID_REQUEST,

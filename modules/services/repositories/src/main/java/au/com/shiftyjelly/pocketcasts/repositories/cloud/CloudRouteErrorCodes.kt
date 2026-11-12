@@ -2,9 +2,10 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 /**
  * The cloud error-code vocabulary in one place (cloud-assistant.md): the codes
- * this client adopts from the server and the shapes it only recognises for log
- * normalization — the allowlist [normalizeForLog] uses to keep them out of
- * device logs verbatim.
+ * this client adopts from the server, the codes it mints itself from the
+ * response status, and the codes/shapes it only recognises for log
+ * normalization — the allowlist [normalizeForLog] uses to keep all of them out
+ * of device logs verbatim.
  */
 object CloudRouteErrorCodes {
     const val RETRIEVAL_UNAVAILABLE = "retrieval_unavailable"
@@ -22,10 +23,11 @@ object CloudRouteErrorCodes {
     const val NO_ANSWER = "no_answer"
 
     /**
-     * Every code this client recognises — those adopted from the server and the shapes recognised
-     * for log normalization. Internal rather than private so the contract check can re-derive it
-     * from code instead of restating it: a code added here without updating the checked-in
-     * contract declaration is exactly the drift that check exists to catch.
+     * Every code this client recognises — those adopted from the server, those it mints itself,
+     * and those recognised for log normalization only. Internal rather than private so the
+     * contract check can re-derive it from code instead of restating it: a code added here
+     * without updating the checked-in contract declaration is exactly the drift that check
+     * exists to catch.
      */
     internal val KNOWN = setOf(
         RETRIEVAL_UNAVAILABLE,
@@ -54,9 +56,9 @@ object CloudRouteErrorCodes {
     fun normalizeForLog(code: String?): String = when {
         code == null -> "none"
 
-        // Known server codes, plus the bounded shapes recognised for log
-        // normalization: `invalid_request`, and `http_<status>`, which
-        // carries the status of an unparseable error body — exactly the
+        // Known codes (server-supplied and client-minted), plus the bounded shapes recognised
+        // for log normalization but never minted by this client: `invalid_request`, and
+        // `http_<status>`, which carries the status of an unparseable error body — exactly the
         // diagnostic worth having when a gateway answers with HTML.
         code in KNOWN || HTTP_STATUS_CODE.matches(code) -> code
 

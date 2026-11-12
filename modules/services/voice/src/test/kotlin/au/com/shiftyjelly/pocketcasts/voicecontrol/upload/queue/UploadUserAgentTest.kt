@@ -54,6 +54,7 @@ class UploadUserAgentTest {
                 override suspend fun currentToken(): String? = "token-a"
             },
             eligible = { true },
+            queue = queue,
         )
 
         assertEquals(201, uploader.send(queue.recordings().single()))

@@ -38,6 +38,9 @@ class RecordingUploader(
      * the recording locally rather than sending it.
      */
     private val eligible: (FolderQueue.Recording) -> Boolean = { true },
+    /** The QUEUE's delete, so a gate refusal is deleted AND logged on the one path every
+     *  deletion uses (reviewer fdab4ba5ff nit). */
+    private val deleteRefused: (FolderQueue.Recording) -> Unit = {},
 ) {
     /**
      * The call currently in flight, so it can be cancelled from outside this coroutine.
@@ -94,9 +97,9 @@ class RecordingUploader(
         synchronized(sendLock) {
             if (!eligible(recording)) {
                 // The user's answer changed while the credential was being obtained: this
-                // recording is no longer sendable, so delete it locally instead of sending or
-                // leaving it to be retried forever.
-                recording.delete()
+                // recording is no longer sendable, so delete it through the queue's logged
+                // path instead of sending or leaving it to be retried forever.
+                deleteRefused(recording)
                 return null
             }
             inFlight.set(call)

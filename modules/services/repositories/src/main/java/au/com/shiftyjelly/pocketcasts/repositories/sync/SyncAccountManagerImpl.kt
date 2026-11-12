@@ -26,20 +26,12 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 
-/**
- * Straight AccountManager-backed implementation of [SyncAccountManager]. The account is the
- * Android account; the access token is obtained and refreshed by the platform authenticator, and
- * invalidation is the ordinary AccountManager call. There is deliberately no session/credential
- * incarnation ledger here: the platform account is the identity, and a 401 means invalidate and
- * re-acquire.
- */
 @Singleton
 open class SyncAccountManagerImpl @Inject constructor(
     private val tokenErrorNotification: TokenErrorNotification,
     private val accountManager: AccountManager,
 ) : TokenHandler,
     SyncAccountManager {
-
     override fun getAccount(): Account? {
         return accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).firstOrNull()
     }
@@ -139,11 +131,9 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun invalidateAccessToken() {
-        val account = getAccount()
-        val accessToken = account?.let { peekAccessToken(it) }
-        if (account != null && accessToken != null) {
-            accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
-        }
+        val account = getAccount() ?: return
+        val accessToken = peekAccessToken(account) ?: return
+        accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
     }
 
     override fun getSignInType(account: Account): AccountConstants.SignInType {
@@ -178,18 +168,14 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun setRefreshToken(refreshToken: RefreshToken) {
-        val account = getAccount()
-        if (account != null) {
-            accountManager.setPassword(account, refreshToken.value)
-            accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
-        }
+        val account = getAccount() ?: return
+        accountManager.setPassword(account, refreshToken.value)
+        accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
     }
 
     override fun setAccessToken(accessToken: AccessToken) {
-        val account = getAccount()
-        if (account != null) {
-            accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
-        }
+        val account = getAccount() ?: return
+        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
     }
 
     override fun getRefreshToken(account: Account?): RefreshToken? = (account ?: getAccount())?.let {

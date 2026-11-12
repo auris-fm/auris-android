@@ -57,6 +57,7 @@ class WithdrawalDuringTokenFetchTest {
                     }
                 },
                 eligible = { sharingOn.get() },
+                queue = queue,
             )
 
             val recording = queue.recordings().single()

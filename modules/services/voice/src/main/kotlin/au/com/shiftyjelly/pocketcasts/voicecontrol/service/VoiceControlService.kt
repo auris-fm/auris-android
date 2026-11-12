@@ -1173,6 +1173,7 @@ class VoiceControlService : Service() {
                 // here makes that work visible to the snapshot below instead of racing it.
                 // FAIL CLOSED (reviewers 1092c632 + 9294defb): a failed final stop, round
                 // exhaustion, or anything still unfinished at release time all mean the released
+                // resources might still be in use. Only Settled permits release.
                 val verdict = EngineQuiescence.settle(
                     stop = { voiceAsrEngine.get().stop() },
                     unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },

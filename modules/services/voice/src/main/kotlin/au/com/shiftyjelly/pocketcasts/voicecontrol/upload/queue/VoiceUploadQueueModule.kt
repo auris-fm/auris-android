@@ -127,6 +127,7 @@ object VoiceUploadQueueModule {
             client = rawClient,
             tokenSource = aurisToken,
             eligible = { recording -> gate.verdictFor(recording) is GateVerdict.Send },
+            queue = queue,
         )
         return UploaderLoop(
             queue = queue,
@@ -156,6 +157,7 @@ object VoiceUploadQueueModule {
         client: OkHttpClient,
         tokenSource: CloudTokenProviding,
         eligible: (FolderQueue.Recording) -> Boolean,
+        queue: FolderQueue,
     ): RecordingUploader = RecordingUploader(
         endpoint = endpoint,
         // The whole call is bounded by the client, and cancelling the call is what releases a
@@ -177,6 +179,7 @@ object VoiceUploadQueueModule {
         // peeking would leave an expired entry in place forever and stall every queued recording.
         authorization = { tokenSource.currentToken() },
         eligible = eligible,
+        deleteRefused = { queue.delete(it, "consent changed while the upload token was fetched") },
     )
 }
 

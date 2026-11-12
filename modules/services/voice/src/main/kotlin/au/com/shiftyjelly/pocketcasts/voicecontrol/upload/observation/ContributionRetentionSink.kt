@@ -904,8 +904,9 @@ open class ContributionRetentionSink(
 
     companion object {
         /** Fixed number of recordings allowed to WAIT for finalization at once (spec cut 3:
-         *  replaces the aggregate byte ledger; memory = per-clip cap x this count). */
-        const val MAX_PENDING_FINALIZATION = 32
+         *  replaces the aggregate byte ledger; worst case = per-clip cap 8 MiB x this count,
+         *  i.e. the SAME 64 MiB the old 64 MiB aggregate ledger allowed). */
+        const val MAX_PENDING_FINALIZATION = 8
 
         private const val BYTES_PER_SAMPLE = 2L
         private const val FIRST_CHUNK_BYTES = 4096L

@@ -55,6 +55,7 @@ class ExpiredTokenStillUploadsTest {
                 client = OkHttpClient(),
                 tokenSource = source,
                 eligible = { true },
+                queue = queue,
             )
 
             val answer = uploader.send(queue.recordings().single())

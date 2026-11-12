@@ -138,14 +138,13 @@ class SyncManagerImpl @Inject constructor(
     }
 
     override suspend fun updatePassword(newPassword: String, oldPassword: String) {
-        getCacheTokenOrLogin { token ->
+        val response = getCacheTokenOrLogin { token ->
             val response = syncServiceManager.updatePassword(newPassword, oldPassword, token)
             eventHorizon.track(UserPasswordUpdatedEvent)
-            // A successful password change returns the replacement tokens; store them through the
-            // ordinary AccountManager writes so the next refresh uses the new credential.
-            syncAccountManager.setRefreshToken(response.refreshToken)
-            syncAccountManager.setAccessToken(response.accessToken)
+            response
         }
+        syncAccountManager.setRefreshToken(response.refreshToken)
+        syncAccountManager.setAccessToken(response.accessToken)
     }
 
     override fun isLoggedIn(): Boolean = syncAccountManager.isLoggedIn()
@@ -166,18 +165,19 @@ class SyncManagerImpl @Inject constructor(
     override fun getRefreshToken(): RefreshToken? = syncAccountManager.getRefreshToken()
 
     private suspend fun fetchAccessToken(account: Account): AccessToken {
-        // The account must still be the one the caller is authenticating; then the refresh token
-        // is exchanged directly with the server and both returned tokens are stored.
-        val current = syncAccountManager.getAccount() ?: throw RefreshTokenExpiredException()
-        if (current.name != account.name) throw RefreshTokenExpiredException()
-        val refreshToken = syncAccountManager.getRefreshToken(current) ?: throw RefreshTokenExpiredException()
-        val signInType = syncAccountManager.getSignInType(current)
+        val refreshToken = syncAccountManager.getRefreshToken(account) ?: throw RefreshTokenExpiredException()
         return try {
-            val tokenResponse = when (signInType) {
-                AccountConstants.SignInType.Password -> syncServiceManager.login(email = account.name, password = refreshToken.value)
-                AccountConstants.SignInType.Tokens -> syncServiceManager.loginToken(refreshToken = refreshToken)
-            }
+            val signInType = syncAccountManager.getSignInType(account)
+            LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Fetching the access token, SignInType: $signInType")
+            val tokenResponse = downloadTokens(
+                email = account.name,
+                refreshToken = refreshToken,
+                signInType = signInType,
+            )
+
+            // update the refresh token as the expiry may have been increased
             syncAccountManager.setRefreshToken(tokenResponse.refreshToken)
+
             syncAccountManager.setAccessToken(tokenResponse.accessToken)
             tokenResponse.accessToken
         } catch (ex: Exception) {
@@ -642,6 +642,15 @@ class SyncManagerImpl @Inject constructor(
             }
         }
         eventHorizon.track(event)
+    }
+
+    private suspend fun downloadTokens(
+        email: String,
+        refreshToken: RefreshToken,
+        signInType: AccountConstants.SignInType,
+    ): LoginTokenResponse = when (signInType) {
+        AccountConstants.SignInType.Password -> syncServiceManager.login(email = email, password = refreshToken.value)
+        AccountConstants.SignInType.Tokens -> syncServiceManager.loginToken(refreshToken = refreshToken)
     }
 
     override suspend fun <T> getCacheTokenOrLogin(serverCall: suspend (token: AccessToken) -> T): T {

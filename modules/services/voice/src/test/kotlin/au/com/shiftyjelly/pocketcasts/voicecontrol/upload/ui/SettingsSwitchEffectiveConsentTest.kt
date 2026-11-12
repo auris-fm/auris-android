@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithd
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -35,6 +36,7 @@ import org.junit.runner.Description
 @OptIn(ExperimentalCoroutinesApi::class)
 class SettingsSwitchEffectiveConsentTest {
     private var mainDispatcher = StandardTestDispatcher()
+    private val scopes = mutableListOf<kotlinx.coroutines.CoroutineScope>()
 
     @get:Rule
     val mainRule = object : TestWatcher() {
@@ -43,6 +45,11 @@ class SettingsSwitchEffectiveConsentTest {
             Dispatchers.setMain(mainDispatcher)
         }
         override fun finished(description: Description) {
+            scopes.forEach { it.cancel() }
+            // Drain BEFORE resetMain: a leaked VM collector touching Dispatchers.Main after reset
+            // throws and is attributed to the next test (CI flake on 7a9664f95e).
+            mainDispatcher.scheduler.runCurrent()
+            scopes.clear()
             Dispatchers.resetMain()
         }
     }
@@ -50,6 +57,8 @@ class SettingsSwitchEffectiveConsentTest {
     private fun viewModelWith(store: SavedSharingChoiceStore): VoiceSharingSettingsViewModel =
         VoiceSharingSettingsViewModel(
             projection = kotlinx.coroutines.flow.MutableStateFlow(null),
+            // Injected so the rule can cancel the VM's collectors before resetMain (no leaked Main access).
+            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
             enrollmentController = EnrollmentController(
                 enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
                 withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },

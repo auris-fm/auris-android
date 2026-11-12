@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedShari
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -33,6 +34,7 @@ import org.junit.runner.Description
 @OptIn(ExperimentalCoroutinesApi::class)
 class OfflineStartRowVisibilityTest {
     private var mainDispatcher = StandardTestDispatcher()
+    private val scopes = mutableListOf<kotlinx.coroutines.CoroutineScope>()
 
     @get:Rule
     val mainRule = object : TestWatcher() {
@@ -41,6 +43,11 @@ class OfflineStartRowVisibilityTest {
             Dispatchers.setMain(mainDispatcher)
         }
         override fun finished(description: Description) {
+            scopes.forEach { it.cancel() }
+            // Drain BEFORE resetMain: a leaked VM collector touching Dispatchers.Main after reset
+            // throws and is attributed to the next test (CI flake on 7a9664f95e).
+            mainDispatcher.scheduler.runCurrent()
+            scopes.clear()
             Dispatchers.resetMain()
         }
     }
@@ -62,6 +69,8 @@ class OfflineStartRowVisibilityTest {
             override fun write(requested: Boolean): Boolean = true
         }),
         ownerSession = { 1L },
+        // Injected so the rule can cancel the VM's collectors before resetMain (no leaked Main access).
+        scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         ioDispatcher = Dispatchers.Main, // keep the disk reads on the TEST scheduler (deterministic)
         markerRead = { true },
         savedChoice = VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" },

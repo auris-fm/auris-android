@@ -37,6 +37,9 @@ class VoiceSharingSettingsViewModelTest {
     val temp = TemporaryFolder()
     private var mainDispatcher = StandardTestDispatcher()
     private val scopes = mutableListOf<kotlinx.coroutines.CoroutineScope>()
+
+    /** Launched jobs whose scopes were never handed to the rule (leak-proofing, CI flake on 7a9664f95e). */
+    private val extraJobs = mutableListOf<kotlinx.coroutines.Job>()
     @get:Rule
     val mainRule = object : TestWatcher() {
         override fun starting(description: Description) {
@@ -45,7 +48,14 @@ class VoiceSharingSettingsViewModelTest {
         }
         override fun finished(description: Description) {
             scopes.forEach { it.cancel() }
+            extraJobs.forEach { it.cancel() }
+            // DRAIN before resetMain (CI flake on 7a9664f95e): a cancelled-but-still-dispatched
+            // collector that touches Dispatchers.Main AFTER resetMain throws
+            // "Main was accessed when ... unset", and runTest attributes it to the NEXT test
+            // (UncaughtExceptionsBeforeTest). Let cancellation take effect while Main still exists.
+            mainDispatcher.scheduler.runCurrent()
             scopes.clear()
+            extraJobs.clear()
             Dispatchers.resetMain()
         }
     }
@@ -246,7 +256,7 @@ class VoiceSharingSettingsViewModelTest {
         }
         val mainDispatcher = mainExecutor.asCoroutineDispatcher()
         val writes = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher)
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it }
         val withdrawGate = Gate()
         withdrawGate.result = VoiceSharingMutationResult.Failure
         val vm = try {
@@ -260,12 +270,12 @@ class VoiceSharingSettingsViewModelTest {
             setProjection(enrolledProjection())
             val watch = kotlinx.coroutines.CoroutineScope(mainDispatcher).launch(Dispatchers.Unconfined) {
                 vm.state.drop(1).collect { writes += Thread.currentThread().name }
-            }
+            }.also { extraJobs += it }
             val issued = java.util.concurrent.CountDownLatch(1)
             kotlinx.coroutines.CoroutineScope(mainDispatcher).launch {
                 vm.withdraw()
                 issued.countDown()
-            }
+            }.also { extraJobs += it }
             assertTrue("the tap is issued", issued.await(10, java.util.concurrent.TimeUnit.SECONDS))
             awaitTrue(10_000) { vm.state.value.pendingOperation == PendingOperation.WITHDRAW }
             withdrawGate.release.complete(Unit)

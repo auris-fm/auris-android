@@ -68,8 +68,19 @@ class SavedSharingChoiceStore(
             ),
         )
         if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
+        lastFailureReason = if (written) null else persistence.lastFailureReason()
         return written
     }
+
+    /**
+     * WHY the last write failed, for the latch log (owner Pixel test): a latch that only says
+     * "failed" cannot be diagnosed from a device. Set on every failed record write and cleared by
+     * the next successful one. Observability only - it never feeds a consent decision.
+     */
+    @Volatile
+    @androidx.annotation.VisibleForTesting
+    var lastFailureReason: String? = null
+        private set
 
     /**
      * Record a server answer of NOT ENROLLED. Nothing the user decided at a surface produced
@@ -147,6 +158,9 @@ interface SharingChoicePersistence {
 
     /** Returns TRUE only when the record is durably in place. */
     fun write(choice: SavedSharingChoice): Boolean
+
+    /** Why the most recent [write] on this instance failed, or null after a success. Diagnostics. */
+    fun lastFailureReason(): String? = null
 }
 
 /**
@@ -172,7 +186,17 @@ class FileSharingChoicePersistence(
      */
     private fun fileFor(account: String): File = File(context.filesDir, "voice-sharing-choice-" + sha256(account))
 
-    private fun tempFileFor(account: String): File = File(context.filesDir, "voice-sharing-choice-" + sha256(account) + ".tmp")
+    /**
+     * A UNIQUE temp path per write (@owner Pixel test, nine `persist: failed latched` lines during
+     * fast taps). The previous fixed `<record>.tmp` was shared by every concurrent writer: writer B
+     * truncated A's in-flight temp, so A renamed a partial record or failed with ENOENT after B had
+     * already renamed it away. Each write now owns its temp file, so overlapping writes each publish
+     * one whole record and the last rename wins.
+     */
+    private fun tempFileFor(account: String): File = File(
+        context.filesDir,
+        "voice-sharing-choice-" + sha256(account) + ".tmp." + java.util.UUID.randomUUID(),
+    )
 
     private fun sha256(text: String): String = java.security.MessageDigest.getInstance("SHA-256")
         .digest(text.toByteArray(Charsets.UTF_8))
@@ -189,10 +213,20 @@ class FileSharingChoicePersistence(
         }
     }
 
+    @Volatile
+    private var failureReason: String? = null
+
+    override fun lastFailureReason(): String? = failureReason
+
+    private fun failed(reason: String): Boolean {
+        failureReason = reason
+        return false
+    }
+
     override fun write(choice: SavedSharingChoice): Boolean {
         val file = fileFor(choice.account)
         val tempFile = tempFileFor(choice.account)
-        val dir = file.parentFile ?: return false
+        val dir = file.parentFile ?: return failed("no parent directory for ${file.name}")
         return try {
             dir.mkdirs()
             FileOutputStream(tempFile).use { out ->
@@ -203,16 +237,17 @@ class FileSharingChoicePersistence(
             if (!tempFile.renameTo(file)) {
                 tempFile.delete()
                 // The rename failed, so the record on disk is whatever it was before this call.
-                false
+                failed("rename failed: ${tempFile.name} -> ${file.name}")
             } else {
                 // The rename is only durable relative to its directory entry. A sync FAILURE throws
                 // and is reported as a failed write, never swallowed as success.
                 directorySync.sync(dir)
+                failureReason = null
                 true
             }
         } catch (e: Exception) {
             tempFile.delete()
-            false
+            failed("exception ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 

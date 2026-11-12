@@ -399,6 +399,79 @@ class VoiceSharingAccountOperationsTest {
         assertTrue(operations.refreshProjection())
         assertEquals(listOf("id-one", "id-two"), observed.single().requestIds)
     }
+    /**
+     * THE ORDERING CONTROL (Reviewer + spec on the owner's Pixel test). Arrival order is not issue
+     * order: a GET issued BEFORE a withdrawal but delivered AFTER it must not republish consent —
+     * neither as the projection nor as the durable choice. The companion case proves a GET issued
+     * after the withdrawal still applies, so this cannot pass on a frozen state.
+     */
+    @Test
+    fun `a GET issued before a withdrawal and delivered after it never republishes consent`() = runTest {
+        val saved = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.InMemoryChoicePersistence(),
+        )
+        val ops = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = owner,
+            aurisToken = ownerToken(owner),
+            onCredentialInvalid = { },
+            onAurisCredentialRefused = { },
+            savedSharingChoice = saved,
+        )
+        issueBearer("Bearer token-a")
+        // The stale GET is issued first and held at the server.
+        server.enqueue(
+            MockResponse().setResponseCode(200)
+                .setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-stale", disclosure = "v3"))
+                .setHeadersDelay(500, TimeUnit.MILLISECONDS),
+        )
+        val staleGet = async(kotlinx.coroutines.Dispatchers.IO) { ops.refreshProjection() }
+        withContext(Dispatchers.IO) { Thread.sleep(150) } // the GET is in flight now
+        // The withdrawal is issued afterwards and answers first.
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-stale")),
+        )
+        assertApplied(ops.withdraw())
+        assertEquals("PREMISE: the withdrawal is the applied state", WithdrawalState.WITHDRAWN, state.projection.value!!.withdrawalState)
+        staleGet.await()
+        assertEquals(
+            "a pre-withdrawal GET arriving late must not republish enrollment",
+            WithdrawalState.WITHDRAWN,
+            state.projection.value!!.withdrawalState,
+        )
+        assertFalse(
+            "the durable choice must not be re-enabled by the stale GET",
+            saved.read("user@example.com")?.state == au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+        )
+    }
+
+    @Test
+    fun `CONTROL - a GET issued after the withdrawal and delivered after it does apply`() = runTest {
+        val saved = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.InMemoryChoicePersistence(),
+        )
+        val ops = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = owner,
+            aurisToken = ownerToken(owner),
+            onCredentialInvalid = { },
+            onAurisCredentialRefused = { },
+            savedSharingChoice = saved,
+        )
+        issueBearer("Bearer token-a")
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-stale")),
+        )
+        assertApplied(ops.withdraw())
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-new", disclosure = "v3")),
+        )
+        assertTrue("a GET issued AFTER the withdrawal must apply", ops.refreshProjection())
+        assertTrue("PREMISE: the newer answer re-enrolls", state.projection.value?.voiceSharingEnrolled == true)
+    }
+
     @Test
     fun `malformed operation response fails closed without applying`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))

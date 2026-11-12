@@ -128,7 +128,11 @@ class VoiceSharingAccountOperations(
             else -> store.recordNotEnrolled(account)
         }
         if (persisted == false) {
-            android.util.Log.w("VoiceSharingChoice", "voice-sharing choice persist: outcome=failed latched")
+            // WHY it failed (owner Pixel test): the bare latch could not be diagnosed from a device.
+            android.util.Log.w(
+                "VoiceSharingChoice",
+                "voice-sharing choice persist: outcome=failed latched reason=${store.lastFailureReason ?: "unknown"}",
+            )
         }
     }
     suspend fun deleteData(): Boolean {

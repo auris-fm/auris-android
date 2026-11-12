@@ -26,10 +26,7 @@ class AurisAuthClientTest {
             server.start()
 
             val client = AurisAuthClient(server.url("/").toString().trimEnd('/'))
-            val result = client.exchange(
-                credential = "pc-session-credential",
-                device = AurisDeviceInfo(platform = "android", appVersion = "8.18"),
-            )
+            val result = client.exchange(credential = "pc-session-credential")
 
             val tokens = (result as AurisAuthResult.Success).tokens
             assertEquals("auris-access", tokens.accessToken)
@@ -40,8 +37,13 @@ class AurisAuthClientTest {
             val recorded = server.takeRequest()
             assertEquals("POST /api/v1/auth/token HTTP/1.1", recorded.requestLine)
             val body = recorded.body.readUtf8()
-            assertTrue(body.contains("\"credential\":\"pc-session-credential\""))
-            assertTrue(body.contains("\"platform\":\"android\""))
+            // The sign-in body carries ONLY the credential: the `device` block is gone (owner + spec,
+            // server-side cleanup on 135 — the platform is read from the User-Agent instead).
+            assertEquals("{\"credential\":\"pc-session-credential\"}", body)
+            // Every Auris request carries the platform agent (spec: sign-in and refresh included —
+            // the server's `platform=` log line reads it from this header).
+            val ua = recorded.getHeader("User-Agent")
+            assertTrue("the sign-in must carry the platform agent, got: $ua", ua != null && ua.startsWith("Pocket Casts/Android/"))
         }
     }
 

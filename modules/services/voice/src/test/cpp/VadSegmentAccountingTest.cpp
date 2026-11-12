@@ -5,7 +5,7 @@
 // the second utterance or after a long idle stretch. An engine test with fabricated sample values
 // cannot catch that, so this drives the real NativeVadProcessor frame loop instead.
 //
-// Run it with:  src/test/cpp/run.sh            (optionally: run.sh <build-dir>)
+// Run it with: src/test/cpp/run.sh (optionally: run.sh <build-dir>)
 //
 // How it works without Oboe or Silero: NativeVadProcessor only ever calls readRingBuffer on its
 // capture, so a fake subclass supplies the audio; and sileroVadPredict / sileroVadResetState are
@@ -215,7 +215,7 @@ bool waitForChild(pid_t pid, int timeoutMs, int* status) {
 int main() {
     std::printf("native VAD segment accounting\n");
 
-    // (0) UNTHREAD-U1 (4d1e5946/2d8d5c4a): the stuck-detector branch. A detector stuck
+    // (0) UNTHREAD-U1: the stuck-detector branch. A detector stuck
     // speech-classified past kStuckDetectorFrameLimit must surface the FAULT sentinel (kFaultEvent,
     // not the stop sentinel) and must NOT emit a completed segment. The script is 4000 loud frames
     // (limit 3750): the frames are served as fast as the loop reads them, so the script runs in
@@ -249,7 +249,7 @@ int main() {
             lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; break; }  // TERMINAL
             if (event == 2) { segmentsEmitted++; continue; }
-            if (event == 1) { continue; }  // ordinary mid-run event (reviewer 1b0b712b)
+            if (event == 1) { continue; }  // ordinary mid-run event
             if (event == 0) { timedOut = true; break; }
             if (event == -1) { break; }
             std::printf("      stuck-case unexpected event=%d\n", event);
@@ -259,7 +259,7 @@ int main() {
         std::printf("      stuck-case last event=%d timedOut=%d\n", lastEvent, (int)timedOut);
         processor.stop();
         // SYNCHRONIZED observation after worker shutdown: how many frames did the loop actually
-        // consume? (Reviewer 92d80009: establish the premise before asserting the terminal cause.)
+        // consume?
         std::printf("      stuck-case served=%d after join\n", capture.served);
         check(!timedOut, "the stuck case must terminate on events, never on the wait timeout");
         check(capture.served >= NativeVadProcessor::stuckFrameLimitForTest(),
@@ -686,7 +686,7 @@ int main() {
         std::fflush(stdout);
         pid_t child = fork();
         if (child == 0) {
-        // (9) XRUN CONTINUITY (reviewer 0c28e33a / spec d3fbda32): the ring flag only catches drops the
+        // (9) XRUN CONTINUITY: the ring flag only catches drops the
         // RING performed. An AAudio overrun discards input in the HAL before it ever reaches
         // RingBuffer::write, so the ring stays self-consistent -- cursors keep advancing, no drop is
         // recorded -- while they fall behind real stream positions. A ring-only continuity check calls
@@ -793,7 +793,7 @@ int main() {
 
 
 
-        // (10) THE REAL start() PATH (reviewer a1633944 / 8a3eb1ad). start() holds mStreamMutex for its
+        // (10) THE REAL start() PATH. start() holds mStreamMutex for its
         // whole body and then baselines; the locking entry point would re-lock a non-recursive mutex and
         // hang every real start. Every earlier control used installStreamForTest(), which start()
         // short-circuits, so none of them reached that line.
@@ -886,7 +886,7 @@ int main() {
             capture.close();
         }
 
-        // (11) AN XRUN DURING SEGMENT EXTRACTION (reviewer 8a3eb1ad). NativeVadProcessor revalidates the
+        // (11) AN XRUN DURING SEGMENT EXTRACTION. NativeVadProcessor revalidates the
         // xrun evidence AFTER collecting the segment and before publishing the anchor. A poll taken only
         // on the way in would miss an overrun during the extraction -- the exact window that displaces the
         // position -- and the anchor would be published as though continuous.

@@ -31,12 +31,26 @@ class AurisTokenProvider(
     /** Null when auth is not configured for this build/environment. */
     private val clientProvider: () -> AurisAuthClient?,
     private val credentialProvider: AurisAccountCredentialProviding,
-    private val device: AurisDeviceInfo? = AurisDeviceInfo(platform = PLATFORM_ANDROID),
     private val clock: () -> Long = System::currentTimeMillis,
-) : CloudTokenProviding {
+) : AurisScopedTokenProviding {
 
     private val mutex = Mutex()
+
+    /**
+     * The cache monitor. The coroutine [mutex] single-flights the NETWORK exchange; this monitor
+     * owns every PUBLICATION and every synchronous read of [cached], so a non-suspending reader
+     * observes the same coherent sequence of entries the writers published (reviewer 57246e46:
+     * two different locks do not synchronize).
+     * Entries are immutable, so a snapshot taken under this monitor is stable outside it.
+     */
+    private val cacheLock = Any()
     private var cached: CachedTokens? = null
+
+    private fun snapshot(): CachedTokens? = synchronized(cacheLock) { cached }
+
+    private fun publish(entry: CachedTokens?) {
+        synchronized(cacheLock) { cached = entry }
+    }
 
     /**
      * Acquires a replacement even when the cached token is still fresh, for the case where the route
@@ -53,33 +67,63 @@ class AurisTokenProvider(
 
     override suspend fun currentToken(): String? = token(force = false)
 
+    /**
+     * The FAIL-CLOSED synchronous read for non-suspending credential sites (the upload
+     * transport's per-attempt authorization): serves ONLY a fresh cached token for the
+     * CURRENT identity — never fetches, never serves a stale or cross-account token.
+     * Null means "acquire first" and callers must refuse, not fall back.
+     */
+    fun peekCurrentToken(): String? = withCurrentCachedToken { token -> token?.takeIf { it.isNotBlank() } }
+
+    /**
+     * Runs [block] on the SAME monitor that owns cache publication, with the access token the
+     * cache currently holds for the CURRENT identity (null when unconfigured, no credential, a
+     * switched or logged-out account, an unmet origin, or an expired entry). Never fetches.
+     */
+    override fun <T> withCurrentCachedToken(block: (String?) -> T): T = synchronized(cacheLock) {
+        val identity = currentIdentity()
+        block(if (identity == null) null else snapshot()?.takeIf { it.matches(identity) && it.isFresh() }?.tokens?.accessToken)
+    }
+
+    /**
+     * TRUE only when [bearer] is still the token the cache holds for the CURRENT identity --
+     * the staleness input for a 401 fence: a bearer from a superseded mint, a switched account,
+     * a different origin, or a cleared cache is NOT current, and a rejection answering it must
+     * commit nothing. Synchronous, so a non-suspending fence can hold the publication monitor
+     * across its whole check-and-commit.
+     */
+    fun isCurrentCachedBearer(bearer: String): Boolean = synchronized(cacheLock) {
+        val identity = currentIdentity() ?: return false
+        snapshot()?.takeIf { it.matches(identity) }?.tokens?.accessToken == bearer
+    }
+
     private suspend fun token(force: Boolean): String? {
         // Read the credential first, before any return: a cached token that came
         // from a different credential belongs to a previous account (logout, or
         // a switch) and must not be served.
         val identity = currentIdentity()
         if (identity == null) {
-            cached = null
+            publish(null)
             return null
         }
-        cached?.let { if (!force && it.matches(identity) && it.isFresh()) return it.tokens.accessToken }
+        snapshot()?.let { if (!force && it.matches(identity) && it.isFresh()) return it.tokens.accessToken }
         return mutex.withLock {
             // Re-check under the lock: a concurrent caller may have refreshed,
             // or the account may have changed while we waited.
             val lockedIdentity = currentIdentity()
             if (lockedIdentity == null) {
-                cached = null
+                publish(null)
                 return@withLock null
             }
-            cached?.let { if (!force && it.matches(lockedIdentity) && it.isFresh()) return@withLock it.tokens.accessToken }
+            snapshot()?.let { if (!force && it.matches(lockedIdentity) && it.isFresh()) return@withLock it.tokens.accessToken }
             val client = clientProvider() ?: run {
-                cached = null
+                publish(null)
                 return@withLock null
             }
             // A token past the refresh skew but still inside its real lifetime
             // can keep serving through an inconclusive upstream blip — but only
             // for this same credential.
-            val stillValid = cached?.takeIf { it.matches(lockedIdentity) && it.isWithinLifetime() }
+            val stillValid = snapshot()?.takeIf { it.matches(lockedIdentity) && it.isWithinLifetime() }
             val attempt = acquire(client, lockedIdentity)
             // The identity can change *while* the request is in flight: a logout
             // or a switch during the exchange would otherwise mint a token for
@@ -89,7 +133,7 @@ class AurisTokenProvider(
             val settledIdentity = currentIdentity()
             when {
                 attempt is Acquisition.Tokens && settledIdentity == lockedIdentity -> {
-                    cached = CachedTokens(attempt.tokens, fetchedAtMs = clock(), identity = lockedIdentity)
+                    publish(CachedTokens(attempt.tokens, fetchedAtMs = clock(), identity = lockedIdentity))
                     attempt.tokens.accessToken
                 }
 
@@ -101,7 +145,7 @@ class AurisTokenProvider(
                     // never dial unauthenticated, but do not sign the user out
                     // or discard a token that is still valid. A later retry
                     // re-attempts the exchange.
-                    cached = stillValid
+                    publish(stillValid)
                     stillValid.tokens.accessToken
                 }
 
@@ -109,7 +153,7 @@ class AurisTokenProvider(
                     // Includes the race: the token in hand belongs to an account
                     // that is no longer signed in, so it is not usable and not
                     // worth caching.
-                    cached = null
+                    publish(null)
                     null
                 }
             }
@@ -125,7 +169,7 @@ class AurisTokenProvider(
      * Null when there is no configured environment or no credential, so both
      * failure modes collapse into "fail closed".
      */
-    private suspend fun currentIdentity(): String? {
+    private fun currentIdentity(): String? {
         val origin = clientProvider()?.origin?.takeIf { it.isNotBlank() } ?: return null
         val credential = credentialProvider.credential()?.takeIf { it.isNotBlank() } ?: return null
         return origin + IDENTITY_SEPARATOR + credentialDigest(credential)
@@ -137,7 +181,7 @@ class AurisTokenProvider(
      * (a 401 means the refresh chain is dead, not that the account is).
      */
     private suspend fun acquire(client: AurisAuthClient, identity: String): Acquisition {
-        val refreshToken = cached?.takeIf { it.matches(identity) }?.tokens?.refreshToken
+        val refreshToken = snapshot()?.takeIf { it.matches(identity) }?.tokens?.refreshToken
         if (refreshToken != null) {
             when (val refreshed = acquire(client.refresh(refreshToken))) {
                 is Acquisition.Tokens -> return refreshed
@@ -149,7 +193,7 @@ class AurisTokenProvider(
             }
         }
         val credential = credentialProvider.credential() ?: return Acquisition.Definitive
-        return acquire(client.exchange(credential, device))
+        return acquire(client.exchange(credential))
     }
 
     private fun acquire(result: AurisAuthResult): Acquisition = when (result) {
@@ -194,7 +238,6 @@ class AurisTokenProvider(
     }
 
     private companion object {
-        const val PLATFORM_ANDROID = "android"
 
         /** Refresh slightly before expiry so an in-flight request never races it. */
         const val EXPIRY_SKEW_MS = 30_000L
@@ -204,9 +247,26 @@ class AurisTokenProvider(
     }
 }
 
+/**
+ * The Auris-scoped view of [CloudTokenProviding]: adds the SYNCHRONOUS, fail-closed cache fence
+ * non-suspending consumers need (upload transport authorization, the 401 staleness commit).
+ * A cache read that cannot suspend must never fetch and must never serve a token that is not
+ * the current identity's -- these operations are what make that checkable.
+ */
+interface AurisScopedTokenProviding : CloudTokenProviding {
+    /** Runs [block] under the cache-publication monitor with the current-identity access token. */
+    fun <T> withCurrentCachedToken(block: (String?) -> T): T
+}
+
 /** The account session credential the app already holds at login. */
 interface AurisAccountCredentialProviding {
-    suspend fun credential(): String?
+    /**
+     * Synchronous by contract: the backing credential is local device state
+     * (the account session's refresh token), not a fetch. A synchronous read is
+     * what lets the token cache answer identity questions without a coroutine,
+     * which is what makes a fail-closed non-suspending cache read possible.
+     */
+    fun credential(): String?
 }
 
 /**

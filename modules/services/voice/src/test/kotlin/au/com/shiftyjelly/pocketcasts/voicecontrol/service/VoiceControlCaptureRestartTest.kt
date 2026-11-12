@@ -76,22 +76,16 @@ import org.robolectric.shadows.ShadowAudioManager
 
 /**
  * REPRODUCTION of the device-observed stop/restart cycle on the installed multiturn build
- * (owner log, 2026-10-17):
+ * (owner log):
  *
- *   wake hit -> `other_app_playing` blocks briefly -> capture stops / VAD exits -> gate allowed
- *   again during teardown -> engine stopped again -> route Unknown -> external acquisition ->
- *   input stream started + VAD started -> route Headset -> engine start request -> VAD
- *   stopped/restarted.
+ * wake hit -> `other_app_playing` blocks briefly -> capture stops / VAD exits -> gate allowed
+ * again during teardown -> engine stopped again -> route Unknown -> external acquisition ->
+ * input stream started + vad started -> route Headset -> engine start request -> vad
+ * stopped/restarted.
  *
  * Driven through the REAL production surfaces — the service's mode observer, ListeningModePolicy,
  * VoiceControlGate, AndroidAudioRouteMonitor and RouteAcquisition — with only native boundaries
  * (Oboe hardware, ASR models/engines, notifications) stood in for.
- *
- * Provenance (@spec 3d4098f5 directive): git -S over origin/main..161092964 shows
- * `invalidatePendingStart`, `startIfNotRunning` and `captureRestartSignal` already present at the
- * pre-task baseline; 161092964..HEAD changed only the availability-sourced acquisition branch and
- * its logging in VoiceControlService, and OtherAppPlayingCondition is untouched by this task. The
- * sequence pinned here is therefore PRE-EXISTING lifecycle behavior, not a multiturn regression.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -129,16 +123,16 @@ class VoiceControlCaptureRestartTest {
      * production [au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidRouteAcquisitionPlatform]
      * encodes:
      *
-     *  - AirPods connected-but-unrouted enumerate an A2DP OUTPUT and a SCO INPUT (the HFP input
-     *    device exists while the profile is idle), and `bluetoothCandidates()` names that SCO input;
-     *  - `startBluetoothSco()` returns IMMEDIATELY and the link establishes ASYNCHRONOUSLY (~150ms
-     *    of HFP negotiation on device). Robolectric's ShadowAudioManager implements neither the
-     *    call nor the establishment, so the harness models both: a background timer flips the link
-     *    flag after the establishment delay and posts the platform's SCO_AUDIO_STATE_UPDATED
-     *    broadcast to the main looper, where the production route monitor receives it -- exactly
-     *    as on device. The polling loop inside RouteAcquisition then observes `isBluetoothScoOn`.
-     *  - opening/starting/closing the input stream goes through the REAL MicrophoneCapture, so
-     *    capture generations advance exactly as in production.
+     * - AirPods connected-but-unrouted enumerate an A2DP output and a sco input (the hfp input
+     * device exists while the profile is idle), and `bluetoothCandidates` names that SCO input;
+     * - `startBluetoothSco` returns immediately and the link establishes asynchronously (~150ms
+     * of HFP negotiation on device). Robolectric's ShadowAudioManager implements neither the
+     * call nor the establishment, so the harness models both: a background timer flips the link
+     * flag after the establishment delay and posts the platform's SCO_AUDIO_STATE_UPDATED
+     * broadcast to the main looper, where the production route monitor receives it -- exactly
+     * as on device. The polling loop inside RouteAcquisition then observes `isBluetoothScoOn`.
+     * - opening/starting/closing the input stream goes through the REAL MicrophoneCapture, so
+     * capture generations advance exactly as in production.
      */
     private inner class FakeScoPlatform(
         private val microphoneCapture: MicrophoneCapture,
@@ -256,6 +250,8 @@ class VoiceControlCaptureRestartTest {
             return true
         }
 
+        override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = 0
+
         override fun stopCaptureAndVad() {
             vadStopCount++
             capturing = false
@@ -359,7 +355,7 @@ class VoiceControlCaptureRestartTest {
      * Wait for `predicate`. Production's service coroutines are dispatched to Dispatchers.Main --
      * backed by a TestDispatcher on [testScheduler] -- and their `delay` continuations execute
      * only when that scheduler is pumped from a thread that is not busy. So wait INSIDE a launch
-     * on the scheduler's own dispatcher: suspending there lets runCurrent() drain every pending
+     * on the scheduler's own dispatcher: suspending there lets runCurrent drain every pending
      * Main continuation (acquisition polls, observer body, engine start) cooperatively.
      */
     private suspend fun awaitState(
@@ -451,6 +447,9 @@ class VoiceControlCaptureRestartTest {
                 override suspend fun ensureReady(sourceLanguage: String) = Result.success(Unit)
                 override suspend fun translate(text: String, sourceLanguage: String): Result<String> = Result.failure(IllegalStateException("unused"))
             },
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
 
@@ -494,7 +493,7 @@ class VoiceControlCaptureRestartTest {
         setField(service, "gate", gate)
         setField(service, "notificationManager", notificationManager)
         setField(service, "voiceRecognizer", NoopRecognizer())
-        setField(service, "voicePlaybackIntentExecutor", mock(VoicePlaybackIntentExecutor::class.java))
+        setField(service, "voicePlaybackIntentExecutor", StubVoiceExecutor())
         setField(service, "voiceDialogManager", mock(au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager::class.java))
         setField(service, "playbackContextMonitor", mock(PlaybackContextMonitor::class.java))
         setField(service, "audioRouteMonitor", monitor)
@@ -504,6 +503,10 @@ class VoiceControlCaptureRestartTest {
         setField(service, "playbackBufferRecorder", playbackBufferRecorder)
         val modelManager = mock(ModelManager::class.java)
         whenever(modelManager.isModelReady(any())).thenReturn(true)
+        // EnsureModelsReady reads the digest-verified readiness, not the cached flag; an
+        // Unstubbed verified check returns a null Boolean and the unboxing NPE silently kills
+        // The IO start job, so the observer never installs.
+        whenever(modelManager.isModelReadyVerified(any())).thenReturn(true)
         whenever(modelManager.isLfmModelReady()).thenReturn(true)
         whenever(modelManager.ensureModel(any())).thenReturn(Result.success(Unit))
         whenever(modelManager.ensureLfmModel()).thenReturn(Result.success(Unit))

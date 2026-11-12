@@ -16,5 +16,5 @@ import javax.inject.Singleton
 class AurisSessionCredentialProvider @Inject constructor(
     private val syncAccountManager: SyncAccountManager,
 ) : AurisAccountCredentialProviding {
-    override suspend fun credential(): String? = syncAccountManager.getRefreshToken()?.value?.takeIf { it.isNotBlank() }
+    override fun credential(): String? = syncAccountManager.getRefreshToken()?.value?.takeIf { it.isNotBlank() }
 }

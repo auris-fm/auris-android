@@ -339,7 +339,9 @@ class CloudRouteSink internal constructor(
         retentionReleased = consumer
     }
 
-    override suspend fun dispatchPrepared(prepared: CloudRouteTurn, isRetry: Boolean): CloudTurnResult {
+    override suspend fun dispatchPrepared(prepared: CloudRouteTurn, isRetry: Boolean): CloudTurnResult = dispatchPreparedReporting(prepared, isRetry, null)
+
+    override suspend fun dispatchPreparedReporting(prepared: CloudRouteTurn, isRetry: Boolean, onDuck: ((VoiceActionOutcome) -> Unit)?): CloudTurnResult {
         val claim = conversationAdmission.claimDispatch(prepared, isRetry)
             ?: return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
         if (!claim.ownsDispatch) {
@@ -359,6 +361,7 @@ class CloudRouteSink internal constructor(
                 capturedOrigin = owned.capturedOrigin,
                 isWakeOriginated = false,
                 prepared = owned,
+                onDuck = onDuck,
             ).also { claim.completion.complete(Unit) }
         } catch (failure: Throwable) {
             claim.completion.completeExceptionally(failure)
@@ -378,6 +381,7 @@ class CloudRouteSink internal constructor(
         /** True when the captured window was opened by a wake: the turn begins a conversation. */
         isWakeOriginated: Boolean = false,
         hint: CloudRouteHint?,
+        onDuck: ((VoiceActionOutcome) -> Unit)? = null,
         /**
          * An ALREADY PREPARED turn to dispatch instead of building one -- the retry path.
          *
@@ -690,7 +694,8 @@ class CloudRouteSink internal constructor(
                             if (activeTurnId != myId) return@collect
                             if (!audioPlayed) {
                                 audioPlayed = true
-                                playbackSink.duck()
+                                (playbackSink as? PlaybackManagerPlaybackSink)?.duckReporting(onDuck)
+                                    ?: playbackSink.duck()
                                 ducked = true
                                 // The obligation outlives this invocation: a successor inherits it.
                                 duckReserved = true
@@ -1107,8 +1112,9 @@ class CloudRouteSink internal constructor(
 
     /**
      * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
+     * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
      * language or missing resources yield the default line with "en" — never one language's text
-     * paired with another's voice (spec ruling 7c7575f6).
+     * paired with another's voice.
      */
     private fun resolveLocalizedLine(key: String, language: String?): ResolvedSpokenLine = templateResolver.resolveLocalized(key, language)
 

@@ -78,7 +78,7 @@ object SlotRepair {
 
     // Must cover every (tool, action) ToolCallMapper / ToolSchema can dispatch so
     // sanitizeParams does not strip legitimate generated slots.
-    private val ACTION_PARAMS: Map<Pair<String, String>, Set<String>> = mapOf(
+    internal val ACTION_PARAMS: Map<Pair<String, String>, Set<String>> = mapOf(
         "playback" to "pause" to emptySet(),
         "playback" to "resume" to emptySet(),
         "playback" to "seek_relative" to setOf("delta_seconds", "direction"),
@@ -88,6 +88,11 @@ object SlotRepair {
         "effects" to "adjust_speed" to setOf("delta"),
         "effects" to "set_trim_mode" to setOf("mode"),
         "effects" to "set_volume_boost" to setOf("enabled"),
+        "effects" to "query" to emptySet(),
+        // Kept beside its canonical spelling so the two tables agree: params are sanitised by
+        // (tool, action) BEFORE the mapper sees the call, so an alias the mapper accepts but this
+        // table does not know would silently lose its slots. This action takes none today, which is
+        // why nothing broke -- the entry is here so the next alias cannot inherit that trap.
         "effects" to "query_effects" to emptySet(),
         "volume" to "set_volume" to setOf("volume"),
         "volume" to "adjust_volume" to setOf("delta"),

@@ -4,7 +4,7 @@ name: "Voice and cloud transport unit tests"
 # intent routing, spoken template resolution, and diagnostics) and the repositories
 # module's cloud transport tests (encoded frame serialization, WebSocket transport)
 # had no CI job running them. Wired for every PR and for pushes to main only
-# (owner 23d4b138/f087c34d): a branch push no longer double-runs the suite that its
+# a branch push no longer double-runs the suite that its
 # pull_request event already covers, and main stays guarded after merge.
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Run voice module Robolectric unit tests
+      - name: Run voice module Robolectric unit tests (self-contained)
         shell: bash
         run: set -o pipefail; ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log
       - name: Upload test reports and logs

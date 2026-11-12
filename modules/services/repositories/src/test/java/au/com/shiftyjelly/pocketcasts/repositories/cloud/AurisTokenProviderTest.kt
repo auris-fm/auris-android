@@ -23,7 +23,7 @@ class AurisTokenProviderTest {
 
     private class FakeCredential(var value: String?) : AurisAccountCredentialProviding {
         var calls = 0
-        override suspend fun credential(): String? {
+        override fun credential(): String? {
             calls += 1
             return value
         }
@@ -277,6 +277,45 @@ class AurisTokenProviderTest {
             credential.value = null
             assertNull(provider.currentToken())
             assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `the fail-closed synchronous peek refuses a stale or switched identity`() = runTest {
+        MockWebServer().use { server ->
+            var exchangeCalls = 0
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    exchangeCalls += 1
+                    return MockResponse().setResponseCode(200)
+                        .setBody(tokensResponse("access-$exchangeCalls", "r-$exchangeCalls"))
+                }
+            }
+            server.start()
+
+            val credential = FakeCredential("pc-session-a")
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = credential,
+            )
+
+            // Acquire once (what the trigger/drain pass does); the peek then serves
+            // exactly that fresh token for the current identity -- no second exchange.
+            assertEquals("access-1", provider.currentToken())
+            assertEquals("access-1", provider.peekCurrentToken())
+            assertEquals(1, exchangeCalls)
+
+            // ACCOUNT SWITCH UNDER THE TOKEN: the synchronous read has no coroutine to
+            // suspend, so its safety IS the identity check -- it must refuse, never serve
+            // the previous account's token, and never dial a silent acquisition.
+            credential.value = "pc-session-b"
+            assertNull(provider.peekCurrentToken())
+            assertEquals(1, exchangeCalls)
+
+            // LOGOUT: same refusal, fail closed.
+            credential.value = null
+            assertNull(provider.peekCurrentToken())
+            assertEquals(1, exchangeCalls)
         }
     }
 

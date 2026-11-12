@@ -169,7 +169,7 @@ object ToolSchema {
             "name": "effects",
             "description": "Playback effects: speed, trim silence, volume boost.",
             "parameters": {
-              "action": {"type": "string", "enum": ["set_speed", "adjust_speed", "set_trim_mode", "set_volume_boost", "query_effects"]},
+              "action": {"type": "string", "enum": ["set_speed", "adjust_speed", "set_trim_mode", "set_volume_boost", "query"]},
               "speed": {"type": "number", "description": "Playback speed (0.5-5.0)."},
               "delta": {"type": "number", "description": "Speed delta. Positive = faster, negative = slower."},
               "mode": {"type": "string", "enum": ["off", "low", "medium", "high"], "description": "Trim silence mode."},

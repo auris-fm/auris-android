@@ -113,6 +113,8 @@ class PocketCastsApplication :
     @Inject lateinit var userManager: UserManager
 
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
+    @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+    @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
 
     @Inject lateinit var analyticsController: AnalyticsController
 
@@ -239,6 +241,8 @@ class PocketCastsApplication :
         applicationScope.launch {
             try {
                 defaultPlaylistsInitializer.initialize()
+                voiceSharingAccountStartup.initializeOnAppStart()
+                voiceCollectionStartup.initializeOnAppStart()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

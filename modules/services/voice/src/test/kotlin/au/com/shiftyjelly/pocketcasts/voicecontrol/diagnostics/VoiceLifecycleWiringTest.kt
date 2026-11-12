@@ -91,7 +91,7 @@ class VoiceLifecycleWiringTest {
                 val prepared = sink.prepareTurn(
                     request = "PRIVATE UTTERANCE", tier = VoiceIntent.CloudTier.Premium, context = PlaybackContext(),
                     isLiveGraceTurn = true, capturedOrigin = signal.currentGeneration, isWakeOriginated = true,
-                    // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
+                    // A real utterance identity is a UUID: the diagnostic records a
                     // non-UUID as `request_id=invalid`, so a placeholder here would assert the
                     // opposite of the contract.
                     hint = null, logicalRequestId = "b7ce1a5e-1c1b-4a4f-9d1e-3f2c8a6d5e70", isRetry = false, sourceLanguage = "zh",
@@ -299,7 +299,16 @@ class VoiceLifecycleWiringTest {
                 service.voiceAsrEngine = dagger.Lazy { engine }
                 service.asrBackendSelector = selector
                 service.playbackBufferRecorder = mock()
-                service.modelManager = mock()
+                // EnsureModelsReady reads digest-VERIFIED readiness; an unstubbed verified
+                // Check returns a null Boolean and the unboxing npe kills the io start job, so
+                // The observer never installs and capture never starts.
+                service.modelManager = mock {
+                    on { isModelReady(any()) }.thenReturn(true)
+                    on { isModelReadyVerified(any()) }.thenReturn(true)
+                    on { isLfmModelReady() }.thenReturn(true)
+                    on { ensureModel(any()) }.thenReturn(Result.success(Unit))
+                    on { ensureLfmModel() }.thenReturn(Result.success(Unit))
+                }
                 service.modelsReadyCondition = ready
                 service.voiceControlServiceController = mock()
                 service.audioFeedbackRenderer = mock()

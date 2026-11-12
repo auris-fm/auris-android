@@ -12,7 +12,7 @@ import org.mockito.Mockito.`when`
 
 /**
  * Reproduces the restart interleaving behind the "old collector can close the replacement
- * capture" finding: `VoiceAsrEngine.stop()` cancels its collector and opens native teardown
+ * capture" finding: `VoiceAsrEngine.stop` cancels its collector and opens native teardown
  * before the cancelled collector's flow `finally` has run, so that `finally` must be unable to
  * stop a capture that was opened for the replacement session.
  *
@@ -51,6 +51,7 @@ class MicrophoneCaptureTest {
 
         override fun waitForVadEvent(timeoutMs: Int): Int = -1
 
+        override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = 0
         override fun getSpeechPcm(buffer: ShortArray): Int = 0
 
         override fun getSpeechPcmSize(): Int = 0
@@ -71,7 +72,7 @@ class MicrophoneCaptureTest {
         return context
     }
 
-    // 4235652501 lifecycle exit (@reviewer fe77cc24): onEngineFinished clears reference eligibility
+    // Lifecycle exit: onEngineFinished clears reference eligibility
     // only when the finishing engine still OWNS the active capture.
     @Test
     fun `a current engine finishing ends reference eligibility`() {

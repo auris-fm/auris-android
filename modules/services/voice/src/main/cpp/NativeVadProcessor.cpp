@@ -145,6 +145,17 @@ int32_t NativeVadProcessor::getSpeechPcm(int16_t* outBuffer, int32_t maxSamples)
     return count;
 }
 
+int32_t NativeVadProcessor::getSpeechPcmRange(int16_t* outBuffer, int32_t offset, int32_t outMax) {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    const int32_t size = static_cast<int32_t>(mSnapshotBuffer.size());
+    if (outBuffer == nullptr || outMax <= 0 || offset < 0 || offset >= size) {
+        return 0;
+    }
+    const int32_t count = std::min(outMax, size - offset);
+    std::memcpy(outBuffer, mSnapshotBuffer.data() + offset, static_cast<size_t>(count) * sizeof(int16_t));
+    return count;
+}
+
 int32_t NativeVadProcessor::getSpeechEndSample() {
     std::lock_guard<std::mutex> lock(mSpeechMutex);
     return mSnapshotSpeechEndSample;
@@ -293,7 +304,7 @@ void NativeVadProcessor::runLoop() {
             mEventReady = true;
             mFaultLatched = true; // preserve the terminal cause through loop exit
             // The processor is STOPPED by the fault: clear mActive BEFORE unlocking so a later
-            // start() cannot report already-running against an exiting worker (b124a183).
+            // start() cannot report already-running against an exiting worker.
             mActive.store(false, std::memory_order_release);
             mEventCv.notify_one();
             break;

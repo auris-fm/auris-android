@@ -28,14 +28,28 @@ class LfmIntentRouter internal constructor(
     private val inference: LfmInference,
     private val monoMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) : VoiceRecognizer {
+    // THE EXTERNAL-NATIVE BOUNDARY: injected rather than hardwired, so constructing the router no
+    // longer decides WHEN libpocketcasts_voice_llm loads. Production binding is [LfmInferenceModule].
     @Inject constructor(
         dialogManager: VoiceDialogManager,
         modelManager: ModelManager,
-    ) : this(dialogManager, modelManager, LfmNativeInference)
+        nativeInference: LfmInference,
+        // monoMs passed explicitly: with it defaulted, the 3-arg call would resolve to this very
+        // constructor and recurse.
+    ) : this(dialogManager, modelManager, nativeInference, { SystemClock.elapsedRealtime() })
 
     private val mutex = Mutex()
     private var loadedRelease: String? = null
     private var loadedFormat: RouterInputFormat? = null
+
+    /**
+     * P1 (reviewer 7033f4d9): the loader's OWN verified identity — [loadedRelease] is set only
+     * after a successful native load of the manifest-verified release. Null until then.
+     */
+    override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
+        val version = loadedRelease ?: return null
+        return au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.Named("lfm", version)
+    }
 
     /** Optional sink for structured local diagnostics (tests / tooling). */
     @Volatile
@@ -103,7 +117,7 @@ class LfmIntentRouter internal constructor(
                 monoMs = monoMs,
                 // THE ADMITTED UTTERANCE IDENTITY, passed in by the engine -- never a second mint here.
                 // Carried to the export so a routing record pairs with its turn by ONE identity
-                // (spec 3b1def9), and to the log line the support bundle exports.
+                // and to the log line the support bundle exports.
                 requestId = logicalRequestId,
                 transcript = input.routerTranscript,
             )

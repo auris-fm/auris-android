@@ -27,7 +27,7 @@ class EarconPlayerTest {
 
     @Test
     fun `submit is nonblocking, serialised, and hands each cue its OWN accepted token`() {
-        // 4d1e5946 controls on the PRODUCTION player with a real accepted write:
+        // controls on the PRODUCTION player with a real accepted write:
         // - a predecessor holds the player thread; submit must return while the write is pending;
         // - tasks run serialised: exactly A then B, each callback with ITS OWN distinct token.
         // Both cues here are INSTALLED and ACCEPTED, so this case establishes admission identity and
@@ -114,14 +114,14 @@ class EarconPlayerTest {
 
     @Test
     fun `a HELD accepted write does not block the submitter, and coverage follows that cue only`() {
-        // 35f7e2d8 controls on the production player lifecycle:
+        // controls on the production player lifecycle:
         // (1) held-write: the track's write BLOCKS like MODE_STREAM behind the audio buffer; the
-        //     submitting caller must return anyway -- the ASR collect path proceeds while the cue
-        //     is still sounding. The previous control only proved enqueue, because nothing was
-        //     actually held inside write().
+        // Submitting caller must return anyway -- the ASR collect path proceeds while the cue
+        // Is still sounding. The previous control only proved enqueue, because nothing was
+        // Actually held inside write().
         // (2) per-cue completion: the admitted token arrives only when THAT cue's write finishes,
-        //     through the production frontier bookkeeping (track field + acceptedFramesTotal),
-        //     since trackFactoryForTest now substitutes only construction.
+        // Through the production frontier bookkeeping (track field + acceptedFramesTotal),
+        // Since trackFactoryForTest now substitutes only construction.
         val holdWrite = java.util.concurrent.CountDownLatch(1)
         val enteredWrite = java.util.concurrent.CountDownLatch(1)
         val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
@@ -177,10 +177,39 @@ class EarconPlayerTest {
     }
 
     @Test
-    fun `play returns false for missing assets`() {
-        // When assets are not present, play should return false, not crash
+    fun `play returns false for a raw resource that is genuinely absent`() {
+        // The original form of this test was asserting A FALSE premise. It called
+        // `play(EarconId.SUCCESS)` and expected false "when assets are not present" -- but
+        // `res/raw/earcon_success.wav` DOES exist, so the real answer is true. It only passed while
+        // Android resources were not being loaded, i.e. It was pinned to a test-environment artifact
+        // Rather than to behaviour. Now that the module loads real resources (needed by
+        // RealServiceLifecycleControlTest), the correct assertions are: a PRESENT earcon plays, and a
+        // Genuinely unresolvable resource id degrades to false instead of crashing.
+        // The REAL AudioTrack is not representable inside Robolectric (its shadow cannot accept
+        // Writes), so the playback boundary is the same `trackFactoryForTest` seam the concurrency
+        // Controls use: the clip below is the REAL resource-loaded clip (real decode, real frames),
+        // Only the constructed track is substituted, accepting what production would accept.
+        val acceptingTrack = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(acceptingTrack.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            acceptingTrack.write(org.mockito.ArgumentMatchers.any<ShortArray>(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt()),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        player.trackFactoryForTest = { acceptingTrack }
+
         val result = player.play(EarconId.SUCCESS)
-        assertNull("a failed play admits nothing", result)
+        assertNotNull(
+            "a present earcon resource must actually play",
+            result,
+        )
+
+        // The missing-resource path still has to be safe. Play through a player whose context cannot
+        // Resolve any earcon resource, which is exactly the "assets not present" condition.
+        val unresolvable = EarconPlayer(MissingResourceContext(context))
+        // When assets are not present, play should return false, not crash
+        assertNull(
+            "an unresolvable earcon resource must return false, not throw",
+            unresolvable.play(EarconId.SUCCESS),
+        )
     }
 
     @Test
@@ -196,7 +225,7 @@ class EarconPlayerTest {
 
     @Test
     fun `playback keeps the clip's rate while only the reference is normalized`() {
-        // @spec's rate policy: playback keeps original fidelity, and only the reference copy is
+        // rate policy: playback keeps original fidelity, and only the reference copy is
         // normalized to the correlator's rate. The two halves live in EarconClip, and nothing pinned
         // that they stay separate — a change that resampled the clip in place would downgrade what the
         // user hears to satisfy the correlator, which is the outcome the policy forbids.
@@ -354,7 +383,7 @@ class EarconPlayerTest {
     /**
      * Disposal releases the worker, and a later session still gets one.
      *
-     * @spec's teardown correction: documenting a retained thread does not close it. The player is a
+     *teardown correction: documenting a retained thread does not close it. The player is a
      * Hilt `@Singleton` reused by every service session, so the worker must be RELEASED on disposal
      * without making the object permanently unusable -- which is why the executor is created on demand
      * rather than held forever or shut down once.
@@ -387,13 +416,13 @@ class EarconPlayerTest {
 
     @Test
     fun `a new track starts its own frontier and cannot inherit the previous one`() {
-        // @reviewer's track-reset item: the frontier counts frames THIS track has accepted, so a new
+        // track-reset item: the frontier counts frames THIS track has accepted, so a new
         // track must start it at zero.
         //
         // THE DIRECTION MATTERS and my first description of it was WRONG: carrying the previous total
         // forward does not report the new cue Consumed early -- it reports it PLAYING FOREVER. The
         // boundary becomes old + new (200) while the new track's head can only reach its own accepted
-        // count (100), so Consumed is never reached and the cue never completes. @reviewer measured
+        // Count (100), so Consumed is never reached and the cue never completes. measured
         // exactly that and corrected the rationale.
         val mockPlayer = EarconPlayer(context)
         val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
@@ -451,7 +480,7 @@ class EarconPlayerTest {
 
     @Test
     fun `a second cue cannot inherit the first cue's consumed head`() {
-        // @reviewer's measured defect: the track's playback head is CUMULATIVE across cues, while
+        // measured defect: the track's playback head is CUMULATIVE across cues, while
         // completion compared it against the cue's own frame COUNT. So a second cue read Consumed
         // immediately -- the head already stood at the first cue's total, which exceeds the second
         // cue's count before any of its frames had sounded.
@@ -508,7 +537,7 @@ class EarconPlayerTest {
 
     @Test
     fun `a queued first cue does not move the second cue's consumed boundary backwards`() {
-        // @reviewer's measured case: cue 1 is queued (head 50 of its 100 frames played) and cue 2 adds
+        // measured case: cue 1 is queued (head 50 of its 100 frames played) and cue 2 adds
         // 100 more, so only 50 of cue 2's frames can have sounded. Reading the head at submission
         // understated the boundary and reported cue 2 Consumed early. The boundary is the frame
         // FRONTIER the track has accepted.
@@ -591,7 +620,7 @@ class EarconPlayerTest {
 
     @Test
     fun `an installed observer returning null stays unavailable rather than using the platform head`() {
-        // @reviewer's third case: a selected observation of null means "not observable". Falling back
+        // third case: a selected observation of null means "not observable". Falling back
         // to the platform head would fabricate an observation the observer explicitly did not make.
         val mockPlayer = EarconPlayer(context)
         val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
@@ -624,7 +653,7 @@ class EarconPlayerTest {
 
     @Test
     fun `frames a FAILED cue already accepted still count against the next cue`() {
-        // @reviewer's partial-acceptance case. A cue can be accepted in part and then fail: the track
+        // partial-acceptance case. A cue can be accepted in part and then fail: the track
         // takes some frames and the next write returns an error. Returning on that failure WITHOUT
         // folding the accepted frames into the frontier forgets audio the track will really play, so the
         // NEXT cue's target excludes it -- the head, which does include it, passes that target early and
@@ -688,10 +717,10 @@ class EarconPlayerTest {
         // The executor records the moment it is SELECTED, and refuses if it is USED after that moment has
         // been made visible to another thread. Sequencing it explicitly makes the two paths differ:
         //
-        //   fixed   selection and submit happen in one locked step, so "used after selected" is never
-        //           observable to the releaser: the submission succeeds.
-        //   defect  the submit happens after the lock is dropped, so the releaser's shutdown is visible
-        //           by then and the submission is refused.
+        // Fixed selection and submit happen in one locked step, so "used after selected" is never
+        // Observable to the releaser: the submission succeeds.
+        // Defect the submit happens after the lock is dropped, so the releaser's shutdown is visible
+        // By then and the submission is refused.
         val player = EarconPlayer(context)
         val selected = java.util.concurrent.CountDownLatch(1)
         val releaserRan = java.util.concurrent.CountDownLatch(1)
@@ -767,7 +796,7 @@ class EarconPlayerTest {
 
     @Test
     fun `a THROWING stop still releases the discarded track`() {
-        // @reviewer: one `runCatching` around stop-then-release means a throwing stop SKIPS the release,
+        // : one `runCatching` around stop-then-release means a throwing stop SKIPS the release,
         // and the reference is dropped anyway -- the resource leaks in exactly the case that most needs
         // releasing. The release must be attempted independently.
         val context = org.robolectric.RuntimeEnvironment.getApplication()
@@ -800,7 +829,7 @@ class EarconPlayerTest {
 
     @Test
     fun `an OLD admission's stop leaves a same-sound successor sounding`() {
-        // @reviewer: the earlier case only showed that currentAdmissionToken is not called on a mock.
+        // : the earlier case only showed that currentAdmissionToken is not called on a mock.
         // THE REAL INTERLEAVING: hold A's token, admit B with the SAME sound, then execute A's stop and
         // require B to be intact -- accepted frames, head target and admission all unchanged.
         val context = org.robolectric.RuntimeEnvironment.getApplication()
@@ -858,7 +887,7 @@ class EarconPlayerTest {
 
     @Test
     fun `stopping a track discards its frontier AND releases it`() {
-        // @spec/@reviewer 5c7c5e76: discard must be complete in ONE step. Nulling the reference after
+        // /@: discard must be complete in ONE step. Nulling the reference after
         // `stop()` alone left the resource unreleased -- nothing could release it later, the only
         // reference was gone -- and left the cumulative frontier standing, so the next cue on a fresh
         // track (head at zero) still had its target counting the retired track's frames.
@@ -909,7 +938,7 @@ class EarconPlayerTest {
 
     @Test
     fun `a same-sound successor completes from ITS OWN frames as the head advances`() {
-        // @spec: the field-level checks do not show COMPLETION. This drives the render head and requires
+        // : the field-level checks do not show COMPLETION. This drives the render head and requires
         // the successor to reach Consumed on its own accepted frames -- and NOT before them, since a
         // target that still included the predecessor's frames would report it Consumed immediately.
         val context = org.robolectric.RuntimeEnvironment.getApplication()
@@ -980,7 +1009,7 @@ class EarconPlayerTest {
 
     @Test
     fun `a same-sound successor's accepted WRITES are observed on a real player before teardown`() {
-        // @spec: close the isolated gap with the EXISTING real EarconPlayer and a controlled track --
+        // : close the isolated gap with the EXISTING real EarconPlayer and a controlled track --
         // observe B's ACCEPTED WRITES / admission before teardown, then its own head-driven completion and
         // session disposal. No mocked-output substitute: this is a real EarconPlayer writing to a mock
         // AudioTrack, so acceptedFramesTotal and lastPlayedId are PRODUCTION state, not bookkeeping.
@@ -1040,7 +1069,7 @@ class EarconPlayerTest {
 
     @Test
     fun `cue ownership opens and closes the recorder admission`() {
-        // @spec's control 3 at the level this harness can reach: an earcon cue is an OWNED producer, not
+        // control 3 at the level this harness can reach: an earcon cue is an OWNED producer, not
         // a null write. Without raw resources no clip plays (play returns null), so drive the same
         // lifecycle the cue path uses: open via the player's own helper semantics -- here verified by
         // constructing the player against a real recorder and checking that any accepted-frame path it
@@ -1063,4 +1092,21 @@ class EarconPlayerTest {
         assertNotNull(recorder.snapshot().firstOrNull())
         owned.release()
     }
+}
+
+/**
+ * A context whose resources resolve no earcon, which is the real "assets are missing" condition.
+ *
+ * Used instead of asserting the absence of an asset that in fact exists.
+ */
+private class MissingResourceContext(private val wrapped: Context) : android.content.ContextWrapper(wrapped) {
+    // Delegate everything to the real context, but make the earcon resource lookup fail, which is
+    // Precisely the "assets are not present" condition the player must survive.
+    override fun getResources(): android.content.res.Resources = MissingResources(wrapped.resources)
+}
+
+/** Real Resources, but every identifier resolves to 0 (i.e. not found). */
+@Suppress("DEPRECATION")
+private open class MissingResources(real: android.content.res.Resources) : android.content.res.Resources(real.assets, real.displayMetrics, real.configuration) {
+    override fun getIdentifier(name: String?, defType: String?, defPackage: String?): Int = 0
 }

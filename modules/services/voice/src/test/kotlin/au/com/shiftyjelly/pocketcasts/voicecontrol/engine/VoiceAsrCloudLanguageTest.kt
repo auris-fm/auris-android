@@ -1,4 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
+
 import android.content.Context
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
@@ -58,44 +59,53 @@ import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+
+/** Actual ASR preparation → dispatch → executor → prepared turn → socket auth JSON. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class VoiceAsrCloudLanguageTest {
     @get:Rule
     val mainCoroutineRule = MainCoroutineRule()
+
     @Test
     fun `model selected cloud sends complete Cantonese source instead of model paraphrase`() = runTest {
         for (fallback in listOf(false, true)) {
             checkCloud("請解釋嘉賓對睡眠嘅看法。", "yue", "Explain the guest's view on sleep.", fallback)
         }
     }
+
     @Test
     fun `routing failure sends complete Mandarin source instead of English translation`() = runTest {
         for (fallback in listOf(false, true)) {
             checkCloud("请解释嘉宾对睡眠的看法。", "zh", "Explain the guest's view on sleep.", fallback)
         }
     }
+
     @Test
     fun `both routes preserve unknown language without using app locale`() = runTest {
         for (fallback in listOf(false, true)) {
             checkCloud("請解釋呢段。", null, "請解釋呢段。", fallback)
         }
     }
+
     @Test
     fun `translated only backend sends available text and known source language on both routes`() = runTest {
         for (fallback in listOf(false, true)) {
             checkCloud("Explain this passage.", "de", "Explain this passage.", fallback, backendTranslation = true)
         }
     }
+
     @Test
     fun `translated only backend with unknown language cannot invent the original`() = runTest {
         checkCloud("Explain this passage.", null, "Explain this passage.", fallback = false, backendTranslation = true)
     }
+
     @Test
     fun `retry keeps the first prepared source text and language`() = runTest {
         checkCloud("解釋呢段。", "yue", "Explain this passage.", fallback = false, retry = true)
     }
+
     @Test
     fun `local intent still receives English and never opens a cloud socket`() = runTest {
         val fixture = startPipeline("暫停。", "yue", "Pause.", VoiceIntent.Playback.Pause)
@@ -109,6 +119,7 @@ class VoiceAsrCloudLanguageTest {
             fixture.close()
         }
     }
+
     @Test
     fun `two separate routing failures in one grace window send two distinct resumable cloud requests`() = runTest {
         val fixture = startPipeline("哦，我指的是AI推理。", "zh", "I mean AI reasoning.", intent = null, utterances = 2)
@@ -130,6 +141,7 @@ class VoiceAsrCloudLanguageTest {
             fixture.close()
         }
     }
+
     @Test
     fun `recognizer owned request identity survives the engine handoff`() = runTest {
         val chosen = VoiceIntent.CloudRoute("runtime request", VoiceIntent.CloudTier.Premium, logicalRequestId = "dialog-owned-request")
@@ -141,6 +153,7 @@ class VoiceAsrCloudLanguageTest {
             fixture.close()
         }
     }
+
     private suspend fun TestScope.checkCloud(
         source: String,
         language: String?,
@@ -149,6 +162,7 @@ class VoiceAsrCloudLanguageTest {
         backendTranslation: Boolean = false,
         retry: Boolean = false,
     ) {
+        // Exercise the real model-call mapper, including a paraphrase that must not become the request.
         val mapped = if (fallback) {
             null
         } else {
@@ -195,6 +209,7 @@ class VoiceAsrCloudLanguageTest {
             fixture.close()
         }
     }
+
     private suspend fun TestScope.startPipeline(
         text: String,
         language: String?,
@@ -234,6 +249,7 @@ class VoiceAsrCloudLanguageTest {
                 logicalRequestId: String,
             ): VoiceRecognizeResult {
                 inputs += input
+                // A null intent and missing failure reason exercise production routing-failure escalation.
                 return VoiceRecognizeResult(intent)
             }
             override fun release() = Unit
@@ -260,6 +276,7 @@ class VoiceAsrCloudLanguageTest {
                             speechOnsetSample = 2,
                         ),
                     )
+                    // The second utterance follows actual terminal/executor completion of the first.
                     if (utterances > 1) finishedTurns.receive()
                 }
             },
@@ -316,6 +333,7 @@ class VoiceAsrCloudLanguageTest {
         )
         return Fixture(engine, signal, client, inputs, intents, executor, playback, completed)
     }
+
     private data class Fixture(
         val engine: VoiceAsrEngine,
         val signal: GracePeriodSignal,
@@ -331,6 +349,8 @@ class VoiceAsrCloudLanguageTest {
             signal.onAppBackgrounded()
         }
     }
+
+    /** Only the network peer is simulated; production transport and JSON adapter do all encoding. */
     private class CapturingClient : OkHttpClient() {
         val frames = mutableListOf<String>()
         override fun newWebSocket(request: Request, listener: WebSocketListener): WebSocket {

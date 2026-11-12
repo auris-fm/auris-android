@@ -1,16 +1,34 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
+
 import java.util.UUID
+
+/**
+ * the immutable publication snapshot: built under the sink
+ * lock at the SINGLE seal operation — whether sealed by early completion (Executed/bleed
+ * terminal, cause [CAUSE_TERMINAL]) or by the bounded outcome wait (cause
+ * [CAUSE_OUTCOME_WAIT_EXPIRED]) — and handed to the REAL publication path. Async publication
+ * reads ONLY this; the mutable [RetainedCandidate] is never dispatched, and every later
+ * observation/terminal on the capture is refused through the same boundary (sealed flag).
+ *
+ * The cause keeps the stage schemas honest: a [CAUSE_OUTCOME_WAIT_EXPIRED] capture's
+ * unresolved stages are typed by the GENUINE expired wait; an early-completed capture keeps
+ * the pre-Batch-B unresolved typing (its wait did not expire — absence there is not an
+ * expiry fact).
+ */
 class SealedCapture(
     val captureId: UUID,
     val context: CaptureContext,
     val pcm: ShortArray,
     val sampleRateHz: Int,
     val wakeState: SegmentObservation.WakeState,
+    /** Measured wake score/threshold (null component = not measured). Null = detector never measured. */
     val wakeMeasurement: SegmentObservation.WakeMeasurement? = null,
     val outcome: CollectionOutcome?,
     val stageHistory: List<CollectionOutcome>,
     val translation: TranslationProvenance?,
+    /** P1: identity of the backend ACTUALLY invoked for ASR; null = never invoked.*/
     val asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef?,
+    /** P1: identity of the router ACTUALLY invoked; null = routing never ran. */
     val routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef?,
     val executionOutcome: ExecutionOutcome?,
     val allowanceMetadataCap: Int?,

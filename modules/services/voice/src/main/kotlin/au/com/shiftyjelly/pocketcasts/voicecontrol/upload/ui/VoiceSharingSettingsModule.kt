@@ -1,4 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
+
+
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice
@@ -13,9 +15,17 @@ import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+
+/**
+ * DI for the settings shell (plan Task 7: "wire through existing voice-module Hilt modules"). The
+ * ViewModel composes the SAME production singletons the collection boundary uses — the live policy
+ * provider, the account startup's projection + enrollment controller, the local withdrawal intent
+ * store — so a Settings tap and a collection decision read one truth, not two.
+ */
 @Module
 @InstallIn(SingletonComponent::class)
 object VoiceSharingSettingsModule {
+
 
     /**
      * EFFECTIVE CONSENT (Reviewer on `c2ce670cc7`): the provider the switch renders from must be the
@@ -53,13 +63,18 @@ object VoiceSharingSettingsModule {
         uploaderLoop: UploaderLoop,
     ): VoiceSharingSettingsViewModel {
         val controller: EnrollmentController = accountStartup.enrollmentController(
+            // Turning sharing off deletes every local recording, which is the whole of what
+            // stopping means for the queue.
             clearLocalPending = { runCatching { queue.deleteAll("sharing turned off") } },
         )
         return VoiceSharingSettingsViewModel(
             projection = accountStartup.state.projection,
             enrollmentController = controller,
             ownerSession = { accountStartup.ownerSessionGeneration() },
+            // The membership GET the surface depends on: production-only request prefix. The
+            // Ordinary signed-in bearer is read by the operations layer itself.
             refreshProjection = { accountStartup.operations.refreshProjection() },
+            // The loop cannot cancel itself while it is blocked in the call, so the tap does it.
             cancelInFlightUpload = uploaderLoop::cancelInFlight,
             savedChoice = effectiveConsentProvider(savedChoice) { accountStartup.currentAccountName() },
             knownChoice = knownChoiceProvider(savedChoice) { accountStartup.currentAccountName() },

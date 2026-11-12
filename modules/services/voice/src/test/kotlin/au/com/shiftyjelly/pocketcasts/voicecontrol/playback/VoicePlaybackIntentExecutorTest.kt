@@ -1,4 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
+
 import au.com.shiftyjelly.pocketcasts.sharedtest.MainCoroutineRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
@@ -15,59 +16,87 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.mockito.Mockito
+
 class VoicePlaybackIntentExecutorTest {
+
     @get:Rule
     val mainCoroutineRule = MainCoroutineRule()
+
     @Test
     fun `pause pauses sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.Pause)
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("pause"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `resume resumes sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.Resume)
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("resume"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `relative positive seek skips forward`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(30))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipForward:30"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `relative negative seek skips backward`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(-10))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipBackward:10"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `relative null seek with direction uses sink interval`() = runTest {
+        // Null deltaSeconds means "no amount stated — sink should apply its own
+        // Interval in direction". The executor passes null so the sink uses the
+        // App's configured interval rather than a manufactured value.
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, "backward"))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipBackward:null"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `relative null seek without direction uses forward interval`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, null))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipForward:null"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `negative absolute seek resolves as an offset back from the episode end`() = runTest {
+        // Voice-intents: "non-negative values are offsets from the beginning, 0 means beginning, and
+        // Negative values are offsets back from the episode end." Clamping to zero is a different
+        // Instruction: "5 s before the end" is not "the beginning". The duration is what makes the
+        // Offset resolvable, so it is supplied and must be used.
         val sinks = FakeSinks()
         org.mockito.kotlin.whenever(sinks.playbackManager.getCurrentEpisode()).thenReturn(
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
@@ -77,84 +106,117 @@ class VoicePlaybackIntentExecutorTest {
                 duration = 1800.0,
             ),
         )
+
         val response = sinks.executor().execute(VoiceIntent.Playback.SeekAbsolute(-5))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("seekTo:1795"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `next episode calls sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Playback.NextEpisode)
+
         assertEquals(VoiceResponse.Earcon(EarconId.NEXT_EPISODE), response)
         assertEquals(listOf("nextEpisode"), sinks.fakePlayback.calls)
     }
+
     @Test
     fun `next chapter calls chapter sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Chapter.NextChapter)
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("next"), sinks.chapter.calls)
     }
+
     @Test
     fun `previous chapter calls chapter sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Chapter.PreviousChapter)
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("previous"), sinks.chapter.calls)
     }
+
     @Test
     fun `chapter by index calls chapter sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Chapter.ByIndex(2))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("byIndex:2"), sinks.chapter.calls)
     }
+
     @Test
     fun `chapter by title does nothing`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Chapter.ByTitle("intro"))
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(emptyList<String>(), sinks.chapter.calls)
     }
+
     @Test
     fun `set speed calls effects sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Effects.SetSpeed(1.25))
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("setSpeed:1.25"), sinks.effects.calls)
     }
+
     @Test
     fun `set volume calls volume sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Volume.SetVolume(50))
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("setVolume:50"), sinks.volume.calls)
     }
+
     @Test
     fun `sleep set calls sleep sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Sleep.Set(30))
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("set:30"), sinks.sleep.calls)
     }
+
     @Test
     fun `bookmark add calls bookmark sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Bookmark.Add("my bookmark"))
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("add:my bookmark"), sinks.bookmark.calls)
     }
+
     @Test
     fun `a refused cloud turn does not renew the grace window`() = runTest {
+        // A limit refusal reaches done-with-error — the turn did
+        // Nothing for the user, so it must NOT earn the recognition renewal. The old code read only
+        // The ACTION outcome (None) and treated it as recognized, extending the window on a refusal.
         val sinks = FakeSinks()
         val signal = GracePeriodSignal(timeoutMs = 5_000L)
         val executor = sinks.executor(signal)
@@ -165,6 +227,9 @@ class VoicePlaybackIntentExecutorTest {
             action = CloudRouteActionOutcome.None,
             succeeded = false,
         )
+
+        // Advance INTO the window, then execute: a renewal would re-anchor the deadline at execute
+        // Time, so past wake+5s only a NON-renewed window expires.
         kotlinx.coroutines.delay(3_000L)
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -177,8 +242,11 @@ class VoicePlaybackIntentExecutorTest {
         assertFalse("a refusal must not extend the grace window", signal.isActive.value)
         assertEquals(window, signal.capturedGeneration())
     }
+
     @Test
     fun `a successful no-action answer still renews the grace window`() = runTest {
+        // The control for the refusal rule: a turn that reached done with spoken feedback and no
+        // Playback action is a recognized turn — its renewal must survive the refusal fix.
         val sinks = FakeSinks()
         val signal = GracePeriodSignal(timeoutMs = 5_000L)
         val executor = sinks.executor(signal)
@@ -189,6 +257,7 @@ class VoicePlaybackIntentExecutorTest {
             action = CloudRouteActionOutcome.None,
             succeeded = true,
         )
+
         kotlinx.coroutines.delay(3_000L)
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -197,14 +266,20 @@ class VoicePlaybackIntentExecutorTest {
                 windowGeneration = window,
             ),
         )
+        // 6s since the wake but only ~3s since execute: only a renewal explains a live window.
         kotlinx.coroutines.delay(3_000L)
         assertTrue("a successful answer renews the window", signal.isActive.value)
     }
+
     @Test
     fun `a dispatched turn carries its own window stamp, so a fresh wake creates`() = runTest {
+        // bound-path case: the stamp on the intent is the captured origin. A fresh wake
+        // Must create even while the previous conversation is still live, and a follow-up stamped with
+        // The same window must resume it.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val firstWindow = signal.capturedGeneration()
         executor.execute(
@@ -220,6 +295,8 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.wakeOrigins.last(),
         )
         assertEquals(firstWindow, sinks.fakeCloudRoute.capturedOrigins.last())
+
+        // A follow-up in the SAME window: not wake-originated, so it resumes.
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "follow-up",
@@ -233,14 +310,19 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.capturedOrigins.last(),
         )
     }
+
     @Test
     fun `a turn stamped with a superseded window never reaches transport`() = runTest {
+        // stale-origin case: an intent captured before a successor wake must not dispatch
+        // Under the successor's window, and must not mutate the successor's playback either.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val staleStamp = signal.capturedGeneration()
         signal.onWakeWordDetected() // a successor wake opens a NEW window
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "successor",
@@ -249,6 +331,7 @@ class VoicePlaybackIntentExecutorTest {
             ),
         )
         val callsAfterSuccessor = sinks.fakePlayback.calls.toList()
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "late old",
@@ -256,6 +339,7 @@ class VoicePlaybackIntentExecutorTest {
                 windowGeneration = staleStamp,
             ),
         )
+
         assertEquals(
             "only the successor reached transport -- the stale dispatch was refused BEFORE preparing " +
                 "(prepared=${sinks.fakeCloudRoute.preparedTurns.map { it.request }} " +
@@ -269,13 +353,20 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakePlayback.calls,
         )
     }
+
     @Test
     fun `a wake-free follow-up in the same window does not inherit the wake's flag`() = runTest {
+        // correction: the wake selection belongs to each request. The window is opened by a
+        // Wake, but only the wake's own request begins a conversation; a follow-up in the same window
+        // Continues it. Reading "this window was opened by a wake" for the follow-up made every
+        // Follow-up look like a fresh user act.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "the wake's own question",
@@ -287,6 +378,7 @@ class VoicePlaybackIntentExecutorTest {
             "the wake's OWN request begins the conversation",
             sinks.fakeCloudRoute.wakeOrigins.last(),
         )
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "a follow-up in the same window",
@@ -300,18 +392,25 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.wakeOrigins.last(),
         )
     }
+
     @Test
     fun `a privacy-closed window is not current even at a matching generation`() = runTest {
+        // third correction: currentness must reject a closed window, not just compare numbers.
+        // A privacy close means nothing keeps listening, so a request whose window was closed must not
+        // Be admitted simply because its generation still matches.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
         signal.onAppBackgrounded() // the privacy close invalidates the window
+
         assertFalse(
             "a closed window must not read as current",
             signal.isCurrent(window),
         )
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "after backgrounding",
@@ -324,22 +423,33 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.calls.isEmpty(),
         )
     }
+
     @Test
     fun `a retry of the same utterance reuses the turn the first dispatch prepared`() = runTest {
+        // production-retention requirement: preparation and retention happen in the EXECUTOR,
+        // So the retry path is reachable without a caller populating the intent. A branch only a test
+        // Can reach would leave retention unimplemented.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         val intent = VoiceIntent.CloudRoute(
             request = "a question worth retrying",
             tier = VoiceIntent.CloudTier.Premium,
             windowGeneration = window,
             logicalRequestId = "logical-1",
         )
+
+        // First attempt: the executor prepares and retains.
         executor.execute(intent)
         assertEquals("one turn prepared", 1, sinks.fakeCloudRoute.preparedTurns.size)
+
+        // Retry of the same utterance, with no prepared turn on the intent: the executor must find the
+        // One it retained.
         executor.execute(intent)
+
         assertEquals(
             "the retry did NOT prepare a second turn (prepared=" +
                 "${sinks.fakeCloudRoute.preparedTurns.map { it.requestId }})",
@@ -358,11 +468,16 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedDispatches[1].conversationId,
         )
     }
+
     @Test
     fun `two same-text user acts a fresh wake apart both dispatch and both create`() = runTest {
+        // bound-path case, whose failure motivated the logical identity: two separate user
+        // Acts saying the SAME words, each under its own wake. Each must dispatch, and each must be its
+        // Own CREATE with its own request ID and handle -- neither an omission nor a shared turn.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -379,6 +494,7 @@ class VoicePlaybackIntentExecutorTest {
                 windowGeneration = signal.capturedGeneration(),
             ),
         )
+
         assertEquals(
             "both user acts dispatched, not one (dispatched=" +
                 "${sinks.fakeCloudRoute.preparedDispatches.map { it.requestId }})",
@@ -396,11 +512,17 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedDispatches[1].conversationId,
         )
     }
+
     @Test
     fun `a retry of a turn prepared under an older window is refused after a successor opens`() = runTest {
+        // regression: prepare under generation 1, open generation 2, then retry the SAME
+        // Logical request with the new dispatch's stamp. The retention lookup returns the old turn, so
+        // Validating the incoming stamp passes while the turn being sent belongs to a superseded window.
+        // The check must run on the TURN's own captured origin.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val first = signal.capturedGeneration()
         executor.execute(
@@ -412,9 +534,13 @@ class VoicePlaybackIntentExecutorTest {
             ),
         )
         val dispatchesAfterFirst = sinks.fakeCloudRoute.preparedDispatches.size
+
+        // A SUCCESSOR window opens.
         signal.onWakeWordDetected()
         val successor = signal.capturedGeneration()
         assertNotEquals("the window moved", first, successor)
+
+        // Retry the same logical request, stamped with the new window.
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "prepared under window 1",
@@ -424,6 +550,7 @@ class VoicePlaybackIntentExecutorTest {
                 isRetry = true,
             ),
         )
+
         assertEquals(
             "a retry of a turn from a superseded window must not dispatch, whatever stamp it carries " +
                 "(dispatches=${sinks.fakeCloudRoute.preparedDispatches.size})",
@@ -431,13 +558,21 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedDispatches.size,
         )
     }
+
     @Test
     fun `a retry retired BETWEEN the executor's guards and preparation is refused, not recreated`() = runTest {
+        // dispatch-seam control. The executor's entry guards run first and then the sink
+        // Prepares; a retirement landing BETWEEN them used to be invisible, because the executor did not
+        // Forward the retry flag -- so the sink saw a request it had never seen and minted A new one,
+        // Sending a fresh conversation for a request the user meant to retry. The refusal exists, but a
+        // Refusal that never receives the flag cannot fire.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
+        // First attempt: prepares and retains under its logical identity.
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "prepare me",
@@ -448,8 +583,14 @@ class VoicePlaybackIntentExecutorTest {
             ),
         )
         assertEquals("the first attempt prepared", 1, sinks.fakeCloudRoute.preparedTurns.size)
+
+        // The retirement lands at the seam. The executor's guards are entry checks on a state read once:
+        // A retirement arriving after them but before preparation is exactly the gap, so the hook fires
+        // From the PREPARATION path where the second call's preparation begins.
         sinks.fakeCloudRoute.onPrepareSeam = { sinks.fakeCloudRoute.forgetRetained("logical-seam") }
+        // Fires only on the RETRY: the first attempt legitimately prepares.
         sinks.fakeCloudRoute.forgetAfterFirstPrepare = "logical-seam"
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "prepare me",
@@ -459,6 +600,7 @@ class VoicePlaybackIntentExecutorTest {
                 isRetry = true,
             ),
         )
+
         assertEquals(
             "a retry retired at the seam must NOT be prepared afresh " +
                 "(prepared=${sinks.fakeCloudRoute.preparedTurns.size})",
@@ -472,12 +614,17 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedDispatches.size,
         )
     }
+
     @Test
     fun `a retry naming an UNKNOWN logical request is refused rather than treated as new input`() = runTest {
+        // unknown-retry refusal: a retry whose identity was never prepared is not a retry of
+        // Anything. Treating it as new input would create a conversation for a request whose own
+        // Identity is unresolvable -- the substitution this mechanism exists to prevent.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "never prepared",
@@ -487,6 +634,7 @@ class VoicePlaybackIntentExecutorTest {
                 isRetry = true,
             ),
         )
+
         assertTrue(
             "an unknown retry reaches neither preparation nor transport " +
                 "(prepared=${sinks.fakeCloudRoute.preparedTurns.size} " +
@@ -494,12 +642,16 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedTurns.isEmpty() && sinks.fakeCloudRoute.preparedDispatches.isEmpty(),
         )
     }
+
     @Test
     fun `a FIRST attempt naming a logical request is not refused`() = runTest {
+        // The control: the refusal is about retries, not about the identity. A first attempt naming a
+        // Logical request is exactly how that request comes to exist.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "first attempt",
@@ -508,16 +660,22 @@ class VoicePlaybackIntentExecutorTest {
                 logicalRequestId = "fresh-request",
             ),
         )
+
         assertEquals("a first attempt prepares normally", 1, sinks.fakeCloudRoute.preparedTurns.size)
         assertEquals("and dispatches", 1, sinks.fakeCloudRoute.preparedDispatches.size)
     }
+
     @Test
     fun `a retry of an EARLIER logical request still finds its own turn after a later one`() = runTest {
+        // retired-ID case: executing logical A, then B, then retrying A must reuse A's turn.
+        // With a single retention slot, B OVERWROTE A, so the retry of A found nothing and created a
+        // THIRD wire request for a logical request that already had one.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         suspend fun dispatch(logical: String) = executor.execute(
             VoiceIntent.CloudRoute(
                 request = "question $logical",
@@ -526,16 +684,19 @@ class VoicePlaybackIntentExecutorTest {
                 logicalRequestId = logical,
             ),
         )
+
         dispatch("A")
         dispatch("B")
         val preparedAfterAB = sinks.fakeCloudRoute.preparedTurns.size
         dispatch("A") // the retry of the EARLIER one
+
         assertEquals(
             "the retry of A did not prepare a third turn " +
                 "(prepared=${sinks.fakeCloudRoute.preparedTurns.map { it.requestId }})",
             preparedAfterAB,
             sinks.fakeCloudRoute.preparedTurns.size,
         )
+        // The fake carries the logical id in the request text, so the filter matches on the prefix.
         val dispatchedA = sinks.fakeCloudRoute.preparedDispatches.filter { it.request.startsWith("question A") }
         assertEquals("A was dispatched twice, once initially and once as a retry", 2, dispatchedA.size)
         assertEquals(
@@ -544,13 +705,19 @@ class VoicePlaybackIntentExecutorTest {
             dispatchedA[1].requestId,
         )
     }
+
     @Test
     fun `the logical identity is what matches, not the words`() = runTest {
+        // The discriminating case for the retention key. A retry that names the same logical request
+        // But words the request differently must reuse the prepared turn: the identity is what matches.
+        // Under a text key it would prepare a second turn -- which is the failure this case exists to
+        // Separate from the same-text case, whose outcome a text key happens to reproduce.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
@@ -559,6 +726,7 @@ class VoicePlaybackIntentExecutorTest {
                 logicalRequestId = "logical-1",
             ),
         )
+        // The SAME logical request, worded differently.
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "could you summarise it",
@@ -567,6 +735,7 @@ class VoicePlaybackIntentExecutorTest {
                 logicalRequestId = "logical-1",
             ),
         )
+
         assertEquals(
             "the same logical request does not prepare twice, whatever words it is retried with " +
                 "(ids=${sinks.fakeCloudRoute.preparedTurns.map { it.requestId }})",
@@ -579,11 +748,16 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedDispatches.last().requestId,
         )
     }
+
     @Test
     fun `two distinct user acts saying the same words prepare separate requests`() = runTest {
+        // key correction: identical words are not the same request. Two separate user acts can
+        // Say the same thing, and each needs its own request ID and its own create/resume decision
+        // Under its own origin. Keying retention on the request text would have merged them.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -593,6 +767,7 @@ class VoicePlaybackIntentExecutorTest {
                 logicalRequestId = "act-1",
             ),
         )
+        // A new wake: a separate user act, saying the same words.
         signal.onWakeWordDetected()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -602,6 +777,7 @@ class VoicePlaybackIntentExecutorTest {
                 logicalRequestId = "act-2",
             ),
         )
+
         assertEquals(
             "each user act prepared its OWN turn (ids=${sinks.fakeCloudRoute.preparedTurns.map { it.requestId }})",
             2,
@@ -613,12 +789,16 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedTurns[1].requestId,
         )
     }
+
     @Test
     fun `an utterance naming no logical request is a new act, not a retry`() = runTest {
+        // The control for the key: a dispatch that names NO logical request never finds a retained turn,
+        // So it prepares its own. Without this, retention keyed on anything would look correct.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
+
         val intent = VoiceIntent.CloudRoute(
             request = "the same words twice",
             tier = VoiceIntent.CloudTier.Premium,
@@ -626,6 +806,7 @@ class VoicePlaybackIntentExecutorTest {
         )
         executor.execute(intent)
         executor.execute(intent)
+
         assertEquals(
             "with no logical identity each dispatch prepares its own turn " +
                 "(ids=${sinks.fakeCloudRoute.preparedTurns.map { it.requestId }})",
@@ -633,13 +814,17 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.preparedTurns.size,
         )
     }
+
     @Test
     fun `a dispatch carrying a prepared turn goes through the retry path, not fresh preparation`() = runTest {
+        // missing production caller: the executor must carry and dispatch a prepared
+        // Turn, so a controller retry reuses its identity instead of preparing a new request.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
             request = "prepared request",
             context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
@@ -648,6 +833,7 @@ class VoicePlaybackIntentExecutorTest {
             conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
             capturedOrigin = window,
         )
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "prepared request",
@@ -656,6 +842,7 @@ class VoicePlaybackIntentExecutorTest {
                 preparedTurn = prepared,
             ),
         )
+
         assertEquals(
             "the prepared turn was dispatched through the retry path (calls=${sinks.fakeCloudRoute.calls})",
             listOf(prepared),
@@ -666,13 +853,17 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.calls.none { it.startsWith("routeToCloud:") },
         )
     }
+
     @Test
     fun `a prepared retry whose window was closed by privacy is refused before dispatch`() = runTest {
+        // The privacy half belongs to the caller: the sink cannot observe the grace signal, so the
+        // Executor refuses a closed window for a retry exactly as it does for a first attempt.
         val sinks = FakeSinks()
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
         val executor = sinks.executor(signal)
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
             request = "prepared request",
             context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
@@ -682,6 +873,7 @@ class VoicePlaybackIntentExecutorTest {
             capturedOrigin = window,
         )
         signal.onAppBackgrounded() // the privacy close invalidates the window
+
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "prepared request",
@@ -690,19 +882,26 @@ class VoicePlaybackIntentExecutorTest {
                 preparedTurn = prepared,
             ),
         )
+
         assertTrue(
             "a retry under a closed window must not reach the sink " +
                 "(dispatches=${sinks.fakeCloudRoute.preparedDispatches})",
             sinks.fakeCloudRoute.preparedDispatches.isEmpty(),
         )
     }
+
     @Test
     fun `the abandonment binding releases a retained turn and clears on teardown`() = runTest {
+        // production composition call, with its lifetime: the binding must CONNECT abandonment
+        // To the retention release, and must be REMOVABLE so a session's end does not leave the manager
+        // Reporting into a sink whose session is over.
         val sinks = FakeSinks()
         val manager = au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager(
             au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper(),
         )
         val executor = sinks.executor()
+
+        // Connected: the bound callback reaches the SINK's release, which is the production effect.
         val released = mutableListOf<String>()
         sinks.fakeCloudRoute.onForget = { released += it }
         executor.bindDialogAbandonment(manager)
@@ -710,17 +909,22 @@ class VoicePlaybackIntentExecutorTest {
             "the binding connects the manager to the release",
             manager.onRequestAbandoned,
         )
+        // Drive it: an abandoned request must reach the sink's release.
         manager.onRequestAbandoned?.invoke("logical-1")
         assertEquals(
             "an abandoned request reaches the sink's release (released=$released)",
             listOf("logical-1"),
             released,
         )
+
+        // Cleared: the manager no longer reports into the session that has ended.
         executor.unbindDialogAbandonment()
         assertNull(
             "teardown clears the binding, so the manager does not report into a finished session",
             manager.onRequestAbandoned,
         )
+        // The release recorded BEFORE teardown is unaffected by clearing the binding, and nothing new
+        // Arrives afterwards: clearing REMOVES the wiring without undoing what it already delivered.
         val releasedBeforeTeardown = released.toList()
         assertEquals(
             "clearing the binding does not undo a release it already delivered",
@@ -728,16 +932,19 @@ class VoicePlaybackIntentExecutorTest {
             released,
         )
     }
+
     @Test
     fun `cloud route delegates to cloud route sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
             ),
         )
+
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(
             "the turn is prepared once and dispatched through the retry path, so a first attempt and a " +
@@ -746,11 +953,17 @@ class VoicePlaybackIntentExecutorTest {
             sinks.fakeCloudRoute.calls,
         )
     }
+
     @Test
     fun `the executor records the action outcome the dispatch reported`() = runTest {
+        // The OUTCOME the sink reports is the only thing that decides what is recorded, so a case that
+        // Passed while reading nothing would need the executor to invent a value -- which it cannot, as
+        // The fake's default is the opposite of what this asserts.
         val sinks = FakeSinks()
         sinks.fakeCloudRoute.actionOutcome = CloudRouteActionOutcome.Unknown
+
         val executor = sinks.executor()
+        // The request owns the outcome, so the case mints what the caller would mint and reads that.
         val outcome = VoicePlaybackIntentExecutor.TurnOutcome()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -759,16 +972,19 @@ class VoicePlaybackIntentExecutorTest {
             ),
             outcome,
         )
+
         assertEquals(
             "an unknown action outcome must survive the dispatch, not be collapsed into a settled one",
             CloudRouteActionOutcome.Unknown,
             outcome.action,
         )
     }
+
     @Test
     fun `a confirmed action is recorded as confirmed`() = runTest {
         val sinks = FakeSinks()
         sinks.fakeCloudRoute.actionOutcome = CloudRouteActionOutcome.Confirmed
+
         val executor = sinks.executor()
         val outcome = VoicePlaybackIntentExecutor.TurnOutcome()
         executor.execute(
@@ -778,15 +994,23 @@ class VoicePlaybackIntentExecutorTest {
             ),
             outcome,
         )
+
         assertEquals(CloudRouteActionOutcome.Confirmed, outcome.action)
     }
+
     @Test
     fun `a spoken pause is reported as a user command`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         executor.execute(VoiceIntent.Playback.Pause)
+
+        // The playback layer cannot tell the user's spoken pause from the cloud
+        // Turn's own pause — both carry the voice tag — so the executor reports
+        // It, and that is what blocks a turn from restoring over the user.
         org.mockito.kotlin.verify(sinks.playbackManager).noteUserPlaybackCommand()
     }
+
     @Test
     fun `the user's command is recorded before the action runs`() = runTest {
         val order = mutableListOf<String>()
@@ -795,23 +1019,35 @@ class VoicePlaybackIntentExecutorTest {
         Mockito.doAnswer { order += "noteUserPlaybackCommand" }
             .`when`(sinks.playbackManager).noteUserPlaybackCommand()
         val executor = sinks.executor()
+
         executor.execute(VoiceIntent.Playback.Pause)
+
+        // A pause that has reached the player but not the counter is the window
+        // Where a cloud turn would resume over the user.
         assertEquals(listOf("noteUserPlaybackCommand", "playback:pause"), order)
     }
+
     @Test
     fun `a spoken seek is not a play-pause command`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         executor.execute(VoiceIntent.Playback.SeekRelative(30))
+
+        // A seek does not contest the turn's pause, so it must not invalidate it.
         org.mockito.kotlin.verify(sinks.playbackManager, org.mockito.kotlin.never()).noteUserPlaybackCommand()
     }
+
     @Test
     fun `a fallback completing after a privacy close leaves the window closed`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val generation = signal.currentGeneration
+
+        // The app is backgrounded while the cloud turn is still in flight.
         sinks.fakeCloudRoute.whileInFlight = { signal.onAppBackgrounded() }
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -821,14 +1057,19 @@ class VoicePlaybackIntentExecutorTest {
                 origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
             ),
         )
+
+        // The turn's completion must not bring the mic back: the privacy close
+        // Wins over an in-flight turn.
         assertFalse("a completion reopened a closed window", signal.isActive.value)
         assertFalse(signal.isCurrent(generation))
     }
+
     @Test
     fun `a model-chosen route completing after a privacy close leaves the window closed`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val generation = signal.currentGeneration
         sinks.fakeCloudRoute.whileInFlight = { signal.onAppBackgrounded() }
@@ -836,16 +1077,20 @@ class VoicePlaybackIntentExecutorTest {
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
+                // The router chose this one; the rule has to hold for it too.
                 windowGeneration = generation,
             ),
         )
+
         assertFalse("a completion reopened a privacy-closed window", signal.isActive.value)
     }
+
     @Test
     fun `a model-chosen route completing inside an open window extends it`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 100L)
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -854,59 +1099,97 @@ class VoicePlaybackIntentExecutorTest {
                 windowGeneration = signal.currentGeneration,
             ),
         )
+
         assertTrue(signal.isActive.value)
     }
+
     @Test
     fun `playback query whats playing returns spoken`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.PlaybackQuery.WhatsPlaying)
+
         assertEquals(VoiceResponse.Spoken("whats playing"), response)
     }
+
     @Test
     fun `queue clear calls queue sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.Queue.Clear)
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("clear"), sinks.queue.calls)
     }
+
     @Test
     fun `stats query returns spoken`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
+
         val response = executor.execute(VoiceIntent.StatsQuery.ListeningStreak)
+
         assertEquals(VoiceResponse.Spoken("streak"), response)
     }
+
+    // The presentation/outcome separation: identical presentation must
+    // Not imply an identical result. These controls read the facts the sinks report, never the
+    // Responses they render.
     @Test
     fun `clear reports dispatch while rendering the same CONFIRM_REQUIRED earcon`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
+
         val response = executor.execute(VoiceIntent.Queue.Clear) { facts += it }
+
+        // The fake renders success; the production sink renders CONFIRM_REQUIRED after the same
+        // Dispatch. Either way the earcon is presentation and the fact below is the outcome.
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        // ..while the reported fact says the clear was requested.
+        // Dispatched is not a result: the executor also records the
+        // Primary unknown, so an auxiliary or later fact cannot lift this into success.
         assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
     }
+
     @Test
     fun `pause reports dispatch even though its earcon says success`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
+
         val response = executor.execute(VoiceIntent.Playback.Pause) { facts += it }
+
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        // A success earcon is not evidence of completion: the sink call returning is dispatch only.
+        // Dispatched is not a result: the executor also records the
+        // Primary unknown, so an auxiliary or later fact cannot lift this into success.
         assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
     }
+
     @Test
     fun `resume reports dispatch although it renders Silent`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
+
         val response = executor.execute(VoiceIntent.Playback.Resume) { facts += it }
+
         assertEquals(VoiceResponse.Silent, response)
+        // Dispatched is not a result: the executor also records the
+        // Primary unknown, so an auxiliary or later fact cannot lift this into success.
         assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
     }
+
     @Test
     fun `overlapping executions each deliver facts to their OWN reporter and never cross`() {
+        // The service-shaped concurrency control: two overlapping execute()
+        // Calls, each with its own invocation-local reporter. The shared-slot design let one
+        // Dispatch overwrite or clear the other's callback; the parameter design cannot. The
+        // Executor serializes actions (one sink in flight), so each dispatch's facts land only
+        // In that dispatch's list — here proven by both lists seeing exactly their own calls.
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val aFacts = mutableListOf<VoiceActionOutcome>()
@@ -927,11 +1210,17 @@ class VoicePlaybackIntentExecutorTest {
         a.start()
         b.start()
         assertTrue(latch.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
         assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), aFacts)
         assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), bFacts)
     }
+
     @Test
     fun `a held cloud stream does not block a pause from entering`() {
+        // The barge-in control: the executor must not serialize
+        // Unrelated voice work — a second turn, pause or stop cannot wait for a long-lived cloud
+        // Stream. A held routeToCloud runs on its own thread; a Pause dispatched meanwhile must
+        // Complete while the cloud turn is still held.
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val cloudHeld = java.util.concurrent.CountDownLatch(1)
@@ -945,6 +1234,7 @@ class VoicePlaybackIntentExecutorTest {
         }
         cloudThread.start()
         assertTrue(cloudHeld.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
         val pauseFacts = mutableListOf<VoiceActionOutcome>()
         val pauseDone = java.util.concurrent.CountDownLatch(1)
         var pauseCompleted = false
@@ -960,20 +1250,29 @@ class VoicePlaybackIntentExecutorTest {
         releaseCloud.countDown()
         cloudThread.join(10_000)
         pauseThread.join(10_000)
+
         assertTrue("pause must enter while the cloud stream is held", enteredWhileHeld)
         assertTrue(pauseCompleted)
         assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), pauseFacts)
     }
+
+    // The deprecated requestAudioFocus overload is what the sink itself calls (suppressing there is
+    // The documented smaller change); the control mirrors the production call, so it suppresses too.
     @Suppress("DEPRECATION")
     @Test
     fun `identical Silent presentations from granted and denied focus report different facts`() {
+        // The real branches, not injected facts: PlaybackManagerPlaybackSink.duck() returns Silent
+        // On BOTH the granted and the rejected audio-focus path. Only the reporter distinguishes
+        // Them, which is exactly what a response-based classifier could never do.
         val context = Mockito.mock(android.content.Context::class.java)
         val audioManager = Mockito.mock(android.media.AudioManager::class.java)
+        // The sink resolves AudioManager via the androidx extension, i.e. The CLASS overload
         Mockito.`when`(context.getSystemService(android.media.AudioManager::class.java)).thenReturn(audioManager)
         Mockito.`when`(audioManager.mode).thenReturn(android.media.AudioManager.MODE_NORMAL)
         val playbackManager = Mockito.mock(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager::class.java)
         val sink = PlaybackManagerPlaybackSink(playbackManager, context)
         val facts = mutableListOf<VoiceActionOutcome>()
+
         Mockito.`when`(
             audioManager.requestAudioFocus(
                 org.mockito.kotlin.any(),
@@ -981,6 +1280,7 @@ class VoicePlaybackIntentExecutorTest {
                 org.mockito.kotlin.any(),
             ),
         ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        // The per-call channel: the reporter travels with THIS focus request, never a shared slot.
         val granted = kotlinx.coroutines.runBlocking { sink.duckReporting { facts += it } }
         Mockito.`when`(
             audioManager.requestAudioFocus(
@@ -990,19 +1290,30 @@ class VoicePlaybackIntentExecutorTest {
             ),
         ).thenReturn(android.media.AudioManager.AUDIOFOCUS_REQUEST_FAILED)
         val denied = kotlinx.coroutines.runBlocking { sink.duckReporting { facts += it } }
+
+        // Identical presentation...
         assertEquals("the granted path renders Silent", VoiceResponse.Silent, granted)
         assertEquals("the denied path renders Silent too", VoiceResponse.Silent, denied)
+        // ..different facts.
         assertEquals(
             listOf<VoiceActionOutcome>(
+                // AUXILIARY facts, named as such: the duck's grant is not
+                // The turn's action result.
                 VoiceActionOutcome.AuxiliaryPerformed("audio_focus"),
                 VoiceActionOutcome.AuxiliaryPreconditionFailed("audio_focus", "audio_focus_denied"),
             ),
             facts,
         )
     }
+
     @Test
     @Suppress("DEPRECATION")
     fun `a REAL cloud turn whose duck is granted still records its own action as unobserved`() = kotlinx.coroutines.runBlocking {
+        // The actual executor path: no injected facts. A real
+        // PlaybackManagerPlaybackSink duck grants focus (auxiliary success) and the executor's own
+        // Execute() decides what to report. Before the primary/auxiliary split, that grant set the
+        // "a fact was reported" flag and suppressed the unknown, so the invocation aggregated to
+        // Success even though the turn never said what IT did.
         val context = Mockito.mock(android.content.Context::class.java)
         val audioManager = Mockito.mock(android.media.AudioManager::class.java)
         Mockito.`when`(context.getSystemService(android.media.AudioManager::class.java)).thenReturn(audioManager)
@@ -1015,16 +1326,22 @@ class VoicePlaybackIntentExecutorTest {
         )
         val sinks = FakeSinks(playbackOverride = playback).withRealCloudRoute(playback)
         val facts = mutableListOf<VoiceActionOutcome>()
+
+        // A REAL cloud turn: the production sink reaches its focus branch and reports the grant.
         sinks.executor().execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium)) { facts += it }
+
+        // The duck's grant IS observed...
         assertTrue(
             "the auxiliary grant must be reported",
             facts.any { it is VoiceActionOutcome.AuxiliaryPerformed },
         )
+        // ..and the turn's own action is still explicitly unobserved.
         assertTrue(
             "an auxiliary success must NOT suppress the primary unknown; facts were $facts",
             facts.contains(VoiceActionOutcome.NotObserved),
         )
     }
+
     private class FakeSinks(
         private val playbackOverride: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackSink? = null,
         cloudRouteOverride: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink? = null,
@@ -1042,8 +1359,11 @@ class VoicePlaybackIntentExecutorTest {
         val queue = FakeQueueSink()
         val playbackQuery = FakePlaybackQuerySink()
         val statsQuery = FakeStatsQuerySink()
+
         val playbackManager: au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager = org.mockito.kotlin.mock()
+
         fun withRealCloudRoute(playbackSink: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackSink): FakeSinks = FakeSinks(playbackOverride = playbackSink, cloudRouteOverride = RealCloudRouteSink(playbackSink))
+
         fun executor(signal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()) = VoicePlaybackIntentExecutor(
             playbackSink = playback,
             effectsSink = effects,
@@ -1060,8 +1380,10 @@ class VoicePlaybackIntentExecutorTest {
             playbackManager = playbackManager,
         )
     }
+
     private class FakePlaybackSink : VoicePlaybackSink {
         var onCall: ((String) -> Unit)? = null
+
         val calls = mutableListOf<String>()
         override suspend fun duck(): VoiceResponse {
             calls += "duck"
@@ -1073,6 +1395,7 @@ class VoicePlaybackIntentExecutorTest {
             onCall?.invoke("restore")
             return VoiceResponse.Silent
         }
+
         override suspend fun pauseAsHold(): VoiceResponse = pause()
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
@@ -1096,6 +1419,8 @@ class VoicePlaybackIntentExecutorTest {
             episodeDurationSeconds: Int,
             expectedEpisodeId: String?,
         ): EpisodeOperationResult {
+            // Resolve the schema's signed semantics the same way production does, so a fake cannot
+            // Make a negative position pass by clamping it where the real sink resolves an offset.
             val resolved = if (positionSeconds < 0) {
                 (episodeDurationSeconds + positionSeconds).coerceIn(0, episodeDurationSeconds)
             } else {
@@ -1109,6 +1434,7 @@ class VoicePlaybackIntentExecutorTest {
             return VoiceResponse.Earcon(EarconId.NEXT_EPISODE)
         }
     }
+
     private class FakeEffectsSink : VoiceEffectsSink {
         val calls = mutableListOf<String>()
         override fun setSpeed(speed: Double): VoiceResponse {
@@ -1129,6 +1455,7 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun queryEffects(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
+
     private class FakeVolumeSink : VoiceVolumeSink {
         val calls = mutableListOf<String>()
         override fun setVolume(volume: Int): VoiceResponse {
@@ -1141,6 +1468,7 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun query(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
+
     private class FakeSleepSink : VoiceSleepSink {
         val calls = mutableListOf<String>()
         override fun set(minutes: Int): VoiceResponse {
@@ -1165,6 +1493,7 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun query(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
+
     private class FakeChapterSink : VoiceChapterSink {
         val calls = mutableListOf<String>()
         override fun next(): VoiceResponse {
@@ -1188,6 +1517,7 @@ class VoicePlaybackIntentExecutorTest {
         override fun queryCount(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
         override fun queryNext(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
+
     private class FakeBookmarkSink : VoiceBookmarkSink {
         val calls = mutableListOf<String>()
         override suspend fun add(title: String?): VoiceResponse {
@@ -1214,35 +1544,77 @@ class VoicePlaybackIntentExecutorTest {
         override fun queryCount(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
         override fun queryNearby(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
+
     private class FakeCloudRouteSink : VoiceCloudRouteSink {
         val calls = mutableListOf<String>()
+
+        /** The grace flag each call carried, so a case can assert continuation versus creation. */
         val graceFlags = mutableListOf<Boolean>()
+
+        /** Runs while the turn is in flight, to land a privacy event mid-turn. */
         var whileInFlight: (() -> Unit)? = null
+
+        /** The captured window identity each call carried, so a case can assert what was captured. */
         val capturedOrigins = mutableListOf<Long?>()
         val wakeOrigins = mutableListOf<Boolean>()
+
+        /**
+         * The action outcome the sink reports.
+         *
+         * Settable so a case can make the DISPATCHED outcome the only thing that decides what the
+         * executor records: a fixed value would let the recording pass while reading nothing.
+         */
         var actionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.Confirmed
+
+        /**
+         * The result the first dispatch returns, settable so a case can present a REAL refusal
+         * (spoken error feedback, no action, failed terminal) exactly as the production sink does.
+         */
         var firstDispatchResult: CloudTurnResult? = null
+
+        /** The prepared turns a retry dispatched, so a case can assert identity was reused. */
         val preparedDispatches = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+        /** The turns prepared on a first dispatch, so a case can assert identity was minted once. */
         val preparedTurns = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+        /** Retained turns by logical request, mirroring the sink's store. */
         private val retained =
             mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+        /** Invoked when the production release path forgets a request, so a case can observe it. */
         var onForget: ((String) -> Unit)? = null
+
         override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
+            // Retained for symmetry with the production interface; the fake has no store to release.
         }
+
         override fun forgetRetained(logicalRequestId: String) {
+            // Actually forget, not just report: a fake that only notified left the entry in its store,
+            // So a retry the production release had retired still resolved here -- the fake would have
+            // Made the defect invisible.
             retained.remove(logicalRequestId)
             onForget?.invoke(logicalRequestId)
         }
+
+        /** Runs at the dispatch seam, between the executor's guards and preparation. */
         var onPrepareSeam: (() -> Unit)? = null
+
+        /** Retires this logical request the first time a retry reaches preparation. */
         var forgetAfterFirstPrepare: String? = null
+
+        /** The windows whose ending reached the sink, so a case can assert the dispatch was wired. */
         val endedWindows = mutableListOf<Long>()
+
         override fun endWindow(endedGeneration: Long): List<String> {
             endedWindows += endedGeneration
             return retained.keys.filter { it.isNotEmpty() }.also { retained.clear() }
         }
+
         override fun retainedTurnFor(
             logicalRequestId: String,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = retained[logicalRequestId]
+
         override suspend fun prepareTurn(
             request: String,
             tier: VoiceIntent.CloudTier,
@@ -1256,15 +1628,27 @@ class VoicePlaybackIntentExecutorTest {
             sourceLanguage: String?,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
             onPrepareSeam?.invoke()
+            // Retire at the seam, once, on the retry: a retirement landing after the executor's guards
+            // Have already read the store is what the refusal must still catch.
             forgetAfterFirstPrepare?.let { id ->
                 forgetAfterFirstPrepare = null
                 forgetRetained(id)
             }
+            // Mirrors the production rule: a logical request that already has a turn reuses it, so the
+            // Fake cannot mask a retry by minting a fresh one.
             logicalRequestId?.let { id ->
+                // The store is the `retained` map alone. Looking in `preparedTurns` as well made the
+                // Fake's store a SECOND record that a retirement never cleared -- so a retired request
+                // Still resolved here and the case could never observe the refusal. Production has one
+                // Store; the fake now does too.
                 retained[id]?.let { return it }
+                // Mirrors the production rule: a RETRY that misses is refused rather than prepared,
+                // Because preparing would resurrect a request that is no longer retryable.
                 if (isRetry) return null
             }
             val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
+                // The logical id is carried in the request text so the fake can key on it exactly as
+                // Production keys on the identity field.
                 request = if (logicalRequestId != null) "$request|$logicalRequestId" else request,
                 context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
                 requestId = "prepared-${preparedTurns.size + 1}",
@@ -1275,25 +1659,34 @@ class VoicePlaybackIntentExecutorTest {
             )
             preparedTurns += prepared
             logicalRequestId?.let { retained[it] = prepared }
+            // Recorded at PREPARE time: production resolves the window and wake selection here, so a
+            // Case asserts what the executor actually decided, not what a call site happened to pass.
             graceFlags += isLiveGraceTurn
             capturedOrigins += capturedOrigin
             wakeOrigins += isWakeOriginated
             calls += "prepareTurn:$request"
             return prepared
         }
+
         override suspend fun dispatchPrepared(
             prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
             isRetry: Boolean,
         ): CloudTurnResult {
             preparedDispatches += prepared
             calls += "dispatchPrepared:${prepared.request}"
+            // The hook belongs to the DISPATCH, which is where production now sends the turn: a case
+            // That landed an event "while in flight" through the old call site would silently land it
+            // Nowhere, and the case would pass or fail for the wrong reason.
             whileInFlight?.invoke()
             firstDispatchResult?.let { return it }
+            // The fake reports a CONFIRMED action, so a case exercising the executor's consumption sees
+            // A settled outcome rather than an accidental Unknown.
             return CloudTurnResult(
                 feedback = VoiceResponse.Silent,
                 action = actionOutcome,
             )
         }
+
         override suspend fun routeToCloud(
             request: String,
             tier: VoiceIntent.CloudTier,
@@ -1313,8 +1706,10 @@ class VoicePlaybackIntentExecutorTest {
             )
         }
     }
+
     private class RealCloudRouteSink(private val playback: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackSink) : ObservingCloudRouteTestAdapter() {
         val calls = mutableListOf<String>()
+
         override suspend fun reportRoute(
             request: String,
             tier: VoiceIntent.CloudTier,
@@ -1322,13 +1717,16 @@ class VoicePlaybackIntentExecutorTest {
             onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {
             calls += "routeToCloud"
+            // The SAME decision production makes: duck through the per-call channel.
             playback.duckReporting(onDuck)
             return VoiceResponse.Silent
         }
     }
+
     private class FakePlaybackContextProvider : PlaybackContextProvider {
         override fun current(): PlaybackContext = PlaybackContext()
     }
+
     private class FakeQueueSink : VoiceQueueSink {
         val calls = mutableListOf<String>()
         override suspend fun addTop(episode: String?): VoiceResponse {
@@ -1380,6 +1778,7 @@ class VoicePlaybackIntentExecutorTest {
             return VoiceResponse.Spoken("queue check")
         }
     }
+
     private class FakePlaybackQuerySink : VoicePlaybackQuerySink {
         override fun whatsPlaying(): VoiceResponse.Spoken = VoiceResponse.Spoken("whats playing")
         override fun position(): VoiceResponse.Spoken = VoiceResponse.Spoken("position")
@@ -1391,6 +1790,7 @@ class VoicePlaybackIntentExecutorTest {
         override fun downloadStatus(): VoiceResponse.Spoken = VoiceResponse.Spoken("status")
         override fun episodeTitle(): VoiceResponse.Spoken = VoiceResponse.Spoken("title")
     }
+
     private class FakeStatsQuerySink : VoiceStatsQuerySink {
         override fun listeningTime(period: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("time")
         override fun topPodcasts(period: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("top")
@@ -1403,14 +1803,19 @@ class VoicePlaybackIntentExecutorTest {
         override fun newEpisodes(timeframe: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("new")
         override fun timeSinceLastListen(): VoiceResponse.Spoken = VoiceResponse.Spoken("last")
     }
+
     @Test
     fun `an Unknown cloud outcome does not reset inactivity at the recognizing site`() = runTest {
+        // finding: the executor recognized unconditionally, before any caller could check --
+        // So a guard added downstream was defeated by this very call. The guard belongs where the act is.
         val sinks = FakeSinks()
         sinks.fakeCloudRoute.actionOutcome = CloudRouteActionOutcome.Unknown
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         val timerBefore = signal.timerJobForTest()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -1419,16 +1824,21 @@ class VoicePlaybackIntentExecutorTest {
                 windowGeneration = window,
             ),
         )
+
         org.junit.Assert.assertSame("an unknown action cannot reset inactivity", timerBefore, signal.timerJobForTest())
     }
+
     @Test
     fun `a Confirmed cloud outcome resets inactivity`() = runTest {
+        // The control, so the case is decided by the outcome rather than by recognition never happening.
         val sinks = FakeSinks()
         sinks.fakeCloudRoute.actionOutcome = CloudRouteActionOutcome.Confirmed
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
         val executor = sinks.executor(signal)
+
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
+
         val timerBefore = signal.timerJobForTest()
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -1437,6 +1847,7 @@ class VoicePlaybackIntentExecutorTest {
                 windowGeneration = window,
             ),
         )
+
         org.junit.Assert.assertNotSame("a confirmed action resets inactivity", timerBefore, signal.timerJobForTest())
     }
 }

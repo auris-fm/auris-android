@@ -87,21 +87,34 @@ class VoiceSharingAccountOperations(
             }
         }
     }
-    suspend fun setVoiceSharing(enrolled: Boolean, acceptedDisclosureVersion: String?): VoiceSharingMutationResult {
+    suspend fun setVoiceSharing(
+        enrolled: Boolean,
+        acceptedDisclosureVersion: String?,
+        mayApply: () -> Boolean = { true },
+    ): VoiceSharingMutationResult {
         if (enrolled && acceptedDisclosureVersion.isNullOrBlank()) return VoiceSharingMutationResult.Failure
         val (ownerAccount, ownerSession) = ownerNow()
         val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null, ownerAccount, ownerSession)
             ?: return VoiceSharingMutationResult.Failure
         return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued)
+            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued, mayApply)
             is Outcome.Done, is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
-    suspend fun enroll(acceptedDisclosureVersion: String): VoiceSharingMutationResult = setVoiceSharing(enrolled = true, acceptedDisclosureVersion = acceptedDisclosureVersion)
-    suspend fun withdraw(): VoiceSharingMutationResult = setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null)
-    private fun appliedOrFailure(json: String, issued: Issued): VoiceSharingMutationResult {
+    /**
+     * [mayApply] is the supersession fence of the calling surface (Reviewer, integrated control):
+     * a withdrawal deliberately does not queue behind an in-flight enrollment, so a superseded
+     * enrollment's PUT answer can land AFTER the withdrawal applied. Without this gate the apply
+     * would publish the stale enrollment over it — in the projection AND the durable choice.
+     */
+    suspend fun enroll(
+        acceptedDisclosureVersion: String,
+        mayApply: () -> Boolean = { true },
+    ): VoiceSharingMutationResult = setVoiceSharing(enrolled = true, acceptedDisclosureVersion = acceptedDisclosureVersion, mayApply = mayApply)
+    suspend fun withdraw(mayApply: () -> Boolean = { true }): VoiceSharingMutationResult = setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null, mayApply = mayApply)
+    private fun appliedOrFailure(json: String, issued: Issued, mayApply: () -> Boolean): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        return if (apply(json, issued, fromRefresh = false)) {
+        return if (apply(json, issued, fromRefresh = false, mayApply = mayApply)) {
             VoiceSharingMutationResult.Applied(projection)
         } else VoiceSharingMutationResult.Failure
     }
@@ -113,13 +126,16 @@ class VoiceSharingAccountOperations(
      * sense: it carries the account/session fence, and a refresh that merely landed earlier must not
      * throw it away (owner Pixel test: twelve successful taps, every answer discarded client-side).
      */
-    private fun apply(json: String, issued: Issued, fromRefresh: Boolean): Boolean = ownership.transaction {
+    private fun apply(json: String, issued: Issued, fromRefresh: Boolean, mayApply: () -> Boolean = { true }): Boolean = ownership.transaction {
         val current = ownership.authoritySnapshot()
         if (current.accountName != issued.accountName || current.session != issued.session) {
             return@transaction false // a different account (or a new login) owns the answer now
         }
         if (fromRefresh && state.publicationCount() != issued.publication) {
             return@transaction false // a newer answer already landed
+        }
+        if (!fromRefresh && !mayApply()) {
+            return@transaction false // superseded: a newer intent owns the outcome (integrated control)
         }
         val projection = state.parseProjection(json) ?: return@transaction false
         state.publish(projection)

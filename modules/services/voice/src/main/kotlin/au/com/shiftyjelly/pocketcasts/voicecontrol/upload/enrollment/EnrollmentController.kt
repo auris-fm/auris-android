@@ -76,8 +76,13 @@ sealed interface EnrollmentOutcome {
  * stops future collection, deletion requests removal of data already accepted.
  */
 class EnrollmentController(
-    private val enrollOperation: suspend (acceptedDisclosureVersion: String) -> VoiceSharingMutationResult,
-    private val withdrawOperation: suspend () -> VoiceSharingMutationResult,
+    /**
+     * Both operations take the [mayApply] fence: the LIVE supersession check at apply time. The
+     * withdrawal does not queue behind an in-flight enrollment (deliberate), so two PUTs can be in
+     * flight; the enrollment's answer must consult the fence when it lands, not trust its issue.
+     */
+    private val enrollOperation: suspend (acceptedDisclosureVersion: String, mayApply: () -> Boolean) -> VoiceSharingMutationResult,
+    private val withdrawOperation: suspend (mayApply: () -> Boolean) -> VoiceSharingMutationResult,
     private val deleteOperation: suspend () -> Boolean,
     private val clearLocalPending: () -> Unit,
     /** Owner session each operation is issued under; a change drops in-flight results. */
@@ -91,6 +96,8 @@ class EnrollmentController(
     private val underOwnerTransaction: ((() -> Any?) -> Any?)? = null,
     private val fence: MutationFence = MutationFence(),
 ) {
+    private fun sessionLive(): Long = ownerSession()
+
     private val mutableState = MutableStateFlow<EnrollmentState>(EnrollmentState.Idle)
     val state: StateFlow<EnrollmentState> = mutableState.asStateFlow()
 
@@ -108,7 +115,7 @@ class EnrollmentController(
         }
         mutableState.value = EnrollmentState.Pending
         val attempt = fence.issue(ownerSession())
-        val result = fence.serialize { enrollOperation(acceptedDisclosureVersion) }
+        val result = fence.serialize { enrollOperation(acceptedDisclosureVersion) { fence.isCurrent(attempt, ::sessionLive) } }
         // A superseded or cross-session result is DROPPED, not applied: applying it would let a slow
         // enrollment flip the UI back to "sharing on" after the user turned sharing off, or write one
         // account's outcome onto another's screen.
@@ -193,7 +200,7 @@ class EnrollmentController(
         // for the very request they are stopping — the deadlock this control produced. The withdrawal
         // is already the newest intent, and the fence guarantees the older enrollment cannot apply, so
         // the two requests need not be ordered against each other.
-        val result = withdrawOperation()
+        val result = withdrawOperation { fence.isCurrent(attempt, ::sessionLive) }
         if (!fence.isCurrent(attempt, ownerSession)) return EnrollmentOutcome.Superseded
         val settled = when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentState.Applied

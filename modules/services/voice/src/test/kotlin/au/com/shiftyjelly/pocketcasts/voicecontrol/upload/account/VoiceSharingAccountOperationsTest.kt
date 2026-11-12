@@ -447,10 +447,9 @@ class VoiceSharingAccountOperationsTest {
     }
 
     /**
-     * THE OWNER'S TAP (spec follow-up on the Pixel bug): a refresh issued BEFORE the tap but
-     * delivered BEFORE the tap's answer must not throw the tap's own successful answer away. The
-     * publication-count fence protects STALE REFRESHES, not fresh mutations: a mutation's own answer
-     * carries the account/session fence and wins over any publication that merely landed earlier.
+     * THE OWNER'S TAP (spec follow-up on the Pixel bug), DETERMINISTIC (Reviewer): both replies are
+     * gated at the server, and the PUT is confirmed ISSUED before the stale GET applies — so the
+     * GET cannot finish before the PUT is even sent. The tap's answer must still win.
      */
     @Test
     fun `a tap's PUT answer wins over a refresh issued before it and delivered before the answer`() = runTest {
@@ -467,21 +466,57 @@ class VoiceSharingAccountOperationsTest {
             savedSharingChoice = saved,
         )
         issueBearer("Bearer token-a")
-        // The refresh is issued first and its answer returns while the tap is in flight.
-        server.enqueue(
-            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-stale")),
-        )
+
+        // GATED SERVER: the stale GET reply and the tap PUT reply each wait for their own latch.
+        val getLatch = CompletableDeferred<Unit>()
+        val putLatch = CompletableDeferred<Unit>()
+        val staleBody = projectionJson(withdrawal = "withdrawn", enrolled = false, epoch = "epoch-stale")
+        val tapBody = projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-tap", disclosure = "v3")
+        val requests = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                requests.add(request.method!!)
+                return when (request.method) {
+                    "GET" -> {
+                        runBlocking { getLatch.await() }
+                        MockResponse().setResponseCode(200).setBody(staleBody)
+                    }
+                    "PUT" -> {
+                        runBlocking { putLatch.await() }
+                        MockResponse().setResponseCode(200).setBody(tapBody)
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+
+        // The refresh is issued first and PARKED at the server.
         val refresh = async(kotlinx.coroutines.Dispatchers.IO) { ops.refreshProjection() }
-        // DETERMINISTIC ORDER: the GET has reached the server before the tap is issued, so the
-        // stale answer cannot be handed to the PUT by dispatch accident.
-        server.takeRequest(5, TimeUnit.SECONDS)!!
-        server.enqueue(
-            MockResponse().setResponseCode(200).setBody(projectionJson(withdrawal = "active", enrolled = true, epoch = "epoch-tap", disclosure = "v3")),
-        )
-        val outcome = ops.enroll(acceptedDisclosureVersion = "v3")
+        // REAL-TIME polling (runTest's virtual clock cannot wait on network threads).
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + 5_000
+            while (requests.size < 1 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        }
+        // The tap is issued while the refresh is parked, and also parks.
+        val enroll = async(kotlinx.coroutines.Dispatchers.IO) { ops.enroll(acceptedDisclosureVersion = "v3") }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + 5_000
+            while (requests.size < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10)
+        }
+        assertTrue("PREMISE: the tap's PUT is issued while the refresh reply is still parked", requests.toList() == listOf("GET", "PUT"))
+
+        // The stale GET applies FIRST.
+        getLatch.complete(Unit)
         refresh.await()
-        // (No premise on the refresh's own outcome: whichever apply lands first wins the count race,
-        // but the invariant under test is only that the tap's answer survives in the end.)
+        assertEquals(
+            "PREMISE: the older refresh applied",
+            "epoch-stale",
+            state.projection.value?.enrollmentEpoch,
+        )
+
+        // Only now does the tap's answer land. It must win.
+        putLatch.complete(Unit)
+        val outcome = enroll.await()
         assertTrue(
             "the tap's own successful answer must not be discarded by the earlier refresh: $outcome",
             outcome is VoiceSharingMutationResult.Applied,

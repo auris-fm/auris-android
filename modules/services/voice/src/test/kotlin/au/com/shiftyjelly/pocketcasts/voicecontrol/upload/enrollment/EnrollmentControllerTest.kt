@@ -87,8 +87,8 @@ class EnrollmentControllerTest {
         operations: FakeOperations,
         onLocalWithdrawal: () -> Unit = {},
     ) = EnrollmentController(
-        enrollOperation = { operations.enroll(it) },
-        withdrawOperation = { operations.withdraw() },
+        enrollOperation = { v, _ -> operations.enroll(v) },
+        withdrawOperation = { _ -> operations.withdraw() },
         deleteOperation = { operations.deleteData() },
         clearLocalPending = onLocalWithdrawal,
         ownerSession = { session },
@@ -103,14 +103,14 @@ class EnrollmentControllerTest {
         var outcome: EnrollmentOutcome? = null
 
         val subject = EnrollmentController(
-            enrollOperation = {
+            enrollOperation = { _, _ ->
                 entered.complete(Unit)
                 gate.await()
                 // The specific result does not matter here: supersession is decided by the fence
                 // BEFORE the result is inspected, which is exactly the property under test.
                 VoiceSharingMutationResult.Failure
             },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
@@ -166,8 +166,8 @@ class EnrollmentControllerTest {
         // placement: if the effect's critical section were not exclusive with issue(), this is where it
         // would be observed.
         val subject = EnrollmentController(
-            enrollOperation = { VoiceSharingMutationResult.Failure },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
@@ -239,8 +239,8 @@ class EnrollmentControllerTest {
         val ownerLock = Any()
         val session = java.util.concurrent.atomic.AtomicLong(7L)
         val subject = EnrollmentController(
-            enrollOperation = { VoiceSharingMutationResult.Failure },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session.get() },
@@ -292,7 +292,7 @@ class EnrollmentControllerTest {
         val entered = CompletableDeferred<Unit>()
         var enrollOutcome: EnrollmentOutcome? = null
         val subject = EnrollmentController(
-            enrollOperation = {
+            enrollOperation = { _, _ ->
                 entered.complete(Unit)
                 gate.await() // stands in for a slow network
                 // A SUCCESS: this is what would restore "sharing on" if the result were applied. The
@@ -300,7 +300,7 @@ class EnrollmentControllerTest {
                 // late success is allowed to reach the state flow at all.
                 VoiceSharingMutationResult.Failure
             },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
@@ -341,13 +341,13 @@ class EnrollmentControllerTest {
         val gates = List(2) { CompletableDeferred<Unit>() }
         var issued = 0
         val subject = EnrollmentController(
-            enrollOperation = {
+            enrollOperation = { _, _ ->
                 val mine = gates[issued]
                 issued += 1
                 mine.await()
                 VoiceSharingMutationResult.Failure
             },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },
@@ -381,12 +381,12 @@ class EnrollmentControllerTest {
         val gate = CompletableDeferred<Unit>()
         val entered = CompletableDeferred<Unit>()
         val subject = EnrollmentController(
-            enrollOperation = {
+            enrollOperation = { _, _ ->
                 entered.complete(Unit)
                 gate.await()
                 VoiceSharingMutationResult.Failure
             },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {},
             ownerSession = { session },

@@ -58,7 +58,10 @@ class SavedSharingChoiceStore(
         epoch: String,
         acceptedDisclosureVersion: String,
     ): Boolean {
-        if (account.isBlank() || epoch.isBlank() || acceptedDisclosureVersion.isBlank()) return false
+        if (account.isBlank() || epoch.isBlank() || acceptedDisclosureVersion.isBlank()) {
+            lastFailureReason = "blank field: account=${account.isBlank()} epoch=${epoch.isBlank()} disclosure=${acceptedDisclosureVersion.isBlank()}"
+            return false
+        }
         val written = persistence.write(
             SavedSharingChoice(
                 account = account,
@@ -89,7 +92,10 @@ class SavedSharingChoiceStore(
      * is fabricated — the record simply fails every consent read.
      */
     fun recordNotEnrolled(account: String): Boolean {
-        if (account.isBlank()) return false
+        if (account.isBlank()) {
+            lastFailureReason = "blank account"
+            return false
+        }
         val written = persistence.write(
             SavedSharingChoice(
                 account = account,
@@ -99,6 +105,7 @@ class SavedSharingChoiceStore(
             ),
         )
         if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
+        lastFailureReason = if (written) null else persistence.lastFailureReason()
         return written
     }
 
@@ -108,7 +115,10 @@ class SavedSharingChoiceStore(
      * consent state changes, which is the single fact the user actually decided.
      */
     fun recordWithdrawn(account: String): Boolean {
-        if (account.isBlank()) return false
+        if (account.isBlank()) {
+            lastFailureReason = "blank account"
+            return false
+        }
         val previous = persistence.read(account)
         val written = persistence.write(
             SavedSharingChoice(
@@ -121,6 +131,7 @@ class SavedSharingChoiceStore(
             ),
         )
         if (!written) persistFailedAccounts.add(account) else persistFailedAccounts.remove(account)
+        lastFailureReason = if (written) null else persistence.lastFailureReason()
         return written
     }
 

@@ -138,12 +138,12 @@ class VoiceSharingSettingsViewModelTest {
             kotlinx.coroutines.SupervisorJob() + mainDispatcher,
         ).also { scopes += it }
         val controller = EnrollmentController(
-            enrollOperation = { version ->
+            enrollOperation = { version, _ ->
                 require(version == EnrollmentDisclosure.VERSION)
                 onEnrollIssue?.invoke()
                 enrollGate.await()
             },
-            withdrawOperation = {
+            withdrawOperation = { _ ->
                 onWithdrawIssue?.invoke()
                 withdrawGate.await()
             },
@@ -176,8 +176,8 @@ class VoiceSharingSettingsViewModelTest {
         marker.onWrite = { requested -> note(if (requested) "marker-stop" else "marker-clear") }
         var purges = 0
         val controller = EnrollmentController(
-            enrollOperation = { VoiceSharingMutationResult.Failure },
-            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
             deleteOperation = { false },
             clearLocalPending = {
                 purges++
@@ -683,8 +683,8 @@ class VoiceSharingSettingsViewModelTest {
         setProjection(enrolledProjection())
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { 1L },
@@ -715,8 +715,8 @@ class VoiceSharingSettingsViewModelTest {
         var session = 1L
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { session },
@@ -754,8 +754,8 @@ class VoiceSharingSettingsViewModelTest {
         setProjection(enrolledProjection())
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { 1L },
@@ -785,8 +785,8 @@ class VoiceSharingSettingsViewModelTest {
         var session = 1L
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { session },
@@ -855,8 +855,8 @@ class VoiceSharingSettingsViewModelTest {
         lateinit var vm: VoiceSharingSettingsViewModel
         var deletions = 0
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = {
                 deletions++
                 deleteGate.await()
@@ -899,8 +899,8 @@ class VoiceSharingSettingsViewModelTest {
         var session = 1L
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { session },
@@ -932,8 +932,8 @@ class VoiceSharingSettingsViewModelTest {
         var session = 1L
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { session },
@@ -965,8 +965,8 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = EnrollmentController(
-                enrollOperation = { enrollGate2.await() },
-                withdrawOperation = { withdrawGate2.await() },
+                enrollOperation = { _, _ -> enrollGate2.await() },
+                withdrawOperation = { _ -> withdrawGate2.await() },
                 deleteOperation = { deleteGate2.await() },
                 clearLocalPending = {},
                 ownerSession = { session },
@@ -1055,8 +1055,8 @@ class VoiceSharingSettingsViewModelTest {
             )
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { 1L },
@@ -1106,8 +1106,8 @@ class VoiceSharingSettingsViewModelTest {
         setProjection(enrolledProjection())
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { 1L },
@@ -1163,8 +1163,8 @@ class VoiceSharingSettingsViewModelTest {
         setProjection(enrolledProjection())
         lateinit var vm: VoiceSharingSettingsViewModel
         val controller = EnrollmentController(
-            enrollOperation = { enrollGate.await() },
-            withdrawOperation = { withdrawGate.await() },
+            enrollOperation = { _, _ -> enrollGate.await() },
+            withdrawOperation = { _ -> withdrawGate.await() },
             deleteOperation = { deleteGate.await() },
             clearLocalPending = {},
             ownerSession = { 1L },

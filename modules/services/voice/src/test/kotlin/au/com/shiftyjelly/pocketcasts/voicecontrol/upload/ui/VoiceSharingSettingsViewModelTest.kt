@@ -149,7 +149,7 @@ class VoiceSharingSettingsViewModelTest {
             savedChoice = effectiveChoice,
         )
     }
-    
+
     private fun awaitTrue(timeoutMs: Long, condition: () -> Boolean): Boolean {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000
         while (System.nanoTime() < deadline) {
@@ -343,9 +343,9 @@ class VoiceSharingSettingsViewModelTest {
         assertFalse("a FAILED withdrawal keeps the local stop: the user decided", failed.enrolled)
         assertEquals("the failure must be surfaced honestly", SettingsOperationStatus.FAILED, failed.status)
     }
-    
-    
-    
+
+
+
     @Test
     fun `the failure copy survives unrelated projection updates until the next action`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
@@ -446,7 +446,7 @@ class VoiceSharingSettingsViewModelTest {
         )
         assertEquals(FailedOperation.NONE, vm.state.value.failedOperation)
     }
-    
+
     @Test
     fun `an account switch does not leave the stale action pending on the new account`() = runTest(mainDispatcher) {
         var session = 1L
@@ -496,8 +496,8 @@ class VoiceSharingSettingsViewModelTest {
         assertFalse("the dead tap leaves no pending state on the new account", vm.state.value.pending)
         assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
-    
-    
+
+
     @Test
     fun `deletion is honest - pending is not success and failure stays visible`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection())
@@ -910,6 +910,6 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.enrolled,
         )
     }
-    
-    
+
+
 }

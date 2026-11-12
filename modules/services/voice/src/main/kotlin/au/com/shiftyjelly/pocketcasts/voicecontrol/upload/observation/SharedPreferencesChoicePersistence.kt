@@ -68,4 +68,3 @@ class SharedPreferencesChoicePersistence(
         const val TAG = "VoiceSharingChoice"
     }
 }
-

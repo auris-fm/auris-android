@@ -261,4 +261,3 @@ class ReservationToken constructor(
     /** The allowance metadata cap FROZEN on the ADMISSION token (capture-owned; null = none). */
     internal val allowanceMetadataCapBytes: Int? = null,
 )
-

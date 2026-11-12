@@ -44,6 +44,15 @@ class LfmToolCallParserTest {
     }
 
     @Test
+    fun parse_bareNoneParsesToNull() {
+        val call = LfmToolCallParser.parse(
+            "<|tool_call_start|>[playback(action='seek_to', position=None)]<|tool_call_end|>",
+        )
+        assertNotNull(call)
+        assertNull(call!!.params["position"])
+    }
+
+    @Test
     fun parse_invalidReturnsNull() {
         assertNull(LfmToolCallParser.parse("not a tool call"))
         assertNull(

@@ -325,11 +325,10 @@ class CastPlayer(
 
     // Guards the episode fields against the bound seek's read.
     //
-    // THE WRITE STAYS SYNCHRONOUS. Posting it to the main looper would DEFER it, so `setEpisode` would
-    // return before the player had actually been re-pointed -- and a caller that then relied on the new
-    // episode, or a seek that ran immediately after, would see the OLD one. A synchronous write under a
-    // lock the seek also takes gives both properties: the re-pointing is complete when this returns, and
-    // the seek's decision cannot interleave with it.
+    // The seek's episode validation reads these fields under this lock so its decision cannot
+    // interleave with a re-pointing. NOTE: `loadEpisode` writes `localEpisodeUuid` OUTSIDE this
+    // lock, so this lock does not make the re-pointing itself synchronous with the seek -- it
+    // only serialises the seek's read against writes that take the lock.
     //
     // A plain monitor rather than `Dispatchers.Main` because a lock cannot span a suspension, and the
     // seek needs to read these fields at a point where it cannot suspend.

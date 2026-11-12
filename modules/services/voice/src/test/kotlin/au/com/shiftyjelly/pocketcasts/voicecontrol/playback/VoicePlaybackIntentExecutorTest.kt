@@ -98,14 +98,7 @@ class VoicePlaybackIntentExecutorTest {
         // instruction: "5 s before the end" is not "the beginning". The duration is what makes the
         // offset resolvable, so it is supplied and must be used.
         val sinks = FakeSinks()
-        org.mockito.kotlin.whenever(sinks.playbackManager.getCurrentEpisode()).thenReturn(
-            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
-                uuid = "episode-id",
-                publishedDate = java.util.Date(),
-                podcastUuid = "podcast-id",
-                duration = 1800.0,
-            ),
-        )
+        org.mockito.kotlin.whenever(sinks.playbackContextMonitor.episodeDurationSeconds()).thenReturn(1800)
 
         val response = sinks.executor().execute(VoiceIntent.Playback.SeekAbsolute(-5))
 
@@ -1362,6 +1355,8 @@ class VoicePlaybackIntentExecutorTest {
 
         val playbackManager: au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager = org.mockito.kotlin.mock()
 
+        val playbackContextMonitor: PlaybackContextMonitor = org.mockito.kotlin.mock()
+
         fun withRealCloudRoute(playbackSink: au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackSink): FakeSinks = FakeSinks(playbackOverride = playbackSink, cloudRouteOverride = RealCloudRouteSink(playbackSink))
 
         fun executor(signal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()) = VoicePlaybackIntentExecutor(
@@ -1378,6 +1373,7 @@ class VoicePlaybackIntentExecutorTest {
             statsQuerySink = statsQuery,
             gracePeriodSignal = signal,
             playbackManager = playbackManager,
+            playbackContextMonitor = playbackContextMonitor,
         )
     }
 

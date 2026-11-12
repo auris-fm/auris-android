@@ -72,7 +72,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
             // libraryCheckpoints decodes hashes as signed Ints; the uint32
             // value is the bit pattern, so re-interpret as an unsigned Long.
             val hashes = checkpoint.hashes.map { it.toLong() and 0xFFFFFFFFL }.toLongArray()
-            matcher.add(checkpoint.timestampSeconds, hashes, reference.checkpointDurationSeconds)
+            matcher.add(checkpoint.timestampSeconds, hashes)
         }
         return matcher
     }

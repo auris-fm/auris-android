@@ -4223,6 +4223,7 @@ class CloudRouteSinkTest {
                 statsQuerySink = mock(),
                 gracePeriodSignal = graceSignal,
                 playbackManager = mock(),
+                playbackContextMonitor = mock(),
             )
             val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
                 audioFeedbackRenderer = renderer
@@ -4375,6 +4376,7 @@ class CloudRouteSinkTest {
                 },
                 queueSink = mock(), playbackQuerySink = mock(), statsQuerySink = mock(),
                 gracePeriodSignal = graceSignal, playbackManager = mock(),
+                playbackContextMonitor = mock(),
             )
             val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
                 audioFeedbackRenderer = renderer
@@ -4491,6 +4493,7 @@ class CloudRouteSinkTest {
                 },
                 queueSink = mock(), playbackQuerySink = mock(), statsQuerySink = mock(),
                 gracePeriodSignal = graceSignal, playbackManager = mock(),
+                playbackContextMonitor = mock(),
             )
             val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
                 audioFeedbackRenderer = renderer
@@ -4625,6 +4628,7 @@ class CloudRouteSinkTest {
                 },
                 queueSink = mock(), playbackQuerySink = mock(), statsQuerySink = mock(),
                 gracePeriodSignal = graceSignal, playbackManager = mock(),
+                playbackContextMonitor = mock(),
             )
             val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
                 audioFeedbackRenderer = renderer

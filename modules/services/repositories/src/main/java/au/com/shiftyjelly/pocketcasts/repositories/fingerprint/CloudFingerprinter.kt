@@ -28,8 +28,8 @@ import kotlin.math.sin
 class CloudFingerprinter {
     // Window geometry mirrors the server constants (also the mobile
     // FingerprintConstants where the same concept exists).
-    private val windowDurationMs = 8000
-    private val windowIntervalMs = 1000
+    private val windowDurationMs = FingerprintConstants.WINDOW_DURATION_MS
+    private val windowIntervalMs = FingerprintConstants.WINDOW_INTERVAL_MS
     private val targetSampleRate = 16000
     private val fftSize = 4096
     private val hopSize = 1024

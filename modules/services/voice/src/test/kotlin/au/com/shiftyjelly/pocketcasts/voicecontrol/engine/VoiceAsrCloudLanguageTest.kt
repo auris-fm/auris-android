@@ -27,6 +27,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudConversationAdmission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudPlaybackContextState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackSink
@@ -238,7 +239,7 @@ class VoiceAsrCloudLanguageTest {
             isHostPlaying = { false }, gracePeriodSignal = signal, currentLocale = { java.util.Locale.JAPANESE },
         )
         val executor = VoicePlaybackIntentExecutor(
-            playback, mock(), mock(), mock(), mock(), mock(), sink, provider, mock(), mock(), mock(), signal, mock(),
+            playback, mock(), mock(), mock(), mock(), mock(), sink, provider, mock(), mock(), mock(), signal, mock(), mock(),
         )
         val inputs = mutableListOf<IntentRoutingInput>()
         val recognizer = object : VoiceRecognizer {

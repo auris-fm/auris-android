@@ -14,9 +14,9 @@ class CloudReferenceMatcherTest {
         val query = CloudFingerprintParityData.signal16kMonoWindows[0]
         // Checkpoints at t=0 carry the query hashes; t=1 and t=2 carry
         // unrelated hashes so the timestamps are distinguishable.
-        matcher.add(0f, query, 8f)
-        matcher.add(1f, longArrayOf(1111, 2222, 3333), 8f)
-        matcher.add(2f, longArrayOf(4444, 5555, 6666), 8f)
+        matcher.add(0f, query)
+        matcher.add(1f, longArrayOf(1111, 2222, 3333))
+        matcher.add(2f, longArrayOf(4444, 5555, 6666))
 
         val matches = matcher.findTopMatches(query, 2)
 
@@ -28,8 +28,8 @@ class CloudReferenceMatcherTest {
     @Test
     fun `different audio scores near zero and fails the match floor`() {
         val matcher = CloudReferenceMatcher()
-        matcher.add(0f, CloudFingerprintParityData.signal16kMonoWindows[0], 8f)
-        matcher.add(1f, CloudFingerprintParityData.signal16kMonoWindows[1], 8f)
+        matcher.add(0f, CloudFingerprintParityData.signal16kMonoWindows[0])
+        matcher.add(1f, CloudFingerprintParityData.signal16kMonoWindows[1])
 
         // Hashes from a completely different signal (empty except one hash).
         val unrelated = longArrayOf(42, 99, 12345)
@@ -49,7 +49,7 @@ class CloudReferenceMatcherTest {
     @Test
     fun `empty query never matches`() {
         val matcher = CloudReferenceMatcher()
-        matcher.add(0f, CloudFingerprintParityData.signal16kMonoWindows[0], 8f)
+        matcher.add(0f, CloudFingerprintParityData.signal16kMonoWindows[0])
         assertTrue(matcher.findTopMatches(LongArray(0), 1).isEmpty())
     }
 

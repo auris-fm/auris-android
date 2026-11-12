@@ -20,9 +20,9 @@ sealed class CloudRouteEvent {
         val turnId: String? = null,
     ) : CloudRouteEvent()
 
-    enum class Outcome(val wireValue: String) {
-        Completed("completed"),
-        Interrupted("interrupted"),
+    enum class Outcome {
+        Completed,
+        Interrupted,
     }
 
     data class Done(

@@ -141,9 +141,9 @@ object VoiceObservationModule {
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }
 
-    // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
-    // production, bound HERE at the Android construction boundary. A failed clear still reports
-    // false and sets the admission latch; there is no unsupported-runtime success fallback.
+    // The withdrawal marker is one boolean in the platform settings store (SharedPreferences,
+    // 2026-11-12): no directory barrier, no latch. A failed commit is logged; the in-memory
+    // value stands, so admission never wedges on storage.
 
     /**
      * BATCH B bounded outcome finalization (reviewer c5d94af4 #1): composed with NO selected

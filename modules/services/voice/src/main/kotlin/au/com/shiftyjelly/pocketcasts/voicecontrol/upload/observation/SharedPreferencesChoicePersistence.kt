@@ -26,10 +26,14 @@ class SharedPreferencesChoicePersistence(
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     override fun read(account: String): SavedSharingChoice? {
-        val state = prefs.getString(key(account, FIELD_STATE), null) ?: return null
+        // ONE snapshot (reviewer nit ddf08a2cc7-a): three separate getString calls could interleave
+        // with a concurrent write and mix old and new fields. prefs.all is one consistent map.
+        val snapshot = prefs.all
+        fun field(name: String) = snapshot[key(account, name)] as? String
+        val state = field(FIELD_STATE) ?: return null
         val parsed = SharingChoiceState.entries.firstOrNull { it.name == state } ?: return null
-        val epoch = prefs.getString(key(account, FIELD_EPOCH), null)?.takeIf { it != ABSENT }
-        val disclosure = prefs.getString(key(account, FIELD_DISCLOSURE), null)?.takeIf { it != ABSENT }
+        val epoch = field(FIELD_EPOCH)?.takeIf { it != ABSENT }
+        val disclosure = field(FIELD_DISCLOSURE)?.takeIf { it != ABSENT }
         return SavedSharingChoice(
             account = account,
             state = parsed,
@@ -48,11 +52,9 @@ class SharedPreferencesChoicePersistence(
             editor.remove(key(choice.account, FIELD_EPOCH))
                 .remove(key(choice.account, FIELD_DISCLOSURE))
         }
-        val ok = editor.commit()
-        if (!ok) {
-            Log.w(TAG, "voice-sharing choice persist: prefs commit failed; the in-memory value stands")
-        }
-        return ok
+        // A failed commit is NOT logged here: the account API logs it once on the record path
+        // (reviewer nit ddf08a2cc7-c). This store is silent.
+        return editor.commit()
     }
 
     private fun key(account: String, field: String) = "$account.$field"

@@ -169,8 +169,9 @@ class VoiceSharingAccountOperations(
             else -> store.recordNotEnrolled(account)
         }
         if (persisted == false) {
-            // Prefs keep the new value in memory even on a failed commit, so there is no latch to
-            // diagnose: this is observability only.
+            // Logged ONCE here (reviewer nit ddf08a2cc7-c): the persistence itself no longer logs
+            // a failed commit. Prefs keep the new value in memory even on a failed commit, so
+            // there is no latch to diagnose: this is observability only.
             android.util.Log.w("VoiceSharingChoice", "voice-sharing choice persist: commit failed; in-memory value stands")
         }
     }

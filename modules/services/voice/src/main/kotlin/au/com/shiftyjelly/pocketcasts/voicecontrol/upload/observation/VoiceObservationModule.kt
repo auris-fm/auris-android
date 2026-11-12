@@ -138,15 +138,7 @@ object VoiceObservationModule {
     // 2026-11-12): no directory barrier, no latch. A failed commit is logged; the in-memory
     // value stands, so admission never wedges on storage.
 
-    /**
-     * BATCH B bounded outcome finalization (reviewer c5d94af4 #1): composed with NO selected
-     * wait — production limits/window/provisioning are unavailable, so no outcome-wait
-     * selection exists. THIS CLOSES CONTRIBUTION ADMISSION fail-closed (spec cf1b9809):
-     * CollectionStartup wires the observer's admission guard to [CaptureOutcomeFinalizer.limitsSelected],
-     * so a null selection refuses every capture rather than admitting captures with an
-     * unbounded wait. Selecting a wait is a separate reviewed change constructing
-     * OutcomeWaitLimits explicitly; never an implicit default.
-     */
+    /** BATCH B bounded outcome finalization with THE production 45 s wait (see the constant). */
     @Provides
     @Singleton
     fun provideCaptureOutcomeFinalizer(
@@ -154,37 +146,11 @@ object VoiceObservationModule {
         @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
     ): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer(
         sink = sink,
-        // FINITE PRODUCTION OUTCOME WAIT (core c74d7e30 connected fix, reviewer 91e13f28): the
-        // null selection closed EVERY production capture (CollectionStartup installs
-        // outcomeWaitGuard = { outcomeFinalizer.limitsSelected }, and limitsSelected was false).
-        // Selected 45 s as a BOUNDED WAIT (spec 0d59b1d5): it is a finite cap on how long a
-        // retained capture may stay open without a terminal outcome — not a claim that every
-        // healthy capture finishes inside it. The one measured full pipeline (report 0c9710ac,
-        // under 25 s) shows the bound is a plausible order of magnitude; a capture that exceeds
-        // the bound is finalized outcome_wait_expired and PUBLISHED, losing neither the audio
-        // nor the evidence. The 60 s ceiling is the reviewed construction bound used by every
-        // finalizer control. At expiry the retained capture is finalized as
-        // outcome_wait_expired and published, never left open forever.
-        // Finite production outcome wait: the
-        // null selection closed EVERY production capture (CollectionStartup installs
-        // outcomeWaitGuard = { outcomeFinalizer.limitsSelected }, and limitsSelected was false).
-        // Selected 45 s as a bounded wait: it is a finite cap on how long a
-        // retained capture may stay open without a terminal outcome — not a claim that every
-        // healthy capture finishes inside it. The one measured full pipeline (report 0c9710ac,
-        // under 25 s) shows the bound is a plausible order of magnitude; a capture that exceeds
-        // the bound is finalized outcome_wait_expired and PUBLISHED, losing neither the audio
-        // nor the evidence. The 60 s ceiling is the reviewed construction bound used by every
-        // finalizer control. At expiry the retained capture is finalized as
-        // outcome_wait_expired and published, never left open forever.
-        waitLimits = PRODUCTION_OUTCOME_WAIT,
+        waitLimitsMs = PRODUCTION_OUTCOME_WAIT_MS,
         scope = scope,
         // Same monotonic domain the sink composes by default (production clock).
         nowMs = { System.nanoTime() / 1_000_000L },
     )
-
-    /** The ONE reviewed production selection; asserted verbatim by the outcome-wait control. */
-    internal val PRODUCTION_OUTCOME_WAIT: OutcomeWaitLimits =
-        OutcomeWaitLimits(selectedWaitMs = 45_000L, ceilingWaitMs = 60_000L)
 
     @Provides
     @Singleton

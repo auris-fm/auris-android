@@ -45,15 +45,16 @@ import timber.log.Timber
  *  - a purge notification cancels only registrations from BEFORE that purge (generation
  *    filter), so a capture registered after the purge keeps its valid timer.
  *
- * [waitLimits] carries the INDEPENDENT selected and ceiling inputs. No limits selected →
- * INACTIVE, and that state CLOSES contribution admission (spec cf1b9809).
+ * A null [waitLimitsMs] is INACTIVE, and that state CLOSES contribution admission (spec
+ * cf1b9809); production always wires the 45 s constant.
  *
  * Process death loses the in-memory timers by design (same scope as the sink itself); scope
  * cancellation disposes via [Job.invokeOnCompletion].
  */
 class CaptureOutcomeFinalizer(
     private val sink: ContributionRetentionSink,
-    private val waitLimits: OutcomeWaitLimits?,
+    /** Null = INACTIVE (no deadlines). Production always wires PRODUCTION_OUTCOME_WAIT_MS. */
+    private val waitLimitsMs: Long?,
     private val scope: CoroutineScope,
     /** Injectable pause; production uses the coroutine delay. Tests drive a virtual clock. */
     private val sleepMs: suspend (Long) -> Unit = { delay(it) },
@@ -64,7 +65,7 @@ class CaptureOutcomeFinalizer(
     val expiredReason: String get() = SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED
 
     /** True when a bounded wait is selected. FALSE CLOSES ADMISSION (fail-closed wiring). */
-    val limitsSelected: Boolean get() = waitLimits != null
+    val limitsSelected: Boolean get() = waitLimitsMs != null
 
     /** ONE owned registration per capture; removal is identity-safe by (id, registration). */
     private class Registration(val captureId: UUID, val generation: Long, val deadlineAtMs: Long) {
@@ -110,14 +111,14 @@ class CaptureOutcomeFinalizer(
     /** Arms the capture's deadline from its COMPLETION-FROZEN timestamp (never from delivery
      *  time). The registration is inserted before the coroutine launches. */
     private fun noteRetained(captureId: UUID, atGeneration: Long, completedAtMs: Long) {
-        val limits = waitLimits ?: return
+        val limits = waitLimitsMs ?: return
         lock.withLock {
             if (disposed) return
             timers.remove(captureId)?.let {
                 it.cancelled = true
                 it.job?.cancel()
             }
-            val reg = Registration(captureId, atGeneration, completedAtMs + limits.selectedWaitMs)
+            val reg = Registration(captureId, atGeneration, completedAtMs + waitLimitsMs)
             timers[captureId] = reg
             reg.job = scope.launch { runDeadline(reg) }
         }

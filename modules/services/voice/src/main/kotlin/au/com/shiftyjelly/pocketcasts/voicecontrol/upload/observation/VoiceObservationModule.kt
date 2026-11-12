@@ -58,11 +58,6 @@ object VoiceObservationModule {
         savedSharingChoice,
     )
 
-    /** Aggregate collection-retention budget: one shared cap across open/ready/queued owners. */
-    @Provides
-    @Singleton
-    fun provideCollectionBudget(): CollectionBudget = CollectionBudget(DEFAULT_TOTAL_RETENTION_BYTES)
-
     @Provides
     @Singleton
     fun provideEngineCollectionAuthority(
@@ -89,10 +84,8 @@ object VoiceObservationModule {
     @Provides
     @Singleton
     fun provideRetentionSink(
-        budget: CollectionBudget,
         publisher: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RecordingPublisher,
     ): ContributionRetentionSink = ContributionRetentionSink(
-        budget,
         lossEventObserver = { event, count ->
             // Reason plus running count: bounded bookkeeping in the sink, the trail itself lives
             // in the persisted log, not in singleton memory.
@@ -216,5 +209,4 @@ object VoiceObservationModule {
 }
 
 /** 64 MiB aggregate ceiling for upload-owned PCM (queue bounds refine this in Task 5). */
-private const val DEFAULT_TOTAL_RETENTION_BYTES: Long = 64L * 1024 * 1024
 private const val RETENTION_LOG_TAG = "VoiceRetention"

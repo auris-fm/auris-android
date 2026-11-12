@@ -6,39 +6,43 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 class CompletionOwnershipTest {
     private fun ctx() = CaptureContext(UUID.randomUUID(), 1L, "Headset", IssuedAuthority("a@b.c", 1L, 1L, "e", "d"), wakeRequired = true)
-    private fun sinkWithOpenPrefix(cap: Long): Triple<ContributionRetentionSink, CaptureContext, MutableList<String>> {
+    private fun sinkWithOpenPrefix(): Triple<ContributionRetentionSink, CaptureContext, MutableList<String>> {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(cap), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val context = ctx()
         assertTrue(sink.started(SegmentObservation.Started(context, ShortArray(8))))
         return Triple(sink, context, losses)
     }
     @Test
-    fun `completion reserves peak - prefix plus flattened output charged together`() {
-        val (sink, context, losses) = sinkWithOpenPrefix(cap = 40L)
+    fun `pending-finalization CAP refuses the completion once the fixed count is full`() {
+        // Spec cut 3's replacement bound: a FIXED number of recordings may wait for finalization.
+        // At the cap the completion is refused outright — the open prefix ends with a terminal,
+        // nothing is retained, nothing dangles.
+        val (sink, context, losses) = sinkWithOpenPrefix()
         val frames = listOf(ShortArray(8), ShortArray(8))
-        val chargedBefore = sink.totalChargedBytesForTest()
-        assertEquals(16L, chargedBefore)
+        repeat(ContributionRetentionSink.MAX_PENDING_FINALIZATION) { n ->
+            val c = ctx().copy(captureId = UUID.randomUUID())
+            sink.started(SegmentObservation.Started(c, ShortArray(8)))
+            assertTrue("PREMISE: candidate $n retained", sink.completed(SegmentObservation.Completed(c, frames, 16000, 0, frames.sumOf { it.size }, SegmentObservation.WakeState.NotDetected)))
+        }
+        assertEquals("PREMISE: the cap is full", ContributionRetentionSink.MAX_PENDING_FINALIZATION, sink.retainedSnapshot().size)
         val accepted = sink.completed(SegmentObservation.Completed(context, frames, 16000, 0, frames.sumOf { it.size }, SegmentObservation.WakeState.NotDetected))
-        assertFalse(accepted)
-        assertEquals(0L, sink.totalChargedBytesForTest())
+        assertFalse("refused at the pending cap", accepted)
         assertFalse(sink.hasOpenPrefix(context))
-        assertTrue(losses.any { it.contains("completion-refused") })
-        assertEquals(0, sink.retainedSnapshot().size)
+        assertTrue(losses.any { it.contains("refused-handoff:pending-cap") })
     }
     @Test
     fun `successful completion transfers charges with no double count`() {
-        val (sink, context, losses) = sinkWithOpenPrefix(cap = 1_000L)
+        val (sink, context, losses) = sinkWithOpenPrefix()
         val frames = listOf(ShortArray(8), ShortArray(8))
         assertTrue(sink.completed(SegmentObservation.Completed(context, frames, 16000, 0, frames.sumOf { it.size }, SegmentObservation.WakeState.NotDetected)))
-        assertEquals(32L, sink.totalChargedBytesForTest())
         assertEquals(1, sink.retainedSnapshot().size)
     }
     @Test
     fun `clip-cap refusal releases the open prefix too`() {
         val context = ctx()
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(10_000L), maxBytesPerClip = 16L, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(maxBytesPerClip = 16L, lossEventObserver = { event, _ -> losses += event })
         assertTrue(sink.started(SegmentObservation.Started(context, ShortArray(8))))
         val big = List(20) { ShortArray(100) } // 4_000 bytes > 16-byte per-clip cap
         assertFalse(sink.completed(SegmentObservation.Completed(context, big, 16000, 0, big.sumOf { it.size }, SegmentObservation.WakeState.NotDetected)))
@@ -47,31 +51,28 @@ class CompletionOwnershipTest {
         assertTrue(losses.any { it.contains("completion-refused:clip-cap") })
     }
     @Test
-    fun `growth reservation failure mutates nothing and keeps token charge intact`() {
-        val budget = CollectionBudget(64L)
+    fun `growth beyond the per-clip cap mutates nothing and keeps the token charge intact`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(budget, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(maxBytesPerClip = 64L, lossEventObserver = { event, _ -> losses += event })
         val context = ctx()
-        assertTrue(sink.started(SegmentObservation.Started(context, ShortArray(8)))) // 16 charged
+        assertTrue(sink.started(SegmentObservation.Started(context, ShortArray(8)))) // 16 bytes
         val token = sink.reserveDelta(context, 16)!!
-        assertEquals(48L, sink.totalChargedBytesForTest())
-        val oversized = ShortArray(40)
+        val oversized = ShortArray(40) // 80 bytes capacity > 64-byte cap
         assertFalse(sink.commitDelta(context, oversized, 40, token))
-        assertEquals(16L, sink.prefixBytesChargedForTest(context))
+        // The per-clip refusal ends THIS capture's retention with exactly one terminal; the
+        // producer-held lease charge stays outstanding until the producer drops the array.
+        assertFalse(sink.hasOpenPrefix(context))
         assertEquals(32L, sink.outstandingLeaseBytesForTest())
-        assertEquals(48L, sink.totalChargedBytesForTest())
         sink.releaseDelta(context, token)
-        assertEquals(16L, sink.totalChargedBytesForTest())
         assertEquals(0L, sink.outstandingLeaseBytesForTest())
     }
     @Test
     fun `invalid valid-range commits are refused before mutation`() {
-        val (sink, context, losses) = sinkWithOpenPrefix(cap = 1_000L)
+        val (sink, context, losses) = sinkWithOpenPrefix()
         val token = sink.reserveDelta(context, 8)!!
         assertFalse(sink.commitDelta(context, ShortArray(8), 9, token)) // copied > capacity
         assertFalse(sink.commitDelta(context, ShortArray(8), -1, token)) // negative range
         assertTrue(sink.commitDelta(context, ShortArray(8), 8, token))
-        assertEquals(32L, sink.totalChargedBytesForTest())
     }
     @Test
     fun `the purge observer runs OUTSIDE the sink lock - another thread can take the lock while it fires`() {
@@ -80,7 +81,6 @@ class CompletionOwnershipTest {
         val releaseObserver = java.util.concurrent.CountDownLatch(1)
         val losses = mutableListOf<String>()
         val sink = ContributionRetentionSink(
-            CollectionBudget(1L shl 20),
             lossEventObserver = { event, _ ->
                 synchronized(losses) { losses += event }
                 observerBlocked.countDown()

@@ -8,7 +8,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
@@ -77,7 +76,7 @@ class EngineProcessingJoinControlTest {
             currentLocale = { Locale.US },
             translationStage = mock(TranslationStage::class.java),
             collectionAuthority = authority,
-            retentionSink = ContributionRetentionSink(CollectionBudget(1L shl 20)),
+            retentionSink = ContributionRetentionSink(),
             segmentObserver = observer,
             context = context,
         ).also { it.scope = scope }

@@ -22,7 +22,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceIntentDispatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
@@ -136,7 +135,7 @@ class MixedFactsPersistControlTest {
         private val authority: () -> AuthorityDecision = {
             AuthorityDecision(collectionPermitted = true, fullRevocation = false)
         }
-        private val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        private val retention = ContributionRetentionSink()
         private val observer = SegmentObserver(
             CollectionGate { true },
             retention,

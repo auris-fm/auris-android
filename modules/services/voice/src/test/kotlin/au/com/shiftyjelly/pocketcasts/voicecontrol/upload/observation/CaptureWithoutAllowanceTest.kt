@@ -30,7 +30,7 @@ class CaptureWithoutAllowanceTest {
     private fun observer(
         decision: AuthorityDecision = LIVE_CONSENT,
     ): Pair<SegmentObserver, ContributionRetentionSink> {
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val sink = ContributionRetentionSink()
         val observer = SegmentObserver(
             gate = CollectionGate { it.shouldRetainNewWork },
             sink = sink,
@@ -44,7 +44,7 @@ class CaptureWithoutAllowanceTest {
     @Test
     fun `consent refusal still closes admission`() {
         // A WITHDRAWN/revoked consent decision refuses admission outright.
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val sink = ContributionRetentionSink()
         val refusedObserver = SegmentObserver(
             gate = CollectionGate { it.shouldRetainNewWork },
             sink = sink,

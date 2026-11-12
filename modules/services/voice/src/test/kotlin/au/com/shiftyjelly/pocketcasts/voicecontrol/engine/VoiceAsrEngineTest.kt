@@ -35,7 +35,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatfor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureOutcomeFinalizer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
@@ -93,7 +92,7 @@ class VoiceAsrEngineTest {
     private val audioFeedbackRenderer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer>()
     private val backend = mock<AsrBackend>()
     private var authority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-    private var retentionSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+    private var retentionSink = ContributionRetentionSink()
     private var observer = SegmentObserver(
         CollectionGate { _ -> false },
         NoopSegmentSink,
@@ -1602,7 +1601,7 @@ class VoiceAsrEngineTest {
     ) = createEngineWithSpeech(observer, retentionSink, authority, recognizer, wakeWordResult)
     @Test
     fun `no allowance authority - a consented capture is still admitted and retained while recognition proceeds`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val retention = ContributionRetentionSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         val bareObserver = SegmentObserver(
             CollectionGate { _ -> true },
@@ -1629,7 +1628,7 @@ class VoiceAsrEngineTest {
     }
     @Test
     fun `prepaid positive companion - the same engine path retains exactly one capture`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val retention = ContributionRetentionSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         val prepaidObserver = SegmentObserver(
             CollectionGate { _ -> true },
@@ -1657,7 +1656,7 @@ class VoiceAsrEngineTest {
     }
     @Test
     fun `an over-ceiling capture is refused at admission and recognition still proceeds`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val retention = ContributionRetentionSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         val overObserver = SegmentObserver(
             CollectionGate { _ -> true },
@@ -2558,7 +2557,7 @@ class VoiceAsrEngineTest {
     }
     @Test
     fun `the engine drives REAL segment events through the observer - frozen context, no double gate check`() = runTest {
-        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val retention = ContributionRetentionSink()
         var gateChecks = 0
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         observer = SegmentObserver(
@@ -2654,7 +2653,7 @@ class VoiceAsrEngineTest {
     @Test
     fun `gate OFF means the pipeline allocates NOTHING for upload across a full turn`() = runTest {
         val sink = EngineObservationSink()
-        val deadSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val deadSink = ContributionRetentionSink()
         val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
         observer = SegmentObserver(
             CollectionGate { false },

@@ -12,7 +12,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudTier
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
@@ -47,7 +46,7 @@ class IntentCategoryCoverageTest {
             currentLocale = { Locale.US },
             translationStage = mock<TranslationStage>(),
             collectionAuthority = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) },
-            retentionSink = ContributionRetentionSink(CollectionBudget(1L shl 20)),
+            retentionSink = ContributionRetentionSink(),
             segmentObserver = mock<SegmentObserver>(),
             context = mock<Context>(),
         )

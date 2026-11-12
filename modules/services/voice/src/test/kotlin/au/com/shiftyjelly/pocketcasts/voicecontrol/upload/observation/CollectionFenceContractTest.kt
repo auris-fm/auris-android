@@ -56,8 +56,7 @@ class CollectionFenceContractTest {
     fun `admission and handoff share one fence - expiry cannot interleave with copy-out`() {
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
-        val budget = CollectionBudget(1L shl 20)
-        val sink = ContributionRetentionSink(budget)
+        val sink = ContributionRetentionSink()
         val issued = IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1")
         val observer = SegmentObserver(
             gate = CollectionGate { it.shouldRetainNewWork },
@@ -119,7 +118,7 @@ class CollectionFenceContractTest {
     fun `a handoff denied by the closed live gate retains nothing and releases its prefix`() {
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val sink = ContributionRetentionSink()
         val observer = SegmentObserver(
             gate = CollectionGate { true },
             sink = sink,
@@ -177,7 +176,7 @@ class CollectionFenceContractTest {
     fun `invalid handoff without context still terminates exactly once and releases prefix`() {
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
+        val sink = ContributionRetentionSink()
         val observer = SegmentObserver(
             gate = CollectionGate { true },
             sink = sink,
@@ -226,8 +225,7 @@ class CollectionFenceContractTest {
     fun `held producer plus revoke - inflight bytes stay charged until finally release`() {
         // Reviewer 8273382e b4: revocation MARKS leases but cannot release the charge while the
         // producer still holds the allocated array; only the producer's drop releases it.
-        val budget = CollectionBudget(1L shl 20)
-        val sink = ContributionRetentionSink(budget)
+        val sink = ContributionRetentionSink()
         val leaseOwner = FakeOwner()
         val tx = CollectionAuthorityTransaction(leaseOwner, sharedLock = leaseOwner.collectionSharedLock)
         val observer = SegmentObserver(
@@ -270,8 +268,7 @@ class CollectionFenceContractTest {
     fun `token isolation - revoking capture A releases ONLY A tokens, never B charge`() {
         // Reviewer 23cae70e b3: a global pending counter let one capture's revocation release
         // ANOTHER capture's outstanding charge. Per-allocation tokens make that impossible.
-        val budget = CollectionBudget(1L shl 20)
-        val sink = ContributionRetentionSink(budget)
+        val sink = ContributionRetentionSink()
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val observer = SegmentObserver(
@@ -333,8 +330,7 @@ class CollectionFenceContractTest {
         // Reviewer 79b2b5c9 b2: releaseInitialChunk is addressed by the IMMUTABLE handle from
         // admission. Revocation closes capture A and a SUCCESSOR B opens; A's producer finally
         // must still return A's held lease — never silently no-op on "current open context".
-        val budget = CollectionBudget(1L shl 20)
-        val sink = ContributionRetentionSink(budget)
+        val sink = ContributionRetentionSink()
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val observer = SegmentObserver(
@@ -369,8 +365,7 @@ class CollectionFenceContractTest {
     fun `partial first copy keeps capacity charged and valid range distinct`() {
         // Reviewer 79b2b5c9 b1/b3: drained VALID count passes separately; the adopted array's FULL
         // CAPACITY stays charged while live; readers see validSamples audio, never zero padding.
-        val budget = CollectionBudget(1L shl 20)
-        val sink = ContributionRetentionSink(budget)
+        val sink = ContributionRetentionSink()
         val owner = FakeOwner()
         val tx = CollectionAuthorityTransaction(owner, sharedLock = owner.collectionSharedLock)
         val observer = SegmentObserver(

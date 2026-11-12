@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CompletionHandoff
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
@@ -135,7 +134,7 @@ class StopOverlapControlTest {
             val applied = java.util.Collections.synchronizedList(mutableListOf<ExecutionOutcome>())
             val counter = AtomicInteger(0)
             val authority: () -> AuthorityDecision = { AuthorityDecision(false, true) }
-            val retention = CountingSink(CollectionBudget(1L shl 16), applied)
+            val retention = CountingSink(applied)
             retentionRef = retention
             val captureId = UUID.randomUUID()
             val engine = VoiceAsrEngine(
@@ -165,9 +164,8 @@ class StopOverlapControlTest {
     }
 
     private class CountingSink(
-        budget: CollectionBudget,
         private val applied: MutableList<ExecutionOutcome>,
-    ) : ContributionRetentionSink(budget) {
+    ) : ContributionRetentionSink() {
         // This control counts PUBLICATIONS, not retention bookkeeping: finalization must not
         // depend on a candidate being retained, so the observation is counted directly.
         override fun noteExecutionOutcome(captureId: UUID, outcome: ExecutionOutcome): Boolean {

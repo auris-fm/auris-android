@@ -169,14 +169,13 @@ class RetainedCandidate internal constructor(
 
 /**
  * Retention owner between the observer and the future ContributionStore. Incremental deltas
- * APPEND REAL SAMPLES into a bounded prefix under aggregate budget control (actual retention,
- * not counters): reservation happens BEFORE allocation, growth re-reserves before each append,
- * cancellation/purge releases, completion transfers the prefix charge without double-counting.
+ * APPEND REAL SAMPLES into a bounded prefix under PER-CLIP cap control (spec cut 3: the
+ * aggregate CollectionBudget ledger is gone — memory is bounded by the per-recording byte cap
+ * and a fixed [MAX_PENDING_FINALIZATION] count of recordings waiting for finalization).
  * The three loss categories stay distinct: revocation purges all charges; listening closure ends
  * only the open prefix; deferral changes nothing.
  */
 open class ContributionRetentionSink(
-    private val budget: CollectionBudget,
     private val maxBytesPerClip: Long = SegmentObserver.DEFAULT_MAX_RETAINED_BYTES,
     /** Injectable monotonic clock (Batch B): the outcome-wait deadline is frozen at REAL
      *  completion time in THIS clock domain, so delayed registration cannot extend the wait. */
@@ -253,7 +252,7 @@ open class ContributionRetentionSink(
     // to the sink (adopted, no copy) — so the reserved amount equals the allocated amount.
     override fun started(observation: SegmentObservation.Started): Boolean {
         val actualBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
-        if (actualBytes > maxBytesPerClip || !budget.reserve(actualBytes)) return false
+        if (actualBytes > maxBytesPerClip) return false
         synchronized(lock) {
             // ADOPT the production array: ownership transfers, zero extra allocation.
             openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk)).apply {
@@ -270,7 +269,7 @@ open class ContributionRetentionSink(
         val bytes = observation.producerSamples.toLong() * BYTES_PER_SAMPLE
         // Empty prefix (size 0): still admitted — nothing allocated, nothing charged; the
         // capture retains from deltas onward under the same ownership.
-        if (bytes > maxBytesPerClip || !budget.reserve(bytes)) return null
+        if (bytes > maxBytesPerClip) return null
         // The frozen cap rides on the ADMISSION TOKEN itself (capture-owned): it reaches the
         // prefix at adoption inside the ownership-transfer lock, never a shared scalar.
         // A FAILED admission creates no token, so no cap survives a refusal.
@@ -295,15 +294,12 @@ open class ContributionRetentionSink(
         // prefix still pins. Valid audio = observation.validSamples (b3), stored separately.
         // Growth beyond the admitted reservation must be charged to close the gap; refusal ends
         // retention explicitly rather than exceed the cap.
-        if (capacityBytes > token.bytes) {
-            val extra = capacityBytes - token.bytes
-            if (!budget.reserve(extra)) {
-                endPrefixWithTerminal(OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = token.bytes }, "adoption-over-cap")
-                dropTokenLocked(token)
-                return false
-            }
-            token.bytes = capacityBytes
+        if (capacityBytes > maxBytesPerClip) {
+            endPrefixWithTerminal(OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = token.bytes }, "adoption-over-cap")
+            dropTokenLocked(token)
+            return false
         }
+        token.bytes = capacityBytes
         val validBytes = observation.validSamples.toLong() * BYTES_PER_SAMPLE
         synchronized(lock) {
             // Transfer ownership atomically: the token's FULL-CAPACITY charge moves into the
@@ -327,19 +323,17 @@ open class ContributionRetentionSink(
 
     private fun dropTokenLocked(token: ReservationToken) {
         synchronized(lock) {
-            if (token.bytes > 0) budget.release(token.bytes)
             token.bytes = 0L
             dropLeaseLocked(token.captureId, token.id)
             tokens.remove(token.id)
         }
     }
 
-    /** Producer-drop path for an initial allocation that never transferred: releases THAT token. */
+    /** Producer-drop path for an initial allocation that never transferred. */
     override fun releaseInitial(context: CaptureContext, token: ReservationToken?) {
         if (token == null) return
         synchronized(lock) {
             val live = tokens[token.id] ?: return
-            if (live.bytes > 0) budget.release(live.bytes)
             live.bytes = 0L
             dropLeaseLocked(live.captureId, live.id)
             tokens.remove(live.id)
@@ -351,20 +345,10 @@ open class ContributionRetentionSink(
         if (samples.isEmpty()) return
         val needed = samples.size.toLong() * BYTES_PER_SAMPLE
         val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } } ?: return
-        // Aggregate reservation FIRST — on failure nothing is copied and retention ends.
-        if (!budget.reserve(needed)) {
-            endPrefixWithTerminal(prefix, "budget-exhausted")
-            return
-        }
         var ended = false
         synchronized(lock) {
-            val still = openPrefix?.takeIf { it.context == observation.context }
-                ?: run {
-                    budget.release(needed)
-                    return
-                }
+            val still = openPrefix?.takeIf { it.context == observation.context } ?: return
             if (still.chargedBytes + needed > maxBytesPerClip) {
-                budget.release(needed)
                 ended = true
             } else {
                 // Owned chunk: a bounded COPY under reservation (the caller's array stays theirs).
@@ -405,10 +389,6 @@ open class ContributionRetentionSink(
         // Per-clip cap accounts for THIS capture's outstanding allocations only (no global
         // pendingDeltaBytes assumption — reviewer 23cae70e b3).
         if (prefix.chargedBytes + outstandingFor(context.captureId) + bytes > maxBytesPerClip) return null
-        if (!budget.reserve(bytes)) {
-            endPrefixWithTerminal(prefix, "budget-exhausted")
-            return null
-        }
         val token = ReservationToken(context.captureId, nextReservationId(), bytes)
         synchronized(lock) {
             tokens[token.id] = token
@@ -434,14 +414,10 @@ open class ContributionRetentionSink(
             // array and its token charge leaves only via releaseDelta.
             if (copied < 0 || copied > drained.size) return@synchronized false
             val capacityBytes = drained.size.toLong() * BYTES_PER_SAMPLE
-            if (capacityBytes > live.bytes) {
-                // Caller handed a larger array than reserved: secure the gap or refuse cleanly.
-                val extra = capacityBytes - live.bytes
-                if (!budget.reserve(extra)) return@synchronized false
-            }
+            // (No aggregate ledger since the CollectionBudget cut: capacity above is bounded by
+            // the per-clip cap check below and by reserveDelta's outstanding accounting.)
             // Per-clip aggregate cap: prefix total after transfer must stay within the cap.
             if (prefix.chargedBytes + capacityBytes > maxBytesPerClip) {
-                if (capacityBytes > live.bytes) budget.release(capacityBytes - live.bytes)
                 endPrefixWithTerminal(prefix, "retention-cap")
                 return@synchronized false
             }
@@ -466,7 +442,6 @@ open class ContributionRetentionSink(
             // The producer DROPPED the allocated array: now (and only now) may THAT token's
             // remaining charge leave the budget — exactly once, never another capture's bytes.
             val live = tokens[token.id] ?: return@synchronized
-            if (live.bytes > 0) budget.release(live.bytes)
             live.bytes = 0L
             dropLeaseLocked(context.captureId, token.id)
             tokens.remove(token.id)
@@ -507,24 +482,19 @@ open class ContributionRetentionSink(
             synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }?.let { endPrefixWithTerminal(it, "completion-refused:clip-cap") }
             return false
         }
+        // FIXED PENDING COUNT replaces the aggregate ledger (spec cut 3): memory is bounded by
+        // the per-clip cap on EACH recording plus a fixed number of recordings allowed to wait
+        // for finalization at once. Beyond the cap the capture is refused, not queued.
+        if (synchronized(lock) { candidates.size } >= MAX_PENDING_FINALIZATION) {
+            logLoss("refused-handoff:pending-cap")
+            synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }?.let { endPrefixWithTerminal(it, "completion-refused:pending-cap") }
+            return false
+        }
         val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }
         if (prefix != null) {
-            // PEAK accounting (reviewer b81c61df b1): while flattening, the flattened output is a
-            // NEW allocation and every retained prefix array is still live. The budget must carry
-            // prefix + fullBytes simultaneously, so reserve the FULL output size up front — not
-            // merely the delta over the prefix charge.
-            if (!budget.reserve(fullBytes)) {
-                logLoss("refused-handoff:budget")
-                // Refusal CANCELS the capture: the retained prefix releases completely and the
-                // producer's frames are dropped; nothing stays pinned as an orphan "open" buffer.
-                endPrefixWithTerminal(prefix, "completion-refused")
-                return false
-            }
-            // Copy the production frames into ONE owned buffer under reservation, then transfer.
             val owned = flattenOwned(observation.frames, fullSamples)
             val transferred = synchronized(lock) {
                 if (openPrefix === prefix) {
-                    val retired = prefix.chargedBytes
                     prefix.buffer.clear()
                     prefix.validLengths.clear()
                     prefix.chargedBytes = fullBytes
@@ -532,9 +502,6 @@ open class ContributionRetentionSink(
                     // Copy THIS capture's frozen cap inside the SAME lock that ends prefix
                     // ownership (reviewer be120bf2 #2).
                     completionCap = prefix.allowanceMetadataCap
-                    // Peak ends: the reserved fullBytes covers the new owned buffer; the retired
-                    // prefix charge returns to the budget exactly once.
-                    budget.release(retired)
                     true
                 } else {
                     false
@@ -542,9 +509,7 @@ open class ContributionRetentionSink(
             }
             if (!transferred) {
                 completionCap = null
-                // Prefix was closed concurrently (revoke/cancel already handled its release):
-                // undo OUR reservation so no charge is orphaned; retain nothing.
-                budget.release(fullBytes)
+                // Prefix was closed concurrently (revoke/cancel already handled it); retain nothing.
                 return false
             }
             val completedAtMs = nowMs() // REAL completion time: frozen under this lock
@@ -565,11 +530,6 @@ open class ContributionRetentionSink(
             }
             onCandidateRetained?.invoke(candidate.context.captureId, gen, completedAtMs)
             return true
-        }
-        // No open prefix (already closed by revoke/cancel): plain full-size reservation.
-        if (!budget.reserve(fullBytes)) {
-            logLoss("refused-handoff:budget")
-            return false
         }
         val owned = flattenOwned(observation.frames, fullSamples)
         // No-prefix completion: NO frozen authority exists for this capture - the candidate
@@ -631,7 +591,6 @@ open class ContributionRetentionSink(
             leases.values.flatten().forEach { it.cancelled = true }
             while (candidates.isNotEmpty()) {
                 val c = candidates.pollFirst() ?: break
-                budget.release(c.bytesCharged)
                 c.pcm = null
             }
             // Count INSIDE the purge lock; the observer is invoked AFTER the outer block below —
@@ -803,7 +762,6 @@ open class ContributionRetentionSink(
         synchronized(lock) {
             val removed = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
             candidates.remove(removed)
-            budget.release(removed.bytesCharged)
             removed.bytesCharged = 0L
             removed.pcm = null
         }
@@ -920,10 +878,8 @@ open class ContributionRetentionSink(
     }
 
     private fun releasePrefix(prefix: OpenPrefix) {
-        val bytes = prefix.chargedBytes
         prefix.buffer.clear()
         prefix.chargedBytes = 0L
-        budget.release(bytes)
     }
 
     private fun logLoss(event: String) {
@@ -947,6 +903,10 @@ open class ContributionRetentionSink(
     }
 
     companion object {
+        /** Fixed number of recordings allowed to WAIT for finalization at once (spec cut 3:
+         *  replaces the aggregate byte ledger; memory = per-clip cap x this count). */
+        const val MAX_PENDING_FINALIZATION = 32
+
         private const val BYTES_PER_SAMPLE = 2L
         private const val FIRST_CHUNK_BYTES = 4096L
     }

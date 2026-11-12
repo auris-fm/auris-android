@@ -75,9 +75,8 @@ class InvocationSettlementRaceControlTest {
     // outcome for a capture that is actually retained, so this fixture retains one first — the
     // counter then observes the real publication, not a mock's callback list.
     private class CountingRetentionSink(
-        budget: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget,
         private val reports: FakeReports,
-    ) : au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink(budget) {
+    ) : au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink() {
         override fun noteExecutionOutcome(captureId: UUID, outcome: ExecutionOutcome): Boolean {
             val applied = super.noteExecutionOutcome(captureId, outcome)
             if (applied) reports.settled += outcome
@@ -106,10 +105,7 @@ class InvocationSettlementRaceControlTest {
             val authority: () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision = {
                 au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, true)
             }
-            sink = CountingRetentionSink(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget(1L shl 16),
-                reports,
-            )
+            sink = CountingRetentionSink(reports)
             val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver(
                 au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate { false },
                 sink,

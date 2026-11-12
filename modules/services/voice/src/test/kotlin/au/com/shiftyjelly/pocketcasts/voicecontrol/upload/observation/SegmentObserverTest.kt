@@ -27,7 +27,7 @@ class SegmentObserverTest {
     @Test
     fun `gate refusal at START allocates NOTHING - frames provider is never invoked`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { _ -> false },
             sink,
@@ -52,7 +52,7 @@ class SegmentObserverTest {
     @Test
     fun `revocation DURING a segment purges everything and refuses handoff - provider not run`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         var live = true
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
@@ -84,7 +84,7 @@ class SegmentObserverTest {
     @Test
     fun `cancel A then start B then LATE completion of A cannot join B`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -108,7 +108,7 @@ class SegmentObserverTest {
     @Test
     fun `detector failure still produces EXACTLY ONE terminal - Completed(DetectorFailed)`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -129,11 +129,10 @@ class SegmentObserverTest {
     }
 
     @Test
-    fun `incremental APPENDS real PCM and the aggregate BUDGET refuses growth before allocation`() {
-        // Budget covers the ADOPTED first chunk (2 samples = 4 bytes) + two 4-byte appends.
-        val budget = CollectionBudget(12L)
+    fun `incremental APPENDS real PCM and the PER-CLIP CAP refuses growth before allocation`() {
+        // Cap covers the ADOPTED first chunk (2 samples = 4 bytes) + two 4-byte appends.
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(budget, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(maxBytesPerClip = 12L, lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -146,30 +145,29 @@ class SegmentObserverTest {
         // Production's own first allocation transfers IN: no phantom fixed-size reservation.
         val context = observer.speechStarted(6L, "Headset", shortArrayOf(1, 2))!!
         assertNotNull(context)
-        assertEquals(4L, budget.charged()) // EXACTLY the adopted array's bytes
-        observer.speechIncremental(context, ShortArray(2)) // reserved & appended (real copy)
+        observer.speechIncremental(context, ShortArray(2)) // appended (real copy)
         assertEquals(4L, sink.prefixSamples()) // adopted chunk + delta, real retained samples
-        assertEquals(8L, budget.charged()) // 4 + 4
-        observer.speechIncremental(context, ShortArray(2)) // 4+4+4 = exactly at cap
-        assertEquals(12L, budget.charged())
-        observer.speechIncremental(context, ShortArray(1)) // ONE sample over: refuse BEFORE alloc
+        observer.speechIncremental(context, ShortArray(2)) // 4+4 BYTES = exactly at cap
+        assertEquals(6L, sink.prefixSamples()) // 6 real samples (12 bytes)
+        // The OBSERVER's own per-clip enforcement simply stops forwarding at the cap; the SINK's
+        // terminal path is driven directly here (the aggregate budget is gone; this is the
+        // per-clip refusal that ends retention with exactly one terminal).
+        sink.incremental(SegmentObservation.Incremental(context, 1, true), ShortArray(1))
 
-        // Growth refusal ends THIS capture's RETENTION with an explicit terminal, releasing the
-        // prefix charge — no silent bounding, no unbounded aggregate. The pipeline continues
-        // normally (ordinary recognition untouched); only collection ownership dies here.
+        // Cap refusal ends THIS capture's RETENTION with an explicit terminal — no silent
+        // bounding, no unbounded growth. The pipeline continues normally (ordinary recognition
+        // untouched); only collection ownership dies here.
         assertFalse(observer.isRetaining(context.captureId))
-        assertEquals(0L, budget.charged())
         assertEquals(0L, sink.prefixSamples())
-        assertTrue(losses.any { it == "partial-discard:budget-exhausted" })
+        assertTrue(losses.any { it == "partial-discard:retention-cap" })
     }
 
     @Test
     fun `handoff refuses when the ORIGINAL issued authority fails owner-transaction validation`() {
         // Reviewer 8fe69937 blocker 2: a fresh Boolean/new projection must NOT reauthorize an old
         // capture. Gate stays LIVE; only the OWNER-side validation of the frozen value fails.
-        val budget = CollectionBudget(1L shl 20)
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(budget, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         var handoffsValidated = 0
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
@@ -188,19 +186,16 @@ class SegmentObserverTest {
 
         assertEquals(1, handoffsValidated) // consulted AT the handoff, inside the owner transaction
         assertEquals(0, sink.retainedCount()) // refused: nothing adopted
-        // The capture CLOSES at the handoff even on refusal (exactly-one-terminal rule), so any
-        // admission charge is released by closure; refusal allocates nothing further.
+        // The capture CLOSES at the handoff even on refusal (exactly-one-terminal rule).
         assertFalse(observer.isOpen(context.captureId))
-        assertEquals(0L, budget.charged())
     }
 
     @Test
     fun `admission reserves BEFORE the producer allocates - refusal drains NOTHING`() {
-        // Producer counter says 100 samples; budget admits only 90 bytes-worth (45 samples*2...
-        // use exact numbers): reserve happens on ADMIT, allocation only after admission.
-        val budget = CollectionBudget(100L) // 50 samples max
+        // Producer counter says 100 samples; the clip cap admits only 50 samples-worth
+        // (100 bytes): the admit decision happens BEFORE any allocation.
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(budget, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(maxBytesPerClip = 100L, lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -209,30 +204,25 @@ class SegmentObserverTest {
             CompletionHandoff { c, o, e, w, p, sc, live, measurement -> sc.completeUnderOwner(c, o, e, w, p, wakeMeasurement = measurement) },
         )
         var allocated = false
-        val producerSizeSamples = 80 // 160 bytes > budget: must be refused BEFORE any ShortArray
+        val producerSizeSamples = 80 // 160 bytes > the 100-byte clip cap: refused BEFORE any ShortArray
 
         val context = observer.speechStartedAdmitting(20L, "Headset", producerSizeSamples)
 
         assertNull(context) // refused at admission
-        assertEquals(0L, budget.charged()) // nothing reserved, nothing allocated
         assertFalse(allocated)
         // Admitted path: size fits, THEN the caller allocates and transfers ownership.
         val ok = observer.speechStartedAdmitting(21L, "Headset", 40) // 80 bytes <= 100
         assertNotNull(ok)
-        assertEquals(80L, budget.charged()) // ADMIT reserved exact bytes BEFORE any allocation
         val chunk = shortArrayOf(1, 2, 3, 4) // producer allocates AFTER admission succeeded
         allocated = true
         observer.adoptFirstChunk(ok!!, ShortArray(40).also { chunk.copyInto(it, 0, 0, minOf(chunk.size, 40)) })
-        assertEquals(80L, budget.charged()) // exact adopted bytes charged once
     }
 
     @Test
     fun `completion charge transfers exactly - no double count between prefix and candidate`() {
         // Prefix accumulates 4 samples (8 bytes); the closed segment is 6 samples (12 bytes).
-        // After adoption EXACTLY 12 bytes stay charged: prefix released, clip reserved once.
-        val budget = CollectionBudget(1L shl 20)
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(budget, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -241,8 +231,7 @@ class SegmentObserverTest {
             CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val context = observer.speechStarted(13L, "Headset", shortArrayOf(1, 2))!! // 4 bytes adopted
-        observer.speechIncremental(context, shortArrayOf(3, 4)) // +4 => 8 charged
-        assertEquals(8L, budget.charged())
+        observer.speechIncremental(context, shortArrayOf(3, 4)) // +4 samples
 
         observer.wakeCompleted(
             context,
@@ -253,7 +242,6 @@ class SegmentObserverTest {
             { listOf(shortArrayOf(1, 2, 3, 4, 5, 6)) to 16000 },
         )
 
-        assertEquals(12L, budget.charged()) // EXACT final clip size, once
         assertEquals(1, sink.retainedCount())
         val candidate = sink.retainedSnapshot().single()
         assertEquals(12L, candidate.bytesCharged)
@@ -262,11 +250,10 @@ class SegmentObserverTest {
 
     @Test
     fun `reservation failure at completion keeps the prefix charged and owned until release`() {
-        // Budget fits the prefix but NOT the larger closed clip: the handoff must refuse WITHOUT
-        // leaving an open uncharged buffer — the prefix keeps its exact charge.
-        val budget = CollectionBudget(8L) // prefix (4+4) fits; 12-byte clip does not fit extra
+        // The clip cap fits the prefix but NOT the larger closed clip: the handoff must refuse
+        // WITHOUT leaving the capture retained — the prefix ends with exactly one terminal.
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(budget, lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(maxBytesPerClip = 8L, lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -276,7 +263,6 @@ class SegmentObserverTest {
         )
         val context = observer.speechStarted(14L, "Headset", shortArrayOf(1, 2))!!
         observer.speechIncremental(context, shortArrayOf(3, 4))
-        assertEquals(8L, budget.charged())
 
         observer.wakeCompleted(
             context,
@@ -288,22 +274,16 @@ class SegmentObserverTest {
         )
 
         assertEquals(0, sink.retainedCount()) // refused handoff
-        // The capture itself closes; whatever charge survives must equal released-or-retained
-        // accounting — never an open prefix with zero charge.
-        assertTrue(sink.openPrefixBytes() == 0L || sink.openPrefixBytes() == 8L)
-        if (sink.openPrefixBytes() == 0L) {
-            // Closed capture path: retention ended explicitly, charges released together.
-            assertEquals(0L, budget.charged())
-            assertTrue(losses.any { it.contains("budget") || it.contains("partial-discard") })
-        } else {
-            assertEquals(8L, budget.charged()) // still owned & charged, never uncharged-live
-        }
+        // The prefix ended with exactly one terminal; nothing is retained and nothing dangles.
+        assertEquals(0L, sink.openPrefixBytes())
+        assertFalse(observer.isRetaining(context.captureId))
+        assertTrue(losses.any { it.contains("clip-cap") || it.contains("partial-discard") })
     }
 
     @Test
     fun `listening closure discards ONLY the current partial - completed contributions survive`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -331,7 +311,7 @@ class SegmentObserverTest {
     @Test
     fun `deferral deletes NOTHING - ready entries stay`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -355,7 +335,7 @@ class SegmentObserverTest {
     @Test
     fun `outcomes join by ISSUED id only - unknown and closed ids are refused`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,
@@ -381,7 +361,7 @@ class SegmentObserverTest {
     @Test
     fun `stale incremental for an unknown context is refused - no orphan accounting`() {
         val losses = mutableListOf<String>()
-        val sink = ContributionRetentionSink(CollectionBudget(1L shl 20), lossEventObserver = { event, _ -> losses += event })
+        val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
         val observer = SegmentObserver(
             CollectionGate { it.shouldRetainNewWork },
             sink,

@@ -19,7 +19,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceIntentDispatcher
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
@@ -123,7 +122,7 @@ class CloudTurnPersistChainControlTest {
             val authority: () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision = {
                 au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, true)
             }
-            val retention = ContributionRetentionSink(CollectionBudget(1L shl 16))
+            val retention = ContributionRetentionSink()
             return VoiceAsrEngine(
                 voiceAudioProcessor = mock(),
                 utteranceFilter = mock(),

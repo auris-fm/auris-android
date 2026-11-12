@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -49,7 +50,8 @@ class LfmToolCallParserTest {
             "<|tool_call_start|>[playback(action='seek_to', position=None)]<|tool_call_end|>",
         )
         assertNotNull(call)
-        assertNull(call!!.params["position"])
+        assertTrue(call!!.params.containsKey("position"))
+        assertNull(call.params["position"])
     }
 
     @Test

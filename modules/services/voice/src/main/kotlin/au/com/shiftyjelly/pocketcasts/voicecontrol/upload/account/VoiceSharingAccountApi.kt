@@ -90,31 +90,33 @@ class VoiceSharingAccountOperations(
     suspend fun setVoiceSharing(
         enrolled: Boolean,
         acceptedDisclosureVersion: String?,
-        mayApply: () -> Boolean = { true },
+        applyUnderGuard: ((() -> Boolean) -> Boolean) = { it() },
     ): VoiceSharingMutationResult {
         if (enrolled && acceptedDisclosureVersion.isNullOrBlank()) return VoiceSharingMutationResult.Failure
         val (ownerAccount, ownerSession) = ownerNow()
         val request = issue(Route.SWITCH, if (enrolled) acceptedDisclosureVersion else null, ownerAccount, ownerSession)
             ?: return VoiceSharingMutationResult.Failure
         return when (val outcome = execute(request.op) { b, payload -> api.putVoiceSharing(b, payload) }) {
-            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued, mayApply)
+            is Outcome.Body -> appliedOrFailure(outcome.json, request.issued, applyUnderGuard)
             is Outcome.Done, is Outcome.Rejected, is Outcome.Unavailable -> VoiceSharingMutationResult.Failure
         }
     }
     /**
-     * [mayApply] is the supersession fence of the calling surface (Reviewer, integrated control):
+     * [applyUnderGuard] is the calling surface's supersession fence (Reviewer, integrated control):
      * a withdrawal deliberately does not queue behind an in-flight enrollment, so a superseded
-     * enrollment's PUT answer can land AFTER the withdrawal applied. Without this gate the apply
-     * would publish the stale enrollment over it — in the projection AND the durable choice.
+     * enrollment's PUT answer can land AFTER the withdrawal applied. The CALLER'S effects (publish +
+     * persist) are handed THROUGH this guard, which runs them under the fence's own lock together
+     * with the currency decision (Reviewer on `561d3c5b6e`: no check-then-write gap) — not a bare
+     * boolean probe followed by unlocked effects.
      */
     suspend fun enroll(
         acceptedDisclosureVersion: String,
-        mayApply: () -> Boolean = { true },
-    ): VoiceSharingMutationResult = setVoiceSharing(enrolled = true, acceptedDisclosureVersion = acceptedDisclosureVersion, mayApply = mayApply)
-    suspend fun withdraw(mayApply: () -> Boolean = { true }): VoiceSharingMutationResult = setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null, mayApply = mayApply)
-    private fun appliedOrFailure(json: String, issued: Issued, mayApply: () -> Boolean): VoiceSharingMutationResult {
+        applyUnderGuard: ((() -> Boolean) -> Boolean) = { it() },
+    ): VoiceSharingMutationResult = setVoiceSharing(enrolled = true, acceptedDisclosureVersion = acceptedDisclosureVersion, applyUnderGuard = applyUnderGuard)
+    suspend fun withdraw(applyUnderGuard: ((() -> Boolean) -> Boolean) = { it() }): VoiceSharingMutationResult = setVoiceSharing(enrolled = false, acceptedDisclosureVersion = null, applyUnderGuard = applyUnderGuard)
+    private fun appliedOrFailure(json: String, issued: Issued, applyUnderGuard: (() -> Boolean) -> Boolean): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        return if (apply(json, issued, fromRefresh = false, mayApply = mayApply)) {
+        return if (apply(json, issued, fromRefresh = false, applyUnderGuard = applyUnderGuard)) {
             VoiceSharingMutationResult.Applied(projection)
         } else VoiceSharingMutationResult.Failure
     }
@@ -126,7 +128,12 @@ class VoiceSharingAccountOperations(
      * sense: it carries the account/session fence, and a refresh that merely landed earlier must not
      * throw it away (owner Pixel test: twelve successful taps, every answer discarded client-side).
      */
-    private fun apply(json: String, issued: Issued, fromRefresh: Boolean, mayApply: () -> Boolean = { true }): Boolean = ownership.transaction {
+    private fun apply(
+        json: String,
+        issued: Issued,
+        fromRefresh: Boolean,
+        applyUnderGuard: (() -> Boolean) -> Boolean = { it() },
+    ): Boolean = ownership.transaction {
         val current = ownership.authoritySnapshot()
         if (current.accountName != issued.accountName || current.session != issued.session) {
             return@transaction false // a different account (or a new login) owns the answer now
@@ -134,13 +141,21 @@ class VoiceSharingAccountOperations(
         if (fromRefresh && state.publicationCount() != issued.publication) {
             return@transaction false // a newer answer already landed
         }
-        if (!fromRefresh && !mayApply()) {
-            return@transaction false // superseded: a newer intent owns the outcome (integrated control)
+        // THE MUTATION EFFECTS RUN INSIDE THE GUARD (Reviewer on `561d3c5b6e`): publish and persist
+        // are handed to [applyUnderGuard], which for controller-driven mutations is the fence's
+        // applyIfCurrent — decision and effects in ONE critical section, so a supersession cannot
+        // land between validation and publication. A refresh (fence-free) applies directly.
+        val publishAndPersist = {
+            val projection = state.parseProjection(json)
+            if (projection == null) {
+                false
+            } else {
+                state.publish(projection)
+                persistSavedChoiceLocked(current.accountName, projection)
+                true
+            }
         }
-        val projection = state.parseProjection(json) ?: return@transaction false
-        state.publish(projection)
-        persistSavedChoiceLocked(current.accountName, projection)
-        true
+        if (fromRefresh) publishAndPersist() else applyUnderGuard(publishAndPersist)
     }
     private fun persistSavedChoiceLocked(account: String?, projection: VoiceSharingAccountProjection) {
         val store = savedSharingChoice ?: return

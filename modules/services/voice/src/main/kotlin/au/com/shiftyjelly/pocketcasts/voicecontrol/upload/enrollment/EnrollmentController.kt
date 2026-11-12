@@ -77,12 +77,15 @@ sealed interface EnrollmentOutcome {
  */
 class EnrollmentController(
     /**
-     * Both operations take the [mayApply] fence: the LIVE supersession check at apply time. The
-     * withdrawal does not queue behind an in-flight enrollment (deliberate), so two PUTs can be in
-     * flight; the enrollment's answer must consult the fence when it lands, not trust its issue.
+     * Both operations take the [applyUnderGuard] fence: the effects they apply are handed THROUGH
+     * it, so the currency decision and the effects run as ONE fence critical section (Reviewer on
+     * `561d3c5b6e`: a bare check released the fence lock before publish/persist, leaving a
+     * check-then-write gap against `supersedeAndIssue`). The withdrawal still does not queue behind
+     * an in-flight enrollment (deliberate), so two PUTs can be in flight; the enrollment's answer
+     * consults the fence at its effects, not trusting its issue.
      */
-    private val enrollOperation: suspend (acceptedDisclosureVersion: String, mayApply: () -> Boolean) -> VoiceSharingMutationResult,
-    private val withdrawOperation: suspend (mayApply: () -> Boolean) -> VoiceSharingMutationResult,
+    private val enrollOperation: suspend (acceptedDisclosureVersion: String, applyUnderGuard: (() -> Boolean) -> Boolean) -> VoiceSharingMutationResult,
+    private val withdrawOperation: suspend (applyUnderGuard: (() -> Boolean) -> Boolean) -> VoiceSharingMutationResult,
     private val deleteOperation: suspend () -> Boolean,
     private val clearLocalPending: () -> Unit,
     /** Owner session each operation is issued under; a change drops in-flight results. */
@@ -115,7 +118,15 @@ class EnrollmentController(
         }
         mutableState.value = EnrollmentState.Pending
         val attempt = fence.issue(ownerSession())
-        val result = fence.serialize { enrollOperation(acceptedDisclosureVersion) { fence.isCurrent(attempt, ::sessionLive) } }
+        // THE GUARD IS THE CRITICAL SECTION (Reviewer on `561d3c5b6e`): the operations hand their
+        // publish+persist THROUGH this function, and applyIfCurrent runs the decision AND the
+        // effects under the fence's own lock. A supersession issued between validation and
+        // publication cannot interleave — it waits for the section, and the newer intent wins from
+        // the next guarded apply onward. Lock order stays owner -> fence.
+        val applyUnderGuard: (() -> Boolean) -> Boolean = { effect ->
+            fence.applyIfCurrent(attempt, ::sessionLive, effect = effect) != null
+        }
+        val result = fence.serialize { enrollOperation(acceptedDisclosureVersion, applyUnderGuard) }
         // A superseded or cross-session result is DROPPED, not applied: applying it would let a slow
         // enrollment flip the UI back to "sharing on" after the user turned sharing off, or write one
         // account's outcome onto another's screen.
@@ -200,7 +211,11 @@ class EnrollmentController(
         // for the very request they are stopping — the deadlock this control produced. The withdrawal
         // is already the newest intent, and the fence guarantees the older enrollment cannot apply, so
         // the two requests need not be ordered against each other.
-        val result = withdrawOperation { fence.isCurrent(attempt, ::sessionLive) }
+        val result = withdrawOperation { effect ->
+            // Same critical-section guard as enroll: the withdrawal's effects also run under the
+            // fence lock, so its answer cannot interleave with a newer intent's either.
+            fence.applyIfCurrent(attempt, ::sessionLive, effect = effect) != null
+        }
         if (!fence.isCurrent(attempt, ownerSession)) return EnrollmentOutcome.Superseded
         val settled = when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentState.Applied

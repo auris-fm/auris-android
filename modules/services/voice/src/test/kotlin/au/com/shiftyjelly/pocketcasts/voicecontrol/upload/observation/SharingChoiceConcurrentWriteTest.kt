@@ -36,6 +36,11 @@ class SharingChoiceConcurrentWriteTest {
         context = ApplicationProvider.getApplicationContext()
         File(context.filesDir, "voice-sharing-choice-" + sha("owner@example.test")).delete()
         File(context.filesDir, "voice-sharing-choice-" + sha("owner@example.test") + ".tmp").delete()
+        // Unique per-write temps carry `.tmp.<uuid>`: sweep ALL leftovers so a previous round's
+        // crash cannot fail the no-leftovers control.
+        context.filesDir.listFiles().orEmpty()
+            .filter { it.name.startsWith("voice-sharing-choice-") && ".tmp." in it.name }
+            .forEach { it.delete() }
     }
 
     private fun sha(text: String): String = java.security.MessageDigest.getInstance("SHA-256")

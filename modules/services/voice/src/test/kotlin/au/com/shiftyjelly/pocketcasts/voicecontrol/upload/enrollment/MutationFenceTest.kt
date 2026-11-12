@@ -6,7 +6,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Test
 
 /**
@@ -261,5 +265,60 @@ class MutationFenceTest {
         )
 
         inFlight.cancel()
+    }
+
+    /**
+     * THE CHECK-THEN-WRITE CONTROL (Reviewer on `561d3c5b6e`): a supersession issued BETWEEN
+     * validation and publication must not interleave. applyIfCurrent runs the decision and the
+     * effect under THIS fence's lock, so a supersedeAndIssue issued while the effect runs waits for
+     * the section — the in-flight apply completes — and only applies from then on refuse older
+     * attempts. The newer intent wins; the older one is never observed mid-flight.
+     */
+    @Test
+    fun `a supersession issued during a guarded apply waits for the section and the older attempt is refused after`() {
+        val fence = MutationFence()
+        val live = { 42L }
+        val attempt = fence.issue(42L)
+        val insideSection = CountDownLatch(1)
+        val releaseSection = CountDownLatch(1)
+        val effectRan = AtomicBoolean(false)
+        val worker = Thread {
+            fence.applyIfCurrent(attempt, live) {
+                insideSection.countDown()
+                releaseSection.await()
+                effectRan.set(true)
+                true
+            }
+        }
+        worker.start()
+        assertTrue(insideSection.await(5, TimeUnit.SECONDS))
+
+        // The supersession is issued while the effect is mid-flight (inside the section). Under the
+        // critical section it cannot return before the section finishes; probe briefly, then
+        // release the section and prove the ordering.
+        val supersedeDone = CountDownLatch(1)
+        val newer = java.util.concurrent.atomic.AtomicReference<MutationFence.Attempt?>(null)
+        val superseder = Thread {
+            newer.set(fence.supersedeAndIssue(42L))
+            supersedeDone.countDown()
+        }
+        superseder.start()
+        assertFalse(
+            "supersession must wait for the guarded section, not interleave with it",
+            supersedeDone.await(300, TimeUnit.MILLISECONDS),
+        )
+
+        releaseSection.countDown()
+        assertTrue(supersedeDone.await(5, TimeUnit.SECONDS))
+        assertTrue("the in-flight apply completed before the supersession was acknowledged", effectRan.get())
+
+        // The newer intent now owns the fence: the old attempt's guarded apply is refused, the
+        // new attempt's goes through.
+        var refusedEffectRan = false
+        assertNull(fence.applyIfCurrent(attempt, live) { refusedEffectRan = true; true })
+        assertFalse(refusedEffectRan)
+        assertTrue(fence.applyIfCurrent(newer.get()!!, live) { true } == true)
+        worker.join()
+        superseder.join()
     }
 }

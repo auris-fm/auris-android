@@ -118,12 +118,12 @@ class VoiceSharingAccountStartup @Inject constructor(
      * composed the queue yet, the no-op is correct — there is no pending work to stop.
      */
     fun enrollmentController(clearLocalPending: () -> Unit): EnrollmentController = EnrollmentController(
-        enrollOperation = { acceptedDisclosureVersion, mayApply ->
-            operations.enroll(acceptedDisclosureVersion, mayApply)
+        enrollOperation = { acceptedDisclosureVersion, applyUnderGuard ->
+            operations.enroll(acceptedDisclosureVersion, applyUnderGuard)
         },
-        withdrawOperation = { mayApply ->
+        withdrawOperation = { applyUnderGuard ->
             // The epoch is captured from the fresh projection inside the owner transaction.
-            operations.withdraw(mayApply)
+            operations.withdraw(applyUnderGuard)
         },
         deleteOperation = {
             operations.deleteData()

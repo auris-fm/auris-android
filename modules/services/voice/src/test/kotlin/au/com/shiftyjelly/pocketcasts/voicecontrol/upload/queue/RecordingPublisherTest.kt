@@ -47,7 +47,7 @@ class RecordingPublisherTest {
                 captureSession = 3,
                 routeClass = "ordinary",
                 wakeRequired = wakeRequired,
-                issuedAuthority = epoch?.let { IssuedAuthority("a@b.c", 1L, 1L, it, "voice-sharing-v1") },
+                issuedAuthority = epoch?.let { IssuedAuthority("a@b.c", it, "voice-sharing-v1") },
             ),
             pcm = pcm,
             sampleRateHz = sampleRateHz,

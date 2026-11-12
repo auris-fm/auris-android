@@ -7,8 +7,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.servers.di.Raw
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionAuthorityTransaction
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
 import dagger.Module
 import dagger.Provides
@@ -94,9 +93,8 @@ object VoiceUploadQueueModule {
         queue: FolderQueue,
         @SyncServiceRetrofit retrofit: dagger.Lazy<retrofit2.Retrofit>,
         aurisToken: AurisTokenProvider,
-        collectionTx: CollectionAuthorityTransaction,
+        accountStartup: VoiceSharingAccountStartup,
         savedSharingChoice: SavedSharingChoiceStore,
-        withdrawalIntent: LocalWithdrawalIntentStore,
         @Raw rawClient: OkHttpClient,
     ): UploaderLoop {
         // Resolved against the same gateway origin the account routes use, so the endpoint is never
@@ -109,23 +107,18 @@ object VoiceUploadQueueModule {
         // twice: once for the loop, and once in the sender after the credential arrives, because
         // acquisition can take long enough for the user's answer to change.
         val gate = AccountPreSendGate(
-            currentAccount = { collectionTx.coherentAuthority().accountName },
+            currentAccount = { accountStartup.currentAccountName() },
             currentEpoch = {
-                val account = collectionTx.coherentAuthority().accountName
+                val account = accountStartup.currentAccountName()
                 savedSharingChoice.enrolledChoiceFor(account)?.epoch
             },
             // The saved choice is the durable record of what the user decided, so switching
             // sharing off stops the queue on the next pass rather than at the next sign-in.
+            // A WITHDRAWN record is the local stop: enrolledChoiceFor returns null, so the gate
+            // refuses even while a withdrawal request is in flight or has failed.
             sharingEnabled = {
-                // The local intent is consulted as well as the saved choice, because a stop
-                // whose write failed is still a stop: the saved record can still say enrolled
-                // after the user has asked to stop.
-                if (!withdrawalIntent.collectionPermittedByLocalIntent()) {
-                    false
-                } else {
-                    val account = collectionTx.coherentAuthority().accountName
-                    savedSharingChoice.enrolledChoiceFor(account) != null
-                }
+                val account = accountStartup.currentAccountName()
+                savedSharingChoice.enrolledChoiceFor(account) != null
             },
         )
 

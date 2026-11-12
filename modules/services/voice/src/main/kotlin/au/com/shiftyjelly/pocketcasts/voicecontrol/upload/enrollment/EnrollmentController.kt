@@ -88,6 +88,13 @@ class EnrollmentController(
     private val withdrawOperation: suspend (applyUnderGuard: (() -> Boolean) -> Boolean) -> VoiceSharingMutationResult,
     private val deleteOperation: suspend () -> Boolean,
     private val clearLocalPending: () -> Unit,
+    /**
+     * Writes the durable WITHDRAWN record for the current account, synchronously, BEFORE the
+     * withdrawal request is issued. The saved WITHDRAWN record is the local stop: it must be in
+     * place while the request is in flight and after it fails, so no stale ENROLLED record resumes
+     * admission. Returns true when the record is durably in place.
+     */
+    private val recordLocalWithdrawal: () -> Boolean = { false },
     /** Owner session each operation is issued under; a change drops in-flight results. */
     private val ownerSession: () -> Long,
     /**
@@ -201,6 +208,9 @@ class EnrollmentController(
         // ORDER MATTERS: before the request, not after. A later clear would keep collecting for the
         // duration of the round trip, which is exactly the state the user just asked to leave.
         clearLocalPending()
+        // THE LOCAL STOP IS THE DURABLE WITHDRAWN RECORD, written at tap time (before the server
+        // answers). A failed write still leaves the in-memory preference value in place.
+        recordLocalWithdrawal()
         // SUPERSEDE BEFORE ANYTHING ELSE. An in-flight enrollment must lose here rather than complete
         // and restore the UI to "on"; waiting for it (or for the serialization lock it holds) would
         // make the user's decision queue behind a request they have already changed their mind about.

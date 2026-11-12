@@ -6,7 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 private val LIVE_CONSENT = AuthorityDecision(collectionPermitted = true, fullRevocation = false)
-private val ISSUED_AUTHORITY = IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1")
+private val ISSUED_AUTHORITY = IssuedAuthority("a@b.c", "epoch-1", "disclosure-1")
 
 /**
  * Required by the uploads contract:

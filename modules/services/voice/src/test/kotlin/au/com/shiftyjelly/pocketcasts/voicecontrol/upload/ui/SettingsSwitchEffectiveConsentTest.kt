@@ -6,9 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentD
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.InMemoryChoicePersistence
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -66,13 +64,8 @@ class SettingsSwitchEffectiveConsentTest {
                 clearLocalPending = {},
                 ownerSession = { 1L },
             ),
-            withdrawalIntent = LocalWithdrawalIntentStore(object : WithdrawalIntentPersistence {
-                override fun read(): Boolean = false
-                override fun write(requested: Boolean): Boolean = true
-            }),
             ownerSession = { 1L },
             ioDispatcher = Dispatchers.Main,
-            markerRead = { true },
             savedChoice = VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" },
             knownChoice = VoiceSharingSettingsModule.knownChoiceProvider(store) { "user@example.com" },
         )

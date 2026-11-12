@@ -11,26 +11,12 @@ import kotlinx.coroutines.CoroutineScope
 
 /**
  * Composition of the collection-retention boundary (plan Task 3): the live authority is read
- * from the ACTUAL authorities — the lease-evaluated policy snapshot and the owner's account
- * session — never reconstructed from cached gate decisions.
+ * from the ACTUAL authorities — the signed-in account name and its durable saved sharing choice —
+ * never reconstructed from cached gate decisions.
  */
 @Module
 @InstallIn(SingletonComponent::class)
 object VoiceObservationModule {
-
-    /**
-     * The durable local stop (reviewer 9156a8ea). File-backed so the user's decision survives a
-     * process restart; the authority consults it at every decision, so a pending or failed
-     * withdrawal cannot silently resume collection.
-     */
-    @Provides
-    @Singleton
-    fun provideLocalWithdrawalIntent(
-        // The INTERFACE: the concrete class lost its @Inject constructor when production binding
-        // moved to provideWithdrawalIntentPersistence below; requesting the concrete type here made
-        // the app-level Hilt graph unresolvable (caught by :app:packageDebug).
-        persistence: WithdrawalIntentPersistence,
-    ): LocalWithdrawalIntentStore = LocalWithdrawalIntentStore(persistence)
 
     @Provides
     @Singleton
@@ -48,13 +34,9 @@ object VoiceObservationModule {
     @Singleton
     fun provideCollectionAuthority(
         accountStartup: VoiceSharingAccountStartup,
-        collectionTx: CollectionAuthorityTransaction,
-        localWithdrawalIntent: LocalWithdrawalIntentStore,
         savedSharingChoice: SavedSharingChoiceStore,
     ): CollectionAuthority = CollectionAuthority(
         accountStartup,
-        collectionTx,
-        localWithdrawalIntent,
         savedSharingChoice,
     )
 
@@ -62,18 +44,7 @@ object VoiceObservationModule {
     @Singleton
     fun provideEngineCollectionAuthority(
         authority: CollectionAuthority,
-    ): () -> AuthorityDecision = authority::decideLossSignalWrapped
-
-    @Provides
-    @Singleton
-    fun provideCollectionTx(
-        accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
-    ): CollectionAuthorityTransaction = CollectionAuthorityTransaction(
-        ownership = accountStartup.ownerForHandoff(),
-        // THE single shared primitive: same object as the owner's collectionSharedLock, injected
-        // through the concrete SyncAccountManagerImpl binding resolved by the startup.
-        sharedLock = accountStartup.sharedCollectionLock(),
-    )
+    ): () -> AuthorityDecision = authority::decide
 
     /**
      * The publish path: a sealed capture becomes a queued recording.
@@ -115,28 +86,62 @@ object VoiceObservationModule {
     fun provideSegmentObserver(
         authority: CollectionAuthority,
         sink: ContributionRetentionSink,
-        collectionTx: CollectionAuthorityTransaction,
     ): SegmentObserver = SegmentObserver(
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
-        // Loss/handoff decisions enter through the collection fence BEFORE any observer monitor:
-        // the wrapped decide acquires the fence internally; callers here never hold a monitor.
-        authority = authority::decideLossSignalWrapped,
-        issueAuthority = authority::issueAuthorityCoherentLockedIndependent,
-        handoff = HandoffCoordinator(
-            collectionTx = collectionTx,
-            validateIssuedLocked = authority::validateIssuedAuthorityLocked,
-        ),
-        fenceGate = object : FenceGate {
-            override fun <R> gate(block: () -> R): R = collectionTx.transaction(block)
+        authority = authority::decide,
+        issueAuthority = authority::issueAuthority,
+        handoff = object : CompletionHandoff {
+            override fun handoff(
+                context: CaptureContext?,
+                speechOnsetSample: Int,
+                speechEndSample: Int,
+                wakeState: SegmentObservation.WakeState,
+                framesProvider: () -> Pair<List<ShortArray>, Int>,
+                scope: ObserverHandoffScope,
+                liveGateAllowed: Boolean,
+                wakeMeasurement: SegmentObservation.WakeMeasurement?,
+            ) {
+                val issued = context?.issuedAuthority
+                val authorized = issued != null && issued.accountName != null &&
+                    authority.validateIssuedAuthority(issued)
+                // Identity check FIRST: a stale/unknown context is a late NO-OP, never a purge of
+                // the current capture's audio.
+                if (context != null && !scope.ownsCapture(context.captureId)) return
+                if (!authorized || !liveGateAllowed) {
+                    // Refusal STILL terminates: exactly one terminal, prefix PCM + charge released
+                    // via the cancel path — never a silent return leaving live uncharged audio.
+                    scope.completeUnderOwner(
+                        context,
+                        speechOnsetSample,
+                        speechEndSample,
+                        wakeState,
+                        framesProvider,
+                        admit = false,
+                        liveGateAllowed = liveGateAllowed,
+                        wakeMeasurement = wakeMeasurement,
+                    )
+                    return
+                }
+                scope.completeUnderOwner(
+                    context,
+                    speechOnsetSample,
+                    speechEndSample,
+                    wakeState,
+                    framesProvider,
+                    admit = true,
+                    liveGateAllowed = true,
+                    wakeMeasurement = wakeMeasurement,
+                )
+            }
         },
     ).also { observer ->
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }
 
-    // The withdrawal marker is one boolean in the platform settings store (SharedPreferences,
-    // 2026-11-12): no directory barrier, no latch. A failed commit is logged; the in-memory
-    // value stands, so admission never wedges on storage.
+    // The withdrawal marker is the WITHDRAWN record in the saved sharing choice store
+    // (SharedPreferences, 2026-11-12): no directory barrier, no separate latch. A failed commit is
+    // logged; the in-memory value stands, so admission never wedges on storage.
 
     /** BATCH B bounded outcome finalization with THE production 45 s wait (see the constant). */
     @Provides
@@ -151,12 +156,6 @@ object VoiceObservationModule {
         // Same monotonic domain the sink composes by default (production clock).
         nowMs = { System.nanoTime() / 1_000_000L },
     )
-
-    @Provides
-    @Singleton
-    fun provideWithdrawalIntentPersistence(
-        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
-    ): WithdrawalIntentPersistence = SharedPreferencesWithdrawalIntentPersistence(context)
 
     /**
      * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change and the

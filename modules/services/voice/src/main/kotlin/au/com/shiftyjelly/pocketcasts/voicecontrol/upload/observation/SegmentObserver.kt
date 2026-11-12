@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
-import java.util.ArrayDeque
 import java.util.UUID
 import timber.log.Timber
 
@@ -22,15 +21,14 @@ class SegmentObserver(
     private val sink: SegmentSink,
     private val authority: () -> AuthorityDecision,
     /** Freezes the ORIGINAL authority at start; NO renewal source — reads current, once. */
-    private val issueAuthority: () -> IssuedAuthority = { IssuedAuthority(null, 0L, 0L, null, null) },
+    private val issueAuthority: () -> IssuedAuthority = { IssuedAuthority(null, null, null) },
     /**
-     * One-transaction completion handoff (owner→observer→sink). Production composes a real
-     * coordinator over the credential owner; the default refuses EVERY handoff (fail-closed),
-     * so an uncomposed observer retains nothing at completion.
+     * One-transaction completion handoff (owner→observer→sink). Production composes a simple
+     * inline handoff that validates the issued authority and completes under this observer; the
+     * default refuses EVERY handoff (fail-closed), so an uncomposed observer retains nothing at
+     * completion.
      */
     private val handoff: CompletionHandoff = RefuseAllCompletionHandoff,
-    /** Collection-fence wrapper supplied by composition; identity when uncomposed (tests). */
-    private val fenceGate: FenceGate = IdentityFenceGate,
     /** Test visibility only: observes each ADMITTED context (never used by production wiring). */
     private val onAdmittedForTest: ((CaptureContext) -> Unit)? = null,
 ) : ObserverHandoffScope {
@@ -60,36 +58,6 @@ class SegmentObserver(
 
     /** Cap on retained collection audio (per-clip bound of plan Task 5 enforced early). */
     var maxRetainedBytes: Long = DEFAULT_MAX_RETAINED_BYTES
-
-    /** Context issued for this SpeechStarted iff admission passed; null when refused/closed. */
-    // [firstChunk] is the production segment's current accumulated audio; when retention starts
-    // the sink ADOPTS that array (ownership transfer, no extra copy). Pass [ShortArray] of the
-    // live buffer — never a fabricated size.
-    // ADMISSION BEFORE ALLOCATION (reviewer 1d27bcd6 blocker 3): [producerSize] is the native
-    // buffer's CURRENT length — a counter read that allocates nothing. The observer freezes the
-    // coherent authority, consults the gate, and RESERVES exactly those bytes in the sink FIRST;
-    // only then does the caller drain the native buffer into an array whose ownership transfers
-    // to the sink ([adoptFirstChunk], called iff this returns non-null). Refusal leaves the
-    // producer untouched: recognition keeps its own buffer as before.
-    // Admission path (order collectionFence → owner → observer → sink; blockers b1/b3): the fence
-    // is acquired BEFORE this object's monitor, and the EXACT-SIZE reservation completes BEFORE
-    // this method returns — the engine allocates its ShortArray only afterwards, so an oversized
-    // or unaffordable prefix never exists. Refusal leaves observer state untouched and releases
-    // any charge it took.
-    // Admission path (order shared → observer → sink; reviewer 2e1d5b0b b2): BOTH authority reads
-    // — the frozen ISSUE and the LIVE gate decision — happen under the shared primitive BEFORE
-    // this object's monitor is entered. Inside the lock only local state + sink admit run.
-    // Admission + its IMMUTABLE initial-reservation handle (reviewer 79b2b5c9 b2): producers
-    // adopt/release by THIS handle even after revocation closed the capture or a successor
-    // opened — release never depends on "the currently open context".
-    data class AdmissionHandle(
-        val context: CaptureContext,
-        val initialToken: ReservationToken?,
-        /** The compiled per-clip ceiling — binds every allocation/growth of THIS capture. */
-        val selectedMaxClipBytes: Long,
-        /** The compiled metadata ceiling — frozen for the capture's persistence stage. */
-        val selectedMaxMetadataBytes: Int,
-    )
 
     /**
      * P1 (reviewer 0cd7e39d): the sink owns retained state; the INVOKED backend/router identity
@@ -137,6 +105,15 @@ class SegmentObserver(
         (sink as? ContributionRetentionSink)?.noteExecutionOutcome(captureId, outcome)
     }
 
+    data class AdmissionHandle(
+        val context: CaptureContext,
+        val initialToken: ReservationToken?,
+        /** The compiled per-clip ceiling — binds every allocation/growth of THIS capture. */
+        val selectedMaxClipBytes: Long,
+        /** The compiled metadata ceiling — frozen for the capture's persistence stage. */
+        val selectedMaxMetadataBytes: Int,
+    )
+
     fun speechStartedAdmitting(
         captureSession: Long,
         routeClass: String,
@@ -145,10 +122,10 @@ class SegmentObserver(
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
         /** Real grace state frozen at segment start (spec phase 2): true = wake word required. */
         wakeRequired: Boolean = true,
-    ): AdmissionHandle? = fenceGate.gate {
+    ): AdmissionHandle? {
         // Refusals consume nothing: a refused gate must not reserve sink bytes or allocate an
         // engine buffer.
-        val issued = issueAuthority() // under the shared primitive, no observer lock yet
+        val issued = issueAuthority() // read current, once
         val decision = authority() // ONE decision read: the reason comes from the SAME evaluation
         val permitted = gate.accepts(decision) // decision read before the monitor
         if (!permitted) {
@@ -156,13 +133,13 @@ class SegmentObserver(
             // from the decision that was actually evaluated, one read, no second state read.
             val reason = decision.refusalReason?.name?.lowercase()?.replace('_', '-') ?: "unknown"
             Timber.i("voice-capture admission: declined (gate-off reason=%s)", reason)
-            return@gate null
+            return null
         }
         // NO ALLOWANCE STEP HERE (core c74d7e30). Capture used to consult a prepaid allowance token
         // and fail closed when it was absent; that reserve-before-capture rule is removed, and the
         // daily limit is metered server-side at acceptance instead. Admission is now gated only by
         // consent/policy (above) and the compiled per-clip ceiling (below).
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, wakeRequired)?.let {
+        return speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, wakeRequired)?.let {
             onAdmittedForTest?.invoke(it)
             Timber.i("voice-capture admission: accepted capture=%s", it.captureId)
             AdmissionHandle(it, admissionToken, ContributionCeilings.MAX_CLIP_BYTES, ContributionCeilings.MAX_METADATA_BYTES)
@@ -258,8 +235,6 @@ class SegmentObserver(
         sink.releaseInitial(admission.context, token)
     }
 
-    // Entry WITHOUT any monitor: fenceGate acquires the SHARED primitive first; the observer
-    // lock is taken only INSIDE admission (order shared → observer), never the reverse.
     fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? {
         val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size) ?: return null
         if (!adoptFirstChunk(admitted, firstChunk)) releaseInitialChunk(admitted)
@@ -269,8 +244,7 @@ class SegmentObserver(
     // --- Reserve-before-copy delta protocol (blocker b3): reservation is a budget admit that
     // allocates NOTHING; commit transfers the caller's drained array (already reserved) into the
     // owned prefix; release returns bytes when the copy failed or was refused. All three take the
-    // observer monitor only — the collection fence was acquired at admission and is NOT re-entered
-    // upward from here. ---
+    // observer monitor only. ---
     fun reserveDelta(context: CaptureContext, samples: Int): ReservationToken? = synchronized(lock) {
         reserveEnforcedLocked(context, samples)
     }
@@ -350,16 +324,9 @@ class SegmentObserver(
     // * zero upload-side bytes are allocated. It hands over the PRODUCTION frames plus sample rate.
     // Completion handoff DELEGATES to [CompletionHandoff]: production runs the whole sequence —
     // original-authority validation, live re-decision, frames materialization, sink adoption,
-    // closure — inside ONE owner transaction (owner→observer→sink order). The default refuses
-    // everything (fail-closed). No check-then-act seam exists at this boundary anymore.
+    // closure. The default refuses everything (fail-closed). No check-then-act seam exists at this
+    // boundary anymore.
 
-    /**
-     * Entry WITHOUT the observer lock: the coordinator acquires collectionFence first, then
-     * re-enters this object via completeUnderOwner which takes the observer lock as the INNERMOST
-     * monitor (order collectionFence → owner → observer → sink; blocker a38421f6 b1).
-     * [framesProvider] is wrapped SINGLE-SHOT (blocker b3): the first call drains and hands the
-     * native buffer back; every later call returns EMPTY — no second copy-out can double-run.
-     */
     fun wakeCompleted(
         context: CaptureContext?,
         speechOnsetSample: Int,
@@ -367,10 +334,9 @@ class SegmentObserver(
         wakeState: SegmentObservation.WakeState,
         wakeMeasurement: SegmentObservation.WakeMeasurement? = null,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
-    ): Unit = fenceGate.gate {
-        // The collection fence is held for the ENTIRE handoff including the single copy-out:
-        // reservation vs expiry can never interleave with the drain (blocker b4), and the
-        // provider stays single-shot — a second call returns EMPTY (no re-drain of native state).
+    ): Unit {
+        // [framesProvider] is wrapped SINGLE-SHOT (blocker b3): the first call drains and hands the
+        // native buffer back; every later call returns EMPTY — no second copy-out can double-run.
         var drained = false
         val oneShot: () -> Pair<List<ShortArray>, Int> = {
             if (drained) {
@@ -380,17 +346,15 @@ class SegmentObserver(
                 framesProvider()
             }
         }
-        // Single consulted gate for the handoff: the LIVE authority decision (shared primitive
-        // held by fenceGate above). The coordinator re-runs its own validation inside; test and
-        // production paths both see exactly ONE gate consultation per handoff.
+        // Single consulted gate for the handoff: the LIVE authority decision.
         val liveAllowed = gate.accepts(authority())
         handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, oneShot, this, liveAllowed, wakeMeasurement)
     }
 
     /**
-     * Observer-side completion body, invoked ONLY through [HandoffCoordinator] while the CALLER
-     * holds the owner lock (order owner→observer). Late/unknown contexts are refused without
-     * running [framesProvider]; the live decision is re-read; refusal allocates nothing.
+     * Observer-side completion body, invoked through [CompletionHandoff]. Late/unknown contexts are
+     * refused without running [framesProvider]; the live decision is re-read; refusal allocates
+     * nothing.
      */
     override fun completeUnderOwner(
         context: CaptureContext?,
@@ -413,7 +377,7 @@ class SegmentObserver(
             return false
         }
         if (!admit) {
-            // ORIGINAL-authority validation failed under the fence: FULL release (blocker b2) —
+            // ORIGINAL-authority validation failed: FULL release (blocker b2) —
             // purge every collection byte (prefix AND ready candidates), close the capture, zero
             // retention; provider never runs. A refused handoff is a loss event, not a deferral.
             (sink as? RevocationAware)?.purgeAllForRevocation("handoff-authority-refused")
@@ -422,10 +386,6 @@ class SegmentObserver(
             totalRetainedBytes = 0L
             return false
         }
-        // The coordinator ALREADY revalidated ORIGINAL coherent authority under the shared
-        // primitive before entering; the live gate here consumes that SAME decision source via
-        // [liveGate] (a plain boolean read of the frozen+live compare result), never by acquiring
-        // the owner/policy locks from inside this monitor (reviewer 2e1d5b0b b2).
         if (!liveGateAllowed) {
             // LIVE-gate refusal is ALSO a terminated handoff (blocker b2): provider never runs,
             // exactly one terminal closes the capture, prefix PCM + charge released via cancel.
@@ -473,19 +433,15 @@ class SegmentObserver(
      * External FULL REVOCATION signal (withdrawal/disable/expiry/account change): purges ALL
      * collection PCM including the open partial, immediately, under the same lifecycle lock.
      */
-    // Loss fan-out enters THROUGH the collection fence first (authority() acquires it), so revoke
-    // serializes against handoff/admission/expiry as ONE authority transaction; only then does it
-    // take the observer monitor (order fence → owner → observer → sink, blocker b1/b4).
-    fun revoked(reason: String): Boolean = fenceGate.gate {
-        // ONE collection transaction covers decide → purge → close: loss fan-out enters through
-        // the fence BEFORE any observer monitor (order fence → owner → observer → sink, b1/b4),
-        // and an in-flight handoff holding the same fence completes its copy before this purge.
+    fun revoked(reason: String): Boolean {
+        // ONE decision covers decide → purge → close: loss fan-out enters here, and an in-flight
+        // handoff completing on the same observer lock is serialized by the monitor below.
         // Loss causes purge on their OWN signal; expiry does not require the flag to have flipped.
         val decision = authority()
         if (!revocationCauses.contains(reason) && decision.collectionPermitted && !decision.fullRevocation) {
-            return@gate false
+            return false
         }
-        synchronized(lock) {
+        return synchronized(lock) {
             val purge = sink as? RevocationAware
             purge?.purgeAllForRevocation(reason)
             closeLocked()
@@ -512,16 +468,6 @@ class SegmentObserver(
         retainedForOpen = false
     }
 
-    private fun flatten(frames: List<ShortArray>): ShortArray {
-        val out = ShortArray(frames.sumOf { it.size })
-        var offset = 0
-        for (f in frames) {
-            System.arraycopy(f, 0, out, offset, f.size)
-            offset += f.size
-        }
-        return out
-    }
-
     companion object {
         const val DEFAULT_MAX_RETAINED_BYTES: Long = 8L * 1024 * 1024
         private const val BYTES_PER_SAMPLE = 2L
@@ -540,4 +486,65 @@ class SegmentObserver(
 /** Sinks that own retention clear everything on full revocation, partial buffers included. */
 interface RevocationAware {
     fun purgeAllForRevocation(reason: String)
+}
+
+/**
+ * Narrow observer surface used ONLY by the completion handoff. Implemented by [SegmentObserver].
+ */
+interface ObserverHandoffScope {
+    /** True when the scope's observer currently holds THIS capture open (stale-guard first). */
+    fun ownsCapture(captureId: java.util.UUID): Boolean
+
+    /**
+     * The handoff has ALREADY validated the ORIGINAL authority and evaluated the LIVE gate; those
+     * decisions arrive as data ([admit], [liveGateAllowed]) — the observer never acquires any
+     * authority lock upward. Runs [framesProvider] at most once, adopts into the sink, closes
+     * the capture. Refusals emit exactly one terminal and release charges. Returns retention.
+     */
+    fun completeUnderOwner(
+        context: CaptureContext?,
+        speechOnsetSample: Int,
+        speechEndSample: Int,
+        wakeState: SegmentObservation.WakeState,
+        framesProvider: () -> Pair<List<ShortArray>, Int>,
+        admit: Boolean = true,
+        liveGateAllowed: Boolean = true,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
+    ): Boolean
+}
+
+/**
+ * Completion handoff strategy: production composes a simple inline handoff; tests may inject an
+ * inline executor. The observer calls this from its own wakeCompleted site and MUST be handed a
+ * scope it can enter.
+ */
+fun interface CompletionHandoff {
+    /**
+     * Executes (or refuses) the handoff for [context]. Fail-closed implementations never invoke
+     * [framesProvider] and never retain.
+     */
+    fun handoff(
+        context: CaptureContext?,
+        speechOnsetSample: Int,
+        speechEndSample: Int,
+        wakeState: SegmentObservation.WakeState,
+        framesProvider: () -> Pair<List<ShortArray>, Int>,
+        scope: ObserverHandoffScope,
+        liveGateAllowed: Boolean,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
+    )
+}
+
+/** Default when uncomposed: NO handoff ever retains. Allocation proof: provider not run. */
+object RefuseAllCompletionHandoff : CompletionHandoff {
+    override fun handoff(
+        context: CaptureContext?,
+        speechOnsetSample: Int,
+        speechEndSample: Int,
+        wakeState: SegmentObservation.WakeState,
+        framesProvider: () -> Pair<List<ShortArray>, Int>,
+        scope: ObserverHandoffScope,
+        liveGateAllowed: Boolean,
+        wakeMeasurement: SegmentObservation.WakeMeasurement?,
+    ) = Unit
 }

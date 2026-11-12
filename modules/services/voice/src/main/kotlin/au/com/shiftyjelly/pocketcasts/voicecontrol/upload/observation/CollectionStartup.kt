@@ -88,7 +88,7 @@ class CollectionStartup @Inject constructor(
         publishWake = wakes::wake
         // Sign-in wake: the binding's authority-move slot (single listener, otherwise unused
         // since the presentation fence moved to the owner's session atomic).
-        accountStartup.binding.authorityMovedListener = wakes::wake
+        accountStartup.authorityMovedListener = wakes::wake
         // Foreground wake: every foreground arrival drains.
         appScope.launch {
             foregroundStateMonitor.isInForeground.collect { inForeground ->

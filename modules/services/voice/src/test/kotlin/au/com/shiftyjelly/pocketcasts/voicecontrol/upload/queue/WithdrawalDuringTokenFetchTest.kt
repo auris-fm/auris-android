@@ -69,6 +69,7 @@ class WithdrawalDuringTokenFetchTest {
 
             assertEquals("a withdrawal during acquisition must keep it off the wire", null, sending.await())
             assertEquals("and no request may reach the server", 0, server.requestCount)
+            assertEquals("and the now-ineligible recording is deleted locally", 0, queue.count())
         } finally {
             server.shutdown()
         }

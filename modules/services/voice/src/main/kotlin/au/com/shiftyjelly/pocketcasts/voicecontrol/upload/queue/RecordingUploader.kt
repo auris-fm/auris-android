@@ -34,8 +34,8 @@ class RecordingUploader(
      * Acquiring a token can take a network round trip, and the user's answer can change during it.
      * The loop checked these facts before calling, but that check is a snapshot: if sharing was
      * withdrawn while the token was being obtained, sending on that stale answer would upload data
-     * the user has just withdrawn. So the same facts are asked again here, and a refusal leaves the
-     * recording unsent for the loop to delete.
+     * the user has just withdrawn. So the same facts are asked again here, and a refusal deletes
+     * the recording locally rather than sending it.
      */
     private val eligible: (FolderQueue.Recording) -> Boolean = { true },
 ) {
@@ -92,7 +92,13 @@ class RecordingUploader(
         // gets here first, in which case no call is published at all, or second, in which case it
         // finds this call and cancels it. There is no ordering in which it misses.
         synchronized(sendLock) {
-            if (!eligible(recording)) return null
+            if (!eligible(recording)) {
+                // The user's answer changed while the credential was being obtained: this
+                // recording is no longer sendable, so delete it locally instead of sending or
+                // leaving it to be retried forever.
+                recording.delete()
+                return null
+            }
             inFlight.set(call)
         }
         return try {

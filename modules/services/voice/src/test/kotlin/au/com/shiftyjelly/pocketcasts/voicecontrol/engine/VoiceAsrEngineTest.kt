@@ -102,16 +102,12 @@ class VoiceAsrEngineTest {
     private val translationStage = mock<TranslationStage>()
     private val issuedAuthorityForTests = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
         "a@b.c",
-        1L,
-        1L,
         "epoch-1",
         "disclosure-1",
     )
     private companion object {
         val issuedAuthorityForTests = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
             "a@b.c",
-            1L,
-            1L,
             "epoch-1",
             "disclosure-1",
         )

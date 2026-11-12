@@ -37,7 +37,7 @@ class WakeRejectedStillUploadsTest {
                 captureSession = 1,
                 routeClass = "ordinary",
                 wakeRequired = true,
-                issuedAuthority = IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "voice-sharing-v1"),
+                issuedAuthority = IssuedAuthority("a@b.c", "epoch-1", "voice-sharing-v1"),
             ),
             pcm = ShortArray(1_600) { 7 },
             sampleRateHz = 16_000,

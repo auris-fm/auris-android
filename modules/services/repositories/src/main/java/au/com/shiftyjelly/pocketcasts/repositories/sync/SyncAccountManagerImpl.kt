@@ -26,214 +26,19 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 
+/**
+ * Straight AccountManager-backed implementation of [SyncAccountManager]. The account is the
+ * Android account; the access token is obtained and refreshed by the platform authenticator, and
+ * invalidation is the ordinary AccountManager call. There is deliberately no session/credential
+ * incarnation ledger here: the platform account is the identity, and a 401 means invalidate and
+ * re-acquire.
+ */
 @Singleton
 open class SyncAccountManagerImpl @Inject constructor(
     private val tokenErrorNotification: TokenErrorNotification,
     private val accountManager: AccountManager,
 ) : TokenHandler,
-    SyncAccountManager,
-    CredentialOwnershipOwner {
-
-    /**
-     * Credential + session OWNERSHIP (reviewers a75df7ef→f1d41730): ONE lock; ONE immutable
-     * Credential + session ownership (reviewers a75df7ef→f1d41730): one lock; one immutable
-     * AuthoritySnapshot (account, session, credential, owner-published token); lifecycle
-     * transactions fire the narrow synchronous binding INSIDE the lock (owner→voice is THE
-     * single lock order); refresh publication is captured BEFORE the network and conditionally
-     * committed; authority is NEVER reconstructed from a bare platform-cache token.
-     */
-    private val credentialWriteLock = Any()
-
-    /**
-     * SHARED collection serialization primitive (reviewer 8273382e): the SAME lock object is the
-     * account-tier participant of ONE global order: COLLECTION FENCE → ACCOUNT/POLICY → OBSERVER
-     * → SINK. Owner transitions take it BEFORE `credentialWriteLock`; the collection lane takes
-     * its own fence (composed over this same object by DI) before anything else; nothing inside
-     * this class acquires it while already holding `credentialWriteLock`, and no observer/sink
-     * code ever acquires it upward. Both lanes enter the SAME primitive first, so they serialize
-     * with each other and no cross-edge can invert the order.
-     */
-    override val collectionSharedLock = Any()
-
-    /** Owner transition: shared collection lock FIRST, then the credential write lock (order-safe). */
-    private fun <T> underCollectionNesting(block: () -> T): T = synchronized(collectionSharedLock) {
-        synchronized(credentialWriteLock) { block() }
-    }
-
-    private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
-    private val sessionGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
-    private var publishedToken: AccessToken? = null // owner-attributed; never a bare cache read
-    private var ownershipBinding: CredentialOwnershipBinding? = null
-    private var retainedAccountName: String? = null // the owner account, retained EXPLICITLY
-    private var sessionOpen = false // whether the binding's session is currently armed
-    private var ownershipInstalled = false // the ONCE bootstrap flag
-
-    fun credentialGeneration(): Long = credentialGenerationCounter.get()
-
-    /** DISTINCT session incarnation: changes ONLY on login/logout/account-switch, never on refresh. */
-    override fun publishCredentials(observed: AuthoritySnapshot, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = underCollectionNesting {
-        reconcileLocked()
-        val account = getAccount()
-        // CONDITIONAL commit: the observed snapshot (captured BEFORE the request) must still be
-        // the current authority — a late A password change after a B login writes NOTHING.
-        if (account == null ||
-            retainedAccountName != observed.accountName ||
-            sessionGenerationCounter.get() != observed.session ||
-            credentialGenerationCounter.get() != observed.credential
-        ) {
-            return@underCollectionNesting false
-        }
-        accountManager.setPassword(account, refreshToken.value)
-        accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
-        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
-        publishedToken = accessToken
-        credentialGenerationCounter.incrementAndGet()
-        true
-    }
-
-    override fun sessionGeneration(): Long = sessionGenerationCounter.get()
-
-    override fun authoritySnapshot(): AuthoritySnapshot = underCollectionNesting {
-        reconcileLocked()
-        AuthoritySnapshot(retainedAccountName, sessionGenerationCounter.get(), credentialGenerationCounter.get(), publishedToken)
-    }
-
-    /**
-     * External-identity reconciliation, run FIRST inside EVERY authority transaction
-     * (reviewer b7ad5a9a): a removal OR replacement observed between transactions ends the
-     * session and voids the published credential INDEPENDENT of token presence (even after a
-     * 401 already invalidated the credential, the STALE SESSION is still revoked here). The
-     * retained account is updated so the replacement is observed exactly once; a replacement
-     * NEVER auto-adopts the new account's token (fail-closed re-login required).
-     */
-    private fun reconcileLocked() {
-        val live = getAccount()?.name
-        if (live != retainedAccountName) {
-            if (sessionOpen) {
-                sessionGenerationCounter.incrementAndGet()
-                sessionOpen = false
-                ownershipBinding?.onSessionEnded(sessionGenerationCounter.get())
-            }
-            // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
-            // An identity replacement while the session is closed STILL voids the token.
-            publishedToken = null
-            credentialGenerationCounter.incrementAndGet()
-            retainedAccountName = live
-        }
-    }
-
-    override fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = underCollectionNesting {
-        reconcileLocked()
-        if (binding == null) {
-            // An explicit null seed REVOKES the previous binding's session.
-            val previous = ownershipBinding
-            ownershipBinding = null
-            if (sessionOpen) {
-                sessionGenerationCounter.incrementAndGet()
-                credentialGenerationCounter.incrementAndGet()
-                publishedToken = null
-                sessionOpen = false
-                previous?.onSessionEnded(sessionGenerationCounter.get())
-            }
-            return@underCollectionNesting null // revoked: no authority from a null seed
-        }
-        if (ownershipInstalled) {
-            // REBINDING: an ATOMIC authority transfer under the owner lock — the OLD binding's
-            // session is retired and the NEW binding is seeded with the RETAINED ledger (same
-            // token, same credential incarnation, NO platform cache re-adoption).
-            val previous = ownershipBinding
-            ownershipBinding = binding
-            if (sessionOpen) {
-                previous?.onSessionEnded(sessionGenerationCounter.get())
-                binding.onSessionStarted(sessionGenerationCounter.get())
-                return@underCollectionNesting authoritySnapshot()
-            }
-            return@underCollectionNesting null
-        }
-        ownershipInstalled = true
-        ownershipBinding = binding // FIRST install: the binding is registered for all future tails
-        val account = getAccount()
-        val platformToken = account?.let { peekAccessToken(it) }
-        if (account == null || platformToken == null) {
-            publishedToken = null // fail-closed: nothing to adopt, no authority
-            retainedAccountName = account?.name
-            return@underCollectionNesting null
-        }
-        // Explicit ONE-TIME adoption of the pre-existing platform token at install: attributed
-        // to the CURRENT credential incarnation.
-        retainedAccountName = account.name
-        publishedToken = platformToken
-        sessionOpen = true
-        binding.onSessionStarted(sessionGenerationCounter.get())
-        authoritySnapshot()
-    }
-
-    override fun beginRefresh(observed: AuthoritySnapshot): RefreshLease? = underCollectionNesting {
-        reconcileLocked()
-        val current = getAccount()
-        // The caller's OBSERVED snapshot (name + session + credential, captured BEFORE the
-        // request) must still be current: an A->B switch AND a same-account relogin BEFORE
-        // admission refuse here — with the refused inputs never read and ZERO network work.
-        if (current == null ||
-            retainedAccountName != observed.accountName ||
-            sessionGenerationCounter.get() != observed.session ||
-            credentialGenerationCounter.get() != observed.credential
-        ) {
-            return@underCollectionNesting null
-        }
-        val refreshToken = getRefreshToken(current) ?: return@underCollectionNesting null
-        val signInType = getSignInType(current)
-        RefreshLease(current.name, sessionGenerationCounter.get(), credentialGenerationCounter.get(), refreshToken, signInType)
-    }
-
-    override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = underCollectionNesting {
-        reconcileLocked()
-        val account = getAccount()
-        if (account == null ||
-            account.name != lease.accountName || // retained-vs-live identity: never combine across accounts
-            retainedAccountName != lease.accountName ||
-            sessionGenerationCounter.get() != lease.session || // session moved: NEVER write into it
-            credentialGenerationCounter.get() != lease.credential
-        ) { // superseded account/session OR a newer credential already published (out-of-order completion)
-            return@underCollectionNesting false
-        }
-        accountManager.setPassword(account, refreshToken.value)
-        accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
-        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
-        publishedToken = accessToken
-        credentialGenerationCounter.incrementAndGet()
-        true
-    }
-
-    override fun <T> credentialTransaction(block: () -> T): T = synchronized(credentialWriteLock) { block() }
-
-    override fun <T> transaction(block: () -> T): T = underCollectionNesting {
-        reconcileLocked()
-        block()
-    }
-
-    override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = underCollectionNesting {
-        reconcileLocked() // external identity FIRST: removal/replacement revokes
-        val rejected = observed.token ?: return@underCollectionNesting false
-        // Retained-vs-observed comparisons: NEVER combine a live account B with retained token A.
-        if (retainedAccountName != observed.accountName ||
-            sessionGenerationCounter.get() != observed.session ||
-            credentialGenerationCounter.get() != observed.credential ||
-            publishedToken?.value != rejected.value
-        ) {
-            return@underCollectionNesting false // stale rejection: invalidates NOTHING
-        }
-        if (!transaction()) return@underCollectionNesting false // scoped voice refusal INSIDE the owner transaction
-        accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, rejected.value)
-        publishedToken = null
-        credentialGenerationCounter.incrementAndGet()
-        true
-    }
-
-    override fun reconcileExternalState(): AuthoritySnapshot = underCollectionNesting {
-        reconcileLocked()
-        authoritySnapshot()
-    }
+    SyncAccountManager {
 
     override fun getAccount(): Account? {
         return accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).firstOrNull()
@@ -334,14 +139,10 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun invalidateAccessToken() {
-        underCollectionNesting {
-            val account = getAccount()
-            val accessToken = account?.let { peekAccessToken(it) }
-            if (account != null && accessToken != null) {
-                accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
-                credentialGenerationCounter.incrementAndGet()
-            }
-            publishedToken = null
+        val account = getAccount()
+        val accessToken = account?.let { peekAccessToken(it) }
+        if (account != null && accessToken != null) {
+            accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
         }
     }
 
@@ -359,17 +160,8 @@ open class SyncAccountManagerImpl @Inject constructor(
             )
             putString(AccountConstants.LOGIN_IDENTITY, loginIdentity.key)
         }
-        val accountAdded = underCollectionNesting {
-            val added = accountManager.addAccountExplicitly(account, refreshToken.value, userData)
-            accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
-            credentialGenerationCounter.incrementAndGet()
-            sessionGenerationCounter.incrementAndGet()
-            retainedAccountName = email // the owner account, retained EXPLICITLY
-            publishedToken = accessToken // owner-published at the login transaction
-            sessionOpen = true
-            ownershipBinding?.onSessionStarted(sessionGenerationCounter.get()) // INSIDE the owner transaction
-            added
-        }
+        val accountAdded = accountManager.addAccountExplicitly(account, refreshToken.value, userData)
+        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
 
         // When the account was already added, set the sign in type to Tokens because the account
         // does not seem to get updated with this from the userData in the addAccountExplicitly call
@@ -380,40 +172,23 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun signOut() {
-        underCollectionNesting {
-            accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).forEach { account ->
-                accountManager.removeAccountExplicitly(account)
-            }
-            credentialGenerationCounter.incrementAndGet()
-            sessionGenerationCounter.incrementAndGet()
-            publishedToken = null
-            retainedAccountName = null
-            sessionOpen = false
-            ownershipBinding?.onSessionEnded(sessionGenerationCounter.get()) // INSIDE the owner transaction
+        accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).forEach { account ->
+            accountManager.removeAccountExplicitly(account)
         }
     }
 
     override fun setRefreshToken(refreshToken: RefreshToken) {
-        underCollectionNesting {
-            // audit b7ad5a9a: the refresh write was UNLOCKED
-            // Audit b7ad5a9a: the refresh write was UNLOCKED
-            reconcileLocked()
-            val account = getAccount()
-            if (account != null && account.name == retainedAccountName) { // never write into a foreign account
-                accountManager.setPassword(account, refreshToken.value)
-                accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
-            }
+        val account = getAccount()
+        if (account != null) {
+            accountManager.setPassword(account, refreshToken.value)
+            accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
         }
     }
 
     override fun setAccessToken(accessToken: AccessToken) {
-        underCollectionNesting {
-            val account = getAccount()
-            if (account != null) {
-                accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
-                credentialGenerationCounter.incrementAndGet()
-                publishedToken = accessToken
-            }
+        val account = getAccount()
+        if (account != null) {
+            accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
         }
     }
 

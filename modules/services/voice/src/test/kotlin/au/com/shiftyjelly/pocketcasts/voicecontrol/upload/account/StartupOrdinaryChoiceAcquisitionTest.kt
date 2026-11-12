@@ -71,12 +71,13 @@ class StartupOrdinaryChoiceAcquisitionTest {
     private fun startup(auth: SyncAccountManagerImpl, server: MockWebServer, store: SavedSharingChoiceStore): VoiceSharingAccountStartup {
         val retrofit = Retrofit.Builder().baseUrl(server.url("/")).client(OkHttpClient()).build()
         return VoiceSharingAccountStartup(
-            ownership = auth,
+            syncAccountManager = auth,
             context = context,
             retrofit = Lazy { retrofit },
-            // The SAME Auris-scoped stub the other owner-transaction controls use: the bearer is
-            // minted from the real owner so the ordinary GET actually leaves for the server.
-            aurisToken = ownerToken(auth),
+            aurisToken = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
+                override suspend fun currentToken(): String? = "auris-token"
+                override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block("auris-token")
+            },
             savedSharingChoice = store,
         )
     }

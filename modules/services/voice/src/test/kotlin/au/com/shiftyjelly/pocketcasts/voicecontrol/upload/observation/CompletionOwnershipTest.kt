@@ -5,7 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 class CompletionOwnershipTest {
-    private fun ctx() = CaptureContext(UUID.randomUUID(), 1L, "Headset", IssuedAuthority("a@b.c", 1L, 1L, "e", "d"), wakeRequired = true)
+    private fun ctx() = CaptureContext(UUID.randomUUID(), 1L, "Headset", IssuedAuthority("a@b.c", "e", "d"), wakeRequired = true)
     private fun sinkWithOpenPrefix(): Triple<ContributionRetentionSink, CaptureContext, MutableList<String>> {
         val losses = mutableListOf<String>()
         val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })

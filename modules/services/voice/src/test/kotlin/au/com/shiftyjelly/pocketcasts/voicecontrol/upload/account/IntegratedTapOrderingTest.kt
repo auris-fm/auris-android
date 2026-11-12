@@ -81,7 +81,7 @@ class IntegratedTapOrderingTest {
         operations = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
-            ownership = owner,
+            currentAccountName = { owner.accountName },
             aurisToken = ownerToken(owner),
             onCredentialInvalid = { },
             onAurisCredentialRefused = { },
@@ -136,7 +136,7 @@ class IntegratedTapOrderingTest {
         )
         val outcome = controller.withdraw()
         assertTrue("PREMISE: the withdrawal applied", outcome is EnrollmentOutcome.Applied)
-        val account = owner.authoritySnapshot().accountName!!
+        val account = owner.accountName!!
         assertEquals(
             "PREMISE: the durable choice is withdrawn",
             SharingChoiceState.WITHDRAWN,
@@ -199,7 +199,7 @@ class IntegratedTapOrderingTest {
         )
         val outcome = controller.enroll(EnrollmentDisclosure.VERSION)
         assertTrue("PREMISE: the enrollment applied", outcome is EnrollmentOutcome.Applied)
-        val account = owner.authoritySnapshot().accountName!!
+        val account = owner.accountName!!
         assertEquals(
             "PREMISE: the durable choice is enrolled",
             SharingChoiceState.ENROLLED,

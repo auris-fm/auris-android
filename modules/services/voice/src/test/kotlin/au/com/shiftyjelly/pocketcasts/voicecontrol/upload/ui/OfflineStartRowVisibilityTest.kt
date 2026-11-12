@@ -3,10 +3,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.InMemoryChoicePersistence
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -64,15 +62,10 @@ class OfflineStartRowVisibilityTest {
             clearLocalPending = {},
             ownerSession = { 1L },
         ),
-        withdrawalIntent = LocalWithdrawalIntentStore(object : WithdrawalIntentPersistence {
-            override fun read(): Boolean = false
-            override fun write(requested: Boolean): Boolean = true
-        }),
         ownerSession = { 1L },
         // Injected so the rule can cancel the VM's collectors before resetMain (no leaked Main access).
         scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         ioDispatcher = Dispatchers.Main, // keep the disk reads on the TEST scheduler (deterministic)
-        markerRead = { true },
         savedChoice = VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" },
         knownChoice = knownChoice,
     )

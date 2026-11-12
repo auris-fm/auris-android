@@ -187,8 +187,6 @@ enum class AdmissionRefusalReason {
     /** The account has no durably saved opt-in (nothing ever saved, other account's, or withdrawn). */
     NO_SAVED_CHOICE,
 
-    /** The user's durable local stop (or a failed stop write) vetoes. */
-    LOCAL_STOP,
 }
 
 /**
@@ -264,11 +262,3 @@ class ReservationToken constructor(
     internal val allowanceMetadataCapBytes: Int? = null,
 )
 
-/** Runs a block inside the collection authority transaction (composition supplies the fence). */
-interface FenceGate {
-    fun <R> gate(block: () -> R): R
-}
-
-val IdentityFenceGate: FenceGate = object : FenceGate {
-    override fun <R> gate(block: () -> R): R = block()
-}

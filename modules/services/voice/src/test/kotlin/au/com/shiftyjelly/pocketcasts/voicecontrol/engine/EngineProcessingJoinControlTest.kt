@@ -54,7 +54,7 @@ class EngineProcessingJoinControlTest {
     }
     private fun engine(scope: CoroutineScope): VoiceAsrEngine {
         val context = mock(android.content.Context::class.java)
-        val issued = IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1")
+        val issued = IssuedAuthority("a@b.c", "epoch-1", "disclosure-1")
         val authority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
         val observer = SegmentObserver(
             CollectionGate { _ -> false },

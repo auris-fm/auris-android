@@ -5,8 +5,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPl
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentDisclosure
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.WithdrawalIntentPersistence
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -72,26 +70,6 @@ class VoiceSharingSettingsViewModelTest {
         suspend fun await(): Boolean = release.await()
     }
     private val deleteGate = ReceiptGate()
-    private val persistenceFlag = RecordingPersistence()
-    private class RecordingPersistence(
-        var stopped: Boolean = false,
-        var failClear: Boolean = false,
-    ) : WithdrawalIntentPersistence {
-        val writes = mutableListOf<Boolean>()
-        var onWrite: ((Boolean) -> Unit)? = null
-        var onRead: (() -> Unit)? = null
-        override fun read(): Boolean {
-            onRead?.invoke()
-            return stopped
-        }
-        override fun write(requested: Boolean): Boolean {
-            onWrite?.invoke(requested)
-            writes += requested
-            if (!requested && failClear) return false
-            stopped = requested
-            return true
-        }
-    }
     private fun enrolledProjection() = VoiceSharingAccountProjection(
         plan = VoiceSharingPlan.PRO,
         voiceSharingEnrolled = true,
@@ -111,13 +89,12 @@ class VoiceSharingSettingsViewModelTest {
         enrollGate: Gate = Gate(),
         withdrawGate: Gate = Gate(),
         scope: kotlinx.coroutines.CoroutineScope? = null,
-        persistence: RecordingPersistence = persistenceFlag,
         ownerSession: () -> Long = { 1L },
         onEnrollIssue: (() -> Unit)? = null,
         onWithdrawIssue: (() -> Unit)? = null,
         cancelInFlightUpload: () -> Unit = {},
         ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = mainDispatcher,
-        markerRead: (suspend () -> Boolean)? = null,
+        recordLocalWithdrawal: () -> Boolean = { false },
         savedChoice: (suspend () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?)? = null,
     ): VoiceSharingSettingsViewModel {
         // Mirrors what the production store holds given the projection the test published: apply()
@@ -159,85 +136,20 @@ class VoiceSharingSettingsViewModelTest {
             },
             deleteOperation = { false },
             clearLocalPending = {},
+            recordLocalWithdrawal = recordLocalWithdrawal,
             ownerSession = ownerSession,
         )
         return VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistence),
             ownerSession = ownerSession,
             scope = effective,
             cancelInFlightUpload = cancelInFlightUpload,
             ioDispatcher = ioDispatcher,
-            markerRead = markerRead,
             savedChoice = effectiveChoice,
         )
     }
-    @Test
-    fun `every storage touch on the withdraw path runs on the injected io dispatcher`() = runTest(mainDispatcher) {
-        val touches = mutableListOf<String>()
-        val crossed = ThreadLocal.withInitial { false }
-        fun note(what: String) {
-            touches += if (crossed.get() == true) what else "INLINE:$what"
-        }
-        val privateDispatcher = kotlinx.coroutines.test.StandardTestDispatcher(testScheduler)
-        val marker = RecordingPersistence()
-        marker.onRead = { note("marker-read") }
-        marker.onWrite = { requested -> note(if (requested) "marker-stop" else "marker-clear") }
-        var purges = 0
-        val controller = EnrollmentController(
-            enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
-            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
-            deleteOperation = { false },
-            clearLocalPending = {
-                purges++
-                note("queue-purge")
-            },
-            ownerSession = { 1L },
-        )
-        val io = object : kotlinx.coroutines.CoroutineDispatcher() {
-            override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
-                privateDispatcher.dispatch(
-                    context,
-                    Runnable {
-                        val previous = crossed.get()
-                        crossed.set(true)
-                        try {
-                            block.run()
-                        } finally {
-                            crossed.set(previous)
-                        }
-                    },
-                )
-            }
-        }
-        val vm = VoiceSharingSettingsViewModel(
-            projection = projection,
-            enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(marker),
-            ownerSession = { 1L },
-            scope = kotlinx.coroutines.CoroutineScope(
-                kotlinx.coroutines.SupervisorJob() + privateDispatcher,
-            ).also { scopes += it },
-            ioDispatcher = io,
-        )
-        setProjection(enrolledProjection())
-        advanceUntilIdle()
-        touches.clear()
-        vm.withdraw()
-        advanceUntilIdle()
-        val tapPath = touches.subList(0, touches.indexOf("queue-purge") + 1)
-        val inline = tapPath.filter { it.startsWith("INLINE:") }
-        assertEquals("no storage touch on the withdraw path may run inline: $touches", emptyList<String>(), inline)
-        assertTrue("the marker read must be on IO: $touches", touches.any { it.startsWith("marker-read") })
-        assertTrue("the queue purge must be on IO: $touches", touches.any { it.startsWith("queue-purge") })
-        assertTrue("the stop must be on IO: $touches", touches.any { it.startsWith("marker-stop") })
-        assertTrue(
-            "the failure latch must be on IO: $touches",
-            touches.count { it.startsWith("marker-clear") || it.startsWith("marker-stop") } >= 2,
-        )
-        assertEquals("the purge runs once", 1, purges)
-    }
+    
     private fun awaitTrue(timeoutMs: Long, condition: () -> Boolean): Boolean {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000
         while (System.nanoTime() < deadline) {
@@ -303,7 +215,6 @@ class VoiceSharingSettingsViewModelTest {
     @Test
     fun `the switch renders the durable choice, not the projection`() = runTest(mainDispatcher) {
         val vm = viewModel(
-            markerRead = { true },
             savedChoice = {
                 au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
                     account = "user@example.com",
@@ -333,7 +244,6 @@ class VoiceSharingSettingsViewModelTest {
     @Test
     fun `the switch renders OFF when the durable choice is withdrawn`() = runTest(mainDispatcher) {
         val vm = viewModel(
-            markerRead = { true },
             savedChoice = {
                 au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
                     account = "user@example.com",
@@ -399,14 +309,33 @@ class VoiceSharingSettingsViewModelTest {
     @Test
     fun `a withdraw tap stops collection FIRST and stays stopped after a failed withdrawal`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection())
+        var durable: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? =
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                account = "user@example.com",
+                state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
+                epoch = "epoch-2",
+                acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
+            )
         val gate = Gate()
-        val vm = viewModel(withdrawGate = gate)
-        mainDispatcher.scheduler.advanceUntilIdle() // the fail-closed seed reads the real marker via IO
+        val vm = viewModel(
+            withdrawGate = gate,
+            recordLocalWithdrawal = {
+                durable = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
+                    account = "user@example.com",
+                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.WITHDRAWN,
+                    epoch = null,
+                    acceptedDisclosureVersion = null,
+                )
+                true
+            },
+            savedChoice = { durable },
+        )
+        mainDispatcher.scheduler.advanceUntilIdle()
         assertTrue("PREMISE: enrolled and active", vm.state.value.enrolled)
         vm.withdraw()
         mainDispatcher.scheduler.advanceUntilIdle()
         val stopped = vm.state.value
-        assertFalse("the local intent must stop collection immediately on the tap", stopped.enrolled)
+        assertFalse("the durable local stop must stop collection immediately on the tap", stopped.enrolled)
         gate.result = VoiceSharingMutationResult.Failure
         gate.release.complete(Unit)
         mainDispatcher.scheduler.advanceUntilIdle()
@@ -414,71 +343,9 @@ class VoiceSharingSettingsViewModelTest {
         assertFalse("a FAILED withdrawal keeps the local stop: the user decided", failed.enrolled)
         assertEquals("the failure must be surfaced honestly", SettingsOperationStatus.FAILED, failed.status)
     }
-    @Test
-    fun `a successful re-enrollment releases the durable local stop`() = runTest(mainDispatcher) {
-        val persistence = RecordingPersistence(stopped = true)
-        setProjection(enrolledProjection())
-        val gate = Gate()
-        val vm = viewModel(enrollGate = gate, persistence = persistence)
-        assertFalse("PREMISE: the durable stop holds even with an enrolled projection", vm.state.value.enrolled)
-        vm.enroll()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("a server-applied re-enrollment is enrolled", vm.state.value.enrolled)
-        assertFalse(
-            "the successful enrollment must RELEASE the durable stop (atomic with the outcome)",
-            persistence.stopped,
-        )
-    }
-    @Test
-    fun `the enroll branch re-reads the marker it just cleared`() = runTest(mainDispatcher) {
-        val persistence = RecordingPersistence(stopped = true)
-        setProjection(enrolledProjection())
-        val readsAfterClear = mutableListOf<Boolean>()
-        val gate = Gate()
-        val vm = viewModel(
-            enrollGate = gate,
-            persistence = persistence,
-            markerRead = {
-                val permitted = !persistence.stopped
-                if (!permitted.not()) readsAfterClear += permitted
-                permitted
-            },
-        )
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse("PREMISE: the durable stop holds", vm.state.value.enrolled)
-        vm.enroll()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        require(!persistence.stopped) { "PREMISE: the durable stop was released" }
-        assertTrue(
-            "the enroll branch must add its own read after the clear; expected the branch's read " +
-                "plus the surface's emissions, saw ${readsAfterClear.size}",
-            readsAfterClear.size >= 2,
-        )
-        assertTrue(
-            "the server agreed and the stop is gone, so the switch must show on",
-            vm.state.value.enrolled,
-        )
-    }
-    @Test
-    fun `a failed enrollment keeps the durable local stop`() = runTest(mainDispatcher) {
-        val persistence = RecordingPersistence(stopped = true)
-        setProjection(enrolledProjection())
-        val gate = Gate()
-        val vm = viewModel(enrollGate = gate, persistence = persistence)
-        vm.enroll()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Failure
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse("a failed enrollment must NOT render as enrolled", vm.state.value.enrolled)
-        assertTrue("the durable stop survives a failed enrollment", persistence.stopped)
-    }
+    
+    
+    
     @Test
     fun `the failure copy survives unrelated projection updates until the next action`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
@@ -579,26 +446,7 @@ class VoiceSharingSettingsViewModelTest {
         )
         assertEquals(FailedOperation.NONE, vm.state.value.failedOperation)
     }
-    @Test
-    fun `a failed local stop release surfaces distinctly and keeps the stop`() = runTest(mainDispatcher) {
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
-        val persistence = RecordingPersistence(stopped = true, failClear = true)
-        val gate = Gate()
-        val vm = viewModel(enrollGate = gate, persistence = persistence)
-        vm.enroll()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Applied(enrolledProjection())
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("the stop survives: durable clearing failed, collection stays paused", persistence.stopped)
-        assertEquals(
-            "the local release failure is surfaced, not rendered as a settled success",
-            SettingsOperationStatus.RELEASE_FAILED,
-            vm.state.value.status,
-        )
-        assertFalse("a settled operation is not pending", vm.state.value.pending)
-        assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
-    }
+    
     @Test
     fun `an account switch does not leave the stale action pending on the new account`() = runTest(mainDispatcher) {
         var session = 1L
@@ -648,46 +496,8 @@ class VoiceSharingSettingsViewModelTest {
         assertFalse("the dead tap leaves no pending state on the new account", vm.state.value.pending)
         assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
-    @Test
-    fun `an applied withdrawal acknowledges the local intent inside the fence`() = runTest(mainDispatcher) {
-        setProjection(enrolledProjection())
-        val gate = Gate()
-        val vm = viewModel(withdrawGate = gate)
-        mainDispatcher.scheduler.advanceUntilIdle() // the fail-closed seed reads the real marker via IO
-        assertTrue("PREMISE: enrolled and active", vm.state.value.enrolled)
-        vm.withdraw()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Applied(
-            enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.WITHDRAWN),
-        )
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.WITHDRAWN))
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse("PREMISE: withdrawn on the server", vm.state.value.enrolled)
-        assertEquals(
-            "an applied withdrawal must reconcile the intent store inside the fence (tap write + outcome write)",
-            listOf(true, true),
-            persistenceFlag.writes,
-        )
-    }
-    @Test
-    fun `a failed withdrawal records the failure with the local intent store`() = runTest(mainDispatcher) {
-        setProjection(enrolledProjection())
-        val gate = Gate()
-        val vm = viewModel(withdrawGate = gate)
-        vm.withdraw()
-        mainDispatcher.scheduler.advanceUntilIdle()
-        gate.result = VoiceSharingMutationResult.Failure
-        gate.release.complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("PREMISE: the stop survives a failed withdrawal", persistenceFlag.stopped)
-        assertEquals(
-            "a failed withdrawal must latch its failure through onWithdrawalFailed (tap write + outcome write)",
-            listOf(true, true),
-            persistenceFlag.writes,
-        )
-    }
+    
+    
     @Test
     fun `deletion is honest - pending is not success and failure stays visible`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection())
@@ -702,7 +512,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -734,7 +543,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -773,7 +581,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -804,7 +611,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -877,7 +683,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -918,7 +723,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -951,7 +755,6 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -981,7 +784,6 @@ class VoiceSharingSettingsViewModelTest {
                 clearLocalPending = {},
                 ownerSession = { session },
             ),
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { session },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -1074,10 +876,8 @@ class VoiceSharingSettingsViewModelTest {
         vm = VoiceSharingSettingsViewModel(
             projection = projection,
             enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
             ownerSession = { 1L },
             ioDispatcher = io,
-            markerRead = { true },
             savedChoice = { durable },
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
         )
@@ -1110,128 +910,6 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.enrolled,
         )
     }
-    @Test
-    fun `the cache a collector render composes from reflects the withdrawal's stop`() = runTest(mainDispatcher) {
-        val io = GatedDispatcher()
-        setProjection(enrolledProjection())
-        lateinit var vm: VoiceSharingSettingsViewModel
-        val controller = EnrollmentController(
-            enrollOperation = { _, _ -> enrollGate.await() },
-            withdrawOperation = { _ -> withdrawGate.await() },
-            deleteOperation = { deleteGate.await() },
-            clearLocalPending = {},
-            ownerSession = { 1L },
-        )
-        vm = VoiceSharingSettingsViewModel(
-            projection = projection,
-            enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
-            ownerSession = { 1L },
-            ioDispatcher = io,
-            savedChoice = {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
-                    account = "user@example.com",
-                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
-                    epoch = "epoch-2",
-                    acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
-                )
-            },
-            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
-        )
-        mainDispatcher.scheduler.advanceUntilIdle()
-        while (io.hasTasks) {
-            io.runOldest()
-            mainDispatcher.scheduler.runCurrent()
-        }
-        assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
-        vm.withdraw()
-        // Alternate main-task and parked-io progress until quiescent: the withdraw launch, its two
-        // fenced reads (marker then durable choice) and the stop write each hop between them.
-        repeat(30) {
-            mainDispatcher.scheduler.runCurrent()
-            if (io.hasTasks) io.runOldest()
-        }
-        assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
-        setProjection(enrolledProjection().copy(enrollmentEpoch = "epoch-3"))
-        mainDispatcher.scheduler.runCurrent()
-        assertFalse(
-            "the cache-driven render must reflect the stop",
-            vm.state.value.enrolled,
-        )
-    }
-    @Test
-    fun `a read issued before the stop completing after it is rejected by the fence`() = runTest(mainDispatcher) {
-        val io = GatedDispatcher()
-        val parked = mutableListOf<CompletableDeferred<Unit>>()
-        val markerRead: suspend () -> Boolean = {
-            val snapshot = persistenceFlag.stopped
-            val gate = CompletableDeferred<Unit>()
-            parked += gate
-            gate.await()
-            !snapshot
-        }
-        setProjection(enrolledProjection())
-        lateinit var vm: VoiceSharingSettingsViewModel
-        val controller = EnrollmentController(
-            enrollOperation = { _, _ -> enrollGate.await() },
-            withdrawOperation = { _ -> withdrawGate.await() },
-            deleteOperation = { deleteGate.await() },
-            clearLocalPending = {},
-            ownerSession = { 1L },
-        )
-        vm = VoiceSharingSettingsViewModel(
-            projection = projection,
-            enrollmentController = controller,
-            withdrawalIntent = LocalWithdrawalIntentStore(persistenceFlag),
-            ownerSession = { 1L },
-            ioDispatcher = io,
-            markerRead = markerRead,
-            savedChoice = {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
-                    account = "user@example.com",
-                    state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState.ENROLLED,
-                    epoch = "epoch-2",
-                    acceptedDisclosureVersion = EnrollmentDisclosure.VERSION,
-                )
-            },
-            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
-        )
-        mainDispatcher.scheduler.advanceUntilIdle()
-        parked[1].complete(Unit) // the LATEST init read completes: the fail-closed seed gets the real marker
-        mainDispatcher.scheduler.advanceUntilIdle()
-        while (io.hasTasks) {
-            io.runOldest()
-            mainDispatcher.scheduler.runCurrent()
-        }
-        assertTrue("PREMISE: enrolled", vm.state.value.enrolled)
-        assertEquals("PREMISE: both init collector refreshes are parked", 2, parked.size)
-        vm.withdraw()
-        mainDispatcher.scheduler.runCurrent()
-        assertEquals("PREMISE: the withdrawal's first read is parked", 3, parked.size)
-        parked[2].complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertTrue("PREMISE: the stop write is held on the gate", io.hasTasks)
-        while (io.hasTasks) {
-            io.runOldest()
-            mainDispatcher.scheduler.runCurrent()
-        }
-        assertTrue(persistenceFlag.stopped)
-        assertEquals(4, parked.size)
-        parked[3].complete(Unit)
-        mainDispatcher.scheduler.advanceUntilIdle()
-        while (io.hasTasks) { // the fenced read now also carries the durable choice on the io queue
-            io.runOldest()
-            mainDispatcher.scheduler.runCurrent()
-        }
-        assertFalse("PREMISE: the stop is published", vm.state.value.enrolled)
-        assertTrue(
-            "PREMISE: the pre-stop read is still parked, so completing it must resume it",
-            parked[0].complete(Unit),
-        )
-        mainDispatcher.scheduler.advanceUntilIdle()
-        assertFalse(
-            "a pre-stop read completing after the stop must not repaint enrolled",
-            vm.state.value.enrolled,
-        )
-    }
+    
+    
 }

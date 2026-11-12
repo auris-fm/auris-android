@@ -46,7 +46,7 @@ class VoiceSharingSwitchPutTest {
         operations = VoiceSharingAccountOperations(
             api = api,
             state = state,
-            ownership = owner,
+            currentAccountName = { owner.accountName },
             aurisToken = ownerToken(owner),
             onCredentialInvalid = { },
             onAurisCredentialRefused = { },
@@ -136,16 +136,16 @@ class VoiceSharingSwitchPutTest {
         operations = VoiceSharingAccountOperations(
             api = api,
             state = state,
-            ownership = owner,
+            currentAccountName = { owner.accountName },
             aurisToken = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
                 override suspend fun currentToken(): String? {
                     if (!switched) {
                         switched = true
-                        owner.login("user@example.org")
+                        owner.accountName = "user@example.org"
                     }
-                    return owner.authoritySnapshot().token?.value
+                    return owner.token?.value
                 }
-                override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.authoritySnapshot().token?.value)
+                override fun <T> withCurrentCachedToken(block: (String?) -> T): T = block(owner.token?.value)
             },
             onCredentialInvalid = { },
             onAurisCredentialRefused = { },

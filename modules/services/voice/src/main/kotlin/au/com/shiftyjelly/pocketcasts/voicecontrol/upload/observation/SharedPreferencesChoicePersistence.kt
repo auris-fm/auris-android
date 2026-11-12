@@ -69,30 +69,3 @@ class SharedPreferencesChoicePersistence(
     }
 }
 
-/**
- * The durable local stop in the SAME platform store (small state, spec item 3): one boolean. The
- * previous hand-built marker file carried the same temp/rename/directory-sync machinery that
- * blocked the choice persist on the owner Pixel; a stop is one bit and belongs in prefs.
- */
-class SharedPreferencesWithdrawalIntentPersistence(
-    @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
-) : WithdrawalIntentPersistence {
-
-    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-
-    override fun read(): Boolean = prefs.getBoolean(KEY_STOPPED, false)
-
-    override fun write(requested: Boolean): Boolean {
-        val ok = prefs.edit().putBoolean(KEY_STOPPED, requested).commit()
-        if (!ok) {
-            Log.w(TAG, "voice-sharing local stop persist: prefs commit failed; the in-memory value stands")
-        }
-        return ok
-    }
-
-    private companion object {
-        const val PREFS = "voice_sharing_local_stop"
-        const val KEY_STOPPED = "stopped"
-        const val TAG = "VoiceSharingChoice"
-    }
-}

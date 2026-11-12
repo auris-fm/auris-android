@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.FolderQueue
@@ -49,7 +48,6 @@ object VoiceSharingSettingsModule {
     @Singleton
     fun provideVoiceSharingSettingsViewModel(
         accountStartup: VoiceSharingAccountStartup,
-        withdrawalIntent: LocalWithdrawalIntentStore,
         savedChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
         queue: FolderQueue,
         uploaderLoop: UploaderLoop,
@@ -60,7 +58,6 @@ object VoiceSharingSettingsModule {
         return VoiceSharingSettingsViewModel(
             projection = accountStartup.state.projection,
             enrollmentController = controller,
-            withdrawalIntent = withdrawalIntent,
             ownerSession = { accountStartup.ownerSessionGeneration() },
             refreshProjection = { accountStartup.operations.refreshProjection() },
             cancelInFlightUpload = uploaderLoop::cancelInFlight,

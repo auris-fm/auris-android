@@ -10,7 +10,7 @@ import org.junit.Test
 private val LIVE = AuthorityDecision(collectionPermitted = true, fullRevocation = false)
 private val DEAD_REVOKED = AuthorityDecision(collectionPermitted = false, fullRevocation = true)
 private val DEAD_DISABLED = AuthorityDecision(collectionPermitted = false, fullRevocation = false)
-private val ISSUED = IssuedAuthority("a@b.c", 1L, 1L, "epoch-1", "disclosure-1")
+private val ISSUED = IssuedAuthority("a@b.c", "epoch-1", "disclosure-1")
 
 class SegmentObserverTest {
 

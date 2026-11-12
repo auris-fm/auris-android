@@ -2,13 +2,12 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
 import android.accounts.AccountManager
 import android.content.Context
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
-import au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot
-import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
+import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -17,77 +16,61 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * The actual production STARTUP CONSUMER for the voice-sharing account boundary: installs the
- * narrow binding with the REAL auth owner (fail-closed bootstrap + seed UNDER THE OWNER LOCK)
- * and builds the operations whose issuance/pre-send/apply/401 transitions all run as owner→voice
- * transactions. External account removal is observed via AccountManager's accounts listener and
- * reconciled at the owner (async observation limit: detection happens when observed, never
- * claimed instant). Same app-start convention as VoiceSharingPolicyStartup.
+ * The production STARTUP CONSUMER for the voice-sharing account boundary: reads the signed-in
+ * account name from the ordinary sync account manager, builds the operations whose issuance,
+ * pre-send, apply and 401 transitions are account-scoped, and observes external account changes
+ * via AccountManager's accounts listener (async observation limit: detection happens when
+ * observed, never claimed instant). Same app-start convention as VoiceSharingPolicyStartup.
  */
 @Singleton
 class VoiceSharingAccountStartup @Inject constructor(
-    private val ownership: CredentialOwnershipOwner,
+    private val syncAccountManager: SyncAccountManager,
     @ApplicationContext private val context: Context,
     @SyncServiceRetrofit private val retrofit: Lazy<retrofit2.Retrofit>,
     /**
      * THE AURIS PROVIDER, injected as the AURIS-SCOPED interface rather than the routing
-     * `CloudTokenProviding` (formerly the concrete type; the same shared singleton sits behind the
-     * new binding -- the interface seam is what the acquisition controls stub, spec ecc411b8).
-     *
-     * This is deliberate and it is the fix. The router picks the Auris provider only when a cloud
-     * base URL is configured and answers with the static `user_<uuid>` bearer otherwise -- the same
-     * fallback defect iOS found in `cloudEdgeTokens`. For the sharing path there must be no
-     * branch to consult: the account route verifies Auris tokens only, so this path either has one
-     * or is refused. `AurisScopedTokenProviding` carries NO fallback branch by construction.
+     * `CloudTokenProviding`. The account route verifies Auris tokens only, so this path either has
+     * one or is refused; `AurisScopedTokenProviding` carries NO fallback branch by construction.
      */
     private val aurisToken: au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding,
     /** The durable saved choice; every accepted server answer mirrors into it. */
     private val savedSharingChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore,
 ) {
     val state = VoiceSharingAccountState()
-    val credentials = VoiceSharingCredentialStore()
-    val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
-    val binding = VoiceSharingAccountAuthBinding(ownership, coordinator)
 
     /** Post-commit hook target: the collection authority registers itself here when composed. */
     @Volatile
-    var enrollmentEvidenceListener: ((VoiceSharingAccountProjection?, Long) -> Unit)? = null
+    var enrollmentEvidenceListener: ((VoiceSharingAccountProjection?, String?) -> Unit)? = null
 
     /** Session-end observer: evidence must die with the session even before a new one starts. */
     @Volatile
     var sessionEndedListener: (() -> Unit)? = null
 
-    /**
-     * FIRST ACCOUNT-READABILITY observer (@spec 69630b93): the policy exchange begins at launch,
-     * so on a cold start that follows a login it can run before the account is readable. This is
-     * the one signal that the account has become readable in THIS process; the policy owner
-     * refreshes itself exactly once on it. Registration/observation only — no authority is derived
-     * here, and the allowance batch, ledger and queued records are untouched.
-     */
+    /** Wake slot for the uploader: fired when the signed-in account changes or disappears. */
     @Volatile
-    var accountReadableListener: ((String, Long) -> Unit)? = null
+    var authorityMovedListener: (() -> Unit)? = null
+
+    /** The signed-in account's name, or null. The durable choice is per-account. */
+    fun currentAccountName(): String? = syncAccountManager.getEmail()
 
     /**
-     * The PRESENTATION-side session source: the owner's own
-     * session-generation atomic, read directly. There is deliberately no committed-session
-     * cache — the atomic read is as cheap as a volatile read and cannot go stale, so no
-     * commit-hook or authority-move refresh path is needed to keep presentation fencing
-     * honest. Correctness fencing (enroll/withdraw/delete, queue sends) keeps the LIVE owner
-     * snapshot through the controller, as before.
+     * Voice-side account-change token for the Settings/Enrollment fence. It increments whenever the
+     * signed-in account name changes, so a tap issued under one account never applies to another.
      */
-    fun ownerSessionGeneration(): Long = ownership.sessionGeneration()
+    private val sessionGenerationCounter = AtomicLong(0)
 
-    /** The signed-in account's name, or null. The durable choice is per-account; callers must never
-     *  read one account's record for another. */
-    fun currentAccountName(): String? = ownership.authoritySnapshot().accountName
+    fun ownerSessionGeneration(): Long = sessionGenerationCounter.get()
+
+    /** Last observed account name, so an account change is reported exactly once. */
+    @Volatile
+    private var lastSeenAccount: String? = null
 
     init {
         // State fence is the single commit point for every projection change (GET/enrollment/
         // withdrawal/401/session-end): post-commit mirror notification ONLY — no authority is
-        // derived here; CollectionAuthority re-reads state + owner snapshot at each decision.
+        // derived here; CollectionAuthority re-reads state + account name at each decision.
         state.onProjectionListener = { projection ->
-            // Mirror notification only: the listener re-reads the live owner snapshot itself.
-            enrollmentEvidenceListener?.invoke(projection, ownership.sessionGeneration())
+            enrollmentEvidenceListener?.invoke(projection, currentAccountName())
         }
     }
 
@@ -95,14 +78,12 @@ class VoiceSharingAccountStartup @Inject constructor(
         VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(retrofit.get()),
             state = state,
-            ownership = ownership, // the REAL owner: every transition is an owner transaction
+            currentAccountName = ::currentAccountName,
             aurisToken = aurisToken, // the bearer SOURCE (Auris-issued only, no fallback branch)
-            // Notification hook only: the REAL invalidation already committed inside the
-            // owner transaction; telemetry joins here. Mirror bookkeeping, NO authority effects.
-            onCredentialInvalid = { credentials.publish(null) },
             // A 401 here revokes only the AURIS credential (force a re-mint from the same account).
             // The upstream session is left alone -- clearing it would sign the user out of the
             // account that minted the token, which is a worse failure than the one we fixed.
+            onCredentialInvalid = {},
             onAurisCredentialRefused = { aurisToken.refreshToken() },
             savedSharingChoice = savedSharingChoice,
         )
@@ -116,28 +97,30 @@ class VoiceSharingAccountStartup @Inject constructor(
      * sweep, so "stop everything now" uses the same ownership-locked path as every other revocation.
      * The caller supplies it because the store belongs to the upload composition; when nothing has
      * composed the queue yet, the no-op is correct — there is no pending work to stop.
+     *
+     * The withdrawal TAP also writes the durable WITHDRAWN record BEFORE the server answer: the
+     * saved WITHDRAWN record IS the local stop, and it must be in place while the request is in
+     * flight or if it fails, so the next capture never admits under a stale ENROLLED record.
      */
     fun enrollmentController(clearLocalPending: () -> Unit): EnrollmentController = EnrollmentController(
         enrollOperation = { acceptedDisclosureVersion, applyUnderGuard ->
             operations.enroll(acceptedDisclosureVersion, applyUnderGuard)
         },
         withdrawOperation = { applyUnderGuard ->
-            // The epoch is captured from the fresh projection inside the owner transaction.
+            // The epoch is captured from the fresh projection inside the account transaction.
             operations.withdraw(applyUnderGuard)
         },
         deleteOperation = {
             operations.deleteData()
         },
         clearLocalPending = clearLocalPending,
-        // Results are fenced to the owner session they were issued under, so an account switch
-        // mid-flight cannot apply one account's outcome to another's screen.
-        ownerSession = { ownership.authoritySnapshot().session },
-        // The currency decision and its durable effect run INSIDE the owner lock, so an account switch
-        // cannot land between "is this still current?" and "apply it" (reviewer e313b32c). A snapshot
-        // taken outside would be stale the moment the owner changed.
-        underOwnerTransaction = { block ->
-            ownership.transaction { block() }
+        recordLocalWithdrawal = {
+            val account = currentAccountName()
+            if (account.isNullOrBlank()) false else savedSharingChoice.recordWithdrawn(account)
         },
+        // Results are fenced to the account they were issued under, so an account switch
+        // mid-flight cannot apply one account's outcome to another's screen.
+        ownerSession = { ownerSessionGeneration() },
     )
 
     /** Called once from the application's onCreate; idempotent. */
@@ -154,48 +137,39 @@ class VoiceSharingAccountStartup @Inject constructor(
                 diagnostic.detail,
             )
         }
-        binding.install()
         // The account may ALREADY be readable when the app starts (normal cold start): announce it
-        // once here so the policy owner gets the same trigger a later transition would give.
-        ownership.authoritySnapshot().let { live -> live.accountName?.let { accountReadableListener?.invoke(it, live.session) } }
-        // THE ORDINARY STARTUP ACQUISITION (spec ecc411b8): the projection refresh is how a signed-in
-        // account with NO saved sharing choice obtains its EXISTING server consent exactly once,
-        // without visiting Settings or toggling. A saved known choice collects immediately without
-        // any this-process fetch prerequisite. Account switch paths use the same guard below.
-        ownership.authoritySnapshot().let { live -> live.accountName?.let { refreshOrdinaryChoiceIfUnsaved(it) } }
+        // once here so any readiness observer gets the same trigger a later transition would give.
+        lastSeenAccount = currentAccountName()
+        val initial = lastSeenAccount
+        if (initial != null) refreshOrdinaryChoiceIfUnsaved(initial)
         AccountManager.get(context).addOnAccountsUpdatedListener({
-            val before = ownership.authoritySnapshot().session
-            val after = ownership.reconcileExternalState()
-            // ACCOUNT CHANGE observed: notify loss subscribers WITHOUT any engine event/read.
-            if (after.accountName == null || after.session != before) sessionEndedListener?.invoke()
-            // Readability transition: the policy owner reacquires policy for the NEW owner identity
-            // (account + session), deduping repeats for the same identity.
-            after.accountName?.let { accountReadableListener?.invoke(it, after.session) }
+            val after = currentAccountName()
+            if (after != lastSeenAccount) {
+                lastSeenAccount = after
+                sessionGenerationCounter.incrementAndGet()
+                sessionEndedListener?.invoke()
+            }
+            authorityMovedListener?.invoke()
             // Same acquisition on a REAL account transition to the new identity (guard is per account).
-            after.accountName?.let { refreshOrdinaryChoiceIfUnsaved(it) }
+            after?.let { refreshOrdinaryChoiceIfUnsaved(it) }
         }, null, false)
     }
 
-    /** THE shared serialization primitive owned by the credential owner (same object identity). */
-    fun sharedCollectionLock(): Any = ownership.collectionSharedLock
-
-    /** The REAL owner for one-transaction handoffs (order owner→observer→sink is composed there). */
-    fun ownerForHandoff(): CredentialOwnershipOwner = ownership
-
     /** Reconciles external account state and fires session-end loss to subscribers. */
     fun reconcileAndNotifySessionEnd() {
-        val before = ownership.authoritySnapshot().session
-        val after = ownership.reconcileExternalState()
-        if (after.accountName == null || after.session != before) sessionEndedListener?.invoke()
-        after.accountName?.let { accountReadableListener?.invoke(it, after.session) }
-        // Same acquisition when this path is the first to observe the readable identity.
-        after.accountName?.let { refreshOrdinaryChoiceIfUnsaved(it) }
+        val after = currentAccountName()
+        if (after != lastSeenAccount) {
+            lastSeenAccount = after
+            sessionGenerationCounter.incrementAndGet()
+            sessionEndedListener?.invoke()
+        }
+        after?.let { refreshOrdinaryChoiceIfUnsaved(it) }
     }
 
     /**
      * ONE ordinary account refresh per process per account, ONLY while that account has no saved
      * sharing choice/provenance. The refresh is the EXISTING ordinary GET (`refreshProjection`):
-     * the server's real answer is applied through the existing owner-transaction funnel, which is
+     * the server's real answer is applied through the existing account-transaction funnel, which is
      * what mirrors the saved choice. Nothing is fabricated: a refused/failed fetch leaves the saved
      * state absent (fail-closed collection refuses), and the next process launch may try again —
      * once, not on a loop. No poller, no session-readiness or cache-freshness gate; off choices,
@@ -212,10 +186,4 @@ class VoiceSharingAccountStartup @Inject constructor(
             timber.log.Timber.i("voice-sharing startup acquisition: account-refreshed=%s applied=%s", account.hashCode(), fetched)
         }
     }
-
-    /** Last observable authority — exposed for diagnostics; never reconstructs from cache. */
-    fun authoritySnapshot(): AuthoritySnapshot = ownership.authoritySnapshot()
-
-    /** Owner-transaction scope: [block] runs under the REAL owner lock (owner→voice order). */
-    fun <T> validateUnderOwnerTransaction(block: (AuthoritySnapshot) -> T): T = ownership.transaction { block(ownership.authoritySnapshot()) }
 }

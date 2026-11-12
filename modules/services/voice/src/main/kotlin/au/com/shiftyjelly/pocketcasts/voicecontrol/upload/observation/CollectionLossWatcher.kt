@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
  * read. Composed by VoiceObservationModule and started from the app surface; this is the caller
  * graph, not intended design:
  *
- *   SyncAccountManager.onAccountsChanged -> reconcileExternalState -> sessionEnded fan-out
+ *   SyncAccountManager email flow -> reconcileAndNotifySessionEnd -> sessionEnded fan-out
  *       -> revoked("account-change")                         [startup listener, real wiring]
  *   VoiceSharingAccountStartup.sessionEndedListener  (set in start(), fired on switch/remove)
  *   VoiceSharingAccountState.onProjectionApplied hook -> enrollment evidence update
@@ -50,8 +50,8 @@ class CollectionLossWatcher @Inject constructor(
             observer.revoked("account-change")
         }
         val priorEvidence = accountStartup.enrollmentEvidenceListener
-        accountStartup.enrollmentEvidenceListener = { projection, ownerSession ->
-            priorEvidence?.invoke(projection, ownerSession)
+        accountStartup.enrollmentEvidenceListener = { projection, accountName ->
+            priorEvidence?.invoke(projection, accountName)
             val permitted = projection != null && enrollPermitted(
                 projection.voiceSharingEnrolled,
                 projection.enrollmentEpoch,

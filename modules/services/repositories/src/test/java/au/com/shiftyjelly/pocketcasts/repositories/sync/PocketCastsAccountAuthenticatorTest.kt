@@ -81,7 +81,6 @@ class PocketCastsAccountAuthenticatorTest {
             context = context,
             settings = mock(),
             syncAccountManager = syncAccountManager,
-            credentialOwnership = syncAccountManager, // the REAL owner under test
             syncServiceManager = syncServiceManager,
             moshi = moshi,
             notificationManager = mock(),

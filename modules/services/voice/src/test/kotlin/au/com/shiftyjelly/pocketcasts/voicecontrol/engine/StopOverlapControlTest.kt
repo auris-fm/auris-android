@@ -151,7 +151,7 @@ class StopOverlapControlTest {
                     CollectionGate { false },
                     retention,
                     authority,
-                    issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "e", "d") },
+                    issueAuthority = { IssuedAuthority("a@b.c", "e", "d") },
                     handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement ->
                         scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement)
                     },

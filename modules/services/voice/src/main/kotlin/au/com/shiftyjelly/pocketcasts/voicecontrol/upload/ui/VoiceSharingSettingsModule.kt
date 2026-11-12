@@ -32,6 +32,19 @@ object VoiceSharingSettingsModule {
         val name = account()
         if (name.isNullOrBlank()) null else savedChoice.enrolledChoiceFor(name)
     }
+
+    /**
+     * VISIBILITY provider for the Settings row (spec's bot, offline-start finding): whether the
+     * account has ANY durable record, whatever its state. "Sharing is off" is a known state — the
+     * row must show offline — while the switch VALUE stays on [effectiveConsentProvider].
+     */
+    internal fun knownChoiceProvider(
+        savedChoice: SavedSharingChoiceStore,
+        account: () -> String?,
+    ): suspend () -> SavedSharingChoice? = {
+        val name = account()
+        if (name.isNullOrBlank()) null else savedChoice.knownChoiceFor(name)
+    }
     @Provides
     @Singleton
     fun provideVoiceSharingSettingsViewModel(
@@ -52,6 +65,7 @@ object VoiceSharingSettingsModule {
             refreshProjection = { accountStartup.operations.refreshProjection() },
             cancelInFlightUpload = uploaderLoop::cancelInFlight,
             savedChoice = effectiveConsentProvider(savedChoice) { accountStartup.currentAccountName() },
+            knownChoice = knownChoiceProvider(savedChoice) { accountStartup.currentAccountName() },
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
         )
     }

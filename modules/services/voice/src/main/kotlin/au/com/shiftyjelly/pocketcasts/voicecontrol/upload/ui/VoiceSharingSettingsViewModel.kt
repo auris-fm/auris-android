@@ -47,6 +47,12 @@ class VoiceSharingSettingsViewModel(
     private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
     private val markerRead: (suspend () -> Boolean)? = null,
     private val savedChoice: (suspend () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?)? = null,
+    /**
+     * VISIBILITY provider (spec's bot, offline-start finding): does the account have ANY durable
+     * record? Kept separate from [savedChoice] because "sharing is off" is a known state — the row
+     * must show offline — while the switch VALUE stays on the stricter consent read.
+     */
+    private val knownChoice: (suspend () -> au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?)? = null,
 ) {
     private var lastFailedOperation = FailedOperation.NONE
     private var pendingOperation = PendingOperation.NONE
@@ -68,6 +74,8 @@ class VoiceSharingSettingsViewModel(
      * so re-reading it here keeps the switch on exactly what admission would act on.
      */
     private var lastRenderedChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? = null
+    /** Any durable record for the account (visibility only); null until an IO read lands. */
+    private var lastKnownChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? = null
     private val mutableState = MutableStateFlow(render())
     val state: StateFlow<VoiceSharingSettingsUiState> = mutableState.asStateFlow()
     init {
@@ -204,20 +212,23 @@ class VoiceSharingSettingsViewModel(
         val marker = markerRead?.invoke()
             ?: withContext(ioDispatcher) { withdrawalIntent.collectionPermittedByLocalIntent() }
         val choice = withContext(ioDispatcher) { savedChoice?.invoke() }
-        return FencedFacts(generation, marker, choice)
+        val known = withContext(ioDispatcher) { knownChoice?.invoke() }
+        return FencedFacts(generation, marker, choice, known)
     }
     private fun acceptMarkerRead(read: FencedFacts) {
         if (read.generation != markerReadGeneration) return
         lastRenderedMarker = read.marker
         lastRenderedChoice = read.choice
+        lastKnownChoice = read.known
         mutableState.value = render()
     }
 
-    /** The fenced render inputs: marker generation, the local stop marker, the durable choice. */
+    /** The fenced render inputs: marker generation, the local stop marker, the durable choice, and whether ANY durable record exists (row visibility). */
     private data class FencedFacts(
         val generation: Long,
         val marker: Boolean,
         val choice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice?,
+        val known: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? = null,
     )
     private suspend fun applyWithdrawalOutcome(outcome: EnrollmentOutcome, generation: Long) {
         when (outcome) {
@@ -346,7 +357,7 @@ class VoiceSharingSettingsViewModel(
             enrolled = enrolled,
             pending = pendingOperation != PendingOperation.NONE,
             projectionObserved = projection.value != null,
-            durableChoiceKnown = lastRenderedChoice != null,
+            durableChoiceKnown = lastKnownChoice != null,
             deletionRequested = deletionRequested,
             deletionFailed = deletionFailed,
             deleteAvailable = isDeleteAvailable(),

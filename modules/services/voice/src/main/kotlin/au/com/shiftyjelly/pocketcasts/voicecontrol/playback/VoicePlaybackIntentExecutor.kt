@@ -176,6 +176,11 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         timingRequestId: String? = null,
     ): VoiceResponse {
         fun report(outcome: VoiceActionOutcome) = onOutcome?.invoke(outcome)
+        // SINK OWNERSHIP: a cloud turn's timing record is finished by the route sink at the turn's
+        // end — but only if this dispatch actually reached it. A refusal or superseded discard
+        // above a dispatch leaves the registry holding one live entry per dropped turn, so the
+        // finally below finishes any cloud record whose turn never became the sink's.
+        var sinkTookOwnership = false
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
         // the player but not this counter is exactly the window where the turn
@@ -255,6 +260,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                         // recorded. A retry that returns only its feedback would hide an unknowable action
                         // on exactly the path where the caller most needs to know whether it ran.
                         val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
+                        sinkTookOwnership = true
                         outcome.action = retried.action
                         outcome.feedbackLanguage = retried.feedbackLanguage
                         outcome.turnSucceeded = retried.succeeded
@@ -309,6 +315,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     // the SAME path and the identity is the one fixed above rather than a second one minted
                     // here.
                     val dispatched = cloudRouteSink.dispatchPreparedReporting(preparedTurn, isRetry = intent.isRetry, onDuck = onOutcome)
+                    sinkTookOwnership = true
                     // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
                     // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
                     // confirmed action from one that was dispatched without a knowable outcome. Reading only
@@ -349,12 +356,21 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
             }
             return whenResult
         } finally {
-            if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
-                    timingRequestId,
-                    cancelled = false,
-                    failed = !outcome.turnSucceeded,
-                )
+            if (timingRequestId != null) {
+                if (intent !is VoiceIntent.CloudRoute) {
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                        timingRequestId,
+                        cancelled = false,
+                        failed = !outcome.turnSucceeded,
+                    )
+                } else if (!sinkTookOwnership) {
+                    // The turn never reached the sink, so no one downstream will finish it.
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                        timingRequestId,
+                        cancelled = false,
+                        failed = true,
+                    )
+                }
             }
         }
     }

@@ -206,6 +206,36 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a refused cloud turn before the sink leaves no live timing entry`() = runTest {
+        // A cloud dispatch refused BEFORE the sink (here: a retry of an unknown logical request)
+        // never opens a route, so the sink's own end-of-turn finish never runs. The executor must
+        // finish the record itself, or the registry keeps one live entry per dropped turn.
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val requestId = "leak-test-request"
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+
+        val response = executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "question",
+                tier = VoiceIntent.CloudTier.Premium,
+                logicalRequestId = "never-prepared",
+                isRetry = true,
+            ),
+            timingRequestId = requestId,
+        )
+
+        assertEquals(VoiceResponse.Silent, response)
+        assertFalse(
+            "a turn refused before the sink must not keep a live timing entry",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
+    }
+
+    @Test
     fun `a refused cloud turn does not renew the grace window`() = runTest {
         // A limit refusal reaches done-with-error — the turn did
         // nothing for the user, so it must NOT earn the recognition renewal. The old code read only

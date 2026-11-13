@@ -100,7 +100,7 @@ class CloudRouteSink internal constructor(
         // submission-side stamp, which can be seconds early on an underrun. The audible listener
         // stays for the ducking/gate consumers; it no longer speaks for this stage.
         audioPlayer?.addFirstAudibleListener { presentationNanos ->
-            activeTimingRequestId?.let { id ->
+            activeTimingRequestId.get()?.let { id ->
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
                     id,
                     au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible,
@@ -182,7 +182,9 @@ class CloudRouteSink internal constructor(
      * actively serving that turn and cleared when the turn ends. The audible fact itself comes from
      * the player, one consumer among several, so it arrives through the listener list.
      */
-    @Volatile private var activeTimingRequestId: String? = null
+    // Atomic so an old turn's clear cannot erase a successor's id written between the
+    // comparison and the store (a plain @Volatile check-and-set is not atomic).
+    private val activeTimingRequestId = java.util.concurrent.atomic.AtomicReference<String?>(null)
     private var activeTurn: Job? = null
 
     /**
@@ -573,7 +575,7 @@ class CloudRouteSink internal constructor(
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
             // From here until the turn ends, FIRST AUDIBLE belongs to this request.
             myTimingRequestId = turn.requestId
-            activeTimingRequestId = turn.requestId
+            activeTimingRequestId.set(turn.requestId)
             val events = openRoute(turn)
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
@@ -979,7 +981,7 @@ class CloudRouteSink internal constructor(
         }
         // This turn is done: a later audible is not its first audible. Clear only when THIS
         // turn still owns the field — a successor may already have replaced it.
-        if (activeTimingRequestId == myTimingRequestId) activeTimingRequestId = null
+        activeTimingRequestId.compareAndSet(myTimingRequestId, null)
         return CloudTurnResult(
             feedback = finalFeedback,
             // THE LANGUAGE THE LINE WAS ACTUALLY RESOLVED IN: an utterance-language line carries

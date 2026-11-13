@@ -918,6 +918,32 @@ class VoiceAsrEngine @Inject constructor(
         request: TranscribeRequest,
         timing: TurnTimingRecord,
     ) {
+        // OWNERSHIP TRAILING CLEANUP: the record was registered for the admitted id before this
+        // call, and ownership transfers to the async downstream only at a dispatch site (executor
+        // for a local action, route sink for a cloud turn). Every exit BEFORE a dispatch — no
+        // handler, router unavailable, bleed drop, ASR failure or empty/non-content transcript —
+        // would leave the registry holding one live entry forever, so the finally finishes any
+        // record that is still registered when segment processing ends without a dispatch.
+        var dispatched = false
+        var cancelled = false
+        try {
+            transcribeSegmentBody(segment, request, timing) { dispatched = true }
+        } catch (ce: java.util.concurrent.CancellationException) {
+            cancelled = true
+            throw ce
+        } finally {
+            if (!dispatched && TurnTimingRecord.isActive(request.admittedId)) {
+                TurnTimingRecord.finishFor(request.admittedId, cancelled = cancelled, failed = true)
+            }
+        }
+    }
+
+    private suspend fun transcribeSegmentBody(
+        segment: VoiceSegmenterResult.SpeechEnded,
+        request: TranscribeRequest,
+        timing: TurnTimingRecord,
+        onDispatch: () -> Unit,
+    ) {
         val b = backend ?: return
         val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
         val floatSamples = request.samples
@@ -1123,6 +1149,7 @@ class VoiceAsrEngine @Inject constructor(
             capture = request.capture,
             admittedId = request.admittedId,
             timing = timing,
+            onDispatch = onDispatch,
         )
     }
 
@@ -1164,6 +1191,7 @@ class VoiceAsrEngine @Inject constructor(
         capture: CaptureContext?,
         admittedId: String,
         timing: TurnTimingRecord? = null,
+        onDispatch: () -> Unit = {},
     ) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: run {
@@ -1236,6 +1264,7 @@ class VoiceAsrEngine @Inject constructor(
             // that window's identity and cannot extend a later one.
             routed(intentCategory(intent))
             pendingExecutionContext = capture
+            onDispatch()
             invokeHandler(
                 handler,
                 // Bind the immutable input for this recognition, not model-authored cloud text.
@@ -1333,6 +1362,7 @@ class VoiceAsrEngine @Inject constructor(
                 routed("cloud_escalation")
                 pendingExecutionContext = capture
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
+                onDispatch()
                 invokeHandler(
                     handler,
                     VoiceIntent.CloudRoute(

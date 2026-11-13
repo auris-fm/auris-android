@@ -52,6 +52,9 @@ class CloudAudioPlayer(
     // Publishes this player's observed output routing, so route-dependent decisions read where the audio
     // actually goes rather than what is merely available. Null in contexts with no route consumer.
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
+    // Test seam: creates the platform AudioTrack. The track is built in init, so a substitution
+    // must be a constructor argument, unlike the post-construction seams below.
+    private val createAudioTrack: (() -> AudioTrack?)? = null,
 ) {
     /**
      * This stream's claim on the routed observation, taken when playback starts.
@@ -427,6 +430,9 @@ class CloudAudioPlayer(
             answerAdmission = null
             frameBuffer.clear()
             if (playing) {
+                // Sample BEFORE stop(): a stopped track's timestamp can be stale or unavailable,
+                // and this stop may be the only sample point a short answer gets.
+                sampleFirstAudible()
                 audioTrack?.stop()
                 playing = false
                 paused = false
@@ -519,7 +525,11 @@ class CloudAudioPlayer(
      */
     private fun sampleFirstAudible() {
         if (firstAudibleFired) return
-        val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
+        // Production never sets the seam; fall back to the track's own getTimestamp exactly like
+        // renderedFrame() does, or first audible never fires outside tests.
+        val ts = audioTrack?.let { track ->
+            readAudioTimestamp?.invoke(track) ?: android.media.AudioTimestamp().takeIf { track.getTimestamp(it) }
+        }
         if (ts != null && ts.framePosition > 0) {
             firstAudibleFired = true
             notifyFirstAudible(ts.nanoTime)
@@ -559,7 +569,7 @@ class CloudAudioPlayer(
             return
         }
 
-        val track = AudioTrack.Builder()
+        val track = createAudioTrack?.invoke() ?: AudioTrack.Builder()
             .setAudioAttributes(audioAttributes)
             .setAudioFormat(
                 AudioFormat.Builder()

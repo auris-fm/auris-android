@@ -146,6 +146,47 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `without the test seam the platform getTimestamp fallback reports first audible`() {
+        // Production never sets readAudioTimestamp - it is a test-only substitution. The sampling
+        // path must fall back to the track's own getTimestamp (as renderedFrame() does), or first
+        // audible never fires outside tests. Robolectric's real AudioTrack cannot report a
+        // timestamp, so the track itself is mocked and getTimestamp stubbed, exactly the shape
+        // production presents.
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.doAnswer { invocation ->
+            val ts = invocation.getArgument<android.media.AudioTimestamp>(0)
+            ts.nanoTime = 99_000_000L
+            ts.framePosition = 512L
+            true
+        }.`when`(track).getTimestamp(org.mockito.kotlin.any())
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.kotlin.any<ByteArray>(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { invocation ->
+            val bytes = invocation.getArgument<ByteArray>(0)
+            bytes.size - invocation.getArgument<Int>(1)
+        }
+        // The seam must be a constructor argument: the track is built in init.
+        val seamPlayer = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            createAudioTrack = { track },
+        )
+        val fired = mutableListOf<Long>()
+        seamPlayer.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        seamPlayer.submitFrame(byteArrayOf(0x00, 0x01))
+        seamPlayer.play()
+        seamPlayer.stop()
+        assertEquals("first audible fires via the platform fallback", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
     fun `an answer that stops inside the first heartbeat interval still reports first audible, exactly once`() {
         // The heartbeat's first tick lands a full interval after play(); an answer that finishes
         // before it cancels the heartbeat without a tick. Sampling must happen on the way out

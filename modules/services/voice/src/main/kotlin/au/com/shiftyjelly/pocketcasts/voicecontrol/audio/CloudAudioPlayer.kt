@@ -490,13 +490,7 @@ class CloudAudioPlayer(
             // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
             // can finish and stop the heartbeat before the first delay elapses, and would then
             // never report a first audible at all. The tick below keeps sampling later frames.
-            if (!firstAudibleFired) {
-                val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
-                if (ts != null && ts.framePosition > 0) {
-                    firstAudibleFired = true
-                    notifyFirstAudible(ts.nanoTime)
-                }
-            }
+            sampleFirstAudible()
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
                 if (!isPlaying) break
@@ -504,13 +498,7 @@ class CloudAudioPlayer(
                 // Presentation evidence rides the same tick: if the track has presented its
                 // first frame by now, this run's first audible is THAT instant, not the
                 // submission stamp above.
-                if (!firstAudibleFired) {
-                    val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
-                    if (ts != null && ts.framePosition > 0) {
-                        firstAudibleFired = true
-                        notifyFirstAudible(ts.nanoTime)
-                    }
-                }
+                sampleFirstAudible()
             }
         }
     }
@@ -520,14 +508,22 @@ class CloudAudioPlayer(
         audibleHeartbeat = null
         // LAST CHANCE: an answer that finished inside the first heartbeat interval presented
         // between the ticks; sample on the way out so short answers still report first audible.
-        if (!firstAudibleFired) {
-            val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
-            if (ts != null && ts.framePosition > 0) {
-                firstAudibleFired = true
-                notifyFirstAudible(ts.nanoTime)
-            }
-        }
+        sampleFirstAudible()
         notifyAudible(false)
+    }
+
+    /**
+     * Sample the track's presentation clock once and fire first audible on the first evidence.
+     * Idempotent: the [firstAudibleFired] latch makes every repeat call a no-op, so a sampled
+     * run reports first audible exactly once no matter how many paths sample it.
+     */
+    private fun sampleFirstAudible() {
+        if (firstAudibleFired) return
+        val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
+        if (ts != null && ts.framePosition > 0) {
+            firstAudibleFired = true
+            notifyFirstAudible(ts.nanoTime)
+        }
     }
 
     private val heartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

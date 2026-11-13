@@ -26,6 +26,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -2310,6 +2311,69 @@ class CloudRouteSinkTest {
         sink.routeToCloud("second", playbackContext, admitted = testWireId).feedback
         firstCancelled.await()
         assertTrue(first.isCancelled)
+    }
+
+    @Test
+    fun `a superseded turn publishes its own timing table and leaves the successor's alone`() = runTest(UnconfinedTestDispatcher()) {
+        // THE BLOCKER THE BOT FOUND: the finish path read the shared activeTimingRequestId, so a
+        // turn superseded mid-flight finished and published its SUCCESSOR's record under the
+        // successor's id, losing both tables. Each turn must publish its own table under its own
+        // request id, whatever a successor did to the shared field meanwhile.
+        val aOnWire = CompletableDeferred<Unit>()
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        val idA = "wire-superseded"
+        val idB = "wire-successor"
+        for (id in listOf(idA, idB)) {
+            val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
+            record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
+        }
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    // A is live on the wire when B arrives, and is superseded mid-flight — the
+                    // interleaving that made the finish path read the successor's state off the
+                    // shared field instead of the turn's own id.
+                    flow {
+                        aOnWire.complete(Unit)
+                        awaitCancellation()
+                    }
+                } else {
+                    flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(0, 0))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { sink.routeToCloud("first", playbackContext, admitted = idA).feedback }
+        aOnWire.await()
+        sink.routeToCloud("second", playbackContext, admitted = idB).feedback
+        // A's publish runs in its non-cancellable cleanup; wait for the job, but never hang the
+        // suite on it — a timeout fails the assertions below with what did publish.
+        withTimeoutOrNull(5_000) { first.join() }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = previousSink
+        for (id in listOf(idA, idB)) {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(id)
+        }
+
+        // EACH TURN PUBLISHES EXACTLY ITS OWN TABLE, under its own request id: the old
+        // finish path published the superseded turn's marks under the successor's id (or
+        // lost them to a null), so either A's block is missing or B's is duplicated.
+        assertEquals(
+            "one published table per turn",
+            setOf(idA, idB),
+            published.mapNotNull { Regex("request_id=(\\S+)").find(it)?.groupValues?.get(1) }.toSet(),
+        )
+        assertTrue(
+            "the superseded turn's table names its own cancellation",
+            published.any { it.contains("request_id=$idA") && it.contains("outcome=cancelled") },
+        )
+        assertTrue(
+            "the successor's table names its own commit",
+            published.any { it.contains("request_id=$idB") && it.contains("outcome=committed") },
+        )
     }
 
     @Test

@@ -146,6 +146,29 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `an answer that stops inside the first heartbeat interval still reports first audible, exactly once`() {
+        // The heartbeat's first tick lands a full interval after play(); an answer that finishes
+        // before it cancels the heartbeat without a tick. Sampling must happen on the way out
+        // (and at heartbeat start), or a sub-second answer never reports first audible at all.
+        player.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                this.nanoTime = 99_000_000L
+                this.framePosition = 512L
+            }
+        }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        // Stop BEFORE the first heartbeat tick could run: the answer ended sub-second.
+        player.stop()
+
+        assertEquals("exactly one first-audible for a sub-second answer", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
     fun `a framePosition of zero is not presentation - first audible stays unfired`() {
         // An underrun or a track that has not yet presented anything reports framePosition 0.
         // That is SUBMISSION with no evidence, exactly the instant this fix refuses to claim.

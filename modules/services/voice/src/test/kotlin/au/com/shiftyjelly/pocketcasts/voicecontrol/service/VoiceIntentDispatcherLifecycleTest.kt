@@ -117,6 +117,43 @@ class VoiceIntentDispatcherLifecycleTest {
     }
 
     @Test
+    fun `a debounced dispatch leaves no live timing record in the registry`() {
+        // The debounce exit never reaches the executor, whose finally would finish the record:
+        // finishing it here is what stops the registry holding one live entry per dropped turn.
+        val engine = engine()
+        val d = dispatcher()
+        val t = token()
+        val id = "wire-debounced"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
+        d.dispatch(
+            scope = scope(),
+            engine = engine,
+            executor = executor { _, _ -> VoiceResponse.Silent },
+            render = { _, _ -> },
+            onCommandRecognized = { },
+            intent = VoiceIntent.Playback.Pause,
+            invocationToken = null,
+        )
+        val job = d.dispatch(
+            scope = scope(),
+            engine = engine,
+            executor = executor { _, _ -> error("debounced: must not run") },
+            render = { _, _ -> },
+            onCommandRecognized = { },
+            intent = VoiceIntent.Playback.Pause,
+            invocationToken = t,
+            timingRequestId = id,
+        )
+        assertNull("a debounced dispatch launches nothing", job)
+        assertTrue(
+            "the dropped turn's record must be finished, not left live in the registry",
+            !au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+        )
+    }
+
+    @Test
     fun `a debounced dispatch settles its token immediately`() {
         val engine = engine()
         val d = dispatcher()

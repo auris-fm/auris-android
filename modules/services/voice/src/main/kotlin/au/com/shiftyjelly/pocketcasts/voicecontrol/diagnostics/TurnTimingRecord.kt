@@ -53,6 +53,9 @@ class TurnTimingRecord(private val requestId: String) {
     // Marks and outcomes are written from several threads (engine, route sink, executor, audio
     // player) while publish renders them, so every access holds this lock: a concurrent first
     // audible during publish would otherwise throw inside the catch and discard the table.
+    // THE LOCK IS THE GUARANTEE, NOT THE COLLECTIONS: LinkedHashMap/LinkedHashSet are not
+    // thread-safe, and this path cannot be tested deterministically for the race, so no reader
+    // or writer may touch `marks`, `outcomes` or `disposition` without holding [lock].
     private val lock = Any()
     private val marks = LinkedHashMap<Stage, Long>()
     private val outcomes = LinkedHashSet<Outcome>()
@@ -179,6 +182,9 @@ class TurnTimingRecord(private val requestId: String) {
         fun markFor(id: String, stage: Stage, atNanos: Long) {
             active[id]?.mark(stage, atNanos)
         }
+
+        /** Test seam: whether [id] still has a live record (a published one removes itself). */
+        internal fun isActive(id: String): Boolean = active.containsKey(id)
 
         fun unregister(id: String) {
             active.remove(id)

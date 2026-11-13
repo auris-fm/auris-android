@@ -71,6 +71,26 @@ target_compile_options(vad_handle_test PRIVATE -Wall -Wextra -O1 -g)
 
 target_link_libraries(vad_handle_test PRIVATE Threads::Threads)
 
+# The snapshot carry-over probe drives the real processor's frame loop through two utterances
+# in one session and reports what a SpeechStarted caller would drain. Same shape as the segment
+# target: no Oboe library, VAD externs stubbed in the test file.
+add_executable(vad_snapshot_carryover_test
+    VadSnapshotCarryoverTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_snapshot_carryover_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+target_compile_options(vad_snapshot_carryover_test PRIVATE -Wall -Wextra -O1 -g)
+
+target_link_libraries(vad_snapshot_carryover_test PRIVATE Threads::Threads)
+
 # The capture/VAD start-ownership control compiles the REAL jni_bridge.cpp entry points together
 # with the real capture and processor translation units. JniBridgeHostPlatformStubs.cpp supplies
 # ONLY the platform boundaries a host lacks (the five JNIEnv calls jni_bridge.cpp makes, dlopen,

@@ -3379,7 +3379,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `the final-tail commit carries the whole utterance, never a stale-shifted tail`() = runTest {
-        // WHAT THE DELTA COMMIT ITSELF DOES (reviewer): the retained clip comes from the
+        // WHAT THE DELTA COMMIT ITSELF DOES: the retained clip comes from the
         // completion handoff, so clip contents alone cannot witness the per-utterance reset.
         // This control watches the SpeechEnded commit directly: with the reset, utterance 2's
         // commit is its WHOLE segment; without it, the stale count from utterance 1 shifts the

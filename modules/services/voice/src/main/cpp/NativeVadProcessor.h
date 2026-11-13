@@ -1,6 +1,7 @@
 #ifndef POCKETCASTS_NATIVE_VAD_PROCESSOR_H
 #define POCKETCASTS_NATIVE_VAD_PROCESSOR_H
 
+#include <deque>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>

@@ -111,6 +111,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
     private inner class FakeScoPlatform(
         private val microphoneCapture: MicrophoneCapture,
+        private val establish: Boolean = true,
     ) : au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform {
         var scoStarts = 0
         var scoStops = 0
@@ -124,6 +125,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
         override fun startBluetoothSco() {
             scoStarts++
+            if (!establish) return
             scoLinkUp = true
             setShadowBluetoothScoOn(audioManager, true)
             shadowOf(audioManager).setInputDevices(
@@ -335,6 +337,8 @@ class VoiceControlModeObserverAvailabilityTest {
         modelsReady: ModelsReadyCondition,
         otherAppRule: FakeRule,
         foregroundRule: FakeRule,
+        acquisitionTimeoutMs: Long = 6_000L,
+        scoEstablishes: Boolean = true,
     ): Harness {
         val userRule = FakeRule(au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition.ID, VoiceControlRuleGroup.Setup)
         val gate = VoiceControlGate(
@@ -369,8 +373,8 @@ class VoiceControlModeObserverAvailabilityTest {
 
         val playbackBufferRecorder = PlaybackBufferRecorder(FingerprintPcmTap())
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
-        val scoPlatform = FakeScoPlatform(microphoneCapture).also { scoLinkUp = { it.scoLinkUp } }
-        val acquisition = RouteAcquisition(scoPlatform, timeoutMs = 6_000L, pollIntervalMs = 10L)
+        val scoPlatform = FakeScoPlatform(microphoneCapture, establish = scoEstablishes).also { scoLinkUp = { it.scoLinkUp } }
+        val acquisition = RouteAcquisition(scoPlatform, timeoutMs = acquisitionTimeoutMs, pollIntervalMs = 10L)
 
         val policy = ListeningModePolicy(gate, monitor, GracePeriodSignal(), CoroutineScope(Dispatchers.Main.immediate))
 
@@ -540,5 +544,93 @@ class VoiceControlModeObserverAvailabilityTest {
         } finally {
             harness.stop()
         }
+    }
+
+    @Test
+    fun `a failed acquisition is not retried on an unrelated gate change until the trigger surface moves`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
+        try {
+            harness.awaitObserverInstalled()
+            // The platform never establishes SCO in this test, so acquisition FAILS (timeout).
+            awaitState("first failed acquisition") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("failed attempt recorded") {
+                val failedAvailability = getField(harness.service, "failedAttemptAvailability")
+                failedAvailability != null
+            }
+            val scoStartsAfterFailure = harness.scoPlatform.scoStarts
+
+            // An unrelated gate flicker re-runs the observer: no second attempt while the
+            // trigger surface (availability + gate) is unchanged.
+            otherAppRule.block("other_app_playing")
+            otherAppRule.allow()
+            awaitState("gate flicker observed") {
+                gateAllowedNow(harness)
+            }
+            Thread.sleep(400)
+            testScheduler.advanceTimeBy(400.milliseconds)
+            assertEquals(
+                "no retry on an unrelated gate change after a failed attempt",
+                scoStartsAfterFailure,
+                harness.scoPlatform.scoStarts,
+            )
+
+            // The trigger surface moves (the device set changes): acquisition runs again.
+            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            setInputDevices()
+            harness.monitor.onDevicesChanged()
+            awaitState("availability back to speaker") { harness.monitor.availability.value == AudioRoute.Speaker }
+            setAirPodsConnected()
+            harness.monitor.onDevicesChanged()
+            awaitState("retry after the trigger surface moved") {
+                harness.scoPlatform.scoStarts > scoStartsAfterFailure
+            }
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `user-driven bluetooth off-on cycles do not consume the restart budget`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("first capture") { harness.hardware.attachCount >= 1 }
+
+            // Merlin's sequence, twice: BT off (capture stops), BT on (capture resumes).
+            repeat(2) {
+                setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+                setInputDevices()
+                harness.monitor.onDevicesChanged()
+                awaitState("capture down (cycle)") { harness.hardware.vadStopCount >= it + 1 }
+                setAirPodsConnected()
+                harness.monitor.onDevicesChanged()
+                awaitState("capture back up (cycle)") { harness.hardware.attachCount >= it + 2 }
+            }
+
+            val budget = getField(harness.service, "captureRestartBudget")!!
+            val restarts = budget.javaClass.getDeclaredField("restarts").apply { isAccessible = true }.get(budget)
+            assertEquals(
+                "user-caused reconnects must not spend automatic restarts",
+                0,
+                restarts,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    private fun gateAllowedNow(harness: Harness): Boolean {
+        val gate = getField(harness.service, "gate")!!
+        val state = gate.javaClass.getMethod("getState").invoke(gate) as StateFlow<*>
+        val allowed = state.value!!.javaClass.getMethod("getAllowed").invoke(state.value) as Boolean
+        return allowed
     }
 }

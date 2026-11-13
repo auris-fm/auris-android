@@ -159,6 +159,17 @@ class VoiceControlService : Service() {
     /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
     private var lastObservedRoute: AudioRoute? = null
 
+    // NO-LOOP RULE (core PR 158): a FAILED acquisition attempt must not be retried while its
+    // trigger surface is unchanged — the next emission of any combine source (an unrelated gate
+    // flicker, a restart-signal bump) would otherwise start a new attempt against the same
+    // still-present headset, bounded only by the silent restart cap. The attempt's trigger is
+    // the (availability, gate-allowed) pair: record it at the failure, skip further attempts
+    // while it is unchanged, and clear it when availability changes or the user toggles voice
+    // control off and back on (EnabledByUser Blocked -> Allowed) — a fresh, deliberate trigger.
+    private var failedAttemptAvailability: AudioRoute? = null
+    private var failedAttemptGateAllowed: Boolean = false
+    private var userWasBlocked: Boolean = false
+
     /**
      * Why the last teardown declined to release, or null when it released cleanly.
      *
@@ -461,8 +472,21 @@ class VoiceControlService : Service() {
                             engineStart.invalidatePendingStart()
                             // The user turning voice control off is a fresh start, not a retry: clear
                             // the automatic-restart cap so re-enabling it can capture again.
-                            if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
+                            val userBlocked =
+                                gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked
+                            if (userBlocked) {
                                 captureRestartBudget.reset()
+                            } else if (userWasBlocked) {
+                                // EnabledByUser Blocked -> Allowed is a fresh, deliberate trigger:
+                                // a previously failed acquisition may be attempted again.
+                                failedAttemptAvailability = null
+                            }
+                            userWasBlocked = userBlocked
+                            // An availability change itself is a new trigger: the failed attempt
+                            // was recorded against the OLD availability, so a different answer
+                            // (device set changed) may be acquired again.
+                            if (audioRouteMonitor.availability.value != failedAttemptAvailability) {
+                                failedAttemptAvailability = null
                             }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
@@ -926,6 +950,17 @@ class VoiceControlService : Service() {
      */
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
+        if (failedAttemptAvailability != null &&
+            audioRouteMonitor.availability.value == failedAttemptAvailability &&
+            gate.state.value.allowed == failedAttemptGateAllowed
+        ) {
+            Timber.i(
+                "[VoicePipeline] acquisition skipped: a previous attempt already failed against " +
+                    "availability=%s with the same gate state; waiting for a new trigger",
+                audioRouteMonitor.availability.value,
+            )
+            return
+        }
         if (!captureRestartBudget.allows()) {
             Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld (cap reached)")
             return
@@ -961,6 +996,8 @@ class VoiceControlService : Service() {
 
                     is AcquisitionResult.Failed -> {
                         val gateState = gate.state.value
+                        failedAttemptAvailability = audioRouteMonitor.availability.value
+                        failedAttemptGateAllowed = gateState.allowed
                         val reasons = joinedBlockedReasons(gateState.rules)
                         Timber.e(
                             "mic_acquisition_skipped: reasons=%s;%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",

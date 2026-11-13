@@ -487,6 +487,16 @@ class CloudAudioPlayer(
         // own first-audible instant.
         firstAudibleFired = false
         audibleHeartbeat = heartbeatScope.launch {
+            // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
+            // can finish and stop the heartbeat before the first delay elapses, and would then
+            // never report a first audible at all. The tick below keeps sampling later frames.
+            if (!firstAudibleFired) {
+                val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
+                if (ts != null && ts.framePosition > 0) {
+                    firstAudibleFired = true
+                    notifyFirstAudible(ts.nanoTime)
+                }
+            }
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
                 if (!isPlaying) break
@@ -508,6 +518,15 @@ class CloudAudioPlayer(
     private fun stopAudibleHeartbeat() {
         audibleHeartbeat?.cancel()
         audibleHeartbeat = null
+        // LAST CHANCE: an answer that finished inside the first heartbeat interval presented
+        // between the ticks; sample on the way out so short answers still report first audible.
+        if (!firstAudibleFired) {
+            val ts = audioTrack?.let { track -> readAudioTimestamp?.invoke(track) }
+            if (ts != null && ts.framePosition > 0) {
+                firstAudibleFired = true
+                notifyFirstAudible(ts.nanoTime)
+            }
+        }
         notifyAudible(false)
     }
 

@@ -506,6 +506,10 @@ class CloudRouteSink internal constructor(
         // throw or cancellation during setup (context build, route opening, the
         // initial pause) must still release ownership and restore audio, or the
         // successor could inherit a paused player with no owner.
+        // TURN-LOCAL timing id, declared at function scope so the finally can finish THIS id
+        // rather than whatever the shared field holds at exit — a superseded turn must not
+        // publish its successor's table.
+        var myTimingRequestId: String? = null
         try {
             // A newer turn supersedes the previous one. Registration and the
             // initial pause share the turn mutex, so a predecessor's suspending
@@ -568,6 +572,7 @@ class CloudRouteSink internal constructor(
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
             // From here until the turn ends, FIRST AUDIBLE belongs to this request.
+            myTimingRequestId = turn.requestId
             activeTimingRequestId = turn.requestId
             val events = openRoute(turn)
 
@@ -922,7 +927,7 @@ class CloudRouteSink internal constructor(
                         // CloudRequestSent and FirstAudible were marked. Finish and publish HERE,
                         // non-cancellable, for every exit path.
                         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
-                            activeTimingRequestId,
+                            myTimingRequestId,
                             cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true,
                             failed = endReason == Reason.TurnFailed,
                         )
@@ -972,8 +977,9 @@ class CloudRouteSink internal constructor(
         if (selectedKind != null) {
             Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, feedbackKind = selectedKind))
         }
-        // This turn is done: a later audible is not its first audible.
-        activeTimingRequestId = null
+        // This turn is done: a later audible is not its first audible. Clear only when THIS
+        // turn still owns the field — a successor may already have replaced it.
+        if (activeTimingRequestId == myTimingRequestId) activeTimingRequestId = null
         return CloudTurnResult(
             feedback = finalFeedback,
             // THE LANGUAGE THE LINE WAS ACTUALLY RESOLVED IN: an utterance-language line carries

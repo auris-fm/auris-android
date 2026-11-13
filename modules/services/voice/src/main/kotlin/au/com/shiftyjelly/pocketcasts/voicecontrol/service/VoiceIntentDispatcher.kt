@@ -61,6 +61,15 @@ class VoiceIntentDispatcher @Inject constructor() {
                 engine.reportExecutionResult(it, ExecutionOutcome.Refused)
                 engine.settleInvocation(it)
             }
+            // A debounced dispatch never reaches the executor, whose finally would finish the
+            // record — finish it here, or the registry keeps one live entry per dropped turn.
+            if (timingRequestId != null) {
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                    timingRequestId,
+                    cancelled = false,
+                    failed = true,
+                )
+            }
             return null
         }
         lastIntentType = intentType

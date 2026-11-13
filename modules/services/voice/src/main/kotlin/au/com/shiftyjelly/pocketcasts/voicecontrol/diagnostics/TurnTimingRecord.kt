@@ -50,6 +50,10 @@ class TurnTimingRecord(private val requestId: String) {
         Cancelled("cancelled"),
     }
 
+    // Marks and outcomes are written from several threads (engine, route sink, executor, audio
+    // player) while publish renders them, so every access holds this lock: a concurrent first
+    // audible during publish would otherwise throw inside the catch and discard the table.
+    private val lock = Any()
     private val marks = LinkedHashMap<Stage, Long>()
     private val outcomes = LinkedHashSet<Outcome>()
 
@@ -60,7 +64,7 @@ class TurnTimingRecord(private val requestId: String) {
      * measurement to whenever a caller happened to notice rather than when it happened.
      */
     fun mark(stage: Stage, atNanos: Long) {
-        marks.putIfAbsent(stage, atNanos)
+        synchronized(lock) { marks.putIfAbsent(stage, atNanos) }
     }
 
     /**
@@ -72,43 +76,47 @@ class TurnTimingRecord(private val requestId: String) {
      */
     fun markDisposition(atNanos: Long, cancelled: Boolean) {
         mark(Stage.CommitOrCancel, atNanos)
-        disposition = if (cancelled) Outcome.Cancelled else Outcome.Committed
-        outcomes += disposition!!
+        synchronized(lock) {
+            disposition = if (cancelled) Outcome.Cancelled else Outcome.Committed
+            outcomes += disposition!!
+        }
     }
 
     private var disposition: Outcome? = null
 
     fun markOutcome(outcome: Outcome) {
-        outcomes += outcome
+        synchronized(lock) { outcomes += outcome }
     }
 
     /** Milliseconds from the acoustic end to [stage], or null when either end was not measured. */
-    fun elapsedMs(stage: Stage): Long? {
+    fun elapsedMs(stage: Stage): Long? = synchronized(lock) {
         val zero = marks[Stage.AcousticEnd] ?: return null
         val at = marks[stage] ?: return null
-        return nanosToMs(at - zero)
+        nanosToMs(at - zero)
     }
 
     /** How long [stage] itself took, measured against the stage before it that was recorded. */
-    fun stageMs(stage: Stage): Long? {
+    fun stageMs(stage: Stage): Long? = synchronized(lock) {
         val at = marks[stage] ?: return null
         val previous = marks.keys.toList().let { keys ->
             val index = keys.indexOf(stage)
             if (index <= 0) null else keys[index - 1]
         } ?: return null
-        return nanosToMs(at - marks.getValue(previous))
+        nanosToMs(at - marks.getValue(previous))
     }
 
     /** One line per measured stage, oldest first, each carrying the turn's identity. */
-    fun lines(): List<String> = marks.map { (stage, at) ->
-        buildString {
-            append("request_id=").append(requestId)
-            // The disposition stage is named for what happened, not for the pair of possibilities.
-            append(" stage=").append(
-                if (stage == Stage.CommitOrCancel) disposition?.wireName ?: stage.wireName else stage.wireName,
-            )
-            append(" elapsed_ms=").append(nanosToMs(at - (marks[Stage.AcousticEnd] ?: at)))
-            append(" outcome=").append(outcomes.joinToString(",") { it.wireName }.ifEmpty { "-" })
+    fun lines(): List<String> = synchronized(lock) {
+        marks.map { (stage, at) ->
+            buildString {
+                append("request_id=").append(requestId)
+                // The disposition stage is named for what happened, not for the pair of possibilities.
+                append(" stage=").append(
+                    if (stage == Stage.CommitOrCancel) disposition?.wireName ?: stage.wireName else stage.wireName,
+                )
+                append(" elapsed_ms=").append(nanosToMs(at - (marks[Stage.AcousticEnd] ?: at)))
+                append(" outcome=").append(outcomes.joinToString(",") { it.wireName }.ifEmpty { "-" })
+            }
         }
     }
 

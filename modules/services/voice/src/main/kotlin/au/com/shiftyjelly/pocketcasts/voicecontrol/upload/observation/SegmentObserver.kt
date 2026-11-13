@@ -193,12 +193,13 @@ class SegmentObserver(
             open = context
             // THE CLIP STARTS FROM ZERO: an empty-prefix admission (producerSize == 0 — the
             // engine no longer drains the finished-utterance buffer at start) has no
-            // adoptFirstChunk to open the sink prefix, so open an EMPTY one here (the admit token
-            // carries the frozen metadata cap), settle the 0-byte token immediately, and mirror
-            // retention from the prefix's existence. Without it the engine's delta commits at
-            // SpeechEnded would see isRetaining()=false and the capture would fall to the
-            // no-prefix completion, which publication refuses fail-closed (no frozen metadata
-            // authority). Non-empty admissions keep the adopt/release protocol unchanged.
+            // adoptFirstChunk to open the sink prefix, so open an EMPTY one here and settle the
+            // 0-byte token immediately. Its effect is the RETENTION MIRROR only: without an open
+            // prefix isRetaining() is false, so the engine's reserve-before-copy commits at
+            // SpeechEnded would never run and the capture would complete through the no-prefix
+            // path, with no budget-accounted collection at all. Published clip bytes are
+            // unaffected either way — completion assembles them from the segment — and
+            // non-empty admissions keep the adopt/release protocol unchanged.
             if (producerSize == 0) {
                 sink.started(SegmentObservation.Started(context, ShortArray(0), 0, token.allowanceMetadataCapBytes))
                 sink.releaseInitial(context, token)

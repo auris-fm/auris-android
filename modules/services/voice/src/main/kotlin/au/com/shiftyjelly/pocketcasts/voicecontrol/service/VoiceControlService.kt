@@ -146,6 +146,12 @@ class VoiceControlService : Service() {
 
     /** The automatic-restart cap, consulted by every start decision. */
     private val captureRestartBudget = CaptureRestartBudget()
+    // True between an unexpected capture end and the automatic restart that ends the credit
+    // (set on the successful start): the release-triggered re-entry that follows the termination
+    // is the restart the spec grants, and it must spend the credit — a later trigger-driven
+    // attempt must not.
+    private var pendingAutomaticRestart = false
+    private var captureStartedAtMs = 0L
 
     /**
      * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
@@ -177,6 +183,7 @@ class VoiceControlService : Service() {
     // normal side effects of setting SCO up, and a device-set change is already covered by
     // recording the START availability — only a blocker clearing mid-attempt needs this flag.
     @Volatile private var gateBlockedDuringAttempt = false
+    @Volatile private var lastAvailabilitySeenByObserver: AudioRoute? = null
 
     /**
      * Why the last teardown declined to release, or null when it released cleanly.
@@ -466,6 +473,17 @@ class VoiceControlService : Service() {
                     if (acquisitionJob != null && !gate.state.value.allowed) {
                         gateBlockedDuringAttempt = true
                     }
+                    // RULE: any acquisition trigger re-arms the restart budget (device change,
+                    // blocker clearing, user re-enable). Availability moving IS the device-set
+                    // trigger; a gate going Blocked is the blocker trigger (the attempt it
+                    // enables runs on the later Allowed emission, against an armed budget).
+                    if (audioRouteMonitor.availability.value != lastAvailabilitySeenByObserver) {
+                        lastAvailabilitySeenByObserver = audioRouteMonitor.availability.value
+                        captureRestartBudget.rearm()
+                    }
+                    if (!gate.state.value.allowed) {
+                        captureRestartBudget.rearm()
+                    }
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
@@ -564,7 +582,7 @@ class VoiceControlService : Service() {
                                     updateListeningState()
                                 }
                             } else {
-                                Timber.w("[VoicePipeline] start skipped: automatic restart withheld (cap reached)")
+                                Timber.w("[VoicePipeline] start skipped: automatic restart withheld")
                             }
                         }
                     }
@@ -838,6 +856,11 @@ class VoiceControlService : Service() {
             // started. They must not be able to un-set it: acquireCandidate hands the acquired
             // stream to the engine based on this result, and a false would close a live stream.
             onStarted = {
+                captureStartedAtMs = SystemClock.elapsedRealtime()
+                if (pendingAutomaticRestart) {
+                    captureRestartBudget.onAutomaticRestart()
+                    pendingAutomaticRestart = false
+                }
                 // Only when the microphone opens where the user cannot see it: the decision is
                 // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
                 // covered in ListeningModePolicyTest.
@@ -882,9 +905,13 @@ class VoiceControlService : Service() {
         // Budget the automatic restarts before anything releases routing: the release fires
         // selection callbacks that re-enter acquisition and the start path, and they consult the
         // same budget.
-        captureRestartBudget.onTerminated()
+        val ranForMs = SystemClock.elapsedRealtime() - captureStartedAtMs
+        captureRestartBudget.onTerminated(ranForMs)
+        pendingAutomaticRestart = captureRestartBudget.allows()
         if (!captureRestartBudget.allows()) {
-            Timber.w("[VoicePipeline] capture keeps ending — automatic restart withheld")
+            // voice-control-core.md > Microphone lifecycle logging: ERROR, with the end reason
+            // and how long the capture had run.
+            Timber.e("[VoicePipeline] mic_restart_withheld: reason=self_ended runtimeMs=%d", ranForMs)
         }
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
@@ -977,7 +1004,7 @@ class VoiceControlService : Service() {
             return
         }
         if (!captureRestartBudget.allows()) {
-            Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld (cap reached)")
+            Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld")
             return
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)

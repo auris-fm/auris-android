@@ -617,11 +617,11 @@ class VoiceControlModeObserverAvailabilityTest {
             }
 
             val budget = getField(harness.service, "captureRestartBudget")!!
-            val restarts = budget.javaClass.getDeclaredField("restarts").apply { isAccessible = true }.get(budget)
-            assertEquals(
-                "user-caused reconnects must not spend automatic restarts",
-                0,
-                restarts,
+            val restartAvailable = budget.javaClass
+                .getDeclaredField("restartAvailable").apply { isAccessible = true }.get(budget) as Boolean
+            assertTrue(
+                "user-caused reconnects are triggers: they must never leave restarts withheld",
+                restartAvailable,
             )
         } finally {
             harness.stop()

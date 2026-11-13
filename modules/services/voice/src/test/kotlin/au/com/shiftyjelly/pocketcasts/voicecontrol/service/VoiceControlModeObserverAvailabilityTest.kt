@@ -563,13 +563,14 @@ class VoiceControlModeObserverAvailabilityTest {
             }
             val scoStartsAfterFailure = harness.scoPlatform.scoStarts
 
-            // An unrelated gate flicker re-runs the observer: no second attempt while the
-            // trigger surface (availability + gate) is unchanged.
-            otherAppRule.block("other_app_playing")
-            otherAppRule.allow()
-            awaitState("gate flicker observed") {
-                gateAllowedNow(harness)
-            }
+            // An UNRELATED re-evaluation: a combine source fires while the overall gate stays
+            // Allowed throughout (the restart-signal bump — same family as a rule changing
+            // without the gate ever leaving Allowed). No second attempt while the trigger
+            // surface is unchanged.
+            @Suppress("UNCHECKED_CAST")
+            val restartSignal = getField(harness.service, "captureRestartSignal") as MutableStateFlow<Long>
+            restartSignal.value = restartSignal.value + 1L
+            awaitState("re-evaluation observed") { true }
             Thread.sleep(400)
             testScheduler.advanceTimeBy(400.milliseconds)
             assertEquals(
@@ -621,6 +622,45 @@ class VoiceControlModeObserverAvailabilityTest {
                 "user-caused reconnects must not spend automatic restarts",
                 0,
                 restarts,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `a blocker clearing after a failed acquisition is a new trigger and retries once`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("first failed acquisition") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("failed attempt recorded") {
+                getField(harness.service, "failedAttemptAvailability") != null
+            }
+            val scoStartsAfterFailure = harness.scoPlatform.scoStarts
+
+            // A BLOCKER CLEARS: the overall gate goes Blocked -> Allowed. That is a new trigger
+            // for any blocker, so exactly one more attempt runs.
+            otherAppRule.block("other_app_playing")
+            awaitState("gate blocked observed") { !gateAllowedNow(harness) }
+            otherAppRule.allow()
+            awaitState("gate allowed again") { gateAllowedNow(harness) }
+            awaitState("retry after the blocker cleared") {
+                harness.scoPlatform.scoStarts > scoStartsAfterFailure
+            }
+            val retryCount = harness.scoPlatform.scoStarts
+
+            // And no further attempts: the retry's own failure re-records the surface.
+            Thread.sleep(400)
+            testScheduler.advanceTimeBy(400.milliseconds)
+            assertEquals(
+                "exactly one attempt per cleared-blocker trigger",
+                retryCount,
+                harness.scoPlatform.scoStarts,
             )
         } finally {
             harness.stop()

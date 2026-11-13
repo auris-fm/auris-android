@@ -7,11 +7,11 @@ import au.com.shiftyjelly.pocketcasts.sharedtest.MainCoroutineRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -51,7 +51,7 @@ class CloudRouteGraceLifecycleTest {
                 emit(CloudRouteEvent.Done(0, 0))
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
+        val owner = async { sink.routeToCloud("question", PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             entered.await()
             advanceTimeBy(350L)
@@ -93,7 +93,7 @@ class CloudRouteGraceLifecycleTest {
                 emit(CloudRouteEvent.Done(0, 0))
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
+        val owner = async { sink.routeToCloud("question", PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             terminal.await()
             runCurrent()
@@ -164,7 +164,7 @@ class CloudRouteGraceLifecycleTest {
             audioPlayer = null,
             gracePeriodSignal = signal,
         )
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
+        val owner = async { sink.routeToCloud("question", PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             entered.await()
             advanceTimeBy(350L)
@@ -202,7 +202,7 @@ class CloudRouteGraceLifecycleTest {
                 kotlinx.coroutines.awaitCancellation()
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
+        val owner = async { sink.routeToCloud("question", PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             playing.await()
             advanceTimeBy(350L)
@@ -238,7 +238,7 @@ class CloudRouteGraceLifecycleTest {
                 emit(CloudRouteEvent.Done(0, 0))
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
+        val owner = async { sink.routeToCloud("question", PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             entered.await()
             signal.onAudioRouteChanged()
@@ -281,11 +281,11 @@ class CloudRouteGraceLifecycleTest {
                 }
             }
         }
-        val first = async { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
+        val first = async { sink.routeToCloud("first", PlaybackContext(), false, origin, true, admitted = testWireId) }
         var second: kotlinx.coroutines.Deferred<CloudTurnResult>? = null
         try {
             firstEntered.await()
-            second = async { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, PlaybackContext(), true, origin, false, admitted = testWireId) }
+            second = async { sink.routeToCloud("second", PlaybackContext(), true, origin, false, admitted = testWireId) }
             secondEntered.await()
             first.join()
             assertTrue(first.isCancelled)
@@ -311,6 +311,27 @@ class CloudRouteGraceLifecycleTest {
         player: CloudAudioPlayer? = null,
         route: (CloudRouteTurn) -> Flow<CloudRouteEvent>,
     ) = CloudRouteSink(
+        transportFactory = { _, _, _ ->
+            object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
+                override fun exchange(frame: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame): Flow<CloudRouteEvent> = flow {
+                    val auth = frame as? au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate
+                    val turn = auth?.let {
+                        CloudRouteTurn(
+                            request = it.request,
+                            sourceLanguage = it.sourceLanguage,
+                            context = it.context,
+                            requestId = it.requestId,
+                            capabilities = it.capabilities,
+                            routeHint = it.routeHint,
+                            conversationId = it.conversationId,
+                            conversationMode = it.conversationMode,
+                            capturedOrigin = 0L,
+                        )
+                    }!!
+                    emitAll(route(turn))
+                }
+            }
+        },
         resolveBaseUrl = { "https://cloud.example.com" },
         tokenProvider = object : CloudTokenProviding {
             override suspend fun currentToken(): String = "test-token"
@@ -323,7 +344,6 @@ class CloudRouteGraceLifecycleTest {
         conversationAdmission = CloudConversationAdmission().apply { beginOrigin(origin) },
         cloudPlaybackContextState = CloudPlaybackContextState(),
         analytics = mock(),
-        routeInvoker = route,
         isHostPlaying = { false },
         audioPlayer = player,
         gracePeriodSignal = signal,

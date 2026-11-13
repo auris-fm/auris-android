@@ -13,14 +13,14 @@ class AsrBackendSelector @Inject constructor(
 ) {
 
     /**
-     * Manual override: force a product backend. Set to "sensevoice" or "canary-flash".
-     * Whisper is legacy-only and is not a product route (override or matrix).
+     * Manual override: force a product backend. Set to "sensevoice" or "canary-flash";
+     * any other value is rejected.
      */
     var manualOverride: String? = null
 
     /**
      * Selects the ASR backend for the current OS locale, or `null` when the locale is
-     * outside the product language set (unsupported — no Whisper fallback).
+     * outside the product language set (unsupported; there is no fallback).
      */
     fun select(): AsrBackend? {
         val override = manualOverride

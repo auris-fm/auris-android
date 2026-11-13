@@ -1581,10 +1581,6 @@ class VoicePlaybackIntentExecutorTest {
         /** Invoked when the production release path forgets a request, so a case can observe it. */
         var onForget: ((String) -> Unit)? = null
 
-        override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
-            // Retained for symmetry with the production interface; the fake has no store to release.
-        }
-
         override fun forgetRetained(logicalRequestId: String) {
             // ACTUALLY FORGET, not just report: a fake that only notified left the entry in its store,
             // so a retry the production release had retired still resolved here -- the fake would have
@@ -1613,7 +1609,6 @@ class VoicePlaybackIntentExecutorTest {
 
         override suspend fun prepareTurn(
             request: String,
-            tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             isLiveGraceTurn: Boolean,
             capturedOrigin: Long?,
@@ -1683,16 +1678,34 @@ class VoicePlaybackIntentExecutorTest {
             )
         }
 
+        override suspend fun routeToCloudWithHint(
+            request: String,
+            context: PlaybackContext,
+            hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint,
+            isLiveGraceTurn: Boolean,
+            capturedOrigin: Long?,
+            isWakeOriginated: Boolean,
+            admitted: String?,
+        ): CloudTurnResult {
+            calls += "routeToCloudWithHint:$request"
+            graceFlags += isLiveGraceTurn
+            capturedOrigins += capturedOrigin
+            wakeOrigins += isWakeOriginated
+            return CloudTurnResult(
+                feedback = VoiceResponse.Silent,
+                action = actionOutcome,
+            )
+        }
+
         override suspend fun routeToCloud(
             request: String,
-            tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             isLiveGraceTurn: Boolean,
             capturedOrigin: Long?,
             isWakeOriginated: Boolean,
             admitted: String?,
         ): CloudTurnResult {
-            calls += "routeToCloud:$request:${tier.name}"
+            calls += "routeToCloud:$request"
             graceFlags += isLiveGraceTurn
             capturedOrigins += capturedOrigin
             wakeOrigins += isWakeOriginated
@@ -1708,7 +1721,6 @@ class VoicePlaybackIntentExecutorTest {
 
         override suspend fun reportRoute(
             request: String,
-            tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {

@@ -4,7 +4,10 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelFile
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
+import com.sun.net.httpserver.HttpServer
 import java.io.File
+import java.net.InetSocketAddress
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -38,5 +41,46 @@ class ModelManagerTest {
         File(dir, "a.ort").writeText("fake model")
 
         assertTrue(manager.isModelReady(spec))
+    }
+
+    @Test
+    fun `downloadModel reports Ready when the download succeeds`() {
+        val body = "fake model bytes".toByteArray()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/a.ort") { exchange ->
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val manager = ModelManager(context).apply { filesDir = tempDir.root }
+            val spec = ModelSpec(
+                files = listOf(
+                    ModelFile(url = "http://127.0.0.1:${server.address.port}/a.ort", filename = "a.ort"),
+                ),
+                targetDir = "sensevoice-model",
+            )
+            val result = runBlocking { manager.ensureModel(spec) }
+            assertTrue(result.isSuccess)
+            assertTrue(manager.downloadState.value is ModelDownloadState.Ready)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `downloadModel reports Failed when the download cannot connect`() {
+        val manager = ModelManager(context).apply { filesDir = tempDir.root }
+        val spec = ModelSpec(
+            files = listOf(
+                ModelFile(url = "http://127.0.0.1:1/a.ort", filename = "a.ort"),
+            ),
+            targetDir = "sensevoice-model",
+        )
+        val result = runBlocking { manager.ensureModel(spec) }
+        assertTrue(result.isFailure)
+        val state = manager.downloadState.value
+        assertTrue("expected Failed, was $state", state is ModelDownloadState.Failed)
+        assertTrue((state as ModelDownloadState.Failed).reason.isNotBlank())
     }
 }

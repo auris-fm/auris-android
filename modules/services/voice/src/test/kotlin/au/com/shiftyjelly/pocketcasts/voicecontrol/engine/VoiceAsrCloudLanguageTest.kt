@@ -225,7 +225,6 @@ class VoiceAsrCloudLanguageTest {
         val token = object : CloudTokenProviding {
             override suspend fun currentToken() = "fixture-token"
         }
-        val route = CloudTurnRoute("https://cloud.example.com", token, okHttpClient = client)
         val playback = mock<VoicePlaybackSink>()
         whenever(playback.pause()).thenReturn(VoiceResponse.Silent)
         val provider = object : PlaybackContextProvider {
@@ -235,7 +234,7 @@ class VoiceAsrCloudLanguageTest {
             resolveBaseUrl = { "https://cloud.example.com" }, tokenProvider = token,
             playbackSink = playback, fingerprintTimingManager = mock(), playbackContextProvider = provider,
             conversationAdmission = CloudConversationAdmission().apply { beginOrigin(signal.currentGeneration) },
-            cloudPlaybackContextState = CloudPlaybackContextState(), analytics = mock(), routeInvoker = route::route,
+            cloudPlaybackContextState = CloudPlaybackContextState(), analytics = mock(), okHttpClient = client,
             isHostPlaying = { false }, gracePeriodSignal = signal, currentLocale = { java.util.Locale.JAPANESE },
         )
         val executor = VoicePlaybackIntentExecutor(

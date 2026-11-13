@@ -89,7 +89,7 @@ class VoiceLifecycleWiringTest {
                     audioPlayer = null, gracePeriodSignal = signal,
                 )
                 val prepared = sink.prepareTurn(
-                    request = "PRIVATE UTTERANCE", tier = VoiceIntent.CloudTier.Premium, context = PlaybackContext(),
+                    request = "PRIVATE UTTERANCE", context = PlaybackContext(),
                     isLiveGraceTurn = true, capturedOrigin = signal.currentGeneration, isWakeOriginated = true,
                     // A real utterance identity is a UUID: the diagnostic records a
                     // non-UUID as `request_id=invalid`, so a placeholder here would assert the
@@ -335,7 +335,6 @@ class VoiceLifecycleWiringTest {
                 val origin = signal.currentGeneration
                 val prepared = cloudSink.prepareTurn(
                     "controlled question",
-                    VoiceIntent.CloudTier.Premium,
                     requestContext.current(),
                     capturedOrigin = origin,
                     logicalRequestId = "held-question",

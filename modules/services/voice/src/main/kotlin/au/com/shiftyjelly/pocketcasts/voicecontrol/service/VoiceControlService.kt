@@ -13,7 +13,6 @@ import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
-import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
@@ -357,7 +356,7 @@ class VoiceControlService : Service() {
         }
 
         // Handle models first: defer mode observation until readiness completes.
-        // This avoids lazy init on first utterance — both whisper and the
+        // This avoids lazy init on first utterance — the ASR model and the
         // LFM inference runtime are fully prepared before audio capture.
         // ALL-EXIT OWNERSHIP CLEANUP (reviewer dab802ec): invokeOnCompletion runs even when the
         // coroutine is cancelled BEFORE its body first runs (a launch finally does not), and the
@@ -461,8 +460,7 @@ class VoiceControlService : Service() {
                                 // Active capture was ongoing, now stopping
                                 val blockedRules = gate.state.value.rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
-                                val reasons = blockedRules.entries
-                                    .joinToString(";") { "${it.key}=${it.value}" }
+                                val reasons = joinedBlockedReasons(gate.state.value.rules)
                                 val isUserRequested = blockedRules.keys.any {
                                     it == EnabledByUserCondition.ID
                                 }
@@ -474,10 +472,7 @@ class VoiceControlService : Service() {
                                 // Capture never started — log once, not on every recomputation
                                 acquisitionLogged = true
                                 val gateState = gate.state.value
-                                val blockedRules = gateState.rules
-                                    .filter { it.value !is VoiceControlRuleState.Allowed }
-                                val reasons = blockedRules.entries
-                                    .joinToString(";") { "${it.key}=${it.value}" }
+                                val reasons = joinedBlockedReasons(gateState.rules)
                                 Timber.i(
                                     "mic_acquisition_skipped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",
                                     reasons,
@@ -562,7 +557,7 @@ class VoiceControlService : Service() {
         val backend = asrBackendSelector.select()
         if (backend == null) {
             Timber.w(
-                "[VoicePipeline] ASR locale unsupported (lang=%s) — no Whisper product route; stopping",
+                "[VoicePipeline] ASR locale unsupported (lang=%s); stopping",
                 java.util.Locale.getDefault().language,
             )
             serviceScope.launch(Dispatchers.Main) { stopSelf() }
@@ -652,19 +647,6 @@ class VoiceControlService : Service() {
         spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec,
     ) {
         val modelDir = java.io.File(filesDir, spec.targetDir)
-        val modelFile = spec.files.firstOrNull()?.let {
-            java.io.File(modelDir, it.filename)
-        }
-        if (modelFile != null && backend is WhisperCppBackend) {
-            // The identity travels WITH the same file it was verified for; without it the file
-            // is wired unnamed and the backend can never cite an artifact.
-            val manifestId = modelManager.verifiedManifestId(spec)
-            if (manifestId != null) {
-                backend.setVerifiedModelFile(modelFile, manifestId)
-            } else {
-                backend.setModelFile(modelFile)
-            }
-        }
         if (backend is SenseVoiceBackend) {
             backend.setModelDir(modelDir)
         }
@@ -968,10 +950,7 @@ class VoiceControlService : Service() {
 
                     is AcquisitionResult.Failed -> {
                         val gateState = gate.state.value
-                        val blockedRules = gateState.rules
-                            .filter { it.value !is VoiceControlRuleState.Allowed }
-                        val reasons = blockedRules.entries
-                            .joinToString(";") { "${it.key}=${it.value}" }
+                        val reasons = joinedBlockedReasons(gateState.rules)
                         Timber.e(
                             "mic_acquisition_skipped: reasons=%s;%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",
                             result.reason,
@@ -1475,4 +1454,10 @@ class VoiceControlService : Service() {
         // would believe a service that the system killed is still alive and never start it again.
         voiceControlServiceController.onServiceStopped()
     }
+
+    /** The blocked eligibility rules joined in the shared reason-log format (key=value;...). */
+    private fun joinedBlockedReasons(rules: Map<String, VoiceControlRuleState>): String = rules
+        .filter { it.value !is VoiceControlRuleState.Allowed }
+        .entries
+        .joinToString(";") { "${it.key}=${it.value}" }
 }

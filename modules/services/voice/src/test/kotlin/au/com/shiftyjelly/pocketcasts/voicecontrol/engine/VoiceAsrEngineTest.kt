@@ -119,7 +119,6 @@ class VoiceAsrEngineTest {
             "epoch-1",
             "disclosure-1",
         )
-
     }
 
     init {
@@ -166,7 +165,6 @@ class VoiceAsrEngineTest {
         )
 
         engine.scope = this
-
     }
 
     private fun startEngine(route: AudioRoute, mode: ListeningMode = ListeningMode.Continuous) {
@@ -178,7 +176,6 @@ class VoiceAsrEngineTest {
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { _, _ -> },
         )
-
     }
 
     @Test
@@ -230,7 +227,6 @@ class VoiceAsrEngineTest {
             "pruning must FORGET finished jobs (mutation: scanning the unfinished list prunes nothing)",
             engine.ownedJobs.none { it.isCompleted },
         )
-
     }
 
     @Test
@@ -310,7 +306,6 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
 
         verify(voiceAudioProcessor, never()).startProcessing()
-
     }
 
     @Test
@@ -1749,7 +1744,6 @@ class VoiceAsrEngineTest {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
                 logs += message
             }
-
         }
         timber.log.Timber.plant(tree)
         try {
@@ -1940,6 +1934,7 @@ class VoiceAsrEngineTest {
         recognizer: VoiceRecognizer,
         wakeWordResult: WakeWordResult,
     ) = createEngineWithSpeech(observer, retentionSink, authority, recognizer, wakeWordResult)
+
     @Test
     fun `no allowance authority - a consented capture is still admitted and retained while recognition proceeds`() = runTest {
         val retention = ContributionRetentionSink()
@@ -2187,6 +2182,7 @@ class VoiceAsrEngineTest {
 
         engine.stop()
     }
+
     @Test
     fun `a pipeline that fails to attach reports the stream was not taken`() = runTest {
         createEngine()
@@ -2206,6 +2202,7 @@ class VoiceAsrEngineTest {
         verify(voiceAudioProcessor, never()).startProcessing()
         engine.stop()
     }
+
     @Test
     fun `a pipeline that attaches reports the start took the stream`() = runTest {
         createEngine()
@@ -2224,6 +2221,7 @@ class VoiceAsrEngineTest {
 
         engine.stop()
     }
+
     @Test
     fun `a start that fails to attach closes the confirmed stream and leaves no active capture`() = runTest {
         createEngine()
@@ -2252,6 +2250,7 @@ class VoiceAsrEngineTest {
 
         engine.stop()
     }
+
     @Test
     fun `a start that attaches hands the confirmed stream to the engine exactly once`() = runTest {
         createEngine()
@@ -2276,6 +2275,7 @@ class VoiceAsrEngineTest {
 
         engine.stop()
     }
+
     @Test
     fun `a chosen-route dispatch after a successor wake carries the original window and admitted ID`() = runTest {
         // STALE-ID NEGATIVE CONTROL: recognition begins in generation 1 and mints admitted ID-A.
@@ -2443,8 +2443,8 @@ class VoiceAsrEngineTest {
             !cloud.logicalRequestId.isNullOrBlank(),
         )
         engine.stop()
-
     }
+
     @Test
     fun `engine-stamped dialog completion flows through sink to CloudTurnRoute authenticate frame`() = runTest {
         // COMPOSED ENGINE→ROUTE CONTROL: a real dialog begins with utterance A, then the engine
@@ -2581,17 +2581,6 @@ class VoiceAsrEngineTest {
             }
         }
 
-        val realRoute = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute(
-            baseUrl = "https://example.com",
-            tokenProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
-                override suspend fun currentToken(): String = "test-token"
-                override suspend fun refreshToken() = Unit
-            },
-            transport = au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
-                "https://example.com",
-                wsClient,
-            ),
-        )
         val conversationAdmission = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudConversationAdmission()
         val sink = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink(
             resolveBaseUrl = { "https://example.com" },
@@ -2612,8 +2601,12 @@ class VoiceAsrEngineTest {
                 )
             },
             analytics = mock(),
-            routeInvoker = { turn -> realRoute.route(turn) },
-            searchResultsRenderer = mock(),
+            transportFactory = { _, _, _ ->
+                au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                    "https://example.com",
+                    wsClient,
+                )
+            },
             templateResolver = mock(),
             currentLocale = { java.util.Locale.US },
             isHostPlaying = { false },
@@ -2626,7 +2619,6 @@ class VoiceAsrEngineTest {
         conversationAdmission.beginOrigin(stampedCloud.windowGeneration ?: 0L)
         val prepared = sink.prepareTurn(
             request = stampedCloud.request,
-            tier = stampedCloud.tier,
             context = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext(
                 episodeId = "ep-1",
                 clientPositionMs = 50_000L,
@@ -2842,6 +2834,7 @@ class VoiceAsrEngineTest {
         assertTrue("identical intents are DIFFERENT dispatches", tokens[0].id != tokens[1].id)
         assertTrue("different dispatches belong to different captures", tokens[0].captureId != tokens[1].captureId)
     }
+
     @Test
     fun `a result reported after stop or settle is dropped, not applied`() = runTest {
         authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
@@ -2929,6 +2922,7 @@ class VoiceAsrEngineTest {
     ) : VoiceRecognizer {
         val calls = mutableListOf<String>()
         val inputs = mutableListOf<IntentRoutingInput>()
+
         /** True once ensureReady has been asked, so a case can assert the recognizer was CONSULTED. */
         var readyAsked = false
             private set
@@ -3024,6 +3018,7 @@ class VoiceAsrEngineTest {
             closeCalls++
         }
     }
+
     @Test
     fun `the engine drives REAL segment events through the observer - frozen context, no double gate check`() = runTest {
         val retention = ContributionRetentionSink()
@@ -3072,6 +3067,7 @@ class VoiceAsrEngineTest {
         assertEquals(candidate.context.captureId, (candidate.outcome as CollectionOutcome.Executed).captureId)
         assertTrue((candidate.outcome as CollectionOutcome.Executed).dispatchedWithoutThrowing)
     }
+
     @Test
     fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
         val sink = EngineObservationSink()
@@ -3119,6 +3115,7 @@ class VoiceAsrEngineTest {
         assertEquals("pipeline-stopped", sink.cancelled.single().reason)
         assertTrue(sink.completed.isEmpty()) // listening closure discards ONLY the current partial
     }
+
     @Test
     fun `gate OFF means the pipeline allocates NOTHING for upload across a full turn`() = runTest {
         val sink = EngineObservationSink()

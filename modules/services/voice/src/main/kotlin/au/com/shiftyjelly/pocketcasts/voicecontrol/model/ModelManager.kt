@@ -158,9 +158,11 @@ class ModelManager @Inject constructor(
                     release.version,
                     release.routerInputFormat.wireName,
                 )
+                _downloadState.value = ModelDownloadState.Ready
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "LFM model download failed")
+                _downloadState.value = ModelDownloadState.Failed(reason = e.message ?: e.javaClass.simpleName)
                 Result.failure(e)
             }
         }
@@ -212,13 +214,17 @@ class ModelManager @Inject constructor(
      * Existing files are skipped (no SHA256 re-check unless sha256 is non-empty in the spec).
      */
     suspend fun ensureModel(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isModelReady(spec)) return@withContext Result.success(Unit)
+        if (isModelReady(spec)) {
+            _downloadState.value = ModelDownloadState.Ready
+            return@withContext Result.success(Unit)
+        }
         val targetDir = File(filesDir, spec.targetDir)
         downloadMutex.withLock {
             // Same VERIFIED predicate inside the lock (reviewer 8e0f87c8): a stale cache must
             // never early-return success here — it falls through to downloadFile, which
             // re-verifies/replaces.
             if (spec.files.all { file -> cachedFileVerified(targetDir, file) }) {
+                _downloadState.value = ModelDownloadState.Ready
                 return@withContext Result.success(Unit)
             }
             try {
@@ -227,9 +233,11 @@ class ModelManager @Inject constructor(
                     val dest = File(targetDir, file.filename)
                     downloadFile(file.url, dest, file.filename, file.sha256)
                 }
+                _downloadState.value = ModelDownloadState.Ready
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "Model download failed for %s", spec.targetDir)
+                _downloadState.value = ModelDownloadState.Failed(reason = e.message ?: e.javaClass.simpleName)
                 Result.failure(e)
             }
         }

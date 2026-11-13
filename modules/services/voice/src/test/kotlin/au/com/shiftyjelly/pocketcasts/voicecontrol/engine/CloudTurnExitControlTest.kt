@@ -132,7 +132,6 @@ class CloudTurnExitControlTest {
     ) : au.com.shiftyjelly.pocketcasts.voicecontrol.playback.ObservingCloudRouteTestAdapter() {
         override suspend fun reportRoute(
             request: String,
-            tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {
@@ -151,7 +150,6 @@ class CloudTurnExitControlTest {
 
         override suspend fun reportRoute(
             request: String,
-            tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {

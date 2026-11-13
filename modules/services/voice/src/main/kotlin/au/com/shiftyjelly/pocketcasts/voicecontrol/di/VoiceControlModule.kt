@@ -2,9 +2,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 
 import android.content.Context
 import android.media.AudioManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.AudioModeCallWatcher
 import android.os.PowerManager
 import android.speech.tts.TextToSpeech
-import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.GoogleMlKitTranslator
@@ -140,16 +140,13 @@ abstract class VoiceControlModule {
         fun provideModelsReadyCondition(): ModelsReadyCondition = ModelsReadyCondition()
 
         @Provides @Singleton
-        @Suppress("DEPRECATION") // TelephonyManager.callState deprecated in API 31; CallStateCallback requires CALL_STATE permission
         fun provideNotOnCallCondition(
             @ApplicationContext context: Context,
         ): NotOnCallCondition {
-            val inCall = try {
-                val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-                tm?.callState == TelephonyManager.CALL_STATE_OFFHOOK
-            } catch (e: SecurityException) {
-                false
-            }
+            // Initial posture from the audio mode: no permission needed, unlike the old
+            // TelephonyManager.callState read (see AudioModeCallWatcher).
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val inCall = AudioModeCallWatcher.isCall(am.mode)
             return NotOnCallCondition(isInCall = inCall)
         }
 

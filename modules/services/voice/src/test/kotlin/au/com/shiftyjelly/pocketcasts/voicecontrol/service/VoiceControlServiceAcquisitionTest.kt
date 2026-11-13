@@ -84,10 +84,6 @@ class VoiceControlServiceAcquisitionTest {
 
         override fun clearCommunicationDevice() = Unit
 
-        override fun audioMode() = AudioManager.MODE_NORMAL
-
-        override fun setAudioMode(mode: Int) = Unit
-
         override fun deviceType(deviceId: Int): Int? = null
 
         override fun openInputStream() = -1

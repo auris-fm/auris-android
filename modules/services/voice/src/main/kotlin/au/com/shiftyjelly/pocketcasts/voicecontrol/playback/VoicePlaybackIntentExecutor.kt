@@ -142,16 +142,6 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         // its timing belongs to the sink instead.
         timingRequestId: String? = null,
     ): VoiceResponse {
-        // LOCAL ACTION EXECUTED, observed where the action actually ran. Only local intents run
-        // this arm — a cloud turn's action is the server's, so its timing belongs to the sink. The
-        // admitted id is the identity the engine registered the record under.
-        if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
-            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
-                timingRequestId,
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos() / 1_000_000L,
-            )
-        }
         // AUXILIARY vs PRIMARY (reviewer 8c77f5aa): a cloud turn's audio FOCUS is an AUXILIARY
         // operation — its success says nothing about whether the turn's own actions ran. So
         // primary results are tracked SEPARATELY from auxiliary ones: with no primary fact, the

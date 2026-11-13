@@ -1861,27 +1861,58 @@ class VoicePlaybackIntentExecutorTest {
 
     @Test
     fun `a local action marks the live turn's timing table when the id is supplied`() = runTest {
-        // The executor stamps the mark with the device clock; the test pins it so the stage's
-        // lag against the acoustic-end baseline is a real quantity, not a mock artifact.
-        org.mockito.Mockito.mockStatic(android.os.SystemClock::class.java).use { clock ->
-            clock.`when`<Long> { android.os.SystemClock.elapsedRealtime() }.thenReturn(1_250L)
-            val admittedId = "local-timing-id"
-            val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
-            record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
-            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
-            val sinks = FakeSinks()
-            val executor = sinks.executor()
-            try {
-                executor.execute(VoiceIntent.Playback.Pause, timingRequestId = admittedId)
-            } finally {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
-            }
-            assertNotNull(
-                "local action stage must be marked through the registry",
-                record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
-            )
-            assertEquals(listOf("pause"), sinks.fakePlayback.calls)
+        // The executor stamps the mark with the RECORD's own clock; the test pins that clock so
+        // the stage's lag against the acoustic-end baseline is an exact quantity, not a mock
+        // artifact. The executor must never read a second clock of its own.
+        val savedClock = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = { 1_250_000_000L }
+        val admittedId = "local-timing-id"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        try {
+            executor.execute(VoiceIntent.Playback.Pause, timingRequestId = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = savedClock
         }
+        assertEquals(
+            "the mark is the record clock's instant, against the acoustic-end baseline",
+            250L,
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+        )
+        assertEquals(listOf("pause"), sinks.fakePlayback.calls)
+    }
+
+    @Test
+    fun `the local action stage is marked after the action runs, not at entry`() = runTest {
+        // THE FIRST OBSERVATION WINS (reviewer): a stage marked at entry would freeze the instant
+        // BEFORE the action ran and the post-action mark would be silently dropped, so the table
+        // would understate every local turn. The fake sink ADVANCES the record clock while it
+        // runs, so only a post-action mark can carry the advanced instant.
+        val clock = longArrayOf(1_000_000_000L)
+        val savedClock = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = { clock[0] }
+        val admittedId = "local-order-id"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, clock[0])
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        sinks.fakePlayback.onCall = { clock[0] += 5_000_000L }
+        try {
+            executor.execute(VoiceIntent.Playback.Pause, timingRequestId = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = savedClock
+        }
+        assertEquals(
+            "only a mark taken after the action can see the clock the action advanced",
+            5L,
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+        )
     }
 
     @Test

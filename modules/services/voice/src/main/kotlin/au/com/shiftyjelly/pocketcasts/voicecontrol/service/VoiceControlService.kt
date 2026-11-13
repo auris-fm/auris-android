@@ -183,7 +183,8 @@ class VoiceControlService : Service() {
     // normal side effects of setting SCO up, and a device-set change is already covered by
     // recording the START availability — only a blocker clearing mid-attempt needs this flag.
     @Volatile private var gateBlockedDuringAttempt = false
-    @Volatile private var lastAvailabilitySeenByObserver: AudioRoute? = null
+    private var lastConnectedDeviceIdentity: String? = null
+    private var lastGateAllowedSeenByObserver: Boolean? = null
 
     /**
      * Why the last teardown declined to release, or null when it released cleanly.
@@ -473,17 +474,21 @@ class VoiceControlService : Service() {
                     if (acquisitionJob != null && !gate.state.value.allowed) {
                         gateBlockedDuringAttempt = true
                     }
-                    // RULE: any acquisition trigger re-arms the restart budget (device change,
-                    // blocker clearing, user re-enable). Availability moving IS the device-set
-                    // trigger; a gate going Blocked is the blocker trigger (the attempt it
-                    // enables runs on the later Allowed emission, against an armed budget).
-                    if (audioRouteMonitor.availability.value != lastAvailabilitySeenByObserver) {
-                        lastAvailabilitySeenByObserver = audioRouteMonitor.availability.value
+                    // RULE (voice-control-core.md > Route acquisition, merged main): a device
+                    // trigger is the USER'S devices connecting or disconnecting — never the
+                    // availability answer our own acquire and release toggle. And a blocker
+                    // clearing is the gate's Blocked -> Allowed transition, not any emission
+                    // while blocked. Both re-arm the restart budget.
+                    val deviceIdentity = audioRouteMonitor.connectedDeviceIdentity()
+                    if (deviceIdentity != lastConnectedDeviceIdentity) {
+                        lastConnectedDeviceIdentity = deviceIdentity
                         captureRestartBudget.rearm()
                     }
-                    if (!gate.state.value.allowed) {
+                    val gateAllowed = gate.state.value.allowed
+                    if (lastGateAllowedSeenByObserver == false && gateAllowed) {
                         captureRestartBudget.rearm()
                     }
+                    lastGateAllowedSeenByObserver = gateAllowed
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
@@ -576,6 +581,10 @@ class VoiceControlService : Service() {
                                 currentMode = mode
                                 updateListeningState()
                             } else if (captureRestartBudget.allows()) {
+                                if (pendingAutomaticRestart) {
+                                    captureRestartBudget.onAutomaticRestart()
+                                    pendingAutomaticRestart = false
+                                }
                                 @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                                 if (startEngine(mode)) {
                                     currentMode = mode
@@ -857,10 +866,6 @@ class VoiceControlService : Service() {
             // stream to the engine based on this result, and a false would close a live stream.
             onStarted = {
                 captureStartedAtMs = SystemClock.elapsedRealtime()
-                if (pendingAutomaticRestart) {
-                    captureRestartBudget.onAutomaticRestart()
-                    pendingAutomaticRestart = false
-                }
                 // Only when the microphone opens where the user cannot see it: the decision is
                 // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
                 // covered in ListeningModePolicyTest.
@@ -1008,6 +1013,14 @@ class VoiceControlService : Service() {
             return
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
+        // The granted restart is spent when it is ATTEMPTED, not when it succeeds: a restart
+        // that fails to start must leave the budget withheld (a failed-start loop otherwise
+        // restarts forever, since onStarted never runs).
+        val spendingRestart = pendingAutomaticRestart
+        if (spendingRestart) {
+            captureRestartBudget.onAutomaticRestart()
+            pendingAutomaticRestart = false
+        }
         // Rule 2 (one attempt per trigger, mid-attempt triggers coalesced): remember the
         // availability this attempt STARTED against, so a failure records the surface the
         // trigger named — not whatever the device set says after the attempt's timeout.
@@ -1050,6 +1063,11 @@ class VoiceControlService : Service() {
                         // bought, and recording here would skip it.
                         if (gateState.allowed && !gateBlockedDuringAttempt) {
                             failedAttemptAvailability = attemptAvailability
+                        }
+                        if (spendingRestart) {
+                            // voice-control-core.md > Microphone lifecycle logging: the
+                            // never-started case is withheld with ran_ms 0 and its own reason.
+                            Timber.e("[VoicePipeline] mic_restart_withheld: reason=start_failed ran_ms=0")
                         }
                         val reasons = joinedBlockedReasons(gateState.rules)
                         Timber.e(

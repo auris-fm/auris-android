@@ -56,6 +56,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -768,6 +769,53 @@ class VoiceControlModeObserverAvailabilityTest {
                 1,
                 attemptsSoFar,
             )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `availability churn without a user device change never re-arms the restart budget`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+
+            val budget = getField(harness.service, "captureRestartBudget")!!
+            val restartAvailable = {
+                budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                    .get(budget) as Boolean
+            }
+            budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                .set(budget, false)
+
+            // The app's own surfaces churn (selection, release, SCO-link flips move
+            // availability; restart signals bump) while the USER'S device set stays the same:
+            // the observer re-runs, and nothing re-arms.
+            @Suppress("UNCHECKED_CAST")
+            val restartSignal = getField(harness.service, "captureRestartSignal") as MutableStateFlow<Long>
+            restartSignal.value = restartSignal.value + 1L
+            awaitState("churn observed") { true }
+            Thread.sleep(200)
+            testScheduler.advanceTimeBy(200.milliseconds)
+            assertFalse(
+                "the app's own routing changes are not device triggers",
+                restartAvailable(),
+            )
+
+            // The user's devices change: a real device trigger re-arms the budget.
+            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            setInputDevices()
+            harness.monitor.onDevicesChanged()
+            awaitState("capture down") { harness.hardware.vadStopCount >= 1 }
+            setAirPodsConnected()
+            harness.monitor.onDevicesChanged()
+            awaitState("capture back up after the real trigger") { harness.hardware.attachCount >= 2 }
+            assertTrue("a real device trigger re-arms the budget", restartAvailable())
         } finally {
             harness.stop()
         }

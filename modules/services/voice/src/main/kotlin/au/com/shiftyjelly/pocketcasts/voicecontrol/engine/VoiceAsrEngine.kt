@@ -305,6 +305,16 @@ class VoiceAsrEngine @Inject constructor(
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
                         is VoiceSegmenterResult.SpeechStarted -> {
+                            // A new utterance must not inherit a verdict or an identity scored for
+                            // the last one. Both live across the endpoint (SpeechEnded), where the
+                            // endpoint path still needs them: the turn must carry the SAME id the
+                            // early connection was opened under, or it replaces that connection
+                            // with one no turn will ever claim.
+                            inFlightUtteranceId = null
+                            earlyWakeResult = null
+                            earlyUtteranceGeneration = null
+                            earlyScoringRetired = false
+                            earlyWakeAcknowledged = false
                             // Freeze the capture context SYNCHRONOUSLY here — before any await
                             // boundary — and keep the ISSUED value for every later stage of THIS
                             // capture. Refused captures yield null and are excluded downstream.
@@ -316,16 +326,6 @@ class VoiceAsrEngine @Inject constructor(
                             // which already carries the whole utterance. (The native buffer itself
                             // is left alone: recognition reads it asynchronously, and clearing it
                             // here could wipe an utterance before ASR copies it.)
-                            // A new utterance must not inherit a verdict or an identity scored for
-                            // the last one. Both live across the endpoint (SpeechEnded), where the
-                            // endpoint path still needs them: the turn must carry the SAME id the
-                            // early connection was opened under, or it replaces that connection
-                            // with one no turn will ever claim.
-                            inFlightUtteranceId = null
-                            earlyWakeResult = null
-                            earlyUtteranceGeneration = null
-                            earlyScoringRetired = false
-                            earlyWakeAcknowledged = false
                             // Per-capture model provenance: the
                             // ACTUAL selected backend's model identity, frozen with the context.
                             // The VERSION is the model's own manifest identity, never a filename.

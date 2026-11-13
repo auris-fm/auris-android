@@ -523,13 +523,14 @@ class CloudAudioPlayer(
      * run reports first audible exactly once no matter how many paths sample it.
      */
     private fun sampleFirstAudible() {
-        if (!firstAudibleFired.compareAndSet(false, true)) return
-        // Production never sets the seam; fall back to the track's own getTimestamp exactly like
-        // renderedFrame() does, or first audible never fires outside tests.
+        // VALIDATE FIRST, latch second: the first sample right after play() usually finds no
+        // presentation yet, and latching before that check would make every later sample a
+        // no-op — losing first audible on every short turn. compareAndSet keeps the fire
+        // exactly once even when the heartbeat and the stop path sample together.
         val ts = audioTrack?.let { track ->
             readAudioTimestamp?.invoke(track) ?: android.media.AudioTimestamp().takeIf { track.getTimestamp(it) }
         }
-        if (ts != null && ts.framePosition > 0) {
+        if (ts != null && ts.framePosition > 0 && firstAudibleFired.compareAndSet(false, true)) {
             notifyFirstAudible(ts.nanoTime)
         }
     }

@@ -353,10 +353,11 @@ class CloudRouteSink internal constructor(
             ?: run {
                 // Refused BEFORE a route opened, so routeTurn's own end-of-turn finish never runs:
                 // finish the record here, or the registry keeps a live entry per refused turn.
+                // No action ran — the turn never routed — so cancelled, not action_failed.
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
                     prepared.requestId,
-                    cancelled = false,
-                    failed = true,
+                    cancelled = true,
+                    failed = false,
                 )
                 return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
             }

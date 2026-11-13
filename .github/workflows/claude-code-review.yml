@@ -58,6 +58,7 @@ jobs:
       should-review: ${{ steps.resolve.outputs.should-review }}
       pr-number: ${{ steps.resolve.outputs.pr-number }}
       head-sha: ${{ steps.resolve.outputs.head-sha }}
+      base-ref: ${{ steps.resolve.outputs.base-ref }}
       skip-reason: ${{ steps.resolve.outputs.skip-reason }}
     steps:
       - name: Resolve the PR, its head, and whether to review
@@ -126,6 +127,9 @@ jobs:
 
           echo "pr-number=${PR}" >> "$GITHUB_OUTPUT"
           echo "head-sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          # The PR's base branch name, so the review job can fetch it and diff against it.
+          BASE_REF=$(printf '%s' "$PR_JSON" | jq -r '.base.ref')
+          echo "base-ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
           echo "should-review=true" >> "$GITHUB_OUTPUT"
           echo "Reviewing PR #${PR} at head ${HEAD_SHA}"
 
@@ -242,7 +246,12 @@ jobs:
           # The RESOLVED head, not the event's default ref: a comment-triggered run has no
           # PR ref, and pinning makes the reviewed commit explicit rather than implied.
           ref: ${{ needs.resolve-target.outputs.head-sha }}
-          fetch-depth: 1
+          # FULL history, not depth 1: the review diffs against the PR's base branch
+          # (`git diff origin/<base>...HEAD`, which needs the merge base), and a depth-1
+          # checkout has neither the base branch nor the merge base, forcing the review to
+          # rebuild the diff through the GitHub API page by page. Core's copy of this
+          # workflow already does a full fetch for the same reason.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Require the review model to be configured
@@ -286,6 +295,13 @@ jobs:
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
             REVIEWED HEAD: ${{ needs.resolve-target.outputs.head-sha }}
+            BASE BRANCH: ${{ needs.resolve-target.outputs.base-ref }}
+
+            The checkout carries FULL git history and the base branch, so the PR's whole
+            diff against its base is available locally as:
+              git diff "origin/${{ needs.resolve-target.outputs.base-ref }}...HEAD"
+            Prefer this for the change set and for inspecting a file's patch; fall back to
+            the GitHub files API only if the diff is too large to read at once.
 
             Read AGENTS.md first - it carries this repo's conventions.
 

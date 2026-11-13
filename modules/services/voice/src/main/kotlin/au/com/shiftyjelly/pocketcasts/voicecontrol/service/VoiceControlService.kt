@@ -146,10 +146,10 @@ class VoiceControlService : Service() {
 
     /** The automatic-restart cap, consulted by every start decision. */
     private val captureRestartBudget = CaptureRestartBudget()
-    // True between an unexpected capture end and the automatic restart that ends the credit
-    // (set on the successful start): the release-triggered re-entry that follows the termination
-    // is the restart the spec grants, and it must spend the credit — a later trigger-driven
-    // attempt must not.
+    // True between an unexpected capture end and the restart the spec granted being spent: the
+    // release-triggered re-entry that follows the termination is that restart, and it must spend
+    // the credit — a later trigger-driven attempt must not. Cleared where the budget re-arms
+    // (a real trigger) and on a user-driven reset, never on an arbitrary observer emission.
     private var pendingAutomaticRestart = false
     private var captureStartedAtMs = 0L
 
@@ -355,6 +355,7 @@ class VoiceControlService : Service() {
         }
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
+        pendingAutomaticRestart = false
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
@@ -479,15 +480,16 @@ class VoiceControlService : Service() {
                     // availability answer our own acquire and release toggle. And a blocker
                     // clearing is the gate's Blocked -> Allowed transition, not any emission
                     // while blocked. Both re-arm the restart budget.
-                    if (pendingAutomaticRestart) pendingAutomaticRestart = false
                     val deviceIdentity = audioRouteMonitor.connectedDeviceIdentity()
                     if (deviceIdentity != lastConnectedDeviceIdentity) {
                         lastConnectedDeviceIdentity = deviceIdentity
                         captureRestartBudget.rearm()
+                        pendingAutomaticRestart = false
                     }
                     val gateAllowed = gate.state.value.allowed
                     if (lastGateAllowedSeenByObserver == false && gateAllowed) {
                         captureRestartBudget.rearm()
+                        pendingAutomaticRestart = false
                     }
                     lastGateAllowedSeenByObserver = gateAllowed
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
@@ -514,6 +516,7 @@ class VoiceControlService : Service() {
                             // the automatic-restart cap so re-enabling it can capture again.
                             if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
                                 captureRestartBudget.reset()
+                                pendingAutomaticRestart = false
                             }
                             // THE GATE GOING BLOCKED CLEARS A FAILED ATTEMPT (core
                             // voice-control-core.md > Route acquisition): any blocker clearing is a
@@ -582,7 +585,15 @@ class VoiceControlService : Service() {
                                 currentMode = mode
                                 updateListeningState()
                             } else if (captureRestartBudget.allows()) {
-                                val spendingRestart = pendingAutomaticRestart
+                                // A granted restart is only really attempted once its acquisition
+                                // has reopened the stream. The recovery nudge can arrive BEFORE
+                                // the route has re-flipped (the release is still settling), when
+                                // startEngine would fail for lack of a stream — spending then
+                                // would withhold the very restart the spec grants. Skip without
+                                // spending: the route/availability emissions that follow drive
+                                // the acquisition and bring the decision back here.
+                                val spendingRestart =
+                                    pendingAutomaticRestart && routeAcquisition.hasConfirmedStream
                                 if (spendingRestart) {
                                     captureRestartBudget.onAutomaticRestart()
                                     pendingAutomaticRestart = false
@@ -922,7 +933,7 @@ class VoiceControlService : Service() {
         if (!captureRestartBudget.allows()) {
             // voice-control-core.md > Microphone lifecycle logging: ERROR, with the end reason
             // and how long the capture had run.
-            Timber.e("[VoicePipeline] mic_restart_withheld: reason=self_ended runtimeMs=%d", ranForMs)
+            Timber.e("[VoicePipeline] mic_restart_withheld: reason=self_ended ran_ms=%d", ranForMs)
         }
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
@@ -1073,7 +1084,10 @@ class VoiceControlService : Service() {
                             pendingAutomaticRestart = false
                             // voice-control-core.md > Microphone lifecycle logging: the
                             // never-started case is withheld with ran_ms 0 and its own reason.
-                            Timber.e("[VoicePipeline] mic_restart_withheld: reason=start_failed ran_ms=0")
+                            Timber.e(
+                                "[VoicePipeline] mic_restart_withheld: reason=%s ran_ms=0",
+                                result.reason,
+                            )
                         }
                         val reasons = joinedBlockedReasons(gateState.rules)
                         Timber.e(

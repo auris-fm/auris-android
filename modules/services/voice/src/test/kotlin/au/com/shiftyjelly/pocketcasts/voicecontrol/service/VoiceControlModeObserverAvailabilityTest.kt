@@ -112,7 +112,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
     private inner class FakeScoPlatform(
         private val microphoneCapture: MicrophoneCapture,
-        private val establish: Boolean = true,
+        var establish: Boolean = true,
     ) : au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform {
         var scoStarts = 0
         var scoStops = 0
@@ -143,7 +143,9 @@ class VoiceControlModeObserverAvailabilityTest {
             scoStops++
             scoLinkUp = false
             setShadowBluetoothScoOn(audioManager, false)
-            shadowOf(audioManager).setInputDevices(emptyList())
+            // The SCO LINK DOES NOT CHANGE THE USER'S DEVICE SET (voice-control-core.md >
+            // Route acquisition): a real device keeps the enumerated SCO input while the link is
+            // down, so clearing it here would fake a device trigger and re-arm the budget.
             @Suppress("DEPRECATION")
             deliver(
                 Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
@@ -445,6 +447,165 @@ class VoiceControlModeObserverAvailabilityTest {
         val microphoneCapture: MicrophoneCapture,
         val acquisition: RouteAcquisition,
     )
+
+    private suspend fun selfEndCapture(harness: Harness) {
+        val engineStart = getField(harness.service, "engineStart")!!
+        val generation = engineStart.javaClass.getDeclaredMethod("generation").apply { isAccessible = true }
+            .invoke(engineStart) as Int
+        val method = harness.service.javaClass.getDeclaredMethod(
+            "onPipelineTerminated",
+            Int::class.javaPrimitiveType,
+        )
+        method.isAccessible = true
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            method.invoke(harness.service, generation)
+        }
+    }
+
+    @Test
+    fun `a headset capture that ends by itself re-acquires and restarts exactly once`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            val scoStartsAfterFirst = harness.scoPlatform.scoStarts
+
+            // Capture ends on its own (pipeline termination, no user change): exactly one
+            // automatic restart — re-acquire plus engine start.
+            selfEndCapture(harness)
+            awaitState("capture restarted") { harness.hardware.attachCount >= 2 }
+            assertEquals(
+                "exactly one automatic restart re-acquired the headset",
+                scoStartsAfterFirst + 1,
+                harness.scoPlatform.scoStarts,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `a granted restart that fails to start withholds further restarts`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        // The acquisition restart path: the restart's acquisition attempt fails.
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+
+            selfEndCapture(harness)
+            harness.scoPlatform.establish = false
+            awaitState("restart withheld") {
+                val budget = getField(harness.service, "captureRestartBudget")!!
+                !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                    .get(budget) as Boolean)
+            }
+            val scoStartsAfterFailure = harness.scoPlatform.scoStarts
+
+            // No further automatic attempts.
+            Thread.sleep(400)
+            testScheduler.advanceTimeBy(400.milliseconds)
+            assertEquals(
+                "a failed restart leaves restarts withheld",
+                scoStartsAfterFailure,
+                harness.scoPlatform.scoStarts,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `a granted restart whose engine start fails withholds further restarts`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+
+            // The restart's acquisition will succeed, but the engine start fails (the VAD
+            // attach never happens): the withheld path through startEngine == false.
+            selfEndCapture(harness)
+            harness.hardware.capturing = false
+            awaitState("restart withheld") {
+                val budget = getField(harness.service, "captureRestartBudget")!!
+                !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                    .get(budget) as Boolean)
+            }
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `a fast-dying capture with real acquire and release churn restarts once then stops`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            val scoStartsAfterFirst = harness.scoPlatform.scoStarts
+
+            // First self-end: one restart (the acquire/release churn this causes is not a
+            // trigger and must not re-arm anything).
+            selfEndCapture(harness)
+            awaitState("capture restarted") { harness.hardware.attachCount >= 2 }
+            val scoStartsAfterRestart = harness.scoPlatform.scoStarts
+            val bA = getField(harness.service, "captureRestartBudget")!!
+            Thread.sleep(300)
+            testScheduler.advanceTimeBy(300.milliseconds)
+
+            // The restarted capture dies fast again: withheld, and the churn of the second
+            // release must not bring it back.
+            selfEndCapture(harness)
+            val budget0 = getField(harness.service, "captureRestartBudget")!!
+            val b0 = getField(harness.service, "captureRestartBudget")!!
+            awaitState("restarts withheld") {
+                val budget = getField(harness.service, "captureRestartBudget")!!
+                !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                    .get(budget) as Boolean)
+            }
+            Thread.sleep(400)
+            testScheduler.advanceTimeBy(400.milliseconds)
+            assertEquals(
+                "exactly one restart, then none: the churn is not a trigger",
+                scoStartsAfterRestart,
+                harness.scoPlatform.scoStarts,
+            )
+
+            // A real device change re-arms and capture resumes. Let the removal's debounced
+            // refresh land first, so the add is a distinct identity change.
+            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            setInputDevices()
+            harness.monitor.onDevicesChanged()
+            awaitState("devices removed observed") {
+                harness.monitor.availability.value == AudioRoute.Speaker
+            }
+            setAirPodsConnected()
+            harness.monitor.onDevicesChanged()
+            // The add's debounced refresh drives the observer; settle it before asserting.
+            Thread.sleep(500)
+            testScheduler.advanceTimeBy(500.milliseconds)
+            awaitState("capture back up after the real trigger") {
+                harness.hardware.attachCount >= 3
+            }
+        } finally {
+            harness.stop()
+        }
+    }
 
     private suspend fun Harness.awaitObserverInstalled() {
         awaitState("observer install") { getField(service, "modeJob") != null }

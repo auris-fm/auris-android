@@ -130,9 +130,9 @@ class ModelManager @Inject constructor(
 
     suspend fun ensureLfmModel(): Result<Unit> = withContext(Dispatchers.IO) {
         if (isLfmModelReady()) {
-            // A fully cached set IS ready, even with nothing downloaded this run
-            // (reviewer f9568faf03): the ASR download before this one must not leave
-            // the screen showing its own Downloading(100) forever.
+            // A fully cached set IS ready, even with nothing downloaded this run: the
+            // ASR download before this one must not leave the screen showing its own
+            // Downloading(100) forever.
             _downloadState.value = ModelDownloadState.Ready
             return@withContext Result.success(Unit)
         }

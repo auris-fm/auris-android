@@ -146,6 +146,12 @@ class VoiceControlService : Service() {
 
     /** The automatic-restart cap, consulted by every start decision. */
     private val captureRestartBudget = CaptureRestartBudget()
+    // True between an unexpected capture end and the restart the spec granted being spent: the
+    // release-triggered re-entry that follows the termination is that restart, and it must spend
+    // the credit — a later trigger-driven attempt must not. Cleared where the budget re-arms
+    // (a real trigger) and on a user-driven reset, never on an arbitrary observer emission.
+    private var pendingAutomaticRestart = false
+    private var captureStartedAtMs = 0L
 
     /**
      * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
@@ -158,6 +164,27 @@ class VoiceControlService : Service() {
 
     /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
     private var lastObservedRoute: AudioRoute? = null
+
+    // NO-LOOP RULE (voice-control-core.md > Route acquisition): a FAILED acquisition attempt
+    // must not be retried while its trigger surface is unchanged — the next emission of any
+    // combine source (an unrelated gate flicker, a restart-signal bump) would otherwise start
+    // a new attempt against the same still-present headset, bounded only by the silent restart
+    // cap. Record the availability the attempt failed against; skip further attempts while it
+    // is unchanged. Clear it when availability changes, or when the overall gate goes
+    // Blocked -> Allowed — a blocker clearing is a new trigger for any blocker, not only the
+    // user toggle (a rule change that never leaves Allowed is not). The recorded value is the
+    // availability the attempt STARTED with, not the one read at failure: a device-set change
+    // arriving mid-attempt (rule 2's coalesced trigger) then reads as different, and the next
+    // observer run attempts again. A failure while the gate is not Allowed records nothing:
+    // that attempt was abandoned by a blocker, and the blocker clearing is itself the trigger.
+    private var failedAttemptAvailability: AudioRoute? = null
+    // Set only when the GATE was Blocked during the attempt (rule 2's coalescing, narrowed to
+    // what the spec calls a trigger): route or restart-signal emissions during an attempt are
+    // normal side effects of setting SCO up, and a device-set change is already covered by
+    // recording the START availability — only a blocker clearing mid-attempt needs this flag.
+    @Volatile private var gateBlockedDuringAttempt = false
+    private var lastConnectedDeviceIdentity: String? = null
+    private var lastGateAllowedSeenByObserver: Boolean? = null
 
     /**
      * Why the last teardown declined to release, or null when it released cleanly.
@@ -328,6 +355,7 @@ class VoiceControlService : Service() {
         }
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
+        pendingAutomaticRestart = false
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
@@ -397,7 +425,15 @@ class VoiceControlService : Service() {
                     // Recovery from a capture that ended on its own is a signal, not a second
                     // starter: this observer owns engine starts and re-runs on the bump.
                     captureRestartSignal,
-                ) { mode, _, _, _ -> mode }.onEach { mode ->
+                    // Availability is the fourth data source (task #7): it is the enumeration
+                    // surface that answers "is an external microphone candidate present". On a
+                    // mid-session Bluetooth reconnect, the observed route stays `Unknown` and the
+                    // mode stays `Off`, so without watching availability the combine emits nothing,
+                    // the Off branch never re-runs, and acquisition never fires — the mic stays
+                    // dead until the app restarts. StateFlow only emits on a real change, so this
+                    // adds no redundant recomputation.
+                    audioRouteMonitor.availability,
+                ) { mode, _, _, _, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
                     // A route change alters the acoustic path, so the recorded reference no longer
                     // describes what reaches the microphone at that delay. Retire it (keeping only
@@ -431,6 +467,31 @@ class VoiceControlService : Service() {
                     // is what a pending acquisition needs. `route` is the OBSERVATION and stays Unknown
                     // without one; reading it here would either abort a succeeding acquisition or force
                     // the observation to carry availability, which is the inference PR #56 removed.
+                    // RULE 2, COALESCING: a gate going Blocked while an attempt is in flight
+                    // is a trigger consumed by the in-flight guard — remember it, so the
+                    // attempt's end can re-run the decision once. Other mid-attempt emissions
+                    // are not triggers (device-set changes are covered by the start-availability
+                    // record; the attempt itself perturbs the observed route).
+                    if (acquisitionJob != null && !gate.state.value.allowed) {
+                        gateBlockedDuringAttempt = true
+                    }
+                    // RULE (voice-control-core.md > Route acquisition, merged main): a device
+                    // trigger is the USER'S devices connecting or disconnecting — never the
+                    // availability answer our own acquire and release toggle. And a blocker
+                    // clearing is the gate's Blocked -> Allowed transition, not any emission
+                    // while blocked. Both re-arm the restart budget.
+                    val deviceIdentity = audioRouteMonitor.connectedDeviceIdentity()
+                    if (deviceIdentity != lastConnectedDeviceIdentity) {
+                        lastConnectedDeviceIdentity = deviceIdentity
+                        captureRestartBudget.rearm()
+                        pendingAutomaticRestart = false
+                    }
+                    val gateAllowed = gate.state.value.allowed
+                    if (lastGateAllowedSeenByObserver == false && gateAllowed) {
+                        captureRestartBudget.rearm()
+                        pendingAutomaticRestart = false
+                    }
+                    lastGateAllowedSeenByObserver = gateAllowed
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
@@ -455,6 +516,20 @@ class VoiceControlService : Service() {
                             // the automatic-restart cap so re-enabling it can capture again.
                             if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
                                 captureRestartBudget.reset()
+                                pendingAutomaticRestart = false
+                            }
+                            // THE GATE GOING BLOCKED CLEARS A FAILED ATTEMPT (core
+                            // voice-control-core.md > Route acquisition): any blocker clearing is a
+                            // new trigger, so a later Allowed state may attempt again. While the
+                            // gate is Allowed a rule change is not a trigger, and the record stays.
+                            if (!gate.state.value.allowed) {
+                                failedAttemptAvailability = null
+                            }
+                            // An availability change itself is a new trigger: the failed attempt
+                            // was recorded against the OLD availability, so a different answer
+                            // (device set changed) may be acquired again.
+                            if (audioRouteMonitor.availability.value != failedAttemptAvailability) {
+                                failedAttemptAvailability = null
                             }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
@@ -510,13 +585,30 @@ class VoiceControlService : Service() {
                                 currentMode = mode
                                 updateListeningState()
                             } else if (captureRestartBudget.allows()) {
-                                @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
-                                if (startEngine(mode)) {
-                                    currentMode = mode
-                                    updateListeningState()
+                                // ONE place decides whether this run IS the granted automatic
+                                // restart (beginAutomaticRestart spends the credit when it is).
+                                // A granted restart that is still waiting on its acquisition must
+                                // not start the engine here: the recovery nudge can run BEFORE the
+                                // route re-flips (the release is still settling), and a start then
+                                // either fails for lack of a stream or opens capture on the
+                                // released routing — which dies at once and muddies the restart
+                                // accounting. The acquisition path brings the decision back here.
+                                val spendingRestart = beginAutomaticRestart(audioRouteMonitor.route.value)
+                                val waitingOnAcquisition =
+                                    pendingAutomaticRestart && !spendingRestart
+                                if (!waitingOnAcquisition) {
+                                    @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
+                                    if (startEngine(mode)) {
+                                        currentMode = mode
+                                        updateListeningState()
+                                    } else if (spendingRestart) {
+                                        // voice-control-core.md > Microphone lifecycle logging: the
+                                        // restart was attempted and failed to start.
+                                        Timber.e("[VoicePipeline] mic_restart_withheld: reason=start_failed ran_ms=0")
+                                    }
                                 }
                             } else {
-                                Timber.w("[VoicePipeline] start skipped: automatic restart withheld (cap reached)")
+                                Timber.w("[VoicePipeline] start skipped: automatic restart withheld")
                             }
                         }
                     }
@@ -790,6 +882,7 @@ class VoiceControlService : Service() {
             // started. They must not be able to un-set it: acquireCandidate hands the acquired
             // stream to the engine based on this result, and a false would close a live stream.
             onStarted = {
+                captureStartedAtMs = SystemClock.elapsedRealtime()
                 // Only when the microphone opens where the user cannot see it: the decision is
                 // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
                 // covered in ListeningModePolicyTest.
@@ -834,9 +927,13 @@ class VoiceControlService : Service() {
         // Budget the automatic restarts before anything releases routing: the release fires
         // selection callbacks that re-enter acquisition and the start path, and they consult the
         // same budget.
-        captureRestartBudget.onTerminated()
+        val ranForMs = SystemClock.elapsedRealtime() - captureStartedAtMs
+        captureRestartBudget.onTerminated(ranForMs)
+        pendingAutomaticRestart = captureRestartBudget.allows()
         if (!captureRestartBudget.allows()) {
-            Timber.w("[VoicePipeline] capture keeps ending — automatic restart withheld")
+            // voice-control-core.md > Microphone lifecycle logging: ERROR, with the end reason
+            // and how long the capture had run.
+            Timber.e("[VoicePipeline] mic_restart_withheld: reason=self_ended ran_ms=%d", ranForMs)
         }
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
@@ -863,6 +960,41 @@ class VoiceControlService : Service() {
     private fun recoverCapture() {
         if (!captureRestartBudget.allows()) return
         captureRestartSignal.value = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * ONE place decides whether this observer run IS the granted automatic restart, and spends
+     * the credit when it is. True when the caller should treat its start attempt as the
+     * restart's outcome: a false start must log `mic_restart_withheld`.
+     *
+     * A restart for a capture whose routing came from an acquisition only counts once the
+     * acquisition has re-opened the stream — earlier the recovery nudge runs while the route
+     * still OBSERVES the old headset (the release's debounced refresh has not landed), and
+     * spending then would open capture on the released routing: it dies at once and withholds
+     * the very restart the spec grants. A capture that needed no acquisition (wired headset,
+     * already-isolated input — `acquiredForCapture` was cleared when this capture opened its
+     * own stream in [confirmCaptureStream]) restarts at once: nothing has to re-open for it.
+     */
+    private fun beginAutomaticRestart(route: AudioRoute): Boolean {
+        if (!pendingAutomaticRestart) return false
+        if (routeAcquisition.acquiredForCapture && !routeAcquisition.hasConfirmedStream) return false
+        // The restart can only begin on a surface the engine can actually start on: an A2DP-only
+        // restart once its acquisition has re-opened the stream, or a headset with a microphone
+        // (wired, already-isolated input) when the dying capture needed no acquisition. Anything
+        // else — Unknown (the release is still settling), NoMic, built-in — is a surface the
+        // start would fail on or die on: spending there would withhold the very restart the
+        // spec grants. Keep the credit; the route, availability or acquisition emissions that
+        // follow bring the decision back here.
+        val startableNow = when (route) {
+            is AudioRoute.BluetoothA2dpOnly -> routeAcquisition.hasConfirmedStream
+            is AudioRoute.Headset -> route.hasMicrophone
+            else -> false
+        }
+        if (!startableNow) return false
+        pendingAutomaticRestart = false
+        if (!captureRestartBudget.allows()) return false
+        captureRestartBudget.onAutomaticRestart()
+        return true
     }
 
     /**
@@ -918,17 +1050,38 @@ class VoiceControlService : Service() {
      */
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
+        if (failedAttemptAvailability != null &&
+            audioRouteMonitor.availability.value == failedAttemptAvailability
+        ) {
+            Timber.i(
+                "[VoicePipeline] acquisition skipped: a previous attempt already failed against " +
+                    "availability=%s with the same gate state; waiting for a new trigger",
+                audioRouteMonitor.availability.value,
+            )
+            return
+        }
         if (!captureRestartBudget.allows()) {
-            Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld (cap reached)")
+            Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld")
             return
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
+        // The granted restart's credit is left for the observer's start branch when the
+        // acquisition SUCCEEDS (spending here would make that branch see `allows() == false`
+        // and never start the engine on the stream just opened). It is spent HERE only when
+        // the attempt FAILS: a restart that fails to start must leave the budget withheld,
+        // or a failed-start loop would restart forever (onStarted never runs).
+        val spendingRestart = pendingAutomaticRestart
+        // Rule 2 (one attempt per trigger, mid-attempt triggers coalesced): remember the
+        // availability this attempt STARTED against, so a failure records the surface the
+        // trigger named — not whatever the device set says after the attempt's timeout.
+        val attemptAvailability = audioRouteMonitor.availability.value
         val gateAllows = {
             gate.state.value.allowed && audioRouteMonitor.availability.value.keepsPendingAcquisition()
         }
+        var attemptResult: AcquisitionResult? = null
         acquisitionJob = serviceScope.launch {
             try {
-                val result = routeAcquisition.acquire(route, gateAllows)
+                val result = routeAcquisition.acquire(route, gateAllows).also { attemptResult = it }
                 // Publish completion before starting the engine: the route monitor will flip to
                 // Headset while startEngine() suspends, and the route-change handling must not
                 // cancel the engine start as if it were still an acquisition.
@@ -953,6 +1106,24 @@ class VoiceControlService : Service() {
 
                     is AcquisitionResult.Failed -> {
                         val gateState = gate.state.value
+                        // A failure while the gate is not Allowed was an abandonment, not a
+                        // failed attempt: record nothing, the blocker clearing is the trigger.
+                        // And when a blocker cleared mid-attempt, do not record either: the
+                        // coalesced re-evaluation after the attempt IS the retry that trigger
+                        // bought, and recording here would skip it.
+                        if (gateState.allowed && !gateBlockedDuringAttempt) {
+                            failedAttemptAvailability = attemptAvailability
+                        }
+                        if (spendingRestart) {
+                            captureRestartBudget.onAutomaticRestart()
+                            pendingAutomaticRestart = false
+                            // voice-control-core.md > Microphone lifecycle logging: the
+                            // never-started case is withheld with ran_ms 0 and its own reason.
+                            Timber.e(
+                                "[VoicePipeline] mic_restart_withheld: reason=%s ran_ms=0",
+                                result.reason,
+                            )
+                        }
                         val reasons = joinedBlockedReasons(gateState.rules)
                         Timber.e(
                             "mic_acquisition_skipped: reasons=%s;%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",
@@ -978,8 +1149,20 @@ class VoiceControlService : Service() {
                     )
                 }
             } finally {
-                if (acquisitionJob === currentCoroutineContext()[Job]) {
+                val superseded = acquisitionJob !== null && acquisitionJob !== currentCoroutineContext()[Job]
+                if (!superseded) {
                     acquisitionJob = null
+                }
+                // RULE 2, RE-EVALUATION: a failed or abandoned attempt ends with the decision
+                // not re-run by anything else, and a trigger consumed mid-attempt never got its
+                // own turn. Re-run the decision ONCE here: if the surface is unchanged the
+                // recorded start availability makes the skip fire, so this cannot loop; if the
+                // devices changed or a blocker cleared, it is exactly the coalesced attempt.
+                gateBlockedDuringAttempt = false
+                if (!superseded &&
+                    (attemptResult is AcquisitionResult.Failed || attemptResult is AcquisitionResult.Cancelled)
+                ) {
+                    acquireExternalMicrophoneIfCandidate()
                 }
             }
         }

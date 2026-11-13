@@ -103,6 +103,18 @@ class RouteAcquisition(
     /** True once this attempt selected routing that [release] must undo. */
     private var routingAcquired = false
 
+    /**
+     * True when the CURRENT capture's stream was opened by an acquisition
+     * ([performAcquisition]). Set once the acquisition's selection completes (covering both
+     * its stream-open and its stream-reuse returns); cleared by [confirmCaptureStream] when
+     * a capture opens its own stream, so the flag follows the stream rather than the
+     * session. The restart decision reads this: a restart for an
+     * acquisition-ridden capture must wait until the acquisition has re-opened the stream,
+     * while a wired or already-isolated capture restarts at once.
+     */
+    var acquiredForCapture = false
+        private set
+
     /** True when this attempt opened an input stream that it has not handed off yet. */
     private var openedStream = false
 
@@ -202,12 +214,20 @@ class RouteAcquisition(
             Selection.SELECTED -> Unit
         }
 
+        // After SELECTED the routing is acquired no matter who opened the stream: if the mode
+        // observer started (and handed off) the stream while this attempt waited for
+        // selection, that capture still runs on the link this attempt selected, so its
+        // restart must wait for an acquisition too.
+        acquiredForCapture = true
+
         // The mode observer can confirm, start and hand off a stream while this attempt was
         // waiting for selection: the callbacks publish the confirmed route, and the engine starts
         // from that. Opening a second stream here would delete the one the engine is using, and
         // the coordinator would then report "already started" with VAD attached to nothing.
         // Reuse the stream this attempt already owns.
-        if (openedStream) return AcquisitionResult.Acquired(openedDeviceId)
+        if (openedStream) {
+            return AcquisitionResult.Acquired(openedDeviceId)
+        }
 
         if (openConfirmedStream() < 0) return AcquisitionResult.Failed(REASON_FAILED)
 
@@ -251,6 +271,11 @@ class RouteAcquisition(
      */
     fun confirmCaptureStream(): Boolean {
         if (openedStream) return true
+        // A stream opened OUTSIDE an acquisition (this capture-start path) is routing nobody
+        // acquired: the flag must follow the stream, so a later restart for this capture does
+        // not wait on an acquisition that will never happen. performAcquisition sets it back
+        // to true once its selection completes, before either of its Acquired returns.
+        acquiredForCapture = false
         if (openConfirmedStream() < 0) return false
         if (!platform.startInputStream()) {
             release()

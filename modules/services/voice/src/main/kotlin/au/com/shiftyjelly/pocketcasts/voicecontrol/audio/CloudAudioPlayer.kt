@@ -52,9 +52,6 @@ class CloudAudioPlayer(
     // Publishes this player's observed output routing, so route-dependent decisions read where the audio
     // actually goes rather than what is merely available. Null in contexts with no route consumer.
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
-    // Test seam: creates the platform AudioTrack. The track is built in init, so a substitution
-    // must be a constructor argument, unlike the post-construction seams below.
-    private val createAudioTrack: (() -> AudioTrack?)? = null,
 ) {
     /**
      * This stream's claim on the routed observation, taken when playback starts.
@@ -123,7 +120,9 @@ class CloudAudioPlayer(
     private val firstAudibleListeners = mutableListOf<(Long) -> Unit>()
 
     /** True once THIS run has reported first audible; reset when a run starts. */
-    private var firstAudibleFired = false
+    // Atomic: the heartbeat and the stop-path sample run on different dispatchers, so both can
+    // pass a plain Boolean check; compareAndSet keeps first audible exactly once per run.
+    private val firstAudibleFired = java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun addFirstAudibleListener(listener: (Long) -> Unit) {
         synchronized(firstAudibleListeners) { firstAudibleListeners += listener }
@@ -491,7 +490,7 @@ class CloudAudioPlayer(
         notifyAudible(true)
         // A new run presents again: clear the previous run's latch so the next answer gets its
         // own first-audible instant.
-        firstAudibleFired = false
+        firstAudibleFired.set(false)
         audibleHeartbeat = heartbeatScope.launch {
             // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
             // can finish and stop the heartbeat before the first delay elapses, and would then
@@ -524,14 +523,13 @@ class CloudAudioPlayer(
      * run reports first audible exactly once no matter how many paths sample it.
      */
     private fun sampleFirstAudible() {
-        if (firstAudibleFired) return
+        if (!firstAudibleFired.compareAndSet(false, true)) return
         // Production never sets the seam; fall back to the track's own getTimestamp exactly like
         // renderedFrame() does, or first audible never fires outside tests.
         val ts = audioTrack?.let { track ->
             readAudioTimestamp?.invoke(track) ?: android.media.AudioTimestamp().takeIf { track.getTimestamp(it) }
         }
         if (ts != null && ts.framePosition > 0) {
-            firstAudibleFired = true
             notifyFirstAudible(ts.nanoTime)
         }
     }
@@ -569,7 +567,7 @@ class CloudAudioPlayer(
             return
         }
 
-        val track = createAudioTrack?.invoke() ?: AudioTrack.Builder()
+        val track = AudioTrack.Builder()
             .setAudioAttributes(audioAttributes)
             .setAudioFormat(
                 AudioFormat.Builder()

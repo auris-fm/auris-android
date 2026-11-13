@@ -12,6 +12,28 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
+/**
+ * Per-test shadow for the REAL AudioTrack the player builds: answers getTimestamp with an armed
+ * presentation instant, which the stock shadow cannot do. Only the test that exercises the
+ * production fallback arms it; everything else sees the stock behaviour.
+ */
+@org.robolectric.annotation.Implements(android.media.AudioTrack::class)
+class TimestampedAudioTrackShadow : org.robolectric.shadows.ShadowAudioTrack() {
+    @org.robolectric.annotation.Implementation
+    fun getTimestamp(timestamp: android.media.AudioTimestamp): Boolean {
+        if (!armed) return false
+        timestamp.nanoTime = nanoTime
+        timestamp.framePosition = framePosition
+        return true
+    }
+
+    companion object {
+        @JvmStatic var armed = false
+        @JvmStatic var nanoTime = 0L
+        @JvmStatic var framePosition = 0L
+    }
+}
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class CloudAudioPlayerTest {
@@ -29,6 +51,7 @@ class CloudAudioPlayerTest {
     @After
     fun tearDown() {
         player.release()
+        TimestampedAudioTrackShadow.armed = false
     }
 
     @Test
@@ -146,42 +169,23 @@ class CloudAudioPlayerTest {
     }
 
     @Test
-    fun `without the test seam the platform getTimestamp fallback reports first audible`() {
-        // Production never sets readAudioTimestamp - it is a test-only substitution. The sampling
-        // path must fall back to the track's own getTimestamp (as renderedFrame() does), or first
-        // audible never fires outside tests. Robolectric's real AudioTrack cannot report a
-        // timestamp, so the track itself is mocked and getTimestamp stubbed, exactly the shape
-        // production presents.
-        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
-        org.mockito.Mockito.doAnswer { invocation ->
-            val ts = invocation.getArgument<android.media.AudioTimestamp>(0)
-            ts.nanoTime = 99_000_000L
-            ts.framePosition = 512L
-            true
-        }.`when`(track).getTimestamp(org.mockito.kotlin.any())
-        org.mockito.Mockito.`when`(
-            track.write(
-                org.mockito.kotlin.any<ByteArray>(),
-                org.mockito.ArgumentMatchers.anyInt(),
-                org.mockito.ArgumentMatchers.anyInt(),
-                org.mockito.ArgumentMatchers.anyInt(),
-            ),
-        ).thenAnswer { invocation ->
-            val bytes = invocation.getArgument<ByteArray>(0)
-            bytes.size - invocation.getArgument<Int>(1)
-        }
-        // The seam must be a constructor argument: the track is built in init.
-        val seamPlayer = CloudAudioPlayer(
-            context = org.robolectric.RuntimeEnvironment.getApplication(),
-            sampleRateHz = 16000,
-            createAudioTrack = { track },
-        )
-        val fired = mutableListOf<Long>()
-        seamPlayer.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+    @Config(shadows = [TimestampedAudioTrackShadow::class])
+    fun `without any test seam the platform getTimestamp fallback reports first audible`() {
+        // Production never sets any test seam: first audible must come from the track's own
+        // getTimestamp, exactly as renderedFrame reads it. Robolectric's stock ShadowAudioTrack
+        // cannot report a timestamp, so a per-test shadow arms one on the REAL track the player
+        // builds — no app-code test hook involved.
+        TimestampedAudioTrackShadow.armed = true
+        TimestampedAudioTrackShadow.nanoTime = 99_000_000L
+        TimestampedAudioTrackShadow.framePosition = 512L
 
-        seamPlayer.submitFrame(byteArrayOf(0x00, 0x01))
-        seamPlayer.play()
-        seamPlayer.stop()
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        player.stop()
+
         assertEquals("first audible fires via the platform fallback", 1, fired.size)
         assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
     }

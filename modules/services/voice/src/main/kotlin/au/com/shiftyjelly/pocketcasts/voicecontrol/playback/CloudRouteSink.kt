@@ -350,7 +350,16 @@ class CloudRouteSink internal constructor(
 
     override suspend fun dispatchPreparedReporting(prepared: CloudRouteTurn, isRetry: Boolean, onDuck: ((VoiceActionOutcome) -> Unit)?): CloudTurnResult {
         val claim = conversationAdmission.claimDispatch(prepared, isRetry)
-            ?: return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
+            ?: run {
+                // Refused BEFORE a route opened, so routeTurn's own end-of-turn finish never runs:
+                // finish the record here, or the registry keeps a live entry per refused turn.
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                    prepared.requestId,
+                    cancelled = false,
+                    failed = true,
+                )
+                return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
+            }
         if (!claim.ownsDispatch) {
             claim.completion.join()
             // The original owner handles feedback and recognition; a duplicate produces no effects.

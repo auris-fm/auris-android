@@ -6,6 +6,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSigna
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -203,6 +206,50 @@ class VoicePlaybackIntentExecutorTest {
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("add:my bookmark"), sinks.bookmark.calls)
+    }
+
+    @Test
+    fun `a cloud dispatch cancelled mid-turn keeps the record for the sink's own end`() = runTest {
+        // Once the dispatch call is made the SINK owns the record's end — even when that call is
+        // cancelled mid-turn. The executor's finally must not publish a cancelled turn as
+        // ActionFailed ahead of the sink's own cancelled finish, so after cancellation the record
+        // is still live, and finishing it cancelled is the sink's job.
+        val dispatchStarted = CompletableDeferred<Unit>()
+        val hangingSink = object : VoiceCloudRouteSink by FakeCloudRouteSink() {
+            // OVERRIDE THE REPORTING ENTRY: the executor's first-attempt path calls
+            // dispatchPreparedReporting, and Kotlin `by` delegation routes interface-default
+            // methods to the delegate, so overriding dispatchPrepared alone would be bypassed.
+            override suspend fun dispatchPreparedReporting(
+                prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+                isRetry: Boolean,
+                onDuck: ((VoiceActionOutcome) -> Unit)?,
+            ): CloudTurnResult {
+                dispatchStarted.complete(Unit)
+                kotlinx.coroutines.suspendCancellableCoroutine<Unit> { }
+                throw IllegalStateException("unreachable: cancelled before resume")
+            }
+        }
+        val executor = FakeSinks(cloudRouteOverride = hangingSink).executor()
+        val requestId = "cancel-test-request"
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+
+        val job = launch {
+            executor.execute(
+                VoiceIntent.CloudRoute(request = "question", tier = VoiceIntent.CloudTier.Premium),
+                timingRequestId = requestId,
+            )
+        }
+        dispatchStarted.await()
+        job.cancelAndJoin()
+
+        assertTrue(
+            "a cancelled dispatch belongs to the sink: the executor must not finish the record itself",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(requestId)
     }
 
     @Test

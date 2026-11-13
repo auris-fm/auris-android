@@ -151,6 +151,86 @@ class TurnTimingWiringTest {
     }
 
     @Test
+    fun `an utterance that exits before dispatch leaves no live timing entry`() = runTest {
+        // The engine registers the record when it admits the utterance, and ownership transfers to
+        // the downstream producers only at a dispatch site. An empty transcript ends segment
+        // processing BEFORE any dispatch, so the engine's own cleanup must have finished the
+        // record — the registry must be empty, not holding a live entry forever.
+        val context = mock<Context>()
+        val audioManager = mock<AudioManager>()
+        val audioProcessor = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor>()
+        val utteranceFilter = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter>()
+        val recognizer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer>()
+        val wakeWordDetector = mock<WakeWordDetector>()
+        val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
+        val feedback = mock<AudioFeedbackRenderer>()
+        val translationStage = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage>()
+        val backend = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend>()
+
+        whenever(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        whenever(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        whenever(audioProcessor.attachCapture()).thenReturn(true)
+        whenever(audioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
+                    speechOnsetSample = 0,
+                    speechEndSample = 1_600,
+                    captureClock = longArrayOf(1600, 1_000_000_000L, 16_000, 1),
+                    segmentEndStreamPosition = 1600,
+                ),
+            ),
+        )
+        whenever(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        // WAKE POSITIVE: the utterance is admitted, so the engine REGISTERS a timing record for it.
+        whenever(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            WakeWordResult(detected = true, confidence = 0.9f, completionSample = 800, threshold = 0.812f),
+        )
+        whenever(backend.ensureReady()).thenReturn(Result.success(Unit))
+        whenever(backend.requiredModel).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec(emptyList(), ""))
+        whenever(backend.capabilities).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities(setOf("en")))
+        // EMPTY TRANSCRIPT: the turn is dropped before any dispatch — the early-exit path.
+        whenever(backend.transcribe(any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult(text = ""),
+        )
+
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = audioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = feedback,
+            translationStage = translationStage,
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
+            context = context,
+            elapsedClockMs = { 5_000_000L },
+        )
+        engine.scope = this
+        engine.start(
+            backend = backend,
+            audioRoute = au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute.Speaker,
+            listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.WakeWord,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed },
+            onIntent = { _, _, _ -> },
+        )
+        testScheduler.advanceUntilIdle()
+
+        val companion = TurnTimingRecord.Companion
+        val field = (companion.javaClass.declaredFields + TurnTimingRecord::class.java.declaredFields)
+            .firstOrNull { it.name == "active" } ?: throw AssertionError("registry field not found")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST") val active = field.get(companion) as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        assertTrue(
+            "a turn dropped before dispatch must leave no live timing entry: ${active.keys}",
+            active.isEmpty(),
+        )
+    }
+
+    @Test
     fun `without capture accounting the acoustic end stays absent rather than becoming now`() = runTest {
         TurnTimingRecord.sink = { _, message -> synchronized(published) { published += message } }
 

@@ -259,8 +259,11 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                         // THE SAME CONSUMPTION AS THE OTHER DISPATCH SITE: feedback out, action outcome
                         // recorded. A retry that returns only its feedback would hide an unknowable action
                         // on exactly the path where the caller most needs to know whether it ran.
-                        val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
+                        // SET BEFORE THE CALL: once made, the dispatch (even one cancelled
+                        // mid-turn) owns the record's end — a set after return would let the
+                        // finally publish a cancelled turn as ActionFailed.
                         sinkTookOwnership = true
+                        val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
                         outcome.action = retried.action
                         outcome.feedbackLanguage = retried.feedbackLanguage
                         outcome.turnSucceeded = retried.succeeded
@@ -314,8 +317,9 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                     // the SAME path and the identity is the one fixed above rather than a second one minted
                     // here.
-                    val dispatched = cloudRouteSink.dispatchPreparedReporting(preparedTurn, isRetry = intent.isRetry, onDuck = onOutcome)
+                    // SET BEFORE THE CALL, for the same reason as the retry site above.
                     sinkTookOwnership = true
+                    val dispatched = cloudRouteSink.dispatchPreparedReporting(preparedTurn, isRetry = intent.isRetry, onDuck = onOutcome)
                     // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
                     // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
                     // confirmed action from one that was dispatched without a knowable outcome. Reading only

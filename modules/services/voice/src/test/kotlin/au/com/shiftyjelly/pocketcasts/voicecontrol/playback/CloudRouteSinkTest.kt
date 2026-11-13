@@ -59,6 +59,31 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `a dispatch the sink refuses before routing leaves no live timing entry`() = runTest {
+        // A turn whose retained identity was retired (forgetRetained) is refused at claimDispatch,
+        // BEFORE any route opens — so routeTurn's end-of-turn finish never runs. The sink must
+        // finish the record itself, or the registry keeps one live entry per refused turn.
+        val deps = TestDeps()
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        val prepared = sink.prepareTurn("question", playbackContext, capturedOrigin = 1, logicalRequestId = "one-utterance")!!
+        val requestId = prepared.requestId
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+        deps.conversationAdmission.forgetRetained("one-utterance")
+
+        val result = sink.dispatchPrepared(prepared)
+
+        assertEquals(VoiceResponse.Silent, result.feedback)
+        assertFalse(
+            "a turn refused before routing must not keep a live timing entry",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
+    }
+
+    @Test
     fun `concurrent callbacks prepare exactly one retained wire identity`() = runTest {
         val deps = TestDeps()
         val sink = deps.sink()

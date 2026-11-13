@@ -287,7 +287,6 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     // identity a later retry must reuse.
                     val preparedTurn = cloudRouteSink.prepareTurn(
                         request = intent.request,
-                        tier = intent.tier,
                         context = context,
                         isLiveGraceTurn = captured != null &&
                             gracePeriodSignal.isCurrent(captured) &&

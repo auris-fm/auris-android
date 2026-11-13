@@ -1060,13 +1060,6 @@ class CloudRouteSink internal constructor(
         ).route(turn)
     }
 
-    /** Advertise a capability only when its renderer is actually available. */
-    private fun advertisedCapabilities(): List<String> = if (searchResultsRenderer != null) {
-        listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1)
-    } else {
-        emptyList()
-    }
-
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         // The saved positions are requested FOR THIS EPISODE: a position recorded while another
         // episode played describes that episode, and sending it here would name a reference in a

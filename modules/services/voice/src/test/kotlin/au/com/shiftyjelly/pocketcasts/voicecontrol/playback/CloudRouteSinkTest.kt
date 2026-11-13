@@ -4773,7 +4773,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
         try {
-            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
         } finally {
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
         }
@@ -4824,7 +4824,7 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
         assertTrue("sink must register a first-audible listener", firstAudibleListeners.isNotEmpty())
         try {
-            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
         } finally {
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
         }
@@ -4872,7 +4872,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
         try {
-            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = admittedId)
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
         } finally {
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
         }

@@ -3218,7 +3218,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
     }
 
@@ -3325,7 +3325,7 @@ class VoiceAsrEngineTest {
                 VoiceSegmenterResult.SpeechStarted,
                 VoiceSegmenterResult.SpeechEnded(utterance1, speechOnsetSample = 2),
                 VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechContinuing,
+                VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                 VoiceSegmenterResult.SpeechEnded(utterance2(500, 600, 700, 800, 900, 1000), speechOnsetSample = 2),
             ),
         )

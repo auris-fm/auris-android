@@ -667,6 +667,71 @@ class VoiceControlModeObserverAvailabilityTest {
         }
     }
 
+    @Test
+    fun `an attempt aborted by a blocker does not swallow the blocker-clearing trigger`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("first failed acquisition") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("failed attempt recorded") {
+                getField(harness.service, "failedAttemptAvailability") != null
+            }
+
+            // Attempt in flight (a new trigger started it), the gate blocks mid-attempt, the
+            // attempt dies as abandoned, then the gate allows again: the cleared blocker is the
+            // trigger and exactly ONE new attempt must run.
+            otherAppRule.block("other_app_playing")
+            harness.scoPlatform.scoStarts = 0
+            awaitState("gate blocked observed") { !gateAllowedNow(harness) }
+            otherAppRule.allow()
+            awaitState("gate allowed again") { gateAllowedNow(harness) }
+            awaitState("exactly one new attempt after the abandoned one") {
+                harness.scoPlatform.scoStarts >= 1
+            }
+            val attemptsAfter = harness.scoPlatform.scoStarts
+            Thread.sleep(400)
+            testScheduler.advanceTimeBy(400.milliseconds)
+            assertEquals(
+                "exactly one attempt for the cleared blocker",
+                1,
+                attemptsAfter,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `a device-set change arriving mid-attempt gets its coalesced retry after the failure`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("attempt in flight") { harness.scoPlatform.scoStarts >= 1 }
+            // The device set changes WHILE the attempt is timing out (headset re-enumerated).
+            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            setInputDevices()
+            harness.monitor.onDevicesChanged()
+            awaitState("availability back to speaker") { harness.monitor.availability.value == AudioRoute.Speaker }
+            setAirPodsConnected()
+            harness.monitor.onDevicesChanged()
+            awaitState("availability candidate again") { harness.monitor.availability.value == AudioRoute.BluetoothA2dpOnly }
+
+            // The attempt fails, recording the START availability; the mid-attempt change makes
+            // the recorded surface stale, so the observer's next run must attempt again.
+            awaitState("coalesced retry after the failure") { harness.scoPlatform.scoStarts >= 2 }
+        } finally {
+            harness.stop()
+        }
+    }
+
     private fun gateAllowedNow(harness: Harness): Boolean {
         val gate = getField(harness.service, "gate")!!
         val state = gate.javaClass.getMethod("getState").invoke(gate) as StateFlow<*>

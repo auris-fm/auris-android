@@ -166,7 +166,11 @@ class VoiceControlService : Service() {
     // cap. Record the availability the attempt failed against; skip further attempts while it
     // is unchanged. Clear it when availability changes, or when the overall gate goes
     // Blocked -> Allowed — a blocker clearing is a new trigger for any blocker, not only the
-    // user toggle (a rule change that never leaves Allowed is not).
+    // user toggle (a rule change that never leaves Allowed is not). The recorded value is the
+    // availability the attempt STARTED with, not the one read at failure: a device-set change
+    // arriving mid-attempt (rule 2's coalesced trigger) then reads as different, and the next
+    // observer run attempts again. A failure while the gate is not Allowed records nothing:
+    // that attempt was abandoned by a blocker, and the blocker clearing is itself the trigger.
     private var failedAttemptAvailability: AudioRoute? = null
 
     /**
@@ -964,6 +968,10 @@ class VoiceControlService : Service() {
             return
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
+        // Rule 2 (one attempt per trigger, mid-attempt triggers coalesced): remember the
+        // availability this attempt STARTED against, so a failure records the surface the
+        // trigger named — not whatever the device set says after the attempt's timeout.
+        val attemptAvailability = audioRouteMonitor.availability.value
         val gateAllows = {
             gate.state.value.allowed && audioRouteMonitor.availability.value.keepsPendingAcquisition()
         }
@@ -994,7 +1002,11 @@ class VoiceControlService : Service() {
 
                     is AcquisitionResult.Failed -> {
                         val gateState = gate.state.value
-                        failedAttemptAvailability = audioRouteMonitor.availability.value
+                        // A failure while the gate is not Allowed was an abandonment, not a
+                        // failed attempt: record nothing, the blocker clearing is the trigger.
+                        if (gateState.allowed) {
+                            failedAttemptAvailability = attemptAvailability
+                        }
                         val reasons = joinedBlockedReasons(gateState.rules)
                         Timber.e(
                             "mic_acquisition_skipped: reasons=%s;%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",

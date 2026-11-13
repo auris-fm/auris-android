@@ -191,6 +191,21 @@ class SegmentObserver(
             }
             admissionToken = token // producer-held initial reservation until adopt/release
             open = context
+            // THE CLIP STARTS FROM ZERO: an empty-prefix admission (producerSize == 0 — the
+            // engine no longer drains the finished-utterance buffer at start) has no
+            // adoptFirstChunk to open the sink prefix, so open an EMPTY one here and settle the
+            // 0-byte token immediately. Its effect is the RETENTION MIRROR only: without an open
+            // prefix isRetaining() is false, so the engine's reserve-before-copy commits at
+            // SpeechEnded would never run and the capture would complete through the no-prefix
+            // path, with no budget-accounted collection at all. Published clip bytes are
+            // unaffected either way — completion assembles them from the segment — and
+            // non-empty admissions keep the adopt/release protocol unchanged.
+            if (producerSize == 0) {
+                sink.started(SegmentObservation.Started(context, ShortArray(0), 0, token.allowanceMetadataCapBytes))
+                sink.releaseInitial(context, token)
+                admissionToken = null
+                retainedForOpen = openPrefixExistsFor(context)
+            }
             context
         }
     }
@@ -236,6 +251,9 @@ class SegmentObserver(
     }
 
     fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? {
+        // An EMPTY chunk needs no adoption: the empty-prefix admission already opened the prefix
+        // and settled its token, and adopting an empty array would double-start the sink prefix.
+        if (firstChunk.isEmpty()) return speechStartedAdmitting(captureSession, routeClass, 0)?.context
         val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size) ?: return null
         if (!adoptFirstChunk(admitted, firstChunk)) releaseInitialChunk(admitted)
         return admitted.context

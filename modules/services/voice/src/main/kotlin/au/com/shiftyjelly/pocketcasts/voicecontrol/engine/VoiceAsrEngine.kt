@@ -271,6 +271,10 @@ class VoiceAsrEngine @Inject constructor(
             // acquisition).
             try {
                 var openContext: CaptureContext? = null
+                // Samples of the CURRENT utterance's clip already collected. The clip starts from
+                // zero at SpeechStarted (the native counter there is the finished-utterance
+                // snapshot), so this is 0 until the segment at SpeechEnded commits the whole
+                // utterance; it is kept so the final commit's budget arithmetic stays explicit.
                 var accountedSamples = 0
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
@@ -278,11 +282,14 @@ class VoiceAsrEngine @Inject constructor(
                             // Freeze the capture context SYNCHRONOUSLY here — before any await
                             // boundary — and keep the ISSUED value for every later stage of THIS
                             // capture. Refused captures yield null and are excluded downstream.
-                            // ADMISSION BEFORE ALLOCATION: read only the native SIZE counter, let
-                            // the observer reserve exact bytes; drain into an admitted array whose
-                            // ownership then transfers to the sink. Refusal allocates NOTHING and
-                            // leaves the recognition buffer untouched.
-                            val initialSize = voiceAudioProcessor.speechPcmSize()
+                            // THE CLIP STARTS FROM ZERO: the native size counter at this moment is
+                            // the FINISHED-utterance snapshot (it only fills at segment end), so
+                            // reading or draining it here collected the PREVIOUS utterance's audio
+                            // as this utterance's prefix. Admission is therefore empty-prefix and
+                            // the clip grows from the segment the engine receives at SpeechEnded,
+                            // which already carries the whole utterance. (The native buffer itself
+                            // is left alone: recognition reads it asynchronously, and clearing it
+                            // here could wipe an utterance before ASR copies it.)
                             // Per-capture model provenance: the
                             // ACTUAL selected backend's model identity, frozen with the context.
                             // The VERSION is the model's own manifest identity, never a filename.
@@ -302,63 +309,27 @@ class VoiceAsrEngine @Inject constructor(
                             val admission = segmentObserver.speechStartedAdmitting(
                                 captureSessionIncarnation,
                                 currentRouteClass,
-                                initialSize,
+                                // Empty-prefix admission: ZERO stays legal and the deltas from the
+                                // segment at SpeechEnded grow the clip.
+                                0,
                                 asrRef,
                                 // REAL GRACE STATE FROZEN AT SEGMENT START (spec phase 2):
                                 // wake word required unless the follow-up grace window is active.
                                 wakeRequired = !gracePeriodSignal.isActive.value,
                             )
                             openContext = admission?.context
-                            if (admission != null) {
-                                // Lease-protected initial allocation (
-                                // release is addressed by the immutable handle —
-                                // valid even if revocation closes this capture or a successor
-                                // opens mid-copy. The admit token's charge leaves EXACTLY ONCE:
-                                // transferred into the prefix on success, or returned here.
-                                var transferred = false
-                                try {
-                                    val firstChunk = ShortArray(initialSize)
-                                    val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
-                                    // ACTUAL sink transfer result; drained VALID count passed
-                                    // Separately from array capacity.
-                                    transferred = segmentObserver.adoptFirstChunk(admission, firstChunk, copied)
-                                    if (transferred) accountedSamples = copied
-                                } finally {
-                                    if (!transferred) segmentObserver.releaseInitialChunk(admission)
-                                }
-                            }
+                            // PER-UTTERANCE accounting: the clip starts from zero each time, so
+                            // the previous utterance's committed size must never leak into this
+                            // one's final-tail arithmetic.
+                            accountedSamples = 0
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {
-                            // RESERVE-BEFORE-COPY (blocker b3): read only the native SIZE counter;
-                            // admit the delta into collection ownership FIRST; allocate + drain the
-                            // tail ONLY for an admitted delta; any failure releases the reservation.
-                            // Not retaining (gate off / cap-ended / refused capture): ZERO collection
-                            // work — no peek array, no copy — recognition continues untouched.
-                            if (openContext != null && segmentObserver.isRetaining(openContext!!.captureId)) {
-                                val producedSize = voiceAudioProcessor.speechPcmSize()
-                                val deltaSamples = (producedSize - accountedSamples).coerceAtLeast(0)
-                                val token = if (deltaSamples > 0) segmentObserver.reserveDelta(openContext!!, deltaSamples) else null
-                                if (token != null) {
-                                    var transferred = false
-                                    try {
-                                        val delta = ShortArray(deltaSamples)
-                                        val copied = voiceAudioProcessor.drainSpeechTail(delta, accountedSamples, producedSize)
-                                        if (copied > 0) {
-                                            // Advance accounting ONLY when the sink ACCEPTED the
-                                            // Commit.
-                                            transferred = segmentObserver.commitDelta(openContext!!, delta, copied, token)
-                                            if (transferred) accountedSamples += copied
-                                        }
-                                    } finally {
-                                        // Every refusal/throw path returns THIS token exactly once.
-                                        if (!transferred) segmentObserver.releaseDelta(openContext!!, token)
-                                    }
-                                } else if (deltaSamples > 0) {
-                                    // Refused growth: retention ended by the observer with its own terminal.
-                                }
-                                accountedSamples = producedSize.coerceAtMost(accountedSamples) // never regress past drained
-                            }
+                            // NO COLLECTION HERE: the native size counter this step read is the
+                            // FINISHED-utterance snapshot, not the live utterance, so a delta taken
+                            // here copied the previous utterance's audio into the current clip.
+                            // SpeechEnded already collects the whole utterance from the segment
+                            // event, which is the only clip source.
                         }
 
                         is VoiceSegmenterResult.SpeechEnded -> {

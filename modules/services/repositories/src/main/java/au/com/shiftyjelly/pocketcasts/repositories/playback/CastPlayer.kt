@@ -272,12 +272,6 @@ class CastPlayer(
         ) : Issued
     }
 
-    /** A cast request ISSUED under the exclusion boundary, to be awaited after it is released. */
-    private class Pending(
-        val before: Long?,
-        val pending: com.google.android.gms.common.api.PendingResult<com.google.android.gms.cast.framework.media.RemoteMediaClient.MediaChannelResult>?,
-    )
-
     override suspend fun seekToTimeMs(positionMs: Int) {
         withContext(Dispatchers.Main) {
             if (isMediaLoaded) {
@@ -364,12 +358,6 @@ class CastPlayer(
         remoteMediaClient?.registerCallback(playPauseCallback)
     }
 
-    // Issues a cast load, reporting whether one was actually ISSUED.
-    //
-    // IT RETURNS A RESULT BECAUSE ITS ABSENCE WAS BEING READ AS SUCCESS. Every early `return` here is a
-    // refusal -- no episode, no podcast, no URL, an unsupported local file, no receiver -- and a caller
-    // that treats "returned" as "loaded" reports a load that never happened. That is the same
-    // "counting a non-event as delivered" defect as the unawaited seek.
     // Waits for a cast request's RESULT, reporting whether the receiver ACCEPTED it.
     //
     // ISSUED IS NOT COMPLETED. `load`/`seek` returning a pending result means the request was SENT; only
@@ -401,6 +389,12 @@ class CastPlayer(
     // execution stays unknown through every caller rather than becoming a retryable-looking failure.
     private enum class CastRemoteOutcome { Accepted, Refused, Unknown }
 
+    // Issues a cast load, reporting whether one was actually ISSUED.
+    //
+    // IT RETURNS A RESULT BECAUSE ITS ABSENCE WAS BEING READ AS SUCCESS. Every early `return` here is a
+    // refusal -- no episode, no podcast, no URL, an unsupported local file, no receiver -- and a caller
+    // that treats "returned" as "loaded" reports a load that never happened. That is the same
+    // "counting a non-event as delivered" defect as the unawaited seek.
     private fun loadEpisode(
         episodeUuid: String,
         currentPositionMs: Int,

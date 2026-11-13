@@ -1219,12 +1219,6 @@ class SettingsImpl @Inject constructor(
         sharedPrefs = sharedPreferences,
     )
 
-    override val voiceControlSetupCompleted = UserSetting.BoolPref(
-        sharedPrefKey = "voiceControlSetupCompleted",
-        defaultValue = false,
-        sharedPrefs = sharedPreferences,
-    )
-
     override val showArchivedDefault = UserSetting.BoolPref(
         sharedPrefKey = "default_show_archived",
         defaultValue = false,

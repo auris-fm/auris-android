@@ -184,9 +184,6 @@ class CloudConversationAdmission @Inject constructor() {
         synchronized(lock) { prepared.remove("logical:$logicalRequestId") }
     }
 
-    /** How many turns are currently retained. Test visibility for the lifecycle contract. */
-    fun retainedCount(): Int = synchronized(lock) { prepared.size }
-
     /** The origin currently declared live. Exposed so a caller with no captured window can use it. */
     fun currentOriginForTest(): Long = synchronized(lock) { currentOrigin }
 

@@ -52,8 +52,8 @@ class CloudStaticIdentityTokenProvider @Inject constructor(
  * Its caller is `CloudPrefetchClient`, which posts playback-start context hints and does not retry a
  * 401 at all — so the fact that this provider cannot mint a replacement costs it nothing: the
  * interface's default `refreshToken` re-reads the same value, and nobody is waiting on a different
- * one. It is here rather than nested in a client so the two callers that want it do not have to
- * reach through one of them.
+ * one. It is here rather than nested in a client so a caller that wants it does not have to reach
+ * through one.
  */
 internal class CloudFixedTokenProvider(private val token: String) : CloudTokenProviding {
     override suspend fun currentToken(): String? = token.takeIf { it.isNotBlank() }

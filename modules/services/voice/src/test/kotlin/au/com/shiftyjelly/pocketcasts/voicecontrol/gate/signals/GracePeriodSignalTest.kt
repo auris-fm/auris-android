@@ -352,9 +352,9 @@ class GracePeriodSignalTest {
 
     @Test
     fun `a wake sets its marker in the same transition that opens the window`() {
-        // The marker and the opening are the SAME act. Setting the marker around `openWindow()` left a
-        // moment where the window was open under the PREVIOUS marker, which a concurrent reader could
-        // observe. This holds the monitor and asserts a wake cannot proceed at all while it is held --
+        // The marker and the opening are the SAME act. Setting the marker around a separate opening call
+        // left a moment where the window was open under the PREVIOUS marker, which a concurrent reader
+        // could observe. This holds the monitor and asserts a wake cannot proceed at all while it is held --
         // so the marker cannot be written outside the transition either.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()

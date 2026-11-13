@@ -45,29 +45,6 @@ class EarconPlayer(
     @Volatile
     private var workerForTest: Thread? = null
 
-    /**
-     * The player's own single thread, created on demand.
-     *
-     * Lazy and re-creatable on purpose, which is what lets two requirements hold together: [release]
-     * must RELEASE the worker rather than retain it for the process, and the player is a Hilt
-     * `@Singleton` that a later service session still needs to use. A permanently-held executor would
-     * leak the thread; a permanently-shut-down one would refuse the next session with
-     * `RejectedExecutionException`. Creating it here gives both -- disposal shuts this one down, and
-     * the next play starts a fresh one.
-     */
-    private fun executorFor(): java.util.concurrent.ExecutorService = synchronized(executorLock) {
-        executor?.takeIf { !it.isShutdown } ?: java.util.concurrent.Executors
-            .newSingleThreadExecutor { runnable ->
-                Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
-                    // THIS player's worker, retained so a test can observe THAT thread rather than any
-                    // thread that happens to share the name. A name scan sees other players' workers
-                    // still winding down and reads a released worker as live; observing the instance
-                    // this player started is both deterministic and about the right subject.
-                    .also { workerForTest = it }
-            }
-            .also { executor = it }
-    }
-
     /** The worker's thread, for a test to observe the lifetime. Null before first use. */
     internal fun workerThreadForTest(): String? = synchronized(executorLock) {
         executor?.let { "earcon-player" }
@@ -141,20 +118,33 @@ class EarconPlayer(
         }
     }
 
-    /** The worker, created on demand. Caller holds [executorLock]. */
+    /**
+     * The player's own single thread, created on demand. Caller holds [executorLock].
+     *
+     * Lazy and re-creatable on purpose, which is what lets two requirements hold together: [release]
+     * must RELEASE the worker rather than retain it for the process, and the player is a Hilt
+     * `@Singleton` that a later service session still needs to use. A permanently-held executor would
+     * leak the thread; a permanently-shut-down one would refuse the next session with
+     * `RejectedExecutionException`. Creating it here gives both -- disposal shuts this one down, and
+     * the next play starts a fresh one.
+     */
     private fun executorForLocked(): java.util.concurrent.ExecutorService {
         val existing = executor?.takeIf { !it.isShutdown }
         if (existing != null) return existing
         return java.util.concurrent.Executors
             .newSingleThreadExecutor { runnable ->
                 Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
+                    // THIS player's worker, retained so a test can observe THAT thread rather than any
+                    // thread that happens to share the name. A name scan sees other players' workers
+                    // still winding down and reads a released worker as live; observing the instance
+                    // this player started is both deterministic and about the right subject.
                     .also { workerForTest = it }
             }
             .also { executor = it }
     }
 
     private fun <T> onPlayerThread(block: () -> T): T {
-        // SUBMIT UNDER THE SAME LOCK THAT SHUTS THE EXECUTOR DOWN. `executorFor()` can hand back a
+        // SUBMIT UNDER THE SAME LOCK THAT SHUTS THE EXECUTOR DOWN. `executorForLocked()` can hand back a
         // service that `release()` shuts down before `submit` runs, and the submit is then REJECTED --
         // a throw under contention, which is exactly what the serialisation exists to prevent. The
         // window is between choosing the executor and using it.

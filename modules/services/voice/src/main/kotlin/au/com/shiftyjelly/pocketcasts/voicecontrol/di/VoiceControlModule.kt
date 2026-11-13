@@ -7,7 +7,6 @@ import android.speech.tts.TextToSpeech
 import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.GoogleMlKitTranslator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CaptureHardware
@@ -28,7 +27,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCon
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EntityExtractor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.BpeTokenizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EmbeddingEngine
@@ -143,9 +141,6 @@ abstract class VoiceControlModule {
         ): au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver(context)
 
         @Provides @Singleton
-        fun provideDeviceProbe(): au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe = au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe()
-
-        @Provides @Singleton
         fun provideCurrentLocale(): () -> Locale = { Locale.getDefault() }
 
         @Provides @Singleton
@@ -181,7 +176,7 @@ abstract class VoiceControlModule {
         }
 
         @Provides @Singleton
-        fun provideNotCastingCondition(castManager: CastManager): NotCastingCondition = NotCastingCondition()
+        fun provideNotCastingCondition(): NotCastingCondition = NotCastingCondition()
 
         @Provides @Singleton
         fun provideBatteryOkCondition(

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -41,6 +42,16 @@ class LfmToolCallParserTest {
         assertEquals("no_match", call!!.name)
         assertEquals("", call.action)
         assertEquals(emptyMap<String, Any?>(), call.params)
+    }
+
+    @Test
+    fun parse_bareNoneParsesToNull() {
+        val call = LfmToolCallParser.parse(
+            "<|tool_call_start|>[playback(action='seek_to', position=None)]<|tool_call_end|>",
+        )
+        assertNotNull(call)
+        assertTrue(call!!.params.containsKey("position"))
+        assertNull(call.params["position"])
     }
 
     @Test

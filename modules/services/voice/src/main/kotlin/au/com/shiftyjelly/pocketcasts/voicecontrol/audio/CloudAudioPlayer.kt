@@ -827,23 +827,6 @@ class CloudAudioPlayer(
         private const val TAG = "CloudAudio"
 
         /**
-         * Resamples [samples] from [sourceRateHz] to the recorder's 16 kHz timeline.
-         *
-         * Stateless single-shot conversion, kept for callers that need one buffer. Prefer
-         * [ChunkResampler] for a stream: with a fractional ratio this discards each chunk's
-         * remainder independently, so successive chunks drift off the producer clock.
-         */
-        internal fun resampleToRecorderRate(
-            samples: FloatArray,
-            sourceRateHz: Int,
-            targetRateHz: Int = PlaybackBufferRecorder.SAMPLE_RATE,
-        ): FloatArray {
-            val resampler = ChunkResampler(targetRateHz)
-            resampler.beginChunk(sourceRateHz)
-            return resampler.resample(samples)
-        }
-
-        /**
          * Resamples a stream of chunks while preserving phase and audio continuity across them.
          *
          * A per-chunk conversion cannot be correct in general: a chunk whose length does not divide

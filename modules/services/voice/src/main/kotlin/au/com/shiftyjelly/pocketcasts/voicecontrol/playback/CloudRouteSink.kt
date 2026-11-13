@@ -715,7 +715,6 @@ class CloudRouteSink internal constructor(
                         if (event.outcome == CloudRouteEvent.Outcome.Completed) sawDoneCompleted = true
                         // Terminal diagnostics are recorded at the actual decode point in
                         // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
-                        val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
                         analytics.recordTurn(
                             outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
                             inputTokens = event.inputTokens,
@@ -1601,8 +1600,8 @@ class CloudRouteSink internal constructor(
             CloudRouteErrorCodes.PROVIDER_ERROR,
             CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE,
             CloudRouteErrorCodes.INVALID_RESPONSE,
-            "limit_exceeded",
-            "budget_exceeded",
+            CloudRouteErrorCodes.LIMIT_EXCEEDED,
+            CloudRouteErrorCodes.BUDGET_EXCEEDED,
             "done",
             "interrupted",
         )

@@ -10,7 +10,8 @@ import javax.inject.Singleton
  *
  * The effective base URL is the gateway URL when cutover is active
  * ([GatewayUrlProvider.isCutoverActive]). Resolution order:
- * SharedPreferences `base_url` override, then build-time [Settings.AURIS_GATEWAY_URL].
+ * SharedPreferences `base_url` override, then the build-time `AURIS_GATEWAY_URL`
+ * default (see [GatewayUrlProvider.configuredGatewayUrl]).
  *
  * An empty effective URL disables cloud alignment — the client degrades to
  * the transcript-sync mapping and `client_position_ms`. The same empty URL or
@@ -30,10 +31,5 @@ class SharedPreferencesCloudConfig @Inject constructor(
             return ""
         }
         return gatewayUrlProvider.configuredGatewayUrl().trimEnd('/')
-    }
-
-    companion object {
-        const val PREFS_NAME = au.com.shiftyjelly.pocketcasts.preferences.gateway.AurisCloudPrefs.PREFS_NAME
-        const val KEY_BASE_URL = au.com.shiftyjelly.pocketcasts.preferences.gateway.AurisCloudPrefs.KEY_BASE_URL
     }
 }

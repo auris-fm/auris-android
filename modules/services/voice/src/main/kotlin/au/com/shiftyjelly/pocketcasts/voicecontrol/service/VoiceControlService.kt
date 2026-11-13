@@ -479,6 +479,7 @@ class VoiceControlService : Service() {
                     // availability answer our own acquire and release toggle. And a blocker
                     // clearing is the gate's Blocked -> Allowed transition, not any emission
                     // while blocked. Both re-arm the restart budget.
+                    if (pendingAutomaticRestart) pendingAutomaticRestart = false
                     val deviceIdentity = audioRouteMonitor.connectedDeviceIdentity()
                     if (deviceIdentity != lastConnectedDeviceIdentity) {
                         lastConnectedDeviceIdentity = deviceIdentity
@@ -581,7 +582,8 @@ class VoiceControlService : Service() {
                                 currentMode = mode
                                 updateListeningState()
                             } else if (captureRestartBudget.allows()) {
-                                if (pendingAutomaticRestart) {
+                                val spendingRestart = pendingAutomaticRestart
+                                if (spendingRestart) {
                                     captureRestartBudget.onAutomaticRestart()
                                     pendingAutomaticRestart = false
                                 }
@@ -589,6 +591,10 @@ class VoiceControlService : Service() {
                                 if (startEngine(mode)) {
                                     currentMode = mode
                                     updateListeningState()
+                                } else if (spendingRestart) {
+                                    // voice-control-core.md > Microphone lifecycle logging: the
+                                    // restart was attempted and failed to start.
+                                    Timber.e("[VoicePipeline] mic_restart_withheld: reason=start_failed ran_ms=0")
                                 }
                             } else {
                                 Timber.w("[VoicePipeline] start skipped: automatic restart withheld")
@@ -1013,14 +1019,12 @@ class VoiceControlService : Service() {
             return
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
-        // The granted restart is spent when it is ATTEMPTED, not when it succeeds: a restart
-        // that fails to start must leave the budget withheld (a failed-start loop otherwise
-        // restarts forever, since onStarted never runs).
+        // The granted restart's credit is left for the observer's start branch when the
+        // acquisition SUCCEEDS (spending here would make that branch see `allows() == false`
+        // and never start the engine on the stream just opened). It is spent HERE only when
+        // the attempt FAILS: a restart that fails to start must leave the budget withheld,
+        // or a failed-start loop would restart forever (onStarted never runs).
         val spendingRestart = pendingAutomaticRestart
-        if (spendingRestart) {
-            captureRestartBudget.onAutomaticRestart()
-            pendingAutomaticRestart = false
-        }
         // Rule 2 (one attempt per trigger, mid-attempt triggers coalesced): remember the
         // availability this attempt STARTED against, so a failure records the surface the
         // trigger named — not whatever the device set says after the attempt's timeout.
@@ -1065,6 +1069,8 @@ class VoiceControlService : Service() {
                             failedAttemptAvailability = attemptAvailability
                         }
                         if (spendingRestart) {
+                            captureRestartBudget.onAutomaticRestart()
+                            pendingAutomaticRestart = false
                             // voice-control-core.md > Microphone lifecycle logging: the
                             // never-started case is withheld with ran_ms 0 and its own reason.
                             Timber.e("[VoicePipeline] mic_restart_withheld: reason=start_failed ran_ms=0")

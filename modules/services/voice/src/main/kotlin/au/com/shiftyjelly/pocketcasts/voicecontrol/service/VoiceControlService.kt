@@ -972,8 +972,8 @@ class VoiceControlService : Service() {
      * still OBSERVES the old headset (the release's debounced refresh has not landed), and
      * spending then would open capture on the released routing: it dies at once and withholds
      * the very restart the spec grants. A capture that needed no acquisition (wired headset,
-     * already-isolated input — `acquiredForCapture` is false, set when its start got
-     * `NotNeeded`) restarts at once: nothing has to re-open for it.
+     * already-isolated input — `acquiredForCapture` was cleared when this capture opened its
+     * own stream in [confirmCaptureStream]) restarts at once: nothing has to re-open for it.
      */
     private fun beginAutomaticRestart(route: AudioRoute): Boolean {
         if (!pendingAutomaticRestart) return false

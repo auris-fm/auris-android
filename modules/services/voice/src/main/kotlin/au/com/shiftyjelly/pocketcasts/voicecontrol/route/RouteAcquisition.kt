@@ -105,9 +105,10 @@ class RouteAcquisition(
 
     /**
      * True when the CURRENT capture's stream was opened by an acquisition
-     * ([performAcquisition]). Set when that stream has started; cleared whenever a capture
-     * opens its own stream ([openConfirmedStream] outside acquisition), so the flag follows
-     * the stream rather than the session. The restart decision reads this: a restart for an
+     * ([performAcquisition]). Set once the acquisition's selection completes (covering both
+     * its stream-open and its stream-reuse returns); cleared by [confirmCaptureStream] when
+     * a capture opens its own stream, so the flag follows the stream rather than the
+     * session. The restart decision reads this: a restart for an
      * acquisition-ridden capture must wait until the acquisition has re-opened the stream,
      * while a wired or already-isolated capture restarts at once.
      */

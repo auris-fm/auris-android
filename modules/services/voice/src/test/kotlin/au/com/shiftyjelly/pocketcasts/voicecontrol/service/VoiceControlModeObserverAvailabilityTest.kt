@@ -728,7 +728,7 @@ class VoiceControlModeObserverAvailabilityTest {
             }
             awaitState("attempt ended") {
                 getField(harness.service, "acquisitionJob") == null &&
-                    getField(harness.service, "triggerArrivedDuringAttempt") == false
+                    getField(harness.service, "gateBlockedDuringAttempt") == false
             }
             val afterRetry = harness.scoPlatform.scoStarts
             Thread.sleep(300)
@@ -737,6 +737,36 @@ class VoiceControlModeObserverAvailabilityTest {
                 "exactly one coalesced attempt, no loop",
                 afterRetry,
                 harness.scoPlatform.scoStarts,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    @Test
+    fun `a route emission during a failing attempt with the gate Allowed throughout loops not`() = runBlocking {
+        setAirPodsConnected()
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 600L, scoEstablishes = false)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("attempt in flight") { harness.scoPlatform.scoStarts >= 1 }
+            // Setting SCO up perturbs the OBSERVED route while the attempt runs: simulate that
+            // by re-announcing the same devices (route re-emits, availability unchanged, gate
+            // Allowed throughout). One attempt in total: the failure records the unchanged
+            // surface, and the finally re-run is skipped.
+            setAirPodsConnected()
+            harness.monitor.onDevicesChanged()
+            awaitState("attempt ended") { getField(harness.service, "acquisitionJob") == null }
+            val attemptsSoFar = harness.scoPlatform.scoStarts
+            Thread.sleep(300)
+            testScheduler.advanceTimeBy(300.milliseconds)
+            assertEquals(
+                "exactly one attempt despite mid-attempt route emissions",
+                1,
+                attemptsSoFar,
             )
         } finally {
             harness.stop()

@@ -71,7 +71,7 @@ static bool initOrt(JNIEnv* env, jobject assetManager) {
 
     // Resolve ORT from onnxruntime-android. Prefer an already-loaded copy (RTLD_NOLOAD avoids a
     // second load), but load it ourselves when nothing has: this entry is reachable without
-    // WakeWordJni/EmbeddingJni having run first, and depending on their lifecycle made capture fail
+    // WakeWordJni having run first, and depending on WakeWordJni's lifecycle made capture fail
     // with "libonnxruntime.so not loaded" whenever it ran before them.
     void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
     if (!ortLib) {

@@ -18,7 +18,7 @@ class CloudReferenceMatcher {
     private val checkpoints = mutableListOf<Checkpoint>()
 
     /** Adds a reference checkpoint (timestamp in seconds, sorted hash set). */
-    fun add(timestampSeconds: Float, hashes: LongArray, durationSeconds: Float) {
+    fun add(timestampSeconds: Float, hashes: LongArray) {
         // The hash set is immutable per checkpoint — precompute it once here
         // instead of rebuilding it for every query window.
         checkpoints.add(Checkpoint(timestampSeconds, hashes, hashes.toHashSet()))

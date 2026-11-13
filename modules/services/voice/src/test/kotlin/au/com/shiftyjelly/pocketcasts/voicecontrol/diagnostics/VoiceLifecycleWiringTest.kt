@@ -256,6 +256,7 @@ class VoiceLifecycleWiringTest {
                     chapterSink = mock(), bookmarkSink = mock(), cloudRouteSink = cloudSink,
                     playbackContextProvider = requestContext, queueSink = mock(), playbackQuerySink = mock(),
                     statsQuerySink = mock(), gracePeriodSignal = signal, playbackManager = playbackManager,
+                    playbackContextMonitor = playbackMonitor,
                 )
                 val route = MutableStateFlow<AudioRoute>(AudioRoute.Headset(true))
                 val monitor = mock<AndroidAudioRouteMonitor>()

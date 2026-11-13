@@ -27,12 +27,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCon
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EntityExtractor
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.BpeTokenizer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EmbeddingEngine
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.JniEmbeddingEngine
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.TextTokenizer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.entity.GrammarEntityExtractor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmIntentRouter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
@@ -78,9 +72,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import java.io.File
 import java.util.Locale
-import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 
@@ -116,25 +108,11 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 
-    @Binds abstract fun bindTextTokenizer(impl: BpeTokenizer): TextTokenizer
-
-    @Binds abstract fun bindEmbeddingEngine(impl: JniEmbeddingEngine): EmbeddingEngine
-
-    @Binds abstract fun bindEntityExtractor(impl: GrammarEntityExtractor): EntityExtractor
-
     @Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector
 
     @Binds abstract fun bindTranslationStage(impl: GoogleMlKitTranslator): TranslationStage
 
     companion object {
-        @Provides @Singleton
-        @Named("embeddingModel")
-        fun provideEmbeddingModelFile(manager: ModelManager): File = manager.embeddingModelFile
-
-        @Provides @Singleton
-        @Named("embeddingTokenizer")
-        fun provideEmbeddingTokenizerFile(manager: ModelManager): File = manager.tokenizerModelFile
-
         @Provides @Singleton
         fun provideSpokenTemplateResolver(
             @ApplicationContext context: android.content.Context,

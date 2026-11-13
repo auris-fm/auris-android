@@ -31,6 +31,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
      * where the distinction is known.
      */
     private val playbackManager: PlaybackManager,
+    private val playbackContextMonitor: PlaybackContextMonitor,
 ) {
     /** The turn retained for [logicalRequestId], if any. Delegates to the sink's store. */
     private fun retainedForLogical(
@@ -403,7 +404,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
     }
 
     /** The current episode's duration in seconds, for resolving a negative absolute position. */
-    private fun currentEpisodeDurationSeconds(): Int = playbackManager.getCurrentEpisode()?.duration?.toInt() ?: 0
+    private fun currentEpisodeDurationSeconds(): Int = playbackContextMonitor.episodeDurationSeconds()
 
     private fun executeEffects(intent: VoiceIntent.Effects): VoiceResponse = when (intent) {
         is VoiceIntent.Effects.SetSpeed -> effectsSink.setSpeed(intent.speed)

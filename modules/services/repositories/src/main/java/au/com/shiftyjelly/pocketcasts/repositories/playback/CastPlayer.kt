@@ -325,11 +325,10 @@ class CastPlayer(
 
     // Guards the episode fields against the bound seek's read.
     //
-    // THE WRITE STAYS SYNCHRONOUS. Posting it to the main looper would DEFER it, so `setEpisode` would
-    // return before the player had actually been re-pointed -- and a caller that then relied on the new
-    // episode, or a seek that ran immediately after, would see the OLD one. A synchronous write under a
-    // lock the seek also takes gives both properties: the re-pointing is complete when this returns, and
-    // the seek's decision cannot interleave with it.
+    // The seek's episode validation reads these fields under this lock, and the re-pointing in
+    // `loadEpisode` writes `localEpisodeUuid` under it too, so a seek's check cannot interleave
+    // with a re-point. Note the seek issues its request under the lock but awaits the receiver's
+    // result after release.
     //
     // A plain monitor rather than `Dispatchers.Main` because a lock cannot span a suspension, and the
     // seek needs to read these fields at a point where it cannot suspend.
@@ -407,7 +406,9 @@ class CastPlayer(
             client.play()
             return null
         }
-        localEpisodeUuid = episodeUuid
+        synchronized(episodeLock) {
+            localEpisodeUuid = episodeUuid
+        }
         val episode = episode
         val podcast = podcast
         if (episode == null || podcast == null || episodeUuid != episode.uuid) {

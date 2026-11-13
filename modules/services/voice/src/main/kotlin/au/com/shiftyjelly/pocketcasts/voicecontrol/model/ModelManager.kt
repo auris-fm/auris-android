@@ -80,21 +80,6 @@ class ModelManager @Inject constructor(
 ) {
     private val downloadMutex = Mutex()
     companion object {
-        // Use hf-mirror.com for faster/reliable downloads from HuggingFace
-        private const val HF_MIRROR = "https://hf-mirror.com"
-
-        // multilingual-e5-small ONNX (INT8 quantized, ~118 MB)
-        private const val EMBEDDING_MODEL_PATH =
-            "/nixiesearch/multilingual-e5-small-onnx/resolve/main/model_opt2_QInt8.onnx"
-        const val EMBEDDING_MODEL_FILENAME = "model_opt2_QInt8.onnx"
-
-        // HuggingFace tokenizer.json (~16 MB, JSON — parseable in pure Kotlin)
-        // Preferred over sentencepiece.bpe.model (~5 MB, protobuf) to avoid
-        // needing a protobuf parser in the BpeTokenizer.
-        private const val TOKENIZER_PATH =
-            "/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
-        const val TOKENIZER_FILENAME = "tokenizer.json"
-
         internal const val LFM_MODEL_FILENAME = "model.gguf"
         internal const val LFM_CLASSIFIER_FILENAME = "classifier.bin"
         internal const val LFM_LABEL_MAP_FILENAME = "label_map.json"
@@ -108,30 +93,6 @@ class ModelManager @Inject constructor(
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotStarted)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
-
-    // -- Embedding model (multilingual-e5-small) ---------------------------
-
-    val embeddingDir get() = File(filesDir, "embedding-model")
-    val embeddingModelFile get() = File(embeddingDir, EMBEDDING_MODEL_FILENAME)
-    val tokenizerModelFile get() = File(embeddingDir, TOKENIZER_FILENAME)
-
-    fun isEmbeddingModelReady(): Boolean = embeddingModelFile.exists() && tokenizerModelFile.exists()
-
-    suspend fun ensureEmbeddingModel(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isEmbeddingModelReady()) return@withContext Result.success(Unit)
-        downloadMutex.withLock {
-            if (isEmbeddingModelReady()) return@withContext Result.success(Unit)
-            try {
-                embeddingDir.mkdirs()
-                downloadFile("$HF_MIRROR$EMBEDDING_MODEL_PATH", embeddingModelFile, "Embedding ONNX", "")
-                downloadFile("$HF_MIRROR$TOKENIZER_PATH", tokenizerModelFile, "Tokenizer", "")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Timber.e(e, "Embedding model download failed")
-                Result.failure(e)
-            }
-        }
-    }
 
     // -- LFM router model --------------------------------------------------
 

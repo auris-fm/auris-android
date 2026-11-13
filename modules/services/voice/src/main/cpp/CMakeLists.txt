@@ -86,7 +86,6 @@ add_library(pocketcasts_voice_capture SHARED
     jni_bridge.cpp
     NativeVadProcessor.cpp
     VadJni.cpp
-    EmbeddingJni.cpp
     WhisperJni.cpp
     WakeWordJni.cpp
 )

@@ -2,8 +2,9 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 /**
  * The cloud error-code vocabulary in one place (cloud-assistant.md): the codes
- * this client adopts from the server *and* the ones it mints itself from the
- * response status — and the allowlist [normalizeForLog] uses to keep both out
+ * this client adopts from the server, the codes it mints itself from the
+ * response status, and the codes/shapes it only recognises for log
+ * normalization — the allowlist [normalizeForLog] uses to keep all of them out
  * of device logs verbatim.
  */
 object CloudRouteErrorCodes {
@@ -22,10 +23,11 @@ object CloudRouteErrorCodes {
     const val NO_ANSWER = "no_answer"
 
     /**
-     * Every code this client recognises — those it adopts from the server and those it mints
-     * itself. Internal rather than private so the contract check can re-derive it from code
-     * instead of restating it: a code added here without updating the checked-in contract
-     * declaration is exactly the drift that check exists to catch.
+     * Every code this client recognises — those adopted from the server, those it mints itself,
+     * and those recognised for log normalization only. Internal rather than private so the
+     * contract check can re-derive it from code instead of restating it: a code added here
+     * without updating the checked-in contract declaration is exactly the drift that check
+     * exists to catch.
      */
     internal val KNOWN = setOf(
         RETRIEVAL_UNAVAILABLE,
@@ -41,9 +43,9 @@ object CloudRouteErrorCodes {
         NO_ANSWER,
     )
 
-    /** `http_<3-digit status>` is minted locally from the response code. */
+    /** `http_<3-digit status>`, recognised for log normalization (not minted by this client). */
     // Internal rather than private so the contract check can assert the declaration against the
-    // shape this object actually mints, instead of against the declaration's own copy of it.
+    // shapes this object recognises, instead of against the declaration's own copy of it.
     internal val HTTP_STATUS_CODE = Regex("http_\\d{3}")
 
     /**
@@ -54,10 +56,11 @@ object CloudRouteErrorCodes {
     fun normalizeForLog(code: String?): String = when {
         code == null -> "none"
 
-        // Known server codes, plus the bounded shapes this client mints
-        // itself: `invalid_request`, and `http_<status>`, which carries the
-        // status of an unparseable error body — exactly the diagnostic worth
-        // having when a gateway answers with HTML.
+        // Known codes (server-supplied and client-minted), plus the bounded shapes recognised
+        // for log normalization but not minted today: `invalid_request` (declared
+        // `mintedByClient` for future use), and
+        // `http_<status>`, which carries the status of an unparseable error body — exactly the
+        // diagnostic worth having when a gateway answers with HTML.
         code in KNOWN || HTTP_STATUS_CODE.matches(code) -> code
 
         else -> "unrecognized"

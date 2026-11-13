@@ -83,17 +83,17 @@ class CloudContractCodeCheckTest {
     }
 
     @Test
-    fun `declared bounded shapes are the shapes the code mints`() {
+    fun `declared bounded shapes are the shapes the code recognises`() {
         // `http_<status>` carries the status of an unparseable error body; it is a shape rather
         // than a code, so it cannot be enumerated and is asserted as a pattern instead. Both the
         // stored pattern and its meaning are read from the code, so editing the code's shape
         // without editing the declaration fails here.
         assertEquals(
-            "the declaration must name exactly the bounded shapes the client mints",
+            "the declaration must name exactly the bounded shapes the client recognises",
             listOf(CloudRouteErrorCodes.HTTP_STATUS_CODE.pattern),
             contract.boundedShapes,
         )
-        assertTrue("http_503 is the shape the code mints", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_503"))
+        assertTrue("http_503 is a bounded shape the client recognises", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_503"))
         assertFalse("http_5 is not a status code", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_5"))
     }
 

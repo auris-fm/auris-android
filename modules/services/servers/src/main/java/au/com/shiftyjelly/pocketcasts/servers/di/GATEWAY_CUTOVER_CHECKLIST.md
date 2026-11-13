@@ -13,7 +13,8 @@ Use this checklist when validating gateway cutover on a debug/staging build befo
 **Interim Android cutover (until gateway multi-host routing):** only
 `serverApiUrl` → gateway. Refresh/static/search/cache/list/sharing stay on
 direct Pocket Casts hosts. Collapsing those onto api.pocketcasts.com via the
-single-upstream proxy yields 401 on discover/OPML (static/refresh return 200).
+single-upstream proxy turns the direct-host 200s on static/refresh/search into
+401s (and discover/OPML also 401).
 Auris `/api/v1/...` still uses the gateway via CloudConfig. Failed HTTP
 responses log `HTTP <code> <method> <url>`. OPML fails closed on non-2xx.
 

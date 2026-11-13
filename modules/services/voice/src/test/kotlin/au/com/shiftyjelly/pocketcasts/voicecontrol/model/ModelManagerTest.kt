@@ -44,7 +44,7 @@ class ModelManagerTest {
     }
 
     @Test
-    fun `downloadModel reports Ready when the download succeeds`() {
+    fun `a completed ASR model download alone does not report Ready`() {
         val body = "fake model bytes".toByteArray()
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/a.ort") { exchange ->
@@ -62,7 +62,11 @@ class ModelManagerTest {
             )
             val result = runBlocking { manager.ensureModel(spec) }
             assertTrue(result.isSuccess)
-            assertTrue(manager.downloadState.value is ModelDownloadState.Ready)
+            // The ASR model is only half the set: the LFM model downloads after it, so the
+            // screen must not show Ready before ensureLfmModel succeeds. The per-file
+            // progress report stays, but no Ready claim is made here.
+            val state = manager.downloadState.value
+            assertFalse("ASR download alone must not claim Ready, was $state", state is ModelDownloadState.Ready)
         } finally {
             server.stop(0)
         }

@@ -383,7 +383,7 @@ void NativeVadProcessor::runLoop() {
                 // Silence timeout reached — enter drain phase.
                 if (mDrainRemaining <= 0) {
                     // Compute how many more frames to drain to reach the target
-                    // utterance length (~3.5s) for reliable Whisper language detection.
+                    // utterance length (~3.5s) for reliable language detection.
                     int32_t totalSoFar = mSpeechFrames;
                     int32_t needed = kTargetTotalFrames - totalSoFar;
                     if (needed < kMinPostSpeechFrames) {

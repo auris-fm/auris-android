@@ -458,9 +458,12 @@ class VoiceControlService : Service() {
                             }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
-                                val blockedRules = gate.state.value.rules
+                                // One snapshot: rules must be read once so the log and the
+                                // user-requested check describe the same evaluation.
+                                val rules = gate.state.value.rules
+                                val blockedRules = rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
-                                val reasons = joinedBlockedReasons(gate.state.value.rules)
+                                val reasons = joinedBlockedReasons(rules)
                                 val isUserRequested = blockedRules.keys.any {
                                     it == EnabledByUserCondition.ID
                                 }

@@ -43,7 +43,7 @@ class AsrBackendSelector @Inject constructor(
         // 1. zh/ja/ko/yue -> SenseVoiceBackend (native text -> ML Kit translation)
         // 2. de/es/fr      -> CanaryFlashBackend (native translate to English)
         // 3. en            -> SenseVoiceBackend (fast non-autoregressive path; no translation)
-        // 4. otherwise     -> unsupported (null; Whisper may remain in-tree but unselected)
+        // 4. otherwise     -> unsupported (null)
         val osLang = currentLocale().language
         return when (osLang) {
             in SENSEVOICE_LANGS -> senseVoiceBackend.get()

@@ -215,7 +215,8 @@ class ModelManager @Inject constructor(
      */
     suspend fun ensureModel(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Result<Unit> = withContext(Dispatchers.IO) {
         if (isModelReady(spec)) {
-            _downloadState.value = ModelDownloadState.Ready
+            // No Ready claim here: the LFM model downloads after this one, so the set is
+            // not ready until ensureLfmModel succeeds. State stays with the caller.
             return@withContext Result.success(Unit)
         }
         val targetDir = File(filesDir, spec.targetDir)
@@ -224,7 +225,6 @@ class ModelManager @Inject constructor(
             // never early-return success here — it falls through to downloadFile, which
             // re-verifies/replaces.
             if (spec.files.all { file -> cachedFileVerified(targetDir, file) }) {
-                _downloadState.value = ModelDownloadState.Ready
                 return@withContext Result.success(Unit)
             }
             try {
@@ -233,7 +233,6 @@ class ModelManager @Inject constructor(
                     val dest = File(targetDir, file.filename)
                     downloadFile(file.url, dest, file.filename, file.sha256)
                 }
-                _downloadState.value = ModelDownloadState.Ready
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "Model download failed for %s", spec.targetDir)

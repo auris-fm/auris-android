@@ -113,6 +113,7 @@ class CloudTurnExitControlTest {
             statsQuerySink = mock(),
             gracePeriodSignal = mock(),
             playbackManager = mock(),
+            playbackContextMonitor = mock(),
         )
         (route as? DuckThenPause)?.executor = executor
         val facts = mutableListOf<VoiceActionOutcome>()

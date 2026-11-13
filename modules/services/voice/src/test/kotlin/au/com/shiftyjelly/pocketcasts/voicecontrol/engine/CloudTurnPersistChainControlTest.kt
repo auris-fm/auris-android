@@ -81,6 +81,7 @@ class CloudTurnPersistChainControlTest {
             statsQuerySink = mock(),
             gracePeriodSignal = mock(),
             playbackManager = mock(),
+            playbackContextMonitor = mock(),
         )
         val token = engine.openInvocationForTest(UUID.randomUUID(), id = 11L)
         val dispatcher = VoiceIntentDispatcher()

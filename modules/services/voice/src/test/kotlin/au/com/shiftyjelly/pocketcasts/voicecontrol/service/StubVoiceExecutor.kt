@@ -56,6 +56,7 @@ class StubVoiceExecutor(
     stubOf(VoiceStatsQuerySink::class.java),
     stubOf(GracePeriodSignal::class.java),
     stubOf(PlaybackManager::class.java),
+    stubOf(au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor::class.java),
 ) {
     override suspend fun execute(
         intent: VoiceIntent,

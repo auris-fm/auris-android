@@ -126,10 +126,26 @@ class VoiceControlModeObserverAvailabilityTest {
             BluetoothCandidate(deviceId = SCO_INPUT_ID, transport = BluetoothTransport.ClassicSco),
         )
 
+        /** When set, [startBluetoothSco] does not bring the link up: the test stages the race
+         * where the SCO state broadcast arrives before the acquisition observes selection. */
+        var holdScoDown = false
+
         override fun startBluetoothSco() {
             scoStarts++
-            if (!establish) return
+            if (!establish || holdScoDown) return
+            bringScoUp()
+        }
+
+        /** The link comes up for real: the acquisition's selection check sees it. */
+        fun bringScoUp() {
             scoLinkUp = true
+            deliverScoUpBroadcast()
+        }
+
+        /** The platform reports the link up (shadow + broadcast) while [scoLinkUp] stays down:
+         * the monitor classifies Headset and the observer may start the stream, but the
+         * acquisition's own selection check has not observed selection yet. */
+        fun deliverScoUpBroadcast() {
             setShadowBluetoothScoOn(audioManager, true)
             shadowOf(audioManager).setInputDevices(
                 listOf(AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BLUETOOTH_SCO).build()),
@@ -649,6 +665,54 @@ class VoiceControlModeObserverAvailabilityTest {
             awaitState("capture back up after the real trigger") {
                 harness.hardware.attachCount >= 3
             }
+        } finally {
+            harness.stop()
+        }
+    }
+
+    /**
+     * The acquisition can lose the race against the mode observer: the SCO state broadcast
+     * publishes the route while the acquisition is still waiting to observe selection, the
+     * observer starts the stream itself, and the acquisition then returns Acquired through
+     * the reuse path. That capture still runs on the link the acquisition selected, so its
+     * self-end restart must WAIT for the reacquire — not spend inside the release's debounce
+     * window and open capture on the routing the release is still tearing down.
+     */
+    @Test
+    fun `a capture the observer starts mid-acquisition still waits its restart on the reacquire`() = runBlocking {
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            // The acquisition starts but selection never completes while the link is held down.
+            harness.scoPlatform.holdScoDown = true
+            awaitState("acquisition started") { harness.scoPlatform.scoStarts >= 1 }
+
+            // The SCO state broadcast arrives first: the route reads Headset and the observer
+            // starts the stream itself, before the acquisition has observed selection.
+            harness.scoPlatform.deliverScoUpBroadcast()
+            awaitState("capture up mid-acquisition") { harness.hardware.attachCount >= 1 }
+
+            // Selection completes; the acquisition returns Acquired through the reuse path.
+            harness.scoPlatform.bringScoUp()
+            awaitState("acquisition settled") { harness.monitor.route.value == AudioRoute.Headset(true) }
+            awaitState("capture committed") { harness.engineStarted() }
+            val scoBeforeEnd = harness.scoPlatform.scoStarts
+            val attaches = harness.hardware.attachCount
+
+            // Self-end: the restart must wait for a FRESH acquisition (one more SCO start),
+            // not spend on the just-released routing. The platform answers SCO normally now.
+            harness.scoPlatform.holdScoDown = false
+            selfEndCapture(harness)
+            awaitState("restarted after the reacquire") { harness.hardware.attachCount >= attaches + 1 }
+            assertEquals(
+                "the restart followed a fresh acquisition",
+                scoBeforeEnd + 1,
+                harness.scoPlatform.scoStarts,
+            )
         } finally {
             harness.stop()
         }

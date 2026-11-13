@@ -213,6 +213,12 @@ class RouteAcquisition(
             Selection.SELECTED -> Unit
         }
 
+        // After SELECTED the routing is acquired no matter who opened the stream: if the mode
+        // observer started (and handed off) the stream while this attempt waited for
+        // selection, that capture still runs on the link this attempt selected, so its
+        // restart must wait for an acquisition too.
+        acquiredForCapture = true
+
         // The mode observer can confirm, start and hand off a stream while this attempt was
         // waiting for selection: the callbacks publish the confirmed route, and the engine starts
         // from that. Opening a second stream here would delete the one the engine is using, and
@@ -234,9 +240,7 @@ class RouteAcquisition(
             release()
             return AcquisitionResult.Failed(REASON_FAILED)
         }
-        // The stream this capture will run on came from THIS acquisition; a later restart
-        // for it must wait until an acquisition has re-opened a stream.
-        acquiredForCapture = true
+
         return AcquisitionResult.Acquired(openedDeviceId)
     }
 

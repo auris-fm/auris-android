@@ -706,27 +706,38 @@ class VoiceControlModeObserverAvailabilityTest {
     }
 
     @Test
-    fun `a device-set change arriving mid-attempt gets its coalesced retry after the failure`() = runBlocking {
+    fun `a blocker clearing mid-attempt still gets its attempt after the failure with no later emission`() = runBlocking {
         setAirPodsConnected()
         val modelsReady = ModelsReadyCondition(isReady = false)
         val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
         val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
-        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
+        val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 600L, scoEstablishes = false)
         try {
             harness.awaitObserverInstalled()
             awaitState("attempt in flight") { harness.scoPlatform.scoStarts >= 1 }
-            // The device set changes WHILE the attempt is timing out (headset re-enumerated).
-            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
-            setInputDevices()
-            harness.monitor.onDevicesChanged()
-            awaitState("availability back to speaker") { harness.monitor.availability.value == AudioRoute.Speaker }
-            setAirPodsConnected()
-            harness.monitor.onDevicesChanged()
-            awaitState("availability candidate again") { harness.monitor.availability.value == AudioRoute.BluetoothA2dpOnly }
-
-            // The attempt fails, recording the START availability; the mid-attempt change makes
-            // the recorded surface stale, so the observer's next run must attempt again.
-            awaitState("coalesced retry after the failure") { harness.scoPlatform.scoStarts >= 2 }
+            // Gate blocks and clears WHILE the attempt is in flight: both emissions are
+            // consumed by the in-flight guard (rule 2's coalescing). Nothing changes after
+            // the attempt ends, so the only path to a retry is the coalesced re-evaluation.
+            otherAppRule.block("other_app_playing")
+            otherAppRule.allow()
+            val attemptsSoFar = harness.scoPlatform.scoStarts
+            // The failure unwinds, and the coalesced trigger's re-evaluation fires a second
+            // attempt WITHOUT any new emission after the block/allow pair.
+            awaitState("coalesced attempt after the failure") {
+                harness.scoPlatform.scoStarts > attemptsSoFar
+            }
+            awaitState("attempt ended") {
+                getField(harness.service, "acquisitionJob") == null &&
+                    getField(harness.service, "triggerArrivedDuringAttempt") == false
+            }
+            val afterRetry = harness.scoPlatform.scoStarts
+            Thread.sleep(300)
+            testScheduler.advanceTimeBy(300.milliseconds)
+            assertEquals(
+                "exactly one coalesced attempt, no loop",
+                afterRetry,
+                harness.scoPlatform.scoStarts,
+            )
         } finally {
             harness.stop()
         }

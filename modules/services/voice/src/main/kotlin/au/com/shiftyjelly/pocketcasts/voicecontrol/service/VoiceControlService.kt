@@ -172,6 +172,7 @@ class VoiceControlService : Service() {
     // observer run attempts again. A failure while the gate is not Allowed records nothing:
     // that attempt was abandoned by a blocker, and the blocker clearing is itself the trigger.
     private var failedAttemptAvailability: AudioRoute? = null
+    @Volatile private var triggerArrivedDuringAttempt = false
 
     /**
      * Why the last teardown declined to release, or null when it released cleanly.
@@ -453,6 +454,12 @@ class VoiceControlService : Service() {
                     // is what a pending acquisition needs. `route` is the OBSERVATION and stays Unknown
                     // without one; reading it here would either abort a succeeding acquisition or force
                     // the observation to carry availability, which is the inference PR #56 removed.
+                    // RULE 2, COALESCING: an emission that arrives while an attempt is in
+                    // flight is consumed by this early return — remember it, so the attempt's
+                    // end can re-run the decision once (the skip guard keeps that finite).
+                    if (acquisitionJob != null) {
+                        triggerArrivedDuringAttempt = true
+                    }
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
@@ -975,9 +982,10 @@ class VoiceControlService : Service() {
         val gateAllows = {
             gate.state.value.allowed && audioRouteMonitor.availability.value.keepsPendingAcquisition()
         }
+        var attemptResult: AcquisitionResult? = null
         acquisitionJob = serviceScope.launch {
             try {
-                val result = routeAcquisition.acquire(route, gateAllows)
+                val result = routeAcquisition.acquire(route, gateAllows).also { attemptResult = it }
                 // Publish completion before starting the engine: the route monitor will flip to
                 // Headset while startEngine() suspends, and the route-change handling must not
                 // cancel the engine start as if it were still an acquisition.
@@ -1004,7 +1012,10 @@ class VoiceControlService : Service() {
                         val gateState = gate.state.value
                         // A failure while the gate is not Allowed was an abandonment, not a
                         // failed attempt: record nothing, the blocker clearing is the trigger.
-                        if (gateState.allowed) {
+                        // And when a trigger was coalesced into this attempt, do not record
+                        // either: the coalesced re-evaluation after the attempt IS the retry
+                        // that trigger bought, and recording here would skip it.
+                        if (gateState.allowed && !triggerArrivedDuringAttempt) {
                             failedAttemptAvailability = attemptAvailability
                         }
                         val reasons = joinedBlockedReasons(gateState.rules)
@@ -1032,8 +1043,21 @@ class VoiceControlService : Service() {
                     )
                 }
             } finally {
-                if (acquisitionJob === currentCoroutineContext()[Job]) {
+                val superseded = acquisitionJob !== null && acquisitionJob !== currentCoroutineContext()[Job]
+                if (!superseded) {
                     acquisitionJob = null
+                }
+                // RULE 2, RE-EVALUATION: a failed or abandoned attempt ends with the decision
+                // not re-run by anything else, and a trigger consumed mid-attempt never got its
+                // own turn. Re-run the decision ONCE here: if the surface is unchanged the
+                // recorded start availability makes the skip fire, so this cannot loop; if the
+                // devices changed or a blocker cleared, it is exactly the coalesced attempt.
+                val consumedTrigger = triggerArrivedDuringAttempt
+                triggerArrivedDuringAttempt = false
+                if (!superseded &&
+                    (consumedTrigger || attemptResult is AcquisitionResult.Failed || attemptResult is AcquisitionResult.Cancelled)
+                ) {
+                    acquireExternalMicrophoneIfCandidate()
                 }
             }
         }

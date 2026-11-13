@@ -117,7 +117,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 else -> null
             }
             // Readiness is the selected backend's OWN model files, the same surface
-            // VoiceControlService uses. The shared downloadState flow never reports Ready.
+            // VoiceControlService uses. The shared downloadState flow reports Ready only
+            // once the whole model set (LFM router included) is on disk.
             // Recomputed on resume so a backend that finishes installing shows as ready.
             var readinessRevision by remember { mutableIntStateOf(0) }
             DisposableEffect(this) {

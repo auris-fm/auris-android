@@ -129,19 +129,26 @@ class ModelManager @Inject constructor(
     fun lfmRouterInputFormat(): RouterInputFormat? = lfmRelease()?.routerInputFormat
 
     suspend fun ensureLfmModel(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isLfmModelReady()) return@withContext Result.success(Unit)
+        if (isLfmModelReady()) {
+            // A fully cached set IS ready, even with nothing downloaded this run
+            // (reviewer f9568faf03): the ASR download before this one must not leave
+            // the screen showing its own Downloading(100) forever.
+            _downloadState.value = ModelDownloadState.Ready
+            return@withContext Result.success(Unit)
+        }
         downloadMutex.withLock {
-            if (isLfmModelReady()) return@withContext Result.success(Unit)
+            if (isLfmModelReady()) {
+                _downloadState.value = ModelDownloadState.Ready
+                return@withContext Result.success(Unit)
+            }
             try {
                 lfmDir.mkdirs()
                 val manifest = downloadText(LFM_LATEST_URL, "LFM manifest")
                 val release = parseLfmManifest(manifest)
                 if (!release.routerInputFormat.isReadyForInference) {
-                    return@withContext Result.failure(
-                        IllegalStateException(
-                            "Unsupported router_input_format: ${release.routerInputFormat.wireName}",
-                        ),
-                    )
+                    val reason = "Unsupported router_input_format: ${release.routerInputFormat.wireName}"
+                    _downloadState.value = ModelDownloadState.Failed(reason = reason)
+                    return@withContext Result.failure(IllegalStateException(reason))
                 }
                 release.requiredAssets.forEach { asset ->
                     downloadFile(

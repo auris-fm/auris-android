@@ -8,6 +8,7 @@ import com.sun.net.httpserver.HttpServer
 import java.io.File
 import java.net.InetSocketAddress
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -67,6 +68,60 @@ class ModelManagerTest {
             // progress report stays, but no Ready claim is made here.
             val state = manager.downloadState.value
             assertFalse("ASR download alone must not claim Ready, was $state", state is ModelDownloadState.Ready)
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    @Test
+    fun `an ASR download with the LFM model already cached ends Ready, not Downloading`() {
+        val manager = ModelManager(context).apply { filesDir = tempDir.root }
+
+        // Cache the LFM set: a manifest the manager parses plus asset files at the
+        // declared byte lengths (the cache check is length-based, like production).
+        fun assetJson(name: String, bytes: Long) = """"$name":{"url":"http://unused/$name","bytes":$bytes,"sha256":"x"}"""
+        val modelBytes = 10L
+        val classifierBytes = 20L
+        val labelBytes = 30L
+        val manifest = """
+            {"version":"t","router_input_format":"english_v1","assets":{
+              ${assetJson("model.gguf", modelBytes)},
+              ${assetJson("classifier.bin", classifierBytes)},
+              ${assetJson("label_map.json", labelBytes)}
+            }}
+        """.trimIndent()
+        val lfmDir = File(manager.filesDir, "function-call")
+        lfmDir.mkdirs()
+        File(lfmDir, "manifest.json").writeText(manifest)
+        File(lfmDir, "model.gguf").writeText("a".repeat(modelBytes.toInt()))
+        File(lfmDir, "classifier.bin").writeText("b".repeat(classifierBytes.toInt()))
+        File(lfmDir, "label_map.json").writeText("c".repeat(labelBytes.toInt()))
+        assertTrue(manager.isLfmModelReady())
+
+        val body = "fake model bytes".toByteArray()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/a.ort") { exchange ->
+            exchange.sendResponseHeaders(200, body.size.toLong())
+            exchange.responseBody.use { it.write(body) }
+        }
+        server.start()
+        try {
+            val spec = ModelSpec(
+                files = listOf(
+                    ModelFile(url = "http://127.0.0.1:${server.address.port}/a.ort", filename = "a.ort"),
+                ),
+                targetDir = "sensevoice-model",
+            )
+            val result = runBlocking {
+                manager.ensureModel(spec)
+                // The service's ensureModelsReady calls ensureLfmModel after the ASR
+                // download; with the LFM set cached it takes the early return.
+                manager.ensureLfmModel()
+            }
+            assertTrue(result.isSuccess)
+            // The ASR download left the state at Downloading(100); the cached LFM set
+            // must resolve it to Ready, not leave the row stuck at "Downloading 100%".
+            assertEquals(ModelDownloadState.Ready, manager.downloadState.value)
         } finally {
             server.stop(0)
         }

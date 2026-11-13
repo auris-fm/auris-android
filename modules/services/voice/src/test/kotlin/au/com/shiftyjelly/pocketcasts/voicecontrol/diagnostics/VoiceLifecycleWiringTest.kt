@@ -407,4 +407,126 @@ class VoiceLifecycleWiringTest {
             Dispatchers.resetMain()
         }
     }
+
+    /**
+     * The `NotOnCall` gate now reads call state from `AudioManager`'s audio mode. At the service
+     * level: a call starting must block the gate and stop an active capture with the spec-required
+     * `mic_capture_stopped` event carrying the `on_call` reason; a call ending must allow capture
+     * again.
+     */
+    @Test
+    fun `a call starting stops capture with mic_capture_stopped (reason on_call) and a call ending allows capture again`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        val scope = CoroutineScope(Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
+        val service = VoiceControlService()
+        try {
+            LifecycleLogCapture().use { log ->
+                val context = ApplicationProvider.getApplicationContext<Context>()
+                android.content.ContextWrapper::class.java.getDeclaredMethod("attachBaseContext", Context::class.java)
+                    .apply { isAccessible = true }.invoke(service, context)
+                shadowOf(context as android.app.Application).grantPermissions(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
+                val signal = GracePeriodSignal()
+                val ready = ModelsReadyCondition(isReady = true)
+                val visibility = MutableStateFlow(true)
+                val lifecycle = object : au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider {
+                    override val isInForeground = visibility
+                }
+                val foreground = au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor(lifecycle, scope, signal)
+                val playbackState = MutableStateFlow(
+                    au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState(
+                        state = au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState.State.PAUSED,
+                        episodeUuid = "episode-id",
+                    ),
+                )
+                val playbackManager = mock<au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager>()
+                whenever(playbackManager.playbackStateFlow).thenReturn(playbackState)
+                val playbackMonitor = PlaybackContextMonitor(playbackManager, signal, backgroundScope)
+                val settings = mock<au.com.shiftyjelly.pocketcasts.preferences.Settings>()
+                val disabled = mock<au.com.shiftyjelly.pocketcasts.preferences.UserSetting<Boolean>>()
+                whenever(disabled.flow).thenReturn(MutableStateFlow(false))
+                whenever(settings.voiceControlUserDisabled).thenReturn(disabled)
+                val notOnCall = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition()
+                val gate = au.com.shiftyjelly.pocketcasts.voicecontrol.di.VoiceControlModule.provideVoiceControlGate(
+                    playbackContextMonitor = playbackMonitor,
+                    settings = settings,
+                    deviceSupported = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.DeviceSupportedCondition(),
+                    modelsReady = ready,
+                    notOnCall = notOnCall,
+                    notCasting = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCondition(),
+                    batteryOk = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.BatteryOkCondition(),
+                    appInForeground = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition(foreground, scope),
+                    otherAppPlaying = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition().apply { update(false) },
+                    scope = scope,
+                )
+                val route = MutableStateFlow<AudioRoute>(AudioRoute.Headset(true))
+                val monitor = mock<AndroidAudioRouteMonitor>()
+                whenever(monitor.route).thenReturn(route)
+                whenever(monitor.availability).thenReturn(route)
+                val engine = mock<VoiceAsrEngine>()
+                whenever(engine.start(any(), any(), any(), any(), any(), any(), any()))
+                    .thenReturn(CaptureAttachment(CompletableDeferred(true)))
+                val backend = mock<AsrBackend>()
+                whenever(backend.requiredModel).thenReturn(ModelSpec(files = emptyList(), targetDir = "test"))
+                whenever(backend.ensureReady()).thenReturn(Result.success(Unit))
+                val selector = mock<AsrBackendSelector>()
+                whenever(selector.select()).thenReturn(backend)
+                val acquisition = mock<RouteAcquisition>()
+                whenever(acquisition.confirmCaptureStream()).thenReturn(true)
+                service.gate = gate
+                service.notificationManager = mock {
+                    on { createDownloadingNotification() }.thenReturn(mock<Notification>())
+                    on { createListeningNotification(any()) }.thenReturn(mock<Notification>())
+                }
+                service.voiceRecognizer = mock()
+                whenever(service.voiceRecognizer.ensureReady()).thenReturn(Result.success(Unit))
+                service.voicePlaybackIntentExecutor = mock()
+                service.voiceDialogManager = mock()
+                service.playbackContextMonitor = playbackMonitor
+                service.audioRouteMonitor = monitor
+                service.listeningModePolicy = ListeningModePolicy(gate, monitor, signal, scope)
+                service.voiceAsrEngine = dagger.Lazy { engine }
+                service.asrBackendSelector = selector
+                service.playbackBufferRecorder = mock()
+                service.modelManager = mock {
+                    on { isModelReady(any()) }.thenReturn(true)
+                    on { isModelReadyVerified(any()) }.thenReturn(true)
+                    on { isLfmModelReady() }.thenReturn(true)
+                    on { ensureModel(any()) }.thenReturn(Result.success(Unit))
+                    on { ensureLfmModel() }.thenReturn(Result.success(Unit))
+                }
+                service.modelsReadyCondition = ready
+                service.voiceControlServiceController = mock()
+                service.audioFeedbackRenderer = mock()
+                service.gracePeriodSignal = signal
+                service.routeAcquisition = acquisition
+                service.captureStateHolder = VoiceControlCaptureStateHolder()
+                service.onStartCommand(null, 0, 1)
+                fun pumpUntil(predicate: () -> Boolean) {
+                    repeat(500) {
+                        runCurrent()
+                        if (predicate()) return
+                        Thread.sleep(10)
+                    }
+                    error("bounded service observer did not reach expected capture state")
+                }
+                pumpUntil { service.captureStateHolder.capturing.value }
+                assertTrue("capture starts with no call", gate.state.value.allowed)
+
+                notOnCall.updateInCall(true)
+                pumpUntil { !service.captureStateHolder.capturing.value }
+                val rule = gate.state.value.rules[au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition.ID]
+                val blocked = rule as? au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState.Blocked
+                assertTrue("the call blocks the NotOnCall rule with the on_call reason", blocked?.reason == "on_call")
+                assertTrue("the capture stop is the service's eligibility-off stop of a live capture", log.lines().any { it.contains("event=Capture reason=EligibilityOff source=ServiceObserver") && it.contains("prior_capture=true capture=false") })
+
+                notOnCall.updateInCall(false)
+                pumpUntil { service.captureStateHolder.capturing.value }
+                assertTrue("a call ending allows capture again", gate.state.value.allowed)
+            }
+        } finally {
+            runCatching { service.onDestroy() }
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+            Dispatchers.resetMain()
+        }
+    }
 }

@@ -4,9 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.PowerManager
-import android.telephony.TelephonyCallback
-import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.BatteryOkCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCondition
@@ -48,25 +47,21 @@ class LiveConditionMonitor @Inject constructor(
         }
     }
 
-    private val callStateCallback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
-        override fun onCallStateChanged(state: Int) {
-            val inCall = state == TelephonyManager.CALL_STATE_OFFHOOK
-            Timber.i("Call state changed: inCall=%s", inCall)
-            notOnCallCondition.updateInCall(inCall)
-        }
-    }
+    // Call detection reads AudioManager's audio mode (no permission needed). The old
+    // TelephonyManager listener needed READ_PHONE_STATE, which the app does not hold, so it
+    // failed with "permission not granted" and the gate defaulted to Allowed during a call.
+    private val callModeWatcher = AudioModeCallWatcher(
+        audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager,
+        callbackExecutor = callbackExecutor,
+        onInCall = { inCall -> notOnCallCondition.updateInCall(inCall) },
+    )
 
     fun start() {
         if (started) return
         started = true
 
-        // Phone call state
-        try {
-            val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-            tm?.registerTelephonyCallback(callbackExecutor, callStateCallback)
-        } catch (e: SecurityException) {
-            Timber.w(e, "Cannot listen for phone state — permission not granted")
-        }
+        // Phone/VoIP call state, via AudioManager's audio mode
+        callModeWatcher.start()
 
         // Power save mode
         context.registerReceiver(

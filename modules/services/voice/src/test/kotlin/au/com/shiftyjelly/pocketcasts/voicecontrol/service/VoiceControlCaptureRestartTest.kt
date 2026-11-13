@@ -142,8 +142,6 @@ class VoiceControlCaptureRestartTest {
 
         @Volatile var scoLinkUp = false
             private set
-        var modeSets = 0
-        var lastMode = -1
 
         override fun bluetoothCandidates(): List<au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate> = listOf(
             au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate(
@@ -214,14 +212,6 @@ class VoiceControlCaptureRestartTest {
         override fun communicationDeviceId(): Int? = null
         override fun clearCommunicationDevice() = Unit
 
-        // Production awaits MODE_IN_COMMUNICATION before confirming an SCO capture stream; the
-        // shadow implements setMode/getMode, so keep the real semantics here.
-        override fun audioMode(): Int = audioManager.mode
-        override fun setAudioMode(mode: Int) {
-            modeSets++
-            lastMode = mode
-            audioManager.mode = mode
-        }
 
         // Device truth: once the HFP link is up, the opened stream selects the SCO input device.
         override fun deviceType(deviceId: Int): Int? = if (deviceId == SCO_INPUT_ID) AudioDeviceInfo.TYPE_BLUETOOTH_SCO else null

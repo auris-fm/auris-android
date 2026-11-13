@@ -250,6 +250,9 @@ class SegmentObserver(
     }
 
     fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? {
+        // An EMPTY chunk needs no adoption: the empty-prefix admission already opened the prefix
+        // and settled its token, and adopting an empty array would double-start the sink prefix.
+        if (firstChunk.isEmpty()) return speechStartedAdmitting(captureSession, routeClass, 0)?.context
         val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size) ?: return null
         if (!adoptFirstChunk(admitted, firstChunk)) releaseInitialChunk(admitted)
         return admitted.context

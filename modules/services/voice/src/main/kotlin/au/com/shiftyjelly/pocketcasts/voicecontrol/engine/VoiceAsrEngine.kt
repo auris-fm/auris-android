@@ -318,6 +318,10 @@ class VoiceAsrEngine @Inject constructor(
                                 wakeRequired = !gracePeriodSignal.isActive.value,
                             )
                             openContext = admission?.context
+                            // PER-UTTERANCE accounting: the clip starts from zero each time, so
+                            // the previous utterance's committed size must never leak into this
+                            // one's final-tail arithmetic.
+                            accountedSamples = 0
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {

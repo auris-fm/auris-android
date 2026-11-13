@@ -103,6 +103,16 @@ class RouteAcquisition(
     /** True once this attempt selected routing that [release] must undo. */
     private var routingAcquired = false
 
+    /**
+     * True when the CURRENT capture's routing was opened by an acquisition
+     * ([performAcquisition]). Set only there; cleared only when a capture starts that needed
+     * no acquisition ([acquire] returned `NotNeeded`). The restart decision reads this: a
+     * restart for an acquisition-ridden capture must wait until the acquisition has re-opened
+     * the stream, while a wired or already-isolated capture restarts at once.
+     */
+    var acquiredForCapture = false
+        private set
+
     /** True when this attempt opened an input stream that it has not handed off yet. */
     private var openedStream = false
 
@@ -125,7 +135,13 @@ class RouteAcquisition(
     private var savedAudioMode: Int? = null
 
     suspend fun acquire(route: AudioRoute, gateAllows: () -> Boolean): AcquisitionResult {
-        if (route !is AudioRoute.BluetoothA2dpOnly) return AcquisitionResult.NotNeeded
+        if (route !is AudioRoute.BluetoothA2dpOnly) {
+            // The capture this starts runs on routing nobody acquired (wired, already-
+            // isolated input): record that, so a later restart does not wait on an
+            // acquisition that will never happen.
+            acquiredForCapture = false
+            return AcquisitionResult.NotNeeded
+        }
         val candidate = platform.bluetoothCandidates().firstOrNull()
         if (candidate == null) {
             Timber.w("[RouteAcquisition] no bluetooth candidate for route=%s", route)
@@ -199,7 +215,7 @@ class RouteAcquisition(
                 return AcquisitionResult.Failed(REASON_TIMEOUT)
             }
 
-            Selection.SELECTED -> Unit
+            Selection.SELECTED -> acquiredForCapture = true
         }
 
         // The mode observer can confirm, start and hand off a stream while this attempt was
@@ -207,7 +223,10 @@ class RouteAcquisition(
         // from that. Opening a second stream here would delete the one the engine is using, and
         // the coordinator would then report "already started" with VAD attached to nothing.
         // Reuse the stream this attempt already owns.
-        if (openedStream) return AcquisitionResult.Acquired(openedDeviceId)
+        if (openedStream) {
+            acquiredForCapture = true
+            return AcquisitionResult.Acquired(openedDeviceId)
+        }
 
         if (openConfirmedStream() < 0) return AcquisitionResult.Failed(REASON_FAILED)
 

@@ -153,13 +153,6 @@ class VoiceControlService : Service() {
     private var pendingAutomaticRestart = false
     private var captureStartedAtMs = 0L
 
-    // Whether the capture that self-ended was riding an acquisition-opened stream. A restart
-    // for such a capture must wait until the acquisition has reopened the stream: the recovery
-    // nudge can run while the route still OBSERVES the old headset (the release's debounced
-    // refresh has not landed), and starting then would open capture on the released routing —
-    // it dies at once and muddies the restart accounting.
-    private var pendingRestartRidesAcquisition = false
-
     /**
      * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
      * observer is the single owner of engine starts, so recovery signals it rather than starting
@@ -937,7 +930,6 @@ class VoiceControlService : Service() {
         val ranForMs = SystemClock.elapsedRealtime() - captureStartedAtMs
         captureRestartBudget.onTerminated(ranForMs)
         pendingAutomaticRestart = captureRestartBudget.allows()
-        pendingRestartRidesAcquisition = routeAcquisition.hasConfirmedStream
         if (!captureRestartBudget.allows()) {
             // voice-control-core.md > Microphone lifecycle logging: ERROR, with the end reason
             // and how long the capture had run.
@@ -971,30 +963,28 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * Teardown shared by every stop: clear the started state, release acquisition routing, and list
-     * the mode as Off. A caller that still holds a running engine stops it first.
-     */
-    /**
      * ONE place decides whether this observer run IS the granted automatic restart, and spends
      * the credit when it is. True when the caller should treat its start attempt as the
      * restart's outcome: a false start must log `mic_restart_withheld`.
      *
-     * An A2DP-only restart only counts once its acquisition has confirmed the stream — earlier
-     * the recovery nudge runs before the route re-flips, and spending then would withhold the
-     * very restart the spec grants. On routes that need no acquisition (wired headset,
-     * already-isolated input) the start attempt itself IS the attempt, so the credit spends
-     * there; `hasConfirmedStream` is never true for them.
+     * A restart for a capture whose routing came from an acquisition only counts once the
+     * acquisition has re-opened the stream — earlier the recovery nudge runs while the route
+     * still OBSERVES the old headset (the release's debounced refresh has not landed), and
+     * spending then would open capture on the released routing: it dies at once and withholds
+     * the very restart the spec grants. A capture that needed no acquisition (wired headset,
+     * already-isolated input — `acquiredForCapture` is false, set when its start got
+     * `NotNeeded`) restarts at once: nothing has to re-open for it.
      */
     private fun beginAutomaticRestart(route: AudioRoute): Boolean {
         if (!pendingAutomaticRestart) return false
+        if (routeAcquisition.acquiredForCapture && !routeAcquisition.hasConfirmedStream) return false
         // The restart can only begin on a surface the engine can actually start on: an A2DP-only
         // restart once its acquisition has re-opened the stream, or a headset with a microphone
         // (wired, already-isolated input) when the dying capture needed no acquisition. Anything
-        // else — Unknown (the release is still settling), a still-observed headset whose stream
-        // is already released, NoMic, built-in — is a surface the start would fail on or die on:
-        // spending there would withhold the very restart the spec grants. Keep the credit; the
-        // route, availability or acquisition emissions that follow bring the decision back here.
-        if (pendingRestartRidesAcquisition && !routeAcquisition.hasConfirmedStream) return false
+        // else — Unknown (the release is still settling), NoMic, built-in — is a surface the
+        // start would fail on or die on: spending there would withhold the very restart the
+        // spec grants. Keep the credit; the route, availability or acquisition emissions that
+        // follow bring the decision back here.
         val startableNow = when (route) {
             is AudioRoute.BluetoothA2dpOnly -> routeAcquisition.hasConfirmedStream
             is AudioRoute.Headset -> route.hasMicrophone
@@ -1007,6 +997,10 @@ class VoiceControlService : Service() {
         return true
     }
 
+    /**
+     * Teardown shared by every stop: clear the started state, release acquisition routing, and list
+     * the mode as Off. A caller that still holds a running engine stops it first.
+     */
     private fun clearCaptureState() {
         engineStart.onStopped()
         captureStateHolder.update(false)

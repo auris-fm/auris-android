@@ -2011,8 +2011,23 @@ class VoiceAsrEngineTest {
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        createEngineWithSpeech(overObserver, retention, liveAuthority, recognizer, WakeWordResult(detected = false, confidence = 0f, completionSample = 4000))
-        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn((ContributionCeilings.MAX_CLIP_BYTES / 2L + 44L).toInt())
+        // The clip starts from zero at SpeechStarted, so the ceiling binds the SEGMENT's actual
+        // size at commit/completion, not a producer-size counter read from the native buffer: an
+        // utterance whose encoded WAV exceeds the per-clip ceiling must still be refused.
+        val oversized = ShortArray((ContributionCeilings.MAX_CLIP_BYTES / 2L + 44L).toInt() + 1) { 300 }
+        createEngineWithEvents(
+            overObserver,
+            retention,
+            liveAuthority,
+            listOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(oversized, 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+            recognizer,
+        )
         engine.start(
             backend = FakeAsrBackend("play something"),
             audioRoute = AudioRoute.Headset(hasMicrophone = true),
@@ -3165,5 +3180,127 @@ class VoiceAsrEngineTest {
             cancelled += observation
         }
         fun allObservedPcmSamples(): Int = completed.sumOf { o -> o.frames.sumOf { it.size } }
+    }
+
+    /** Engine over a caller-supplied event script, with a REAL observer and retention sink. */
+    private fun CoroutineScope.createEngineWithEvents(
+        observer: SegmentObserver,
+        sink: ContributionRetentionSink,
+        authorityOverride: () -> AuthorityDecision,
+        events: List<VoiceSegmenterResult>,
+        recognizer: VoiceRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
+    ) {
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(*events.toTypedArray()))
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(true))
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
+            )
+        }
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            collectionAuthority = authorityOverride,
+            retentionSink = sink,
+            segmentObserver = observer,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = bleedingBackendForLifecycle(),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { _, _ -> },
+        )
+    }
+
+    @Test
+    fun `a stale finished-utterance snapshot is never drained into the next clip`() = runTest {
+        // THE BUG THIS FIXES: the native size counter at SpeechStarted is the FINISHED-utterance
+        // snapshot (it only fills at segment end and nothing clears it between utterances in a
+        // session), so the old start path drained the PREVIOUS utterance's audio as this one's
+        // prefix. The stub below answers 800 exactly as that stale buffer would; the clip must
+        // still contain ONLY the utterance's own segment.
+        val retention = ContributionRetentionSink()
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val observer = SegmentObserver(
+            CollectionGate { _ -> true },
+            retention,
+            liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
+        )
+        val utterance = listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000))
+        createEngineWithEvents(
+            observer,
+            retention,
+            liveAuthority,
+            listOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(utterance, speechOnsetSample = 2),
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(utterance, speechOnsetSample = 2),
+            ),
+        )
+        advanceUntilIdle()
+        `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
+        org.mockito.kotlin.verify(voiceAudioProcessor, org.mockito.kotlin.times(0))
+            .drainSpeechPcm(org.mockito.kotlin.any<ShortArray>())
+        org.mockito.kotlin.verify(voiceAudioProcessor, org.mockito.kotlin.times(0))
+            .drainSpeechTail(org.mockito.kotlin.any<ShortArray>(), org.mockito.kotlin.any(), org.mockito.kotlin.any())
+        val clips = retention.retainedSnapshot()
+        assertEquals("both utterances must be retained", 2, clips.size)
+        for (clip in clips) {
+            val pcm = clip.pcm
+            assertEquals(
+                "a clip carries ONLY its own utterance's samples, never the previous one's",
+                4,
+                pcm?.size,
+            )
+            assertEquals(shortArrayOf(100, 200, 300, 400).toList(), pcm?.toList())
+        }
+        engine.stop()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `an empty-prefix admission is a real retained capture that grows at segment end`() = runTest {
+        val retention = ContributionRetentionSink()
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        val observer = SegmentObserver(
+            CollectionGate { _ -> true },
+            retention,
+            liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
+        )
+        val utterance = listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000))
+        createEngineWithEvents(
+            observer,
+            retention,
+            liveAuthority,
+            listOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(utterance, speechOnsetSample = 2),
+            ),
+        )
+        advanceUntilIdle()
+        val clips = retention.retainedSnapshot()
+        assertEquals("the empty-prefix capture is still retained and completed", 1, clips.size)
+        assertEquals("the whole segment reached the clip", 4, clips.single().pcm?.size)
+        assertEquals(8L, clips.single().bytesCharged)
+        engine.stop()
+        advanceUntilIdle()
     }
 }

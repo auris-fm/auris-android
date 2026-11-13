@@ -102,6 +102,7 @@ int main() {
     append(frames(utterance1, true));
     append(frames(gap, false));
     append(frames(utterance2, true));
+    append(frames(90, false));
 
     NativeVadProcessor processor(&capture);
     bool started = processor.start();
@@ -114,6 +115,7 @@ int main() {
     bool sawClose1 = false;
     bool sawClose2 = false;
     int32_t sizeAtClose1 = -1;
+    int32_t sizeAtClose2 = -1;
 
     if (started) {
         while (true) {
@@ -136,7 +138,10 @@ int main() {
                     std::printf("      close #1: snapshot size=%d\n", sizeAtClose1);
                 } else {
                     sawClose2 = true;
-                    std::printf("      close #2: snapshot size=%d\n", processor.getSpeechPcmSize());
+                    // Recorded INSIDE the loop: stop() clears the snapshot, so a read after it
+                    // would trivially see 0.
+                    sizeAtClose2 = processor.getSpeechPcmSize();
+                    std::printf("      close #2: snapshot size=%d\n", sizeAtClose2);
                 }
             } else if (event == 0) {
                 // Timeout: the script is fully served and nothing more is coming.
@@ -157,9 +162,12 @@ int main() {
     std::printf(
         "      size at start #2 = %d (utterance 1 was %d frames = %d samples)\n",
         sizeAtStart2, utterance1, utterance1 * kFrame);
-    if (sizeAtStart2 > 0) {
-        // What fraction of the drained "initial chunk" is actually SPEECH audio (the previous
-        // utterance's loud frames) rather than silence?
+    // THE PREMISE THE KOTLIN START PATH RELIES ON: the snapshot at utterance 2's onset still
+    // holds utterance 1's audio (native code is unchanged by the fix), and it is REAL speech.
+    // This is exactly the buffer the old Kotlin path drained as utterance 2's prefix.
+    check(sizeAtStart2 == sizeAtClose1,
+        "the finished-utterance snapshot is still intact at the next onset (the fix never reads it)");
+    {
         int64_t energy = 0;
         for (const int16_t s : drainedAtStart2) energy += static_cast<int64_t>(s) * s;
         const double rms = drainedAtStart2.empty()
@@ -168,10 +176,17 @@ int main() {
         std::printf(
             "      drained %zu samples at utterance 2 start; rms=%.0f (4000 = speech, 0 = silence)\n",
             drainedAtStart2.size(), rms);
-        check(rms > 1000.0,
-            "carry-over CONFIRMED: utterance 2's SpeechStarted drains utterance 1's audio");
+        check(rms > 1000.0, "the stale buffer is real speech audio, not silence");
+    }
+    if (sawClose2) {
+        // THE CLIP INVARIANT: utterance 2's completed snapshot (what SpeechEnded collects) must
+        // NOT contain utterance 1. A cumulative snapshot would be at least close #1's size plus
+        // all of utterance 1's frames; replacement (the correct behavior) stays below that.
+        std::printf("      size at close #2 = %d (utterance 1 closed at %d)\n", sizeAtClose2, sizeAtClose1);
+        check(sizeAtClose2 < sizeAtClose1 + utterance1 * kFrame,
+            "utterance 2's completed snapshot is NOT cumulative with utterance 1's audio");
     } else {
-        check(false, "carry-over NOT observed: utterance 2 SpeechStarted saw an empty snapshot");
+        check(false, "utterance 2 never completed");
     }
 
     std::printf("%s\n", gFailures == 0 ? "PASS" : "FAIL");

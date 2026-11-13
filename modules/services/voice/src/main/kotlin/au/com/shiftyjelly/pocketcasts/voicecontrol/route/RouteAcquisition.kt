@@ -270,6 +270,11 @@ class RouteAcquisition(
      */
     fun confirmCaptureStream(): Boolean {
         if (openedStream) return true
+        // A stream opened OUTSIDE an acquisition (this capture-start path) is routing nobody
+        // acquired: the flag must follow the stream, so a later restart for this capture does
+        // not wait on an acquisition that will never happen. performAcquisition sets it back
+        // to true once its selection completes, before either of its Acquired returns.
+        acquiredForCapture = false
         if (openConfirmedStream() < 0) return false
         if (!platform.startInputStream()) {
             release()
@@ -288,11 +293,6 @@ class RouteAcquisition(
         if (openedStream) return openedDeviceId
         val deviceId = platform.openInputStream()
         openedStream = true
-        // A stream opened OUTSIDE an acquisition (the capture-start path) is routing nobody
-        // acquired: the flag must follow the stream, so a later restart for this capture does
-        // not wait on an acquisition that will never happen. performAcquisition sets it back
-        // to true when its own stream started successfully.
-        acquiredForCapture = false
         openedDeviceId = deviceId
         streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {

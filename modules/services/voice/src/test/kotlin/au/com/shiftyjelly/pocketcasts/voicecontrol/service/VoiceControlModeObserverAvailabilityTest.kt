@@ -46,6 +46,7 @@ import java.lang.reflect.Field
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -665,6 +666,79 @@ class VoiceControlModeObserverAvailabilityTest {
             awaitState("capture back up after the real trigger") {
                 harness.hardware.attachCount >= 3
             }
+        } finally {
+            harness.stop()
+        }
+    }
+
+    /**
+     * An ordinary acquisition must leave the stream marked acquired — both when the
+     * acquisition opens the stream itself and when the mode observer won the race and the
+     * attempt returns through the reuse path. Either way the capture runs on the link the
+     * acquisition selected, so its self-end restart must wait for the reacquire.
+     */
+    @Test
+    fun `acquire marks the stream acquired on the normal and the reuse path`() = runBlocking {
+        val microphoneCapture = MicrophoneCapture(
+            ApplicationProvider.getApplicationContext(),
+            FakeHardware(scoReady = { true }),
+            mock(EpisodeReferenceEligibility::class.java),
+        )
+        setAirPodsConnected()
+
+        // Normal path: the acquisition opens, confirms and starts the stream itself.
+        val acquisition = RouteAcquisition(FakeScoPlatform(microphoneCapture), timeoutMs = 6_000L, pollIntervalMs = 10L)
+        val normal = acquisition.acquire(AudioRoute.BluetoothA2dpOnly, gateAllows = { true })
+        assertTrue("normal acquisition succeeds", normal is au.com.shiftyjelly.pocketcasts.voicecontrol.route.AcquisitionResult.Acquired)
+        assertTrue(
+            "the normal acquisition's stream is marked acquired",
+            getField(acquisition, "acquiredForCapture") as Boolean,
+        )
+
+        // Reuse path: the observer already opened the stream; the attempt returns Acquired
+        // through the reuse branch once selection completes.
+        val racedPlatform = FakeScoPlatform(microphoneCapture)
+        racedPlatform.holdScoDown = true
+        val raced = RouteAcquisition(racedPlatform, timeoutMs = 6_000L, pollIntervalMs = 10L)
+        assertTrue("the observer's early stream opens", raced.confirmCaptureStream())
+        kotlinx.coroutines.coroutineScope {
+            val result = async {
+                raced.acquire(AudioRoute.BluetoothA2dpOnly, gateAllows = { true })
+            }
+            racedPlatform.bringScoUp()
+            assertTrue("the raced acquisition succeeds", result.await() is au.com.shiftyjelly.pocketcasts.voicecontrol.route.AcquisitionResult.Acquired)
+            assertTrue(
+                "the reuse path's stream is marked acquired too",
+                getField(raced, "acquiredForCapture") as Boolean,
+            )
+        }
+    }
+
+    /**
+     * End to end on the ordinary path: an AirPods capture's self-end restart comes only
+     * after its FRESH acquisition, never as a spend on the just-released routing.
+     */
+    @Test
+    fun `an AirPods capture's restart comes only after its fresh acquisition`() = runBlocking {
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("capture committed") { harness.engineStarted() }
+            val scoBeforeEnd = harness.scoPlatform.scoStarts
+            val attaches = harness.hardware.attachCount
+
+            selfEndCapture(harness)
+            awaitState("restarted") { harness.hardware.attachCount >= attaches + 1 }
+            assertEquals(
+                "the restart followed a fresh acquisition",
+                scoBeforeEnd + 1,
+                harness.scoPlatform.scoStarts,
+            )
         } finally {
             harness.stop()
         }

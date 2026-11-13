@@ -62,7 +62,7 @@ class AsrBackendSelectorTest {
     }
 
     @Test
-    fun `unsupported locale returns null without selecting Whisper`() {
+    fun `unsupported locale returns null`() {
         for (lang in listOf("ar", "ru", "pt")) {
             selector = buildSelector(locale(lang))
             assertNull("Locale $lang should surface unsupported", selector.select())
@@ -70,14 +70,14 @@ class AsrBackendSelectorTest {
     }
 
     @Test
-    fun `product matrix never selects WhisperCppBackend`() {
+    fun `product matrix selects only product backends`() {
         for (lang in listOf("en", "zh", "de", "ar", "ru")) {
             selector = buildSelector(locale(lang))
             val backend = selector.select()
             if (backend != null) {
                 assertTrue(
-                    "Locale $lang must not select Whisper",
-                    backend !is WhisperCppBackend,
+                    "Locale $lang selected a non-product backend",
+                    backend is SenseVoiceBackend || backend is CanaryFlashBackend,
                 )
             }
         }
@@ -96,7 +96,7 @@ class AsrBackendSelectorTest {
     }
 
     @Test
-    fun `manual override to whisper-cpp is rejected`() {
+    fun `manual override to an unknown backend is rejected`() {
         selector.manualOverride = "whisper-cpp"
         assertThrows("Unknown backend override", IllegalStateException::class.java) {
             selector.select()

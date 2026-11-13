@@ -129,19 +129,26 @@ class ModelManager @Inject constructor(
     fun lfmRouterInputFormat(): RouterInputFormat? = lfmRelease()?.routerInputFormat
 
     suspend fun ensureLfmModel(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isLfmModelReady()) return@withContext Result.success(Unit)
+        if (isLfmModelReady()) {
+            // A fully cached set IS ready, even with nothing downloaded this run: the
+            // ASR download before this one must not leave the screen showing its own
+            // Downloading(100) forever.
+            _downloadState.value = ModelDownloadState.Ready
+            return@withContext Result.success(Unit)
+        }
         downloadMutex.withLock {
-            if (isLfmModelReady()) return@withContext Result.success(Unit)
+            if (isLfmModelReady()) {
+                _downloadState.value = ModelDownloadState.Ready
+                return@withContext Result.success(Unit)
+            }
             try {
                 lfmDir.mkdirs()
                 val manifest = downloadText(LFM_LATEST_URL, "LFM manifest")
                 val release = parseLfmManifest(manifest)
                 if (!release.routerInputFormat.isReadyForInference) {
-                    return@withContext Result.failure(
-                        IllegalStateException(
-                            "Unsupported router_input_format: ${release.routerInputFormat.wireName}",
-                        ),
-                    )
+                    val reason = "Unsupported router_input_format: ${release.routerInputFormat.wireName}"
+                    _downloadState.value = ModelDownloadState.Failed(reason = reason)
+                    return@withContext Result.failure(IllegalStateException(reason))
                 }
                 release.requiredAssets.forEach { asset ->
                     downloadFile(
@@ -158,9 +165,11 @@ class ModelManager @Inject constructor(
                     release.version,
                     release.routerInputFormat.wireName,
                 )
+                _downloadState.value = ModelDownloadState.Ready
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "LFM model download failed")
+                _downloadState.value = ModelDownloadState.Failed(reason = e.message ?: e.javaClass.simpleName)
                 Result.failure(e)
             }
         }
@@ -212,7 +221,11 @@ class ModelManager @Inject constructor(
      * Existing files are skipped (no SHA256 re-check unless sha256 is non-empty in the spec).
      */
     suspend fun ensureModel(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isModelReady(spec)) return@withContext Result.success(Unit)
+        if (isModelReady(spec)) {
+            // No Ready claim here: the LFM model downloads after this one, so the set is
+            // not ready until ensureLfmModel succeeds. State stays with the caller.
+            return@withContext Result.success(Unit)
+        }
         val targetDir = File(filesDir, spec.targetDir)
         downloadMutex.withLock {
             // Same VERIFIED predicate inside the lock (reviewer 8e0f87c8): a stale cache must
@@ -230,6 +243,7 @@ class ModelManager @Inject constructor(
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "Model download failed for %s", spec.targetDir)
+                _downloadState.value = ModelDownloadState.Failed(reason = e.message ?: e.javaClass.simpleName)
                 Result.failure(e)
             }
         }

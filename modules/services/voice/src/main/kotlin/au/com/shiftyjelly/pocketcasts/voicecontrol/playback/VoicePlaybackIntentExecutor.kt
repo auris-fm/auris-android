@@ -277,7 +277,6 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                 // identity a later retry must reuse.
                 val preparedTurn = cloudRouteSink.prepareTurn(
                     request = intent.request,
-                    tier = intent.tier,
                     context = context,
                     isLiveGraceTurn = captured != null &&
                         gracePeriodSignal.isCurrent(captured) &&
@@ -716,7 +715,6 @@ interface VoiceCloudRouteSink {
      */
     suspend fun routeToCloud(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         // Defaults to a NEW conversation: a caller that does not say it continues a grace window is
         // starting one, and CREATE is the safe reading of silence.
@@ -737,7 +735,6 @@ interface VoiceCloudRouteSink {
      */
     suspend fun prepareTurn(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         isLiveGraceTurn: Boolean = false,
         capturedOrigin: Long? = null,
@@ -750,16 +747,6 @@ interface VoiceCloudRouteSink {
         /** ASR source language retained with the prepared request, including retries. */
         sourceLanguage: String? = null,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
-
-    /**
-     * Installs [consumer] as the release target for a logical request that is no longer retryable.
-     *
-     * INVERTED ON PURPOSE. Binding this as a constructor dependency would make the sink and the dialog
-     * manager depend on each other -- the router already reaches the manager -- and Dagger rejects the
-     * cycle. The owner registers its release here, so the connection is one-way and the graph stays
-     * acyclic.
-     */
-    fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit)
 
     /**
      * Forgets the turn retained for [logicalRequestId]: no retry of it is coming.
@@ -806,7 +793,6 @@ interface VoiceCloudRouteSink {
      */
     suspend fun routeToCloudWithHint(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
         isLiveGraceTurn: Boolean = false,
@@ -814,15 +800,7 @@ interface VoiceCloudRouteSink {
         isWakeOriginated: Boolean = false,
         /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
         admitted: String?,
-    ): CloudTurnResult = routeToCloud(
-        request,
-        tier,
-        context,
-        isLiveGraceTurn,
-        capturedOrigin,
-        isWakeOriginated,
-        admitted,
-    )
+    ): CloudTurnResult
 }
 
 interface VoiceQueueSink {

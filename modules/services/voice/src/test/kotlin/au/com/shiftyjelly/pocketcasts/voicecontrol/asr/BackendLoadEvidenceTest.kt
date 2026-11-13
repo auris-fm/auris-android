@@ -59,24 +59,6 @@ class BackendLoadEvidenceTest {
     }
 
     @Test
-    fun `whisper claims no artifact even with a model file present, and release keeps it absent`() {
-        val backend = WhisperCppBackend()
-        val file = tmp.newFile("ggml.bin").apply { writeBytes(ByteArray(64)) }
-        backend.setModelFile(file)
-        // NO native load is attempted as evidence: this backend carries no verified version,
-        // so even a load that succeeded could not mint a Named ref.
-        runCatching { kotlinx.coroutines.runBlocking { backend.ensureReady() } }
-        assertNull("no verified version label means no claim", backend.loadedModelRef())
-        // A transcription with the model path present must also claim nothing.
-        runCatching { kotlinx.coroutines.runBlocking { backend.transcribe(FloatArray(1600), 16000) } }
-        assertNull("a transcription run claims no artifact either", backend.loadedModelRef())
-        // The native model free is unavailable in a unit test (no native library); the claim
-        // stays absent regardless.
-        runCatching { backend.release() }
-        assertNull("release keeps the absence", backend.loadedModelRef())
-    }
-
-    @Test
     fun `the load-evidence flag starts absent and release leaves it absent`() {
         val backend = SenseVoiceBackend()
         val first = senseVoiceDir()

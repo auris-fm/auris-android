@@ -1,12 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
@@ -23,7 +21,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
@@ -50,9 +47,6 @@ class CloudRouteSink internal constructor(
     private val conversationAdmission: CloudConversationAdmission = CloudConversationAdmission(),
     private val cloudPlaybackContextState: CloudPlaybackContextState,
     private val analytics: CloudRouteAnalytics,
-    private val routeInvoker: ((CloudRouteTurn) -> Flow<CloudRouteEvent>)?,
-    /** Non-null only when this client can render structured discovery results. */
-    private val searchResultsRenderer: CloudSearchResultsRenderer? = null,
     private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     /**
@@ -89,6 +83,8 @@ class CloudRouteSink internal constructor(
     private val gracePeriodSignal: GracePeriodSignal? = null,
     /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
+    /** Test seam: a custom OkHttp client for the route socket (MockWebServer wiring). */
+    private val okHttpClient: okhttp3.OkHttpClient? = null,
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -114,8 +110,6 @@ class CloudRouteSink internal constructor(
         analytics = analytics,
         audioPlayer = audioPlayer,
         gracePeriodSignal = gracePeriodSignal,
-        routeInvoker = null,
-        searchResultsRenderer = null,
         templateResolver = templateResolver,
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
@@ -158,15 +152,6 @@ class CloudRouteSink internal constructor(
     private val turnMutex = Mutex()
     private var activeTurnId: Long = 0
 
-    /**
-     * The outcome of the last turn's playback action, for the external API to report.
-     *
-     * DISTINCT FROM "feedback": a turn can produce feedback and still have DISPATCHED an action whose
-     * outcome is unknown, and a caller that only sees feedback cannot tell those apart.
-     */
-    @Volatile
-    internal var lastActionOutcome: ActionOutcome = ActionOutcome.None
-        private set
     private var activeTurn: Job? = null
 
     /**
@@ -214,7 +199,6 @@ class CloudRouteSink internal constructor(
 
     override suspend fun routeToCloud(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         isLiveGraceTurn: Boolean,
         capturedOrigin: Long?,
@@ -222,7 +206,6 @@ class CloudRouteSink internal constructor(
         admitted: String?,
     ): CloudTurnResult = routeTurn(
         request = request,
-        tier = tier,
         context = context,
         isLiveGraceTurn = isLiveGraceTurn,
         capturedOrigin = capturedOrigin,
@@ -233,7 +216,6 @@ class CloudRouteSink internal constructor(
 
     override suspend fun routeToCloudWithHint(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
         isLiveGraceTurn: Boolean,
@@ -242,7 +224,6 @@ class CloudRouteSink internal constructor(
         admitted: String?,
     ): CloudTurnResult = routeTurn(
         request = request,
-        tier = tier,
         context = context,
         isLiveGraceTurn = isLiveGraceTurn,
         capturedOrigin = capturedOrigin,
@@ -264,7 +245,6 @@ class CloudRouteSink internal constructor(
      */
     override suspend fun prepareTurn(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         isLiveGraceTurn: Boolean,
         capturedOrigin: Long?,
@@ -295,7 +275,9 @@ class CloudRouteSink internal constructor(
                 sourceLanguage = sourceLanguage,
                 context = buildRouteContext(context),
                 requestId = admitted,
-                capabilities = advertisedCapabilities(),
+                // No structured-results surface is rendered client-side, so no
+                // result capability is advertised.
+                capabilities = emptyList(),
                 routeHint = hint,
                 conversationId = admission.conversationId,
                 conversationMode = admission.mode,
@@ -329,14 +311,6 @@ class CloudRouteSink internal constructor(
      */
     override fun forgetRetained(logicalRequestId: String) {
         conversationAdmission.forgetRetained(logicalRequestId)
-        retentionReleased?.invoke(logicalRequestId)
-    }
-
-    /** The consumer notified when a logical request stops being retryable. */
-    private var retentionReleased: ((logicalRequestId: String) -> Unit)? = null
-
-    override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
-        retentionReleased = consumer
     }
 
     override suspend fun dispatchPrepared(prepared: CloudRouteTurn, isRetry: Boolean): CloudTurnResult = dispatchPreparedReporting(prepared, isRetry, null)
@@ -353,7 +327,6 @@ class CloudRouteSink internal constructor(
         try {
             return routeTurn(
                 request = owned.request,
-                tier = VoiceIntent.CloudTier.Premium,
                 context = PlaybackContext(),
                 hint = owned.routeHint,
                 // The origin travels WITH the prepared turn, so a retry is validated against the window it was
@@ -371,7 +344,6 @@ class CloudRouteSink internal constructor(
 
     private suspend fun routeTurn(
         request: String,
-        tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         // True when this turn continues an answer still inside its grace window: it RESUMES rather
         // than creating a new conversation.
@@ -474,9 +446,6 @@ class CloudRouteSink internal constructor(
         // Raised where a three-way outcome is KNOWN; the Boolean `executeAction` result cannot express it.
         fun noteOutcome(outcome: ActionOutcome) {
             actionOutcome = mergeActionOutcome(actionOutcome, outcome)
-            // PUBLISHED FOR THE CALLER. The external API must report what the turn's action achieved
-            // rather than only "feedback", so the outcome is observable after the turn completes.
-            lastActionOutcome = actionOutcome
         }
         var handledResult = false
         var audioPlayed = false
@@ -561,7 +530,9 @@ class CloudRouteSink internal constructor(
                 // logical turn, a transport retry reuses it, and the server rejects a repeat rather
                 // than re-executing (no auto-retry is attempted by this client).
                 requestId = admittedId!!,
-                capabilities = advertisedCapabilities(),
+                // No structured-results surface is rendered client-side, so no
+                // result capability is advertised.
+                capabilities = emptyList(),
                 routeHint = hint,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
@@ -609,6 +580,11 @@ class CloudRouteSink internal constructor(
             events.collect { event ->
                 if (outcome != null) return@collect
                 when (event) {
+                    // A structured results frame carries nothing this client renders: no result
+                    // capability is advertised, so the server should not send one. Ignore it and
+                    // wait for the terminal.
+                    is CloudRouteEvent.Result -> {}
+
                     is CloudRouteEvent.Connected -> {
                         // Handshake acknowledgement, and the frame that carries the codec the
                         // server negotiated. Propagate it so the player builds the right decoder
@@ -806,43 +782,11 @@ class CloudRouteSink internal constructor(
                         Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = doneFeedbackKind))
                     }
 
-                    is CloudRouteEvent.Result -> {
-                        // Renderer is present iff we advertised the capability;
-                        // results never auto-play. Only the negotiated result kind is rendered.
-                        val renderer = searchResultsRenderer
-                        if (renderer != null &&
-                            event.results.kind == CloudSearchResults.KIND_EPISODE_RESULTS
-                        ) {
-                            if (event.results.items.isEmpty()) {
-                                renderer.renderEmpty(event.results.scope)
-                            } else {
-                                renderer.renderResults(event.results)
-                            }
-                            // Rendered is delivered: the no-match state is the answer, so a blank
-                            // Done after it must not also speak the incomplete-turn line.
-                            handledResult = true
-                        }
-                    }
-
                     is CloudRouteEvent.Error -> {
                         // Terminal diagnostics are recorded at the actual decode point in
                         // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
                         // Local Error events (missing-token, parse) do NOT fire server terminal.
                         endReason = Reason.TurnFailed
-                        // Genuinely unavailable evidence is a state the results
-                        // renderer owns whenever it is present AND this turn had a
-                        // results surface (three states, not two).
-                        // Capability advertisement is client-scoped (a client
-                        // advertises only what it can render), so the renderer
-                        // check is the whole gate — see advertisedCapabilities().
-                        if (searchResultsRenderer != null &&
-                            event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
-                        ) {
-                            searchResultsRenderer.renderUnavailable()
-                            // Rendered, so the user has been told; a spoken line on top of it would
-                            // say the same thing twice in different words.
-                            handledResult = true
-                        }
                         // Code only: the server's message can carry upstream
                         // detail derived from the user's request or account,
                         // and it is already spoken/shown where it belongs.
@@ -1017,7 +961,6 @@ class CloudRouteSink internal constructor(
     }
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
-        routeInvoker?.let { return it(turn) }
         // Production runs over the WebSocket only (cloud-assistant.md, owner's ruling): a refused
         // upgrade fails the turn visibly rather than falling back, so a completed turn is evidence
         // the negotiated path served it. The choice lives in one place rather than beside a second
@@ -1055,14 +998,13 @@ class CloudRouteSink internal constructor(
             }
         }
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)
-        return CloudTurnRoute(resolveBaseUrl(), tokenProvider, transport = transport, observer = transportObserver).route(turn)
-    }
-
-    /** Advertise a capability only when its renderer is actually available. */
-    private fun advertisedCapabilities(): List<String> = if (searchResultsRenderer != null) {
-        listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1)
-    } else {
-        emptyList()
+        return CloudTurnRoute(
+            resolveBaseUrl(),
+            tokenProvider,
+            okHttpClient = okHttpClient ?: CloudTurnRoute.defaultOkHttpClient(),
+            transport = transport,
+            observer = transportObserver,
+        ).route(turn)
     }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {

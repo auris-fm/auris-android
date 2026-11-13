@@ -52,14 +52,13 @@ target_link_libraries(pocketcasts_voice_llm
     android
 )
 
-# Hide symbols from static archives so llama/ggml cannot interpose with
-# whisper's separately-linked ggml in pocketcasts_voice_capture.
+# Hide symbols from static archives so llama/ggml archive symbols cannot leak
+# into the .so.
 target_link_options(pocketcasts_voice_llm PRIVATE -Wl,--exclude-libs,ALL)
 
 target_compile_features(pocketcasts_voice_llm PUBLIC cxx_std_17)
 target_compile_options(pocketcasts_voice_llm PRIVATE -Wall -Werror -O2 -fvisibility=hidden)
 
-# --- whisper.cpp capture stack (separate shared library; dual ggml is temporary) ---
 FetchContent_Declare(
     oboe
     GIT_REPOSITORY https://github.com/google/oboe.git
@@ -68,43 +67,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(oboe)
 
-set(WHISPER_VULKAN OFF CACHE BOOL "" FORCE)
-set(WHISPER_SDL2 OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    whispercpp
-    GIT_REPOSITORY https://github.com/ggerganov/whisper.cpp.git
-    GIT_TAG v1.8.4
-    GIT_SHALLOW TRUE
-)
-set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(whispercpp)
-
-
 
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp
     NativeVadProcessor.cpp
     VadJni.cpp
-    WhisperJni.cpp
     WakeWordJni.cpp
 )
 
 target_include_directories(pocketcasts_voice_capture PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${oboe_SOURCE_DIR}/include
-    ${whispercpp_SOURCE_DIR}/include
-    ${whispercpp_SOURCE_DIR}/ggml/include
 )
 
 target_link_libraries(pocketcasts_voice_capture
     oboe
     log
     android
-    whisper
 )
 
-# Mirror llm: do not re-export whisper/ggml archive symbols into the .so.
+# Mirror llm: do not re-export oboe archive symbols into the .so.
 target_link_options(pocketcasts_voice_capture PRIVATE -Wl,--exclude-libs,ALL)
 
 target_compile_features(pocketcasts_voice_capture PUBLIC cxx_std_17)

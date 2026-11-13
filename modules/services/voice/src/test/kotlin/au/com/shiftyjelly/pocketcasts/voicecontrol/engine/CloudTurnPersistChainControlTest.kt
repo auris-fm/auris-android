@@ -109,7 +109,6 @@ class CloudTurnPersistChainControlTest {
     private class DuckingCloudRoute(private val playback: PlaybackManagerPlaybackSink) : au.com.shiftyjelly.pocketcasts.voicecontrol.playback.ObservingCloudRouteTestAdapter() {
         override suspend fun reportRoute(
             request: String,
-            tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {

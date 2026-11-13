@@ -397,7 +397,15 @@ class VoiceControlService : Service() {
                     // Recovery from a capture that ended on its own is a signal, not a second
                     // starter: this observer owns engine starts and re-runs on the bump.
                     captureRestartSignal,
-                ) { mode, _, _, _ -> mode }.onEach { mode ->
+                    // Availability is the fourth data source (task #7): it is the enumeration
+                    // surface that answers "is an external microphone candidate present". On a
+                    // mid-session Bluetooth reconnect, the observed route stays `Unknown` and the
+                    // mode stays `Off`, so without watching availability the combine emits nothing,
+                    // the Off branch never re-runs, and acquisition never fires — the mic stays
+                    // dead until the app restarts. StateFlow only emits on a real change, so this
+                    // adds no redundant recomputation.
+                    audioRouteMonitor.availability,
+                ) { mode, _, _, _, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
                     // A route change alters the acoustic path, so the recorded reference no longer
                     // describes what reaches the microphone at that delay. Retire it (keeping only

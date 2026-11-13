@@ -90,7 +90,6 @@ class TurnTimingRecord(private val requestId: String) {
     }
 
     /** How long [stage] itself took, measured against the stage before it that was recorded. */
-
     fun stageMs(stage: Stage): Long? {
         val at = marks[stage] ?: return null
         val previous = marks.keys.toList().let { keys ->

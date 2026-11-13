@@ -1888,7 +1888,7 @@ class VoicePlaybackIntentExecutorTest {
 
     @Test
     fun `the local action stage is marked after the action runs, not at entry`() = runTest {
-        // THE FIRST OBSERVATION WINS (reviewer): a stage marked at entry would freeze the instant
+        // THE FIRST OBSERVATION WINS: a stage marked at entry would freeze the instant
         // BEFORE the action ran and the post-action mark would be silently dropped, so the table
         // would understate every local turn. The fake sink ADVANCES the record clock while it
         // runs, so only a post-action mark can carry the advanced instant.

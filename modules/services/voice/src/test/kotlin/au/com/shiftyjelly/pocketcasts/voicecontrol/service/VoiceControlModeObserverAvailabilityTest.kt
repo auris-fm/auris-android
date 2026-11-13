@@ -655,6 +655,66 @@ class VoiceControlModeObserverAvailabilityTest {
     }
 
     /**
+     * The flag that says "this capture's routing came from an acquisition" must follow the
+     * STREAM, not the session: an AirPods capture sets it, then the user switches to a wired
+     * headset — the wired capture opens its own stream (no acquisition), so a self-end must
+     * get its one restart at once, not wait on an acquisition that will never happen.
+     */
+    @Test
+    fun `a wired capture after an AirPods session still gets its one restart`() = runBlocking {
+        val withheldLogs = intArrayOf(0)
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (message.contains("mic_restart_withheld")) withheldLogs[0]++
+            }
+        }
+        timber.log.Timber.plant(tree)
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("AirPods capture up") { harness.hardware.attachCount >= 1 }
+
+            // The user switches headsets: AirPods go away, and another headset connects
+            // already selected (the link is up before voice control re-evaluates). The device
+            // change re-arms the budget and the new capture starts with NO acquisition.
+            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            setInputDevices()
+            harness.monitor.onDevicesChanged()
+            awaitState("AirPods capture torn down") { harness.hardware.vadStopCount >= 1 }
+            harness.scoPlatform.seedAlreadySelectedInput()
+            setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+            setInputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+            harness.monitor.onDevicesChanged()
+            awaitState("wired capture up") { harness.hardware.attachCount >= 2 }
+            awaitState("wired capture committed") { harness.engineStarted() }
+
+            // The wired capture ends by itself: one restart at once (its stream was its own,
+            // not an acquisition's), then the fast second death withholds.
+            withheldLogs[0] = 0
+            selfEndCapture(harness)
+            awaitState("wired capture restarted") { harness.hardware.attachCount >= 3 }
+            awaitState("restart committed") { harness.engineStarted() }
+            selfEndCapture(harness)
+            awaitState("withheld") {
+                val budget = getField(harness.service, "captureRestartBudget")!!
+                !(budget.javaClass.getDeclaredField("restartAvailable")
+                    .apply { isAccessible = true }.get(budget) as Boolean) && withheldLogs[0] >= 1
+            }
+            Thread.sleep(300)
+            testScheduler.advanceTimeBy(300.milliseconds)
+            assertEquals("exactly one withheld log", 1, withheldLogs[0])
+            assertEquals("no restart after withholding", 3, harness.hardware.attachCount)
+        } finally {
+            timber.log.Timber.uproot(tree)
+            harness.stop()
+        }
+    }
+
+    /**
      * Table-driven over route kinds x restart outcomes: every route must give a self-ended
      * capture exactly one automatic restart, and a restart that dies within 60 s or fails to
      * start must leave restarts withheld with exactly one `mic_restart_withheld` log. Wired

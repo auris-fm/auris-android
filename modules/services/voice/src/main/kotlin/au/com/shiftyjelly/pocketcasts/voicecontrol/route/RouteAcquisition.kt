@@ -104,11 +104,12 @@ class RouteAcquisition(
     private var routingAcquired = false
 
     /**
-     * True when the CURRENT capture's routing was opened by an acquisition
-     * ([performAcquisition]). Set only there; cleared only when a capture starts that needed
-     * no acquisition ([acquire] returned `NotNeeded`). The restart decision reads this: a
-     * restart for an acquisition-ridden capture must wait until the acquisition has re-opened
-     * the stream, while a wired or already-isolated capture restarts at once.
+     * True when the CURRENT capture's stream was opened by an acquisition
+     * ([performAcquisition]). Set when that stream has started; cleared whenever a capture
+     * opens its own stream ([openConfirmedStream] outside acquisition), so the flag follows
+     * the stream rather than the session. The restart decision reads this: a restart for an
+     * acquisition-ridden capture must wait until the acquisition has re-opened the stream,
+     * while a wired or already-isolated capture restarts at once.
      */
     var acquiredForCapture = false
         private set
@@ -135,13 +136,7 @@ class RouteAcquisition(
     private var savedAudioMode: Int? = null
 
     suspend fun acquire(route: AudioRoute, gateAllows: () -> Boolean): AcquisitionResult {
-        if (route !is AudioRoute.BluetoothA2dpOnly) {
-            // The capture this starts runs on routing nobody acquired (wired, already-
-            // isolated input): record that, so a later restart does not wait on an
-            // acquisition that will never happen.
-            acquiredForCapture = false
-            return AcquisitionResult.NotNeeded
-        }
+        if (route !is AudioRoute.BluetoothA2dpOnly) return AcquisitionResult.NotNeeded
         val candidate = platform.bluetoothCandidates().firstOrNull()
         if (candidate == null) {
             Timber.w("[RouteAcquisition] no bluetooth candidate for route=%s", route)
@@ -215,7 +210,7 @@ class RouteAcquisition(
                 return AcquisitionResult.Failed(REASON_TIMEOUT)
             }
 
-            Selection.SELECTED -> acquiredForCapture = true
+            Selection.SELECTED -> Unit
         }
 
         // The mode observer can confirm, start and hand off a stream while this attempt was
@@ -224,7 +219,6 @@ class RouteAcquisition(
         // the coordinator would then report "already started" with VAD attached to nothing.
         // Reuse the stream this attempt already owns.
         if (openedStream) {
-            acquiredForCapture = true
             return AcquisitionResult.Acquired(openedDeviceId)
         }
 
@@ -240,7 +234,9 @@ class RouteAcquisition(
             release()
             return AcquisitionResult.Failed(REASON_FAILED)
         }
-
+        // The stream this capture will run on came from THIS acquisition; a later restart
+        // for it must wait until an acquisition has re-opened a stream.
+        acquiredForCapture = true
         return AcquisitionResult.Acquired(openedDeviceId)
     }
 
@@ -288,6 +284,11 @@ class RouteAcquisition(
         if (openedStream) return openedDeviceId
         val deviceId = platform.openInputStream()
         openedStream = true
+        // A stream opened OUTSIDE an acquisition (the capture-start path) is routing nobody
+        // acquired: the flag must follow the stream, so a later restart for this capture does
+        // not wait on an acquisition that will never happen. performAcquisition sets it back
+        // to true when its own stream started successfully.
+        acquiredForCapture = false
         openedDeviceId = deviceId
         streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {

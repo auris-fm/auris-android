@@ -62,10 +62,13 @@ class ShutdownBarrierControlTest {
             val entered = CompletableDeferred<Unit>()
             val outer = scope.launch(Dispatchers.IO) {
                 val inner = launch(Dispatchers.IO) {
-                    entered.complete(Unit)
                     awaitCancellation()
                 }
+                // Admit inner BEFORE signalling readiness: completing `entered` first let close()
+                // run between the signal and the admission, so the close legitimately saw only
+                // outer and the test flaked on an ordering it never controlled.
                 barrier.beginStart(listOf(inner))
+                entered.complete(Unit)
                 awaitCancellation()
             }
             barrier.beginStart(listOf(outer))

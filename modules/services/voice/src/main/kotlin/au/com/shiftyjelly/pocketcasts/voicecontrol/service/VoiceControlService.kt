@@ -258,7 +258,7 @@ class VoiceControlService : Service() {
         // the action it dispatched actually ran. Reading only the feedback would let an action whose
         // outcome could not be established pass as a delivered turn.
         val response = try {
-            voicePlaybackIntentExecutor.execute(intent, turnOutcome, requestId)
+            voicePlaybackIntentExecutor.execute(intent, outcome = turnOutcome, timingRequestId = requestId)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
             // have transferred this turn's hold to the renderer path. Rethrow without releasing and

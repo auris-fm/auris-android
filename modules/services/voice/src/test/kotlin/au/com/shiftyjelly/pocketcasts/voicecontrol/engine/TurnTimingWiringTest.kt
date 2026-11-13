@@ -104,6 +104,9 @@ class TurnTimingWiringTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = feedback,
             translationStage = translationStage,
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
             elapsedClockMs = { 5_000_000L },
         )
@@ -114,7 +117,7 @@ class TurnTimingWiringTest {
             listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         testScheduler.advanceUntilIdle()
 
@@ -195,6 +198,9 @@ class TurnTimingWiringTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = feedback,
             translationStage = translationStage,
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
             context = context,
         )
         engine.scope = this
@@ -204,7 +210,7 @@ class TurnTimingWiringTest {
             listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         testScheduler.advanceUntilIdle()
 

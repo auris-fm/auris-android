@@ -18,6 +18,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.isNull
 import org.mockito.kotlin.times
@@ -47,11 +48,11 @@ class VoiceIntentDispatcherLifecycleTest {
     private fun token() = VoiceAsrEngine.InvocationToken(id = 1L, captureId = UUID.randomUUID())
 
     private fun executor(behavior: (VoiceIntent, ((VoiceActionOutcome) -> Unit)?) -> VoiceResponse) = org.mockito.kotlin.mock<VoicePlaybackIntentExecutor> {
-        on { runBlocking { execute(any(), any(), any()) } }.thenAnswer { inv ->
+        on { runBlocking { execute(any(), any(), any(), anyOrNull()) } }.thenAnswer { inv ->
             @Suppress("UNCHECKED_CAST")
             val intent = inv.getArgument<VoiceIntent>(0)
-            // execute(intent, outcome, onOutcome): the REQUEST-OWNED outcome is arg 1; the
-            // per-action callback is arg 2 (the old 2-arg signature is gone).
+            // execute(intent, outcome, onOutcome, timingRequestId): the REQUEST-OWNED outcome is
+            // arg 1; the per-action callback is arg 2 (the old 2-arg signature is gone).
             val onOutcome = inv.getArgument<((VoiceActionOutcome) -> Unit)?>(2)
             behavior(intent, onOutcome)
         }

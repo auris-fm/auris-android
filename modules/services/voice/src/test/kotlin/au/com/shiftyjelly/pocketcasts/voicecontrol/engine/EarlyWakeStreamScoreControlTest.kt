@@ -171,8 +171,6 @@ class EarlyWakeStreamScoreControlTest {
             startAndDrain(engine, this)
         }
 
-        // One early score plus one finished-segment score: a cached negative is not re-scored per
-        // frame, and the endpoint path keeps running the detector so wake audio is still stripped.
         assertEquals(2, detector.windows.size)
         assertEquals(0, detector.onsets[0])
         assertEquals(onsetSamples, detector.onsets[1])
@@ -194,7 +192,9 @@ class EarlyWakeStreamScoreControlTest {
         opener: EarlyConnectionOpener?,
         order: MutableList<String>?,
         eventsOverride: List<VoiceSegmenterResult>? = null,
-    ): VoiceAsrEngine = VoiceAsrEngine(
+    ): VoiceAsrEngine {
+        whenever(grace.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        return VoiceAsrEngine(
         voiceAudioProcessor = mock<VoiceAudioProcessor>().also {
             whenever(it.attachCapture()).thenReturn(true)
             whenever(it.startProcessing()).thenReturn(
@@ -215,10 +215,14 @@ class EarlyWakeStreamScoreControlTest {
         audioFeedbackRenderer = renderer,
         translationStage = mock(),
         currentLocale = { java.util.Locale.US },
+        collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+        retentionSink = org.mockito.kotlin.mock(),
+        segmentObserver = org.mockito.kotlin.mock(),
         context = context(),
         earlyConnectionOpener = opener,
         inProgressUtterance = reader,
-    )
+        )
+    }
 
     private suspend fun startAndDrain(
         engine: VoiceAsrEngine,
@@ -232,7 +236,7 @@ class EarlyWakeStreamScoreControlTest {
             ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), sampleRateHz, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         scope.advanceUntilIdle()
     }
@@ -304,6 +308,7 @@ class EarlyWakeStreamScoreControlTest {
     fun `an early hit fires the earcon and grace once, at the early hit`() {
         val renderer = mock<AudioFeedbackRenderer>()
         val grace = mock<GracePeriodSignal>()
+        whenever(grace.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
         val order = mutableListOf<String>()
         kotlinx.coroutines.test.runTest {
             val engine = buildEngine(RecordingDetector(), reader(), renderer, grace, null, order)
@@ -343,6 +348,7 @@ class EarlyWakeStreamScoreControlTest {
     fun `without a reader the endpoint path is unchanged`() {
         val renderer = mock<AudioFeedbackRenderer>()
         val grace = mock<GracePeriodSignal>()
+        whenever(grace.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
         val detector = RecordingDetector()
         val order = mutableListOf<String>()
         kotlinx.coroutines.test.runTest {

@@ -149,7 +149,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
                 timingRequestId,
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted,
-                android.os.SystemClock.elapsedRealtime(),
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos() / 1_000_000L,
             )
         }
         // AUXILIARY vs PRIMARY (reviewer 8c77f5aa): a cloud turn's audio FOCUS is an AUXILIARY
@@ -195,8 +195,8 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         // turn's end. Whatever happens below — success, failure, cancellation — the record is
         // finished and published exactly once here, in a finally, so a cancelled dispatch still
         // publishes what it measured instead of leaking its registry entry.
-        val response = try {
-            when (intent) {
+        try {
+            val whenResult = when (intent) {
             is VoiceIntent.Playback -> executePlayback(intent, onOutcome)
 
                 is VoiceIntent.Effects -> executeEffects(intent)
@@ -319,7 +319,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                     // the SAME path and the identity is the one fixed above rather than a second one minted
                     // here.
-                    val dispatched = cloudRouteSink.dispatchPrepared(preparedTurn, isRetry = intent.isRetry)
+                    val dispatched = cloudRouteSink.dispatchPreparedReporting(preparedTurn, isRetry = intent.isRetry, onDuck = onOutcome)
                     // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
                     // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
                     // confirmed action from one that was dispatched without a knowable outcome. Reading only
@@ -332,67 +332,6 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     captured?.let { gracePeriodSignal.notePreparedRequest(it) }
                     dispatched.feedback
                 }
-                val context = playbackContextProvider.current()
-                // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
-                // not the current one read here. The executor runs later than the dispatch, so reading
-                // the live window would let a fresh wake look like a continuation of the previous
-                // conversation, and would let a request captured before a successor wake act under the
-                // successor's. The stamp is the captured origin; when a dispatch carries none, there is
-                // no window to claim and the sink falls back to the declared-live origin.
-                val captured = intent.windowGeneration
-                // A dispatch stamped with a window that is no longer current is SUPERSEDED and does
-                // not run at all. This belongs here rather than only in the sink: the sink's admission
-                // governs which CONVERSATION a turn joins, while this governs whether a superseded
-                // request may act on the successor's playback at all -- and a stale dispatch reaching
-                // the sink would still be a mutation made on behalf of a replaced user act.
-                if (captured != null && !gracePeriodSignal.isCurrent(captured)) {
-                    Timber.i("[Voice] superseded dispatch discarded (stamp=$captured)")
-                    return VoiceResponse.Silent
-                }
-                // READ BEFORE NOTING: whether this is the window's first request decides whether it
-                // begins a conversation, and noting first made every dispatch see itself as a
-                // continuation -- the flag was computed against a state this dispatch had just set.
-                val isFirstRequestOfWindow = captured != null &&
-                    !gracePeriodSignal.hasPreparedRequest(captured)
-                // PREPARED ONCE, RETAINED FOR A RETRY. Preparing here rather than at the call site is
-                // what makes the retry path a production path: the identity fixed at this moment is the
-                // identity a later retry must reuse.
-                val preparedTurn = cloudRouteSink.prepareTurn(
-                    request = intent.request,
-                    context = context,
-                    isLiveGraceTurn = captured != null &&
-                        gracePeriodSignal.isCurrent(captured) &&
-                        gracePeriodSignal.isActive.value,
-                    capturedOrigin = captured,
-                    isWakeOriginated = captured != null &&
-                        gracePeriodSignal.isWakeOriginated(
-                            captured,
-                            isFirstRequestOfWindow = isFirstRequestOfWindow,
-                        ),
-                    logicalRequestId = intent.logicalRequestId,
-                    // THE RETRY FLAG IS FORWARDED. Without it the sink cannot tell a retry from new
-                    // input, so a retry whose identity was retired between the executor's entry guards
-                    // and this preparation was silently MINTED AS A NEW REQUEST and sent -- the exact
-                    // defect the refusal exists to prevent.
-                    isRetry = intent.isRetry,
-                    sourceLanguage = intent.sourceLanguage,
-                ) ?: return VoiceResponse.Silent
-                // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
-                // the SAME path and the identity is the one fixed above rather than a second one minted
-                // here.
-                val dispatched = cloudRouteSink.dispatchPreparedReporting(preparedTurn, isRetry = intent.isRetry, onDuck = onOutcome)
-                // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
-                // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
-                // confirmed action from one that was dispatched without a knowable outcome. Reading only
-                // the feedback would treat an unknowable execution as if nothing had happened.
-                outcome.action = dispatched.action
-                outcome.feedbackLanguage = dispatched.feedbackLanguage
-                outcome.turnSucceeded = dispatched.succeeded
-                // Noted after the dispatch: this window now has a request, so a LATER one continues
-                // rather than beginning.
-                captured?.let { gracePeriodSignal.notePreparedRequest(it) }
-                dispatched.feedback
-            }
 
             is VoiceIntent.Queue -> executeQueue(intent, onOutcome)
 
@@ -410,7 +349,16 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
                 )
             }
-            return response
+            // THE OUTCOME GUARD BELONGS HERE, at the site that recognizes -- not only at a later caller.
+            // Recognizing unconditionally here meant a turn whose action outcome could not be established
+            // still earned the recognized-command privileges before any caller could check, so a guard added
+            // downstream was defeated by this call. ONE RULE, AT THE SITE THAT ACTS.
+            if (capabilityOf(intent, outcome).allowsRecognition) {
+                gracePeriodSignal.onCommandRecognized(
+                    fromGeneration = intent.windowGenerationOf(),
+                )
+            }
+            return whenResult
         } finally {
             if (intent !is VoiceIntent.CloudRoute && timingRequestId != null) {
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
@@ -419,7 +367,6 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     failed = !outcome.turnSucceeded,
                 )
             }
-        }
         }
     }
 

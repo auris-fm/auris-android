@@ -99,8 +99,11 @@ class VoiceAsrEngine @Inject constructor(
     // Upload observation is OFF unless a composition module binds all three collaborators;
     // Dagger never applies Kotlin defaults, so an unbound constructor fails at build time.
     @ApplicationContext private val context: Context,
-    /** One clock for every timing mark, so the table's differences are real quantities. */
-    private val elapsedClockMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
+    /** One clock for every timing mark, so the table's differences are real quantities. The
+     * table's own clock (TurnTimingRecord.clockNanos) shares this base, so request-id stamps and
+     * stage marks are comparable; System.nanoTime is CLOCK_MONOTONIC, so unit tests need no
+     * Android framework shadows to construct the engine. */
+    private val elapsedClockMs: () -> Long = { System.nanoTime() / 1_000_000L },
     /**
      * Opens the route connection early, while the turn is still being recognised.
      *
@@ -960,9 +963,6 @@ class VoiceAsrEngine @Inject constructor(
             Timber.w(t, "[VoicePipeline] asr provider failed")
             return
         }
-        timing.mark(TurnTimingRecord.Stage.AsrDone, TurnTimingRecord.clockNanos())
-||||||| parent of 05218e81 (voice: one monotonic clock for the whole timing table)
-        val asrResult = b.transcribe(floatSamples, sampleRateHz)
         timing.mark(TurnTimingRecord.Stage.AsrDone, TurnTimingRecord.clockNanos())
         val asrMs = System.currentTimeMillis() - asrStartedAt
         val durationMs = (floatSamples.size * 1000L / sampleRateHz).toInt()

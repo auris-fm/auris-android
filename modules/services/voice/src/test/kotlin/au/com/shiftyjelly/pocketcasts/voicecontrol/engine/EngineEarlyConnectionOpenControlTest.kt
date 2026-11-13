@@ -34,6 +34,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
@@ -125,10 +126,15 @@ class EngineEarlyConnectionOpenControlTest {
             },
             intentRecognizer = recognizer(),
             wakeWordDetector = wake,
-            gracePeriodSignal = mock(),
+            gracePeriodSignal = mock<GracePeriodSignal>().also {
+                whenever(it.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+            },
             audioFeedbackRenderer = mock(),
             translationStage = mock(),
             currentLocale = { java.util.Locale.US },
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
             context = context(),
             earlyConnectionOpener = opener,
         )
@@ -139,7 +145,7 @@ class EngineEarlyConnectionOpenControlTest {
             mode,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         return engine
     }

@@ -1136,7 +1136,7 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
 
-        val response = executor.execute(VoiceIntent.Queue.Clear) { facts += it }
+        val response = executor.execute(VoiceIntent.Queue.Clear, onOutcome = { facts += it })
 
         // The fake renders success; the production sink renders CONFIRM_REQUIRED after the same
         // Dispatch. Either way the earcon is presentation and the fact below is the outcome.
@@ -1153,7 +1153,7 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
 
-        val response = executor.execute(VoiceIntent.Playback.Pause) { facts += it }
+        val response = executor.execute(VoiceIntent.Playback.Pause, onOutcome = { facts += it })
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         // A success earcon is not evidence of completion: the sink call returning is dispatch only.
@@ -1168,7 +1168,7 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
 
-        val response = executor.execute(VoiceIntent.Playback.Resume) { facts += it }
+        val response = executor.execute(VoiceIntent.Playback.Resume, onOutcome = { facts += it })
 
         assertEquals(VoiceResponse.Silent, response)
         // Dispatched is not a result: the executor also records the
@@ -1190,13 +1190,13 @@ class VoicePlaybackIntentExecutorTest {
         val latch = java.util.concurrent.CountDownLatch(2)
         val a = Thread {
             kotlinx.coroutines.runBlocking {
-                executor.execute(VoiceIntent.Playback.Pause) { aFacts += it }
+                executor.execute(VoiceIntent.Playback.Pause, onOutcome = { aFacts += it })
             }
             latch.countDown()
         }
         val b = Thread {
             kotlinx.coroutines.runBlocking {
-                executor.execute(VoiceIntent.Playback.Resume) { bFacts += it }
+                executor.execute(VoiceIntent.Playback.Resume, onOutcome = { bFacts += it })
             }
             latch.countDown()
         }
@@ -1233,7 +1233,7 @@ class VoicePlaybackIntentExecutorTest {
         var pauseCompleted = false
         val pauseThread = Thread {
             kotlinx.coroutines.runBlocking {
-                executor.execute(VoiceIntent.Playback.Pause) { pauseFacts += it }
+                executor.execute(VoiceIntent.Playback.Pause, onOutcome = { pauseFacts += it })
                 pauseCompleted = true
                 pauseDone.countDown()
             }
@@ -1321,7 +1321,7 @@ class VoicePlaybackIntentExecutorTest {
         val facts = mutableListOf<VoiceActionOutcome>()
 
         // A REAL cloud turn: the production sink reaches its focus branch and reports the grant.
-        sinks.executor().execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium)) { facts += it }
+        sinks.executor().execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium), onOutcome = { facts += it })
 
         // The duck's grant IS observed...
         assertTrue(
@@ -1880,7 +1880,7 @@ class VoicePlaybackIntentExecutorTest {
                 "local action stage must be marked through the registry",
                 record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
             )
-            assertEquals(listOf("pause"), sinks.playback.calls)
+            assertEquals(listOf("pause"), sinks.fakePlayback.calls)
         }
     }
 
@@ -1892,7 +1892,7 @@ class VoicePlaybackIntentExecutorTest {
         // not throw or mint one.
         val response = executor.execute(VoiceIntent.Playback.Pause)
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
-        assertEquals(listOf("pause"), sinks.playback.calls)
+        assertEquals(listOf("pause"), sinks.fakePlayback.calls)
     }
 
     @Test

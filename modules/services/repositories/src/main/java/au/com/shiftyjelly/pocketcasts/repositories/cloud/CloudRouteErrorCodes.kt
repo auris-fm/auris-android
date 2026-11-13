@@ -57,7 +57,8 @@ object CloudRouteErrorCodes {
         code == null -> "none"
 
         // Known codes (server-supplied and client-minted), plus the bounded shapes recognised
-        // for log normalization but never minted by this client: `invalid_request`, and
+        // for log normalization but not minted today: `invalid_request` (declared
+        // `mintedByClient` for future use), and
         // `http_<status>`, which carries the status of an unparseable error body — exactly the
         // diagnostic worth having when a gateway answers with HTML.
         code in KNOWN || HTTP_STATUS_CODE.matches(code) -> code

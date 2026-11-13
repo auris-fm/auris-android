@@ -93,7 +93,7 @@ class CloudContractCodeCheckTest {
             listOf(CloudRouteErrorCodes.HTTP_STATUS_CODE.pattern),
             contract.boundedShapes,
         )
-        assertTrue("http_503 is the shape the code mints", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_503"))
+        assertTrue("http_503 is a bounded shape the client recognises", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_503"))
         assertFalse("http_5 is not a status code", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_5"))
     }
 

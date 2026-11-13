@@ -3378,6 +3378,40 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `the final-tail commit carries the whole utterance, never a stale-shifted tail`() = runTest {
+        // WHAT THE DELTA COMMIT ITSELF DOES (reviewer): the retained clip comes from the
+        // completion handoff, so clip contents alone cannot witness the per-utterance reset.
+        // This control watches the SpeechEnded commit directly: with the reset, utterance 2's
+        // commit is its WHOLE segment; without it, the stale count from utterance 1 shifts the
+        // tail to utterance 2's last |U1| samples.
+        val (observer, retention, liveAuthority) = staleSnapshotObserverAndSink()
+        val observerSpy = org.mockito.Mockito.spy(observer)
+        createEngineWithEvents(
+            observerSpy,
+            retention,
+            liveAuthority,
+            listOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(utterance1, speechOnsetSample = 2),
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechEnded(utterance2(500, 600, 700, 800, 900, 1000), speechOnsetSample = 2),
+            ),
+        )
+        stubStaleNativeSnapshot()
+        advanceUntilIdle()
+        val captor = org.mockito.kotlin.argumentCaptor<ShortArray>()
+        org.mockito.kotlin.verify(observerSpy, org.mockito.kotlin.times(2))
+            .commitDelta(org.mockito.kotlin.any(), captor.capture(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull())
+        assertEquals(
+            "utterance 2's commit is its whole segment, not utterance 1's length cut from its head",
+            shortArrayOf(500, 600, 700, 800, 900, 1000).toList(),
+            captor.allValues[1].toList(),
+        )
+        engine.stop()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun `an empty-prefix admission is a real retained capture that grows at segment end`() = runTest {
         val retention = ContributionRetentionSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }

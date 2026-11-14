@@ -357,6 +357,7 @@ class Media3SessionCallbackTest {
         verify(playbackManager).pauseSuspend(
             transientLoss = any(),
             sourceView = any(),
+            asVoiceHold = any(),
         )
     }
 

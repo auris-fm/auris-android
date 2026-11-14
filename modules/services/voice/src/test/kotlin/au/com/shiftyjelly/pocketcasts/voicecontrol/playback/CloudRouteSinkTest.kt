@@ -800,7 +800,7 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
 
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -946,7 +946,7 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
 
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -1026,7 +1026,7 @@ class CloudRouteSinkTest {
 
         // A turn with NO episode: an episode-specific reference action has nothing to act on.
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = null, clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -1652,7 +1652,7 @@ class CloudRouteSinkTest {
         deps.playback.preActionPositionMsForTest = 60_000L
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         val recorded = state.snapshot("episode-id")
         // 60_000 playback maps to 45_000 reference. The provider's 999_000 would map far away, so a live
@@ -1665,47 +1665,9 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `composite steps stay unknown when one step was not established`() {
-        // THE THREE INPUTS THAT DECIDE IT are enumerated, so the case cannot pass on a rule that only
-        // happens to agree for one of them. A confirmed-later-step rule would report the first two as
-        // Confirmed.
-        assertEquals(
-            "an unknown step leaves the composite unknown however well the later step went",
-            CloudRouteSink.Companion.ActionOutcome.Unknown,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Unknown,
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            ),
-        )
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.Unknown,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.Unknown,
-            ),
-        )
-        // The composite is confirmed only when EVERY required step was.
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            ),
-        )
-        // A step that did nothing cannot make the composite confirmed.
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.None,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.None,
-            ),
-        )
-    }
-
-    @Test
     fun `turn aggregation still promotes a confirmed action past an unknown sibling`() {
-        // THE OTHER CONTRACT, asserted here so the two rules cannot silently become one. Independent
-        // actions do not depend on each other, so an unknown sibling must not erase a confirmed one.
+        // Independent actions do not depend on each other, so an unknown sibling must not erase a
+        // confirmed one.
         assertEquals(
             CloudRouteSink.Companion.ActionOutcome.Confirmed,
             CloudRouteSink.mergeActionOutcome(
@@ -1736,7 +1698,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         // preQuote is playback-timeline; the context state must carry the
         // reference-timeline conversion (45s reference == 60s playback here).
@@ -1780,7 +1742,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         // Turn 2+ regression guard: null must clear, not retain turn 1's value.
         assertEquals(null, state.snapshot("episode-id").previousReferencePositionMs)

@@ -41,19 +41,20 @@ set -o pipefail
 #
 # The lane set and both shapes are core's. The POSIX awk in CI has no lookahead, so a "whole word"
 # is expressed as the lane followed by a non-word character or the end of the text.
-CHAT_LANES='spec|reviewer|cloud|trainer|guru|android|ios|cindy|merlinran'
+CHAT_LANES='spec|reviewer|cloud|trainer|guru|android|ios|cindy|nightshift|merlinran'
 # Case-insensitive, as core's `i` flag makes it, so a capitalised lane name reads the same as
 # its lowercase form.
-CHAT_LANE_ERE="[@]([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn])([^A-Za-z0-9_-]|$)"
+CHAT_LANE_ERE="[@]([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Nn][Ii][Gg][Hh][Tt][Ss][Hh][Ii][Ff][Tt]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn])([^A-Za-z0-9_-]|$)"
 
 # A lane name followed by a hex message id (7+ characters, same minimum as core, because an
 # ordinary word follows a lane name in prose far more often than an id does).
-CHAT_HEX_ERE="(^|[^A-Za-z0-9_-])([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn]) +[0-9a-fA-F]{7,}([^A-Za-z0-9]|$)"
+CHAT_HEX_ERE="(^|[^A-Za-z0-9_-])([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Nn][Ii][Gg][Hh][Tt][Ss][Hh][Ii][Ff][Tt]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn]) +[0-9a-fA-F]{7,}([^A-Za-z0-9]|$)"
 
 # Extensions the rule applies to: source and test files in the repos' own code.
 SOURCE_NAMES=(-name '*.kt' -o -name '*.java' -o -name '*.kts' -o -name '*.cpp' -o -name '*.h'
               -o -name '*.ts' -o -name '*.go' -o -name '*.py' -o -name '*.mm' -o -name '*.swift'
-              -o -name '*.sh' -o -name '*.yml' -o -name '*.yaml')
+              -o -name '*.sh' -o -name '*.yml' -o -name '*.yaml'
+              -o -name '*.toml' -o -name '.gitignore')
 
 usage() {
     sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
@@ -100,6 +101,12 @@ chat_lang_for() {
         # ordinary character, and treating it as an opener hid the rest of the file. A hash needs
         # whitespace before it, since a value may contain one.
         *.yml|*.yaml)                              echo "hash 0 0 0 1 1" ;;
+        # TOML carries the dependency rationale, so its comments are prose like a Python
+        # docstring's; it has Python's triple-quote spelling too.
+        *.toml)                                    echo "hash 1 0 0 0 0" ;;
+        # A .gitignore explains why an entry is ignored, which is exactly the kind of note a
+        # rationale reference attaches to. A hash needs a word break, as in shell.
+        *.gitignore)                               echo "hash 0 0 0 1 0" ;;
         # Kotlin, C++ and Swift all have a triple-quoted raw string that spans lines. Java does
         # not, but listing it there costs nothing: a Java file cannot contain the delimiter
         # without it being a compile error, so the row is about what the language allows.
@@ -145,7 +152,7 @@ run_selftest() {
     # DENY, and the number of findings must equal the number of markers. A fixture with no
     # markers would make this vacuous, which is the failure the check exists to prevent.
     local dirty_out planted found_count
-    dirty_out=$(for f in $(find "$base/dirty" -type f); do scan_file "$f"; done)
+    dirty_out=$(for f in $(find -L "$base/dirty" -type f); do scan_file "$f"; done)
     planted=$(grep -rh 'DENY' "$base/dirty" | wc -l | tr -d ' ')
     found_count=$(printf '%s\n' "$dirty_out" | grep -c . )
     # A finding with no marker beside it is also a defect: either the fixture contains a
@@ -249,7 +256,12 @@ if [ "${#paths[@]}" -eq 0 ]; then
     # root path that quietly started matching at depth, is how a guard stops covering a tree
     # while still reporting on it.
     while IFS= read -r f; do paths+=("$f"); done < <(
-        cd "$root" && find . \( "${SOURCE_NAMES[@]}" \) \
+        # -L so a symlinked directory is walked, as core does: this tree has `.claude/skills`
+        # pointing at `.agents/skills`, which holds only Markdown today, but a symlink to a
+        # directory of source would otherwise be invisible to the scan. `find -L` reports a
+        # cycle as an error rather than looping, and 2>/dev/null keeps that from failing the run
+        # on a tree it has already covered.
+        cd "$root" && find -L . \( "${SOURCE_NAMES[@]}" \) \
             -not -path './.git/*' -not -path '*/build/*' -not -path './.gradle/*' \
             -not -path './config/chat-reference-guard/fixtures/*' -type f 2>/dev/null | sed 's|^\./||'
     )

@@ -1,0 +1,3 @@
+# A dependency rationale lives in a TOML comment, which is where a reference survives a
+# removal elsewhere.
+# per @nightshift this pin exists DENY

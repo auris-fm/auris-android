@@ -228,4 +228,56 @@ class EarlyConnectionAdoptionControlTest {
             connectionClosed && fakeSocket.cancelled,
         )
     }
+
+    /**
+     * An adopted socket is already open, so it never opens again: no onOpen will arrive for it.
+     * The turn still needs to be able to observe that its socket is open — that observation is
+     * the only evidence the early connection actually happened — so the adopted path must report
+     * the open itself. Without this, a turn that used an early connection looks identical to one
+     * that never opened a socket at all.
+     */
+    @Test
+    fun `an adopted connection reports the socket as opened`() = runTest {
+        val events = Channel<RawSocketEvent>(Channel.UNLIMITED)
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport(
+            baseUrl = "https://example.invalid",
+            okHttpClient = OkHttpClient(),
+            observer = observer,
+        )
+        transport.dial = { _: Request, _: WebSocketListener -> throw IllegalStateException("must not dial") }
+        transport.adopt(connection("utt-1", events))
+        // The open is already buffered: the socket opened before this turn existed.
+        events.trySend(RawSocketEvent.Opened)
+
+        withTimeoutOrNull(2_000) { transport.exchange(turn).first() }
+
+        assertTrue(
+            "an adopted socket must report its open, or the early connection is unobservable: ${observer.events}",
+            observer.events.contains("socket_opened"),
+        )
+    }
+
+    /** Records the observer callbacks the transport actually makes. */
+    private class RecordingObserver : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver {
+        val events = java.util.concurrent.CopyOnWriteArrayList<String>()
+        override fun onAuthResolved(requestId: String, outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome) {
+            events += "auth:${outcome.name}"
+        }
+        override fun onSocketOpened(requestId: String) {
+            events += "socket_opened"
+        }
+        override fun onSendAttempted(requestId: String) {
+            events += "send_attempted"
+        }
+        override fun onSendResult(requestId: String, outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.SendOutcome) {
+            events += "send:${outcome.name}"
+        }
+        override fun onTerminalReceived(requestId: String, origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin, errorCode: String?) {
+            events += "terminal:${origin.name}:$errorCode"
+        }
+        override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
+            events += "connection_failed"
+        }
+    }
 }

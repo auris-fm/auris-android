@@ -250,7 +250,15 @@ class WebSocketCloudTurnTransport(
                             // path gets identical handshake validation instead of its own copy.
                             is RawSocketEvent.Text -> listener.acceptText(raw.text)
 
-                            RawSocketEvent.Opened -> ensureAuthSent()
+                            // The dialled path reports the open from its own onOpen. An adopted
+                            // socket has already opened — that is the whole point of opening it
+                            // early — so no onOpen will ever arrive for it. Reporting it here is
+                            // what makes "the socket is open" observable on the path whose entire
+                            // reason to exist is that the socket is open before the turn starts.
+                            RawSocketEvent.Opened -> {
+                                observer?.onSocketOpened(frame.requestId)
+                                ensureAuthSent()
+                            }
 
                             // Post-adoption binary is audio, not a protocol violation: same
                             // negotiated-codec guard the dialled listener applies.
@@ -282,8 +290,13 @@ class WebSocketCloudTurnTransport(
                 }
             } ?: run {
                 // No replayable events (a handle that owns no socket buffer): the open has
-                // already happened by construction, so the exchange sends now.
-                launch { sendAuthFrame(frame.requestId) { json -> connection.send(json) } }
+                // already happened by construction, so the exchange sends now — and reports the
+                // open, for the same reason the replay path does. This socket will never issue
+                // an onOpen of its own.
+                launch {
+                    observer?.onSocketOpened(frame.requestId)
+                    sendAuthFrame(frame.requestId) { json -> connection.send(json) }
+                }
             }
         }
 

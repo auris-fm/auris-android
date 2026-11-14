@@ -365,10 +365,6 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `an UNKNOWN execution is NOT a refusal, so a caller cannot retry it as one`() = runTest {
-        // @spec's distinction: "distinguish receiver refusal/failure from timeout or lost outcome...
-        // unknown execution remains unknown through manager, history and skip/quote callers; do not map
-        // it to a retryable refusal."
-        //
         // A refusal is a DECISION a caller may act on. Unknown means we do not know whether the operation
         // ran, and reporting that as a refusal invites a RETRY THAT REPEATS an operation already
         // performed. The two must not collapse into one value.

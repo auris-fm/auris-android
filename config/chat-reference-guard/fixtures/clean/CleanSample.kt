@@ -18,3 +18,14 @@ class CleanSample {
     // The episode binding on a resume is about the recording the turn is on.
     fun episodeBoundResume() = Unit
 }
+
+// A comment marker inside a string is content, not a comment: reporting it would teach the
+// reader to distrust the output.
+val quoted = "see http:// example"
+
+// Real syntax that is not a citation: a framework resource and a scoped package.
+// The tint is @android:color/white and the import is @cloudflare/workers-types.
+
+/**
+ * A one-line doc comment with no reference in it.
+ */

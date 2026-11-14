@@ -1,95 +1,182 @@
 # Scan one file for chat-lane references in comments.
 #
-# Invoked by check-chat-references.sh with the patterns passed through -v. Kept in its own
-# file so the shell and awk quoting rules do not have to be reasoned about at the same time.
+# Invoked by check-chat-references.sh. Patterns arrive through -v. Kept in its own file so the
+# shell and awk quoting rules are not reasoned about at once.
 #
-# Prints path:line: raw for each offending line; prints nothing when the file is clean.
+# Prints path:line: raw for each offending line; nothing when the file is clean.
 #
-# The whole design question here is where a comment STARTS. Code and comments need
-# different treatment -- a string literal is not a citation, but comment prose is exactly
-# where citations live -- and the two cannot be scanned by the same rule. So each line is
-# split first: `code` is the part before the comment marker (used only to locate markers,
-# never to match), and `comment` is the prose (the only part that is matched).
+# **This is one continuous walk over the file, not one comment per line.** State cannot belong
+# to a line when it is the point of a line not to end it: a block comment, a Python docstring
+# and a template string all span lines. Carrying only block state meant a closing delimiter was
+# read as an opening one. Restarting once per line meant the `b` in `/* a */ /* b` stayed open
+# and the prose beneath it was read as code. Both are file-level state, so the walk is too.
+#
+# **Language syntax comes from CHAT_LANG, set by the caller from the file's extension.** An
+# earlier version generalised C-style syntax to every language and got two real files wrong: a
+# Python docstring containing `/*` started a phantom block that ran to end of file, and a
+# JS regex literal holding a quote hid the rest of its line. A language's own delimiters are the
+# only thing that can answer "is this a comment", so the caller states them and this file obeys.
+#
+# CHAT_LANG values, matching core PR 172's table:
+#   c      //  line, /* */ block, " ' quotes          (kt, java, kts, cpp, h, swift, mm)
+#   js     //  line, /* */ block, " ' ` quotes, regex (ts)
+#   go     //  line, /* */ block, " ' ` quotes        (go)
+#   hash   #   line, no block,   " ' quotes           (sh, py)
+# CHAT_TRIPLE=1 adds ''' and """ as quotes (Python).
 
-BEGIN { in_block = 0 }
+BEGIN {
+    in_block = 0
+    block_open = "/*"
+    block_close = "*/"
+    quote = ""
+    in_regex = 0
+    prev_significant = ""
+
+    # Comment markers, per language, as parallel arrays so awk can loop them.
+    n_line = 0
+    if (lang == "c" || lang == "js" || lang == "go") {
+        n_line = 1; marker[1] = "//"
+        has_block = 1
+    } else {
+        has_block = 0          # a `#` language has no block-comment form
+        n_line = 1; marker[1] = "#"
+    }
+
+    # String delimiters, longest first so a triple quote wins over a single one.
+    n_quote = 0
+    if (lang == "js" || lang == "go") {
+        n_quote = 3; q[1] = "`"; q[2] = "\""; q[3] = "'"
+    } else if (lang == "c") {
+        n_quote = 2; q[1] = "\""; q[2] = "'"
+    } else {
+        n_quote = 2; q[1] = "\""; q[2] = "'"
+    }
+    if (triple == 1) {
+        n_quote = 4; q[1] = "\"\"\""; q[2] = "'''"; q[3] = "\""; q[4] = "'"
+    }
+}
 
 {
-    raw = $0
-    code = raw
-    comment = ""
+    line = $0
+    n = length(line)
+    comment_text = ""
+    has_comment = 0
 
-    # Blank string and char literals in CODE only. An apostrophe in English prose
-    # ("Reviewer's") must never be read as a char-literal opener, which is what happens if
-    # the whole line is scanned for literals before the comment is split off.
-    n = length(code); out = ""; in_str = 0; in_char = 0; esc = 0
-    for (i = 1; i <= n; i++) {
-        c = substr(code, i, 1)
-        if (esc)       { esc = 0; out = out " "; continue }
-        if (c == "\\") { esc = 1; out = out " "; continue }
-        if (in_str)    { if (c == "\"") in_str = 0;  out = out " "; continue }
-        if (in_char)   { if (c == "'") in_char = 0;   out = out " "; continue }
-        if (c == "\"") { in_str = 1; out = out " "; continue }
-        if (c == "'")  { in_char = 1; out = out " "; continue }
-        out = out c
-    }
-    code = out
+    for (p = 1; p <= n; p++) {
+        ch = substr(line, p, 1)
 
-    if (in_block) {
-        comment = raw
-        # A block may close and reopen on the same line: "/* a */ /* b". The restart is a
-        # LOOP over the remainder, not a single check, or the reopened block is treated as
-        # closed and its continuation lines are scanned as code.
-        while (match(comment, /\*\//)) {
-            rest = substr(comment, RSTART + 2)
-            if (match(rest, /\/\*/)) {
-                comment = substr(rest, RSTART)
+        if (in_block) {
+            # A block may close and reopen on the same line: "/* a */ /* b". The close is
+            # consumed and the walk continues in the same loop, so the reopened block is
+            # entered rather than treated as the end of the comment.
+            #
+            # The text read here IS comment text, including when the block opened and closed on
+            # this very line -- a one-line doc comment is the common case, and forgetting to set
+            # has_comment made every `/** ... */` on a single line invisible.
+            rest = substr(line, p)
+            idx = index(rest, block_close)
+            has_comment = 1
+            if (idx == 0) { comment_text = comment_text " " rest; break }
+            comment_text = comment_text " " substr(rest, 1, idx - 1)
+            in_block = 0
+            p += idx + length(block_close) - 2
+            continue
+        }
+
+        if (quote != "") {
+            if (ch == "\\") { p++; continue }
+            if (length(quote) == 1 ? (ch == quote) : (substr(line, p, length(quote)) == quote)) {
+                p += length(quote) - 1
+                quote = ""
+            }
+            continue
+        }
+
+        if (in_regex) {
+            if (ch == "\\") { p++; continue }
+            if (ch == "[") {          # a character class may hold an unescaped slash
+                p++
+                while (p <= n && substr(line, p, 1) != "]") {
+                    if (substr(line, p, 1) == "\\") p++
+                    p++
+                }
                 continue
             }
-            comment = substr(comment, 1, RSTART + 1)
-            in_block = 0
-            break
+            if (ch == "/") in_regex = 0
+            continue
         }
-    } else if (match(code, /\/\*/)) {
-        comment = substr(raw, RSTART)
-        if (match(substr(code, RSTART + 2), /\*\//)) {
-            # Closed on this line. Scan past it: a second opener may follow.
-            after = substr(raw, RSTART + 2)
-            while (match(after, /\*\//)) {
-                after = substr(after, RSTART + 2)
-                if (match(after, /\/\*/)) {
-                    comment = substr(after, RSTART)
-                    in_block = 1
+
+        # A multi-character delimiter is tested first so a triple quote wins.
+        matched_longer = 0
+        for (qi = 1; qi <= n_quote; qi++) {
+            if (length(q[qi]) > 1 && substr(line, p, length(q[qi])) == q[qi]) {
+                quote = q[qi]
+                p += length(q[qi]) - 1
+                matched_longer = 1
+                break
+            }
+        }
+        if (matched_longer) continue
+        if (index("\"'`", ch) && ch != "" && is_a_quote(ch)) {
+            quote = ch
+            continue
+        }
+
+        # Comment markers are tested BEFORE the regex heuristic. A slash prefixes both comment
+        # forms, so a regex test first would swallow a real comment.
+        if (has_block && substr(line, p, 2) == block_open) {
+            in_block = 1
+            p += length(block_open) - 1
+            continue
+        }
+
+        marker_here = 0
+        for (mi = 1; mi <= n_line; mi++) {
+            if (substr(line, p, length(marker[mi])) == marker[mi]) {
+                # Core's rule: the marker is tested at a word start -- the preceding character
+                # must be whitespace, or there is none. In a `#` language this is what keeps a
+                # colour literal or a URL fragment from reading as a comment.
+                if (p == 1 || is_space(substr(line, p - 1, 1))) {
+                    marker_here = 1
                     break
                 }
             }
-        } else {
-            in_block = 1
         }
-    } else if (match(code, /\/\//)) {
-        comment = substr(raw, RSTART)
-    } else if (match(code, /^[ \t]*#/)) {
-        # A leading hash comment (shell, Python, Go).
-        comment = substr(raw, RSTART)
-    } else if (match(code, /#[ \t]/)) {
-        # A trailing hash comment. Strings are blanked in `code` above, so a "#" inside a
-        # literal is already gone. Requiring whitespace after the "#" keeps a colour
-        # literal or a shell parameter from reading as a comment.
-        comment = substr(raw, RSTART + 1)
-    } else if (raw ~ /^[ \t]*\*/) {
-        # Continuation lines of a KDoc or C-style block comment.
-        comment = raw
+        if (marker_here) {
+            comment_text = comment_text " " substr(line, p + length(marker[mi]))
+            has_comment = 1
+            break
+        }
+
+        # A slash opens a regex literal only where a value can begin. Bounded on purpose:
+        # reading every slash as a regex opener would swallow ordinary division, and guessing
+        # wrong costs a slice nobody reads rather than a reference the guard cannot see.
+        if (lang == "js" && ch == "/" &&
+            (prev_significant == "" || prev_significant ~ /[=(,:;[{!&|?+\-*%~^<>]/)) {
+            in_regex = 1
+            prev_significant = ""
+            continue
+        }
+
+        if (ch !~ /[ \t]/) prev_significant = ch
     }
 
-    if (comment == "") next
+    if (!has_comment && !in_block && quote == "") next
+    if (comment_text == "") next
 
-    # A framework attribute or a scoped package on the SAME line must not suppress a real
-    # reference beside it, so those forms are removed from the text and each remaining
-    # mention is judged on its own -- which is what checking each match separately means.
-    gsub(/@(spec|reviewer|cloud|trainer|guru|android|ios|cindy|merlinran)[:\/][A-Za-z0-9_.:\/-]*/, "<attr>", comment)
+    # A framework attribute or a scoped package beside a real reference must not suppress it,
+    # so those forms are removed and each remaining mention is judged on its own -- which is
+    # what checking each match separately means.
+    gsub(/@(spec|reviewer|cloud|trainer|guru|android|ios|cindy|merlinran)[:\/][A-Za-z0-9_.:\/-]*/, "<attr>", comment_text)
 
     flagged = 0
-    if (comment ~ lane_ere) flagged = 1
-    if (!flagged && comment ~ hex_ere) flagged = 1
-
-    if (flagged) printf "%s:%d: %s\n", FILENAME, FNR, raw
+    if (comment_text ~ lane_ere) flagged = 1
+    if (!flagged && comment_text ~ hex_ere) flagged = 1
+    if (flagged) printf "%s:%d: %s\n", FILENAME, FNR, line
 }
+
+function is_a_quote(c) {
+    for (qi = 1; qi <= n_quote; qi++) if (length(q[qi]) == 1 && q[qi] == c) return 1
+    return 0
+}
+function is_space(c) { return c == " " || c == "\t" }

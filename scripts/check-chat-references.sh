@@ -76,11 +76,50 @@ done
 # Reading comment bodies rather than raw lines is what keeps `@android:` attributes and
 # `@cloudflare/` imports out of the result. String and char literals are blanked first so
 # a lane name inside a message template is not mistaken for a comment.
+# Comment and string syntax for an extension. Mirrors core PR 172's table so one rule holds in
+# all three repos. A language's own delimiters are the only thing that can answer "is this a
+# comment", and generalising from one language to all of them got real files wrong: a Python
+# docstring holding /* started a phantom block, and a TS regex literal holding a quote hid the
+# rest of its line.
+#
+#   c     two-slash line, block, double and single quotes        kt java kts cpp h swift mm
+#   js    two-slash line, block, backtick strings, regex literals ts
+#   go    two-slash line, block, backtick strings                 go
+#   hash  hash line only, double and single quotes                sh py
+#
+# The second field adds Python's triple-quoted strings, which span lines.
+chat_lang_for() {
+    case "$1" in
+        *.ts)                                      echo "js 0" ;;
+        *.go)                                      echo "go 0" ;;
+        *.py)                                      echo "hash 1" ;;
+        *.sh)                                      echo "hash 0" ;;
+        *.kt|*.java|*.kts|*.cpp|*.h|*.swift|*.mm)  echo "c 0" ;;
+        *)                                         echo "c 0" ;;
+    esac
+}
+
 scan_file() {
-    awk -v lane_ere="$CHAT_LANE_ERE" \
+    read -r lang triple <<< "$(chat_lang_for "$1")"
+    # LC_ALL=C for BYTE semantics. The walk indexes characters with substr() and length(), and
+    # in a UTF-8 locale awk aborts on a multibyte character it cannot convert ("towc: multibyte
+    # conversion failure") -- one curly quote in a string literal was enough. Byte semantics are
+    # safe here because every character the walk looks for is ASCII: a UTF-8 continuation byte is
+    # always >= 0x80 and can never be mistaken for a quote, a slash or a hash.
+    LC_ALL=C awk -v lane_ere="$CHAT_LANE_ERE" \
         -v hex_ere="$CHAT_HEX_ERE" \
         -v resource_ere="$CHAT_RESOURCE_ERE" \
+        -v lang="$lang" \
+        -v triple="${triple:-0}" \
         -f "$(dirname "$0")/chat-reference-guard.awk" "$1"
+    # An awk that died mid-file prints no findings, which reads exactly like a clean file. Any
+    # non-zero status other than a normal exit is surfaced so the run cannot pass on a scan that
+    # did not happen. (awk exits 0 on a clean scan and 2 on a fatal error.)
+    local awk_status=$?
+    if [ "$awk_status" -ne 0 ]; then
+        echo "check-chat-references: the scanner failed on $1 (status $awk_status)" >&2
+        return 2
+    fi
 }
 
 run_selftest() {
@@ -141,6 +180,29 @@ run_selftest() {
         status=1
     else
         echo "ok: unreadable path exits 2"
+    fi
+
+    echo "== a scanner that dies must not read as a clean file =="
+    # Same failure one level in: an awk that aborts prints no findings, and no findings is
+    # indistinguishable from a clean file unless the status is checked. Exercised through the
+    # real scan_file by pointing its awk at a script that exits 2 -- if that status were
+    # swallowed, this would report success. The real scan_file is re-sourced here because a
+    # function cannot otherwise have its awk replaced.
+    local broken_root broken_status
+    broken_root="$(mktemp -d)"
+    printf 'val x = 1\n' > "$broken_root/x.kt"
+    (
+        awk() { command awk 'BEGIN { exit 2 }'; }
+        eval "$(sed -n '/^scan_file()/,/^}/p' "$0")"
+        scan_file "$broken_root/x.kt"
+    ) >/dev/null 2>&1
+    broken_status=$?
+    rm -rf "$broken_root"
+    if [ "$broken_status" -ne 2 ]; then
+        echo "FAIL: a scan that died reported status $broken_status, not 2; it reads as clean." >&2
+        status=1
+    else
+        echo "ok: a scan that died exits 2"
     fi
 
     if [ "$status" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi

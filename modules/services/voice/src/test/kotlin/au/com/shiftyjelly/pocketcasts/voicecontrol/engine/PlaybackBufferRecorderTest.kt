@@ -444,7 +444,7 @@ class PlaybackBufferRecorderTest {
     // GLOBAL RETIREMENT INVALIDATES OLD CALLBACKS, IT DOES NOT REOPEN THEIR RIGHT TO WRITE. The defect
     // this defends: retire() used to CLEAR the retired-id ledger and deadlines, so a route change after
     // a cloud stop handed every previously-retired id back to a held callback and left any surviving
-    // tail matchable forever. Control per @spec: stopped producer -> global retire (route change) ->
+    // tail matchable forever. Control: stopped producer -> global retire (route change) ->
     // successor writes under its own id -> the HELD old write and observation are released -> nothing
     // lands and the successor is untouched.
     @Test
@@ -470,7 +470,7 @@ class PlaybackBufferRecorderTest {
         )
     }
 
-    // DEADLIVES SURVIVE THE GLOBAL RESET TOO. @reviewer: preserve or replace tail deadlines for every
+    // DEADLINES SURVIVE THE GLOBAL RESET TOO. Preserve or replace tail deadlines for every
     // retained sample during global retirement. Control: live producer with a long stream -> global
     // retire keeps only the acoustic tail WITH an expiry -> advance the clock, no further writes -> the
     // retained tail ages out of reference()/snapshot() instead of lingering indefinitely matchable.
@@ -1525,7 +1525,7 @@ class PlaybackBufferRecorderTest {
 
     private fun admFor(recorder: PlaybackBufferRecorder, id: Long): PlaybackBufferRecorder.Admission = testAdmissions.getOrPut(recorder to id) { recorder.openAdmission(id) }
 
-    // CONTROLS @spec/@reviewer: ADMISSION IS CAPTURED AT EMISSION, NOT CONSUMPTION. The tap stamps each
+    // CONTROLS: ADMISSION IS CAPTURED AT EMISSION, NOT CONSUMPTION. The tap stamps each
     // chunk when it is created; a wholesale retire() kills every outstanding ticket, so audio that was
     // ALREADY QUEUED stays dead even though delivery happens after the reset -- consumption must never
     // launder in-flight work into the new generation. Only FUTURE emissions from a live owner renew.
@@ -1636,7 +1636,7 @@ class PlaybackBufferRecorderTest {
         )
     }
 
-    // CONTROLS @reviewer: the ACTUAL tap sequence, not a recorder-shaped proxy. Emit/drain under the
+    // CONTROLS: the ACTUAL tap sequence, not a recorder-shaped proxy. Emit/drain under the
     // owner's first ticket -> global retire (registry intentionally emptied) -> emit/drain the SAME
     // epoch. The active emission owner must renew future emissions from its RETAINED Admission; if
     // renewal recovered ownership from the cleared registry, every later chunk would be dead forever

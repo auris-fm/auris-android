@@ -1046,7 +1046,7 @@ class CloudAudioPlayerTest {
         }
 
         // REVERSED from its first version, which expected the chunk CLAMPED to the observation's own
-        // instant. @spec: a timestamp naming a different frame must not be clamped to the chunk's own
+        // instant. A timestamp naming a different frame must not be clamped to the chunk's own
         // instant and called observed alignment. This observation names frame 16000 -- a frame AT OR
         // PAST the chunk under submission (a stale or reset read) -- so the mapping reports
         // UNAVAILABLE and the chunk records no anchored position.

@@ -241,7 +241,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `an UNSTAMPED command that replaces a window still reports the window it ended`() = runTest {
-        // @reviewer: the unstamped branch called `openWindowLocked()` and DISCARDED the ended
+        // The unstamped branch called `openWindowLocked()` and DISCARDED the ended
         // generation, so a command that replaced a window emitted NO retirement callback. "A replacement
         // is an ending" -- and this was the one open path that ignored it.
         val retired = mutableListOf<Long>()

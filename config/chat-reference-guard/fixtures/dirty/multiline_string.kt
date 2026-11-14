@@ -4,4 +4,3 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.fixture
 val doc = """
     body text
     """  // per @reviewer this follows the closing quotes DENY
-

@@ -1103,7 +1103,7 @@ class AndroidPlatformTtsEngineTest {
         assertSame("successor must not replace the shared slot while its cleanup lock is held", oldTrack.get(), observed)
     }
 
-    // CONTROL @reviewer/@spec: a HELD OLD TTS WRITE released after a successor has started and the old
+    // CONTROL: a HELD OLD TTS WRITE released after a successor has started and the old
     // utterance's cleanup ran must not append its audio under the SUCCESSOR'S reference identity. The
     // defect shape was recordAccepted reading the shared currentUtteranceAdmission at RECORDING time:
     // an old stream blocked inside AudioTrack.write resumes AFTER a successor published its own
@@ -1206,7 +1206,7 @@ class AndroidPlatformTtsEngineTest {
             assertTrue("the successor's audio is in the reference (ring non-empty)", snapshot.isNotEmpty())
             val oldTickets = tags.filterIndexed { i, _ -> kotlin.math.abs(snapshot[i]) in 0.025f..0.04f }.toSet()
             val successorTickets = tags.filterIndexed { i, _ -> snapshot[i] > 0.6f }.toSet()
-            // @reviewer: without this, an empty successor set would make the disjointness below
+            // Without this, an empty successor set would make the disjointness below
             // vacuously true even if the successor contributed nothing to the ring at all.
             assertTrue(
                 "the successor must have recorded audio under ITS OWN ticket (else disjointness is vacuous)",

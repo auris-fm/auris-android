@@ -90,17 +90,21 @@ done
 # The second field adds Python's triple-quoted strings, which span lines.
 chat_lang_for() {
     case "$1" in
-        *.ts)                                      echo "js 0" ;;
-        *.go)                                      echo "go 0" ;;
-        *.py)                                      echo "hash 1" ;;
-        *.sh)                                      echo "hash 0" ;;
-        *.kt|*.java|*.kts|*.cpp|*.h|*.swift|*.mm)  echo "c 0" ;;
-        *)                                         echo "c 0" ;;
+        *.ts)                                      echo "js 0 0" ;;
+        *.go)                                      echo "go 0 0" ;;
+        *.py)                                      echo "hash 1 0" ;;
+        *.sh)                                      echo "hash 0 1" ;;
+        # Kotlin, C++ and Swift all have a triple-quoted raw string that spans lines. Java does
+        # not, but listing it there costs nothing: a Java file cannot contain the delimiter
+        # without it being a compile error, so the row is about what the language allows.
+        *.kt|*.kts|*.cpp|*.h|*.swift|*.mm)         echo "c 1 0" ;;
+        *.java)                                    echo "c 0 0" ;;
+        *)                                         echo "c 0 0" ;;
     esac
 }
 
 scan_file() {
-    read -r lang triple <<< "$(chat_lang_for "$1")"
+    read -r lang triple shellmode <<< "$(chat_lang_for "$1")"
     # LC_ALL=C for BYTE semantics. The walk indexes characters with substr() and length(), and
     # in a UTF-8 locale awk aborts on a multibyte character it cannot convert ("towc: multibyte
     # conversion failure") -- one curly quote in a string literal was enough. Byte semantics are
@@ -111,6 +115,7 @@ scan_file() {
         -v resource_ere="$CHAT_RESOURCE_ERE" \
         -v lang="$lang" \
         -v triple="${triple:-0}" \
+        -v shell="${shellmode:-0}" \
         -f "$(dirname "$0")/chat-reference-guard.awk" "$1"
     # An awk that died mid-file prints no findings, which reads exactly like a clean file. Any
     # non-zero status other than a normal exit is surfaced so the run cannot pass on a scan that

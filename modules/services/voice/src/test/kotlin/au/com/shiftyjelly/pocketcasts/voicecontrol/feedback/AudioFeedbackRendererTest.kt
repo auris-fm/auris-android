@@ -80,7 +80,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a REFUSED cue is reported as refused, not accepted`() {
-        // @reviewer: playEarcon returned true even when the player returned null, so a REFUSED cue looked
+        // playEarcon returned true even when the player returned null, so a REFUSED cue looked
         // accepted to every caller -- they could not tell a cue that never sounded from one that did.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(null)
 
@@ -424,7 +424,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `an old stop cannot retire a successor cue's observation`() = runTest {
-        // @spec: "an old stop must not retire a successor". The first cue's observation expires to
+        // An old stop must not retire a successor. The first cue's observation expires to
         // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
         // not overwrite the successor's verdict -- otherwise a stale stop would re-open the gate's
         // attribution on a cue that already finished, or hide one that is still sounding.
@@ -471,7 +471,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `one cue keeps ONE identity across its verdict changes`() = runTest {
-        // @reviewer: "Consumed→Ended on one cue receives two IDs." An identity must be a property of the
+        // Consumed→Ended on one cue receives two IDs. An identity must be a property of the
         // CUE, allocated once at admission -- otherwise a consumer comparing ids reads its own cue
         // changing its verdict as a DIFFERENT cue and discards the elapsed time it should keep.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
@@ -1073,7 +1073,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a RELEASED old observer cannot overwrite the same-sound successor's verdict`() = runTest {
-        // @spec: verify the ACTUAL stale-observer retirement path end to end. Hold A's observer, admit a
+        // Verify the ACTUAL stale-observer retirement path end to end. Hold A's observer, admit a
         // SAME-SOUND B, release A, and require B's observation to survive. This is where the ownership
         // guarantee really lives -- `publishObservationIfOwning` refuses a writer that no longer owns the
         // cue -- not in a stop API.

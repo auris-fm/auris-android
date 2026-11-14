@@ -43,16 +43,43 @@ BEGIN {
     }
 
     # String delimiters, longest first so a triple quote wins over a single one.
+    #
+    # **`spans` is the bound on what a misread costs.** Carrying every quote across lines made one
+    # misread quote hide every comment for the REST OF THE FILE, where before it hid one line. A
+    # single quote in Kotlin ends at the newline, so only the delimiters that really do span lines
+    # are carried: Python's triple quotes, the TypeScript and Go backtick, and shell's quotes,
+    # which may continue after a backslash. Everything else closes at end of line.
     n_quote = 0
     if (lang == "js" || lang == "go") {
-        n_quote = 3; q[1] = "`"; q[2] = "\""; q[3] = "'"
-    } else if (lang == "c") {
-        n_quote = 2; q[1] = "\""; q[2] = "'"
+        n_quote = 3
+        q[1] = "`";  spans[1] = 1
+        q[2] = "\""; spans[2] = 0
+        q[3] = "'";  spans[3] = 0
     } else {
-        n_quote = 2; q[1] = "\""; q[2] = "'"
+        n_quote = 2
+        q[1] = "\""; spans[1] = 0
+        q[2] = "'";  spans[2] = 0
+    }
+    if (lang == "hash" && triple == 0) {
+        # Shell quotes continue after a backslash; Python's single quotes do not.
+        if (shell == 1) { spans[1] = 1; spans[2] = 1 }
     }
     if (triple == 1) {
-        n_quote = 4; q[1] = "\"\"\""; q[2] = "'''"; q[3] = "\""; q[4] = "'"
+        # A triple-quoted string that spans lines. Python spells it both ways; Kotlin, C++ and
+        # Swift only with the double quote. Getting this wrong is not harmless: a delimiter the
+        # language does not have opens a string on text that is really code.
+        if (lang == "hash") {
+            n_quote = 4
+            q[1] = "\"\"\""; spans[1] = 1
+            q[2] = "'''";  spans[2] = 1
+            q[3] = "\"";   spans[3] = 0
+            q[4] = "'";    spans[4] = 0
+        } else {
+            n_quote = 3
+            q[1] = "\"\"\""; spans[1] = 1
+            q[2] = "\"";   spans[2] = 0
+            q[3] = "'";    spans[3] = 0
+        }
     }
 }
 
@@ -91,7 +118,6 @@ BEGIN {
             }
             continue
         }
-
         if (in_regex) {
             if (ch == "\\") { p++; continue }
             if (ch == "[") {          # a character class may hold an unescaped slash
@@ -111,13 +137,17 @@ BEGIN {
         for (qi = 1; qi <= n_quote; qi++) {
             if (length(q[qi]) > 1 && substr(line, p, length(q[qi])) == q[qi]) {
                 quote = q[qi]
+                quote_index = qi
                 p += length(q[qi]) - 1
                 matched_longer = 1
                 break
             }
         }
         if (matched_longer) continue
-        if (index("\"'`", ch) && ch != "" && is_a_quote(ch)) {
+        if (is_a_quote(ch)) {
+            for (qi = 1; qi <= n_quote; qi++) {
+                if (length(q[qi]) == 1 && q[qi] == ch) { quote_index = qi; break }
+            }
             quote = ch
             continue
         }
@@ -161,13 +191,18 @@ BEGIN {
         if (ch !~ /[ \t]/) prev_significant = ch
     }
 
-    if (!has_comment && !in_block && quote == "") next
+    # A quote that does not span lines ends with the line, whether or not it was closed. This is
+    # what keeps one misread quote to its own line instead of hiding the rest of the file.
+    if (quote != "" && spans[quote_index] == 0) quote = ""
+
+    if (!has_comment) next
     if (comment_text == "") next
 
-    # A framework attribute or a scoped package beside a real reference must not suppress it,
-    # so those forms are removed and each remaining mention is judged on its own -- which is
-    # what checking each match separately means.
-    gsub(/@(spec|reviewer|cloud|trainer|guru|android|ios|cindy|merlinran)[:\/][A-Za-z0-9_.:\/-]*/, "<attr>", comment_text)
+    # **Only @android: is exempt, and only because it is a framework resource reference**
+    # (`@android:color/...`, `@android:id/...`) rather than a mention of a lane. Every other lane
+    # followed by a colon is a citation -- "as @spec: said" is the most common form there is -- so
+    # exempting the whole `@lane:` shape hid it. Each remaining mention is judged on its own.
+    gsub(/@android:[A-Za-z0-9_.:\/]*/, "<resource>", comment_text)
 
     flagged = 0
     if (comment_text ~ lane_ere) flagged = 1

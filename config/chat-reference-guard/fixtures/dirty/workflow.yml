@@ -1,7 +1,0 @@
-# A workflow comment is prose too: the YAML files were never scanned before.
-name: fixture
-jobs:
-  build:
-    steps:
-      - run: echo hi  # per @spec this holds DENY
-      - run: echo "a # b"

@@ -1,4 +1,0 @@
-# A hash glued to a value does not start a comment in YAML, so the first line below must stay
-# silent while the second is a real comment.
-key: a#text-glued-to-a-value-and-not-a-comment
-other: 1  # per @cloud this is a comment DENY

@@ -107,6 +107,32 @@ run_selftest() {
         echo "ok: clean fixture produced no findings"
     fi
 
+    echo "== block-comment edge cases: a reopened block and code-then-comment =="
+    local edge_dir edge_out
+    edge_dir="$(mktemp -d)"
+    printf '/* a */ /* b\n * @spec 1234567a inner\n */\n' > "$edge_dir/reopen.kt"
+    printf 'val x = 1 // @reviewer 1234567b here\n' > "$edge_dir/oneline.kt"
+    edge_out=$(for f in "$edge_dir"/*; do scan_file "$f"; done)
+    if [ "$(printf '%s\n' "$edge_out" | grep -c .)" -ne 2 ]; then
+        echo "FAIL: a reopened block or a code-then-comment line was not read." >&2
+        printf '%s\n' "$edge_out" | sed 's/^/    /' >&2
+        status=1
+    else
+        echo "ok: both edge cases found"
+    fi
+    rm -rf "$edge_dir"
+
+    echo "== an unreadable path is an error, not a silent 'clean' =="
+    local quiet_out quiet_status
+    quiet_out=$("$0" --root "$base/clean" --paths does-not-exist.kt 2>&1)
+    quiet_status=$?
+    if [ "$quiet_status" -ne 2 ]; then
+        echo "FAIL: an unreadable path exited $quiet_status, not 2; it would read as clean." >&2
+        status=1
+    else
+        echo "ok: unreadable path exits 2"
+    fi
+
     if [ "$status" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
     return "$status"
 }
@@ -130,11 +156,29 @@ if [ "${#paths[@]}" -eq 0 ]; then
 fi
 
 found=0
+# A path that cannot be read is an ERROR, not a silent skip. A guard that answers "clean"
+# because it scanned nothing is worse than one that fails: it reports the same thing for a
+# clean tree and for a broken invocation, and nothing downstream can tell them apart.
+hits_file="$(mktemp)"
+trap 'rm -f "$hits_file"' EXIT
+for p in "${paths[@]}"; do
+    case "$p" in
+        /*) target="$p" ;;
+        *)  target="$root/$p" ;;
+    esac
+    if [ ! -f "$target" ]; then
+        echo "check-chat-references: cannot read $p" >&2
+        echo "check-chat-references: refusing to report a result for files it could not read" >&2
+        exit 2
+    fi
+    scan_file "$target" >> "$hits_file"
+done
+
 while IFS= read -r hit; do
     [ -z "$hit" ] && continue
     echo "$hit"
     found=$((found + 1))
-done < <(for p in "${paths[@]}"; do [ -f "$root/$p" ] && scan_file "$root/$p"; done)
+done < "$hits_file"
 
 if [ "$found" -gt 0 ]; then
     echo "" >&2

@@ -1,0 +1,3 @@
+# An apostrophe in an unquoted YAML value is an ordinary character, not a string opener.
+name: Don't merge yet
+# per @spec later DENY

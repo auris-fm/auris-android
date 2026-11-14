@@ -67,8 +67,11 @@ BEGIN {
         if (shell == 1) { spans[1] = 1; spans[2] = 1 }
     }
     if (yaml == 1) {
-        # A quoted scalar in a workflow is a value, so no delimiter is prose.
-        spans[1] = 1; spans[2] = 1
+        # **YAML has no quote handling at all.** An apostrophe in an unquoted value -- "Don't
+        # merge yet" -- is an ordinary character, not an opener, and treating it as one hid every
+        # comment for the rest of the file. A quoted scalar is a value anyway, so there is nothing
+        # to collect from one.
+        n_quote = 0
     }
     if (triple == 1) {
         # A triple-quoted string that spans lines. Python spells it both ways; Kotlin, C++ and

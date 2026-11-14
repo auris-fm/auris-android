@@ -96,7 +96,10 @@ chat_lang_for() {
         *.go)                                      echo "go 0 0 0 1 0" ;;
         *.py)                                      echo "hash 1 0 0 0 0" ;;
         *.sh)                                      echo "hash 0 1 0 1 0" ;;
-        *.yml|*.yaml)                              echo "hash 0 0 0 0 1" ;;
+        # YAML has no quote handling: an apostrophe in an unquoted value ("Don't merge yet") is an
+        # ordinary character, and treating it as an opener hid the rest of the file. A hash needs
+        # whitespace before it, since a value may contain one.
+        *.yml|*.yaml)                              echo "hash 0 0 0 1 1" ;;
         # Kotlin, C++ and Swift all have a triple-quoted raw string that spans lines. Java does
         # not, but listing it there costs nothing: a Java file cannot contain the delimiter
         # without it being a compile error, so the row is about what the language allows.

@@ -77,7 +77,7 @@ class FingerprintPcmTap @Inject constructor() {
 
     /**
      * Subscribes to the SINK PAUSE event: media3 calls audioSink.pause() on player pause WITHOUT any
-     * flush (@reviewer/@spec pause acoustic contract). A subscriber ends the current audible-reference
+     * flush, which is the pause contract. A subscriber ends the current audible-reference
      * admission at the pause: only the bounded delay tail survives, expiring without another write;
      * queued pre-pause work is refused. Logical stream identity is retained for resume, which admits
      * future playback under a RENEWED admission -- the old reference is never revived.

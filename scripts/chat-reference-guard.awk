@@ -11,7 +11,6 @@
 # split first: `code` is the part before the comment marker (used only to locate markers,
 # never to match), and `comment` is the prose (the only part that is matched).
 
-
 BEGIN { in_block = 0 }
 
 {
@@ -37,29 +36,59 @@ BEGIN { in_block = 0 }
 
     if (in_block) {
         comment = raw
-        if (index(raw, "*/") > 0) in_block = 0
+        # A block may close and reopen on the same line: "/* a */ /* b". The restart is a
+        # LOOP over the remainder, not a single check, or the reopened block is treated as
+        # closed and its continuation lines are scanned as code.
+        while (match(comment, /\*\//)) {
+            rest = substr(comment, RSTART + 2)
+            if (match(rest, /\/\*/)) {
+                comment = substr(rest, RSTART)
+                continue
+            }
+            comment = substr(comment, 1, RSTART + 1)
+            in_block = 0
+            break
+        }
     } else if (match(code, /\/\*/)) {
         comment = substr(raw, RSTART)
-        if (index(substr(code, RSTART + 2), "*/") == 0) in_block = 1
+        if (match(substr(code, RSTART + 2), /\*\//)) {
+            # Closed on this line. Scan past it: a second opener may follow.
+            after = substr(raw, RSTART + 2)
+            while (match(after, /\*\//)) {
+                after = substr(after, RSTART + 2)
+                if (match(after, /\/\*/)) {
+                    comment = substr(after, RSTART)
+                    in_block = 1
+                    break
+                }
+            }
+        } else {
+            in_block = 1
+        }
     } else if (match(code, /\/\//)) {
         comment = substr(raw, RSTART)
+    } else if (match(code, /^[ \t]*#/)) {
+        # A leading hash comment (shell, Python, Go).
+        comment = substr(raw, RSTART)
+    } else if (match(code, /#[ \t]/)) {
+        # A trailing hash comment. Strings are blanked in `code` above, so a "#" inside a
+        # literal is already gone. Requiring whitespace after the "#" keeps a colour
+        # literal or a shell parameter from reading as a comment.
+        comment = substr(raw, RSTART + 1)
     } else if (raw ~ /^[ \t]*\*/) {
         # Continuation lines of a KDoc or C-style block comment.
-        comment = raw
-    } else if (raw ~ /^[ \t]*#/) {
-        # Shell, Python and Go comments.
         comment = raw
     }
 
     if (comment == "") next
 
-    flagged = 0
+    # A framework attribute or a scoped package on the SAME line must not suppress a real
+    # reference beside it, so those forms are removed from the text and each remaining
+    # mention is judged on its own -- which is what checking each match separately means.
+    gsub(/@(spec|reviewer|cloud|trainer|guru|android|ios|cindy|merlinran)[:\/][A-Za-z0-9_.:\/-]*/, "<attr>", comment)
 
-    if (comment ~ lane_ere) {
-        # A lane followed by ':' or '/' is framework resource syntax (@android:color) or a
-        # scoped package import (@cloudflare/), not a citation.
-        if (comment !~ resource_ere) flagged = 1
-    }
+    flagged = 0
+    if (comment ~ lane_ere) flagged = 1
     if (!flagged && comment ~ hex_ere) flagged = 1
 
     if (flagged) printf "%s:%d: %s\n", FILENAME, FNR, raw

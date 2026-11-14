@@ -345,7 +345,7 @@ class PlaybackBufferRecorder @Inject constructor(
                     // New stream epoch -- or the owner's held admission no longer matches the carried
                     // ticket: the previous incarnation (if any) is superseded and retired; a seek or new
                     // episode is a NEW producer identity, audio never migrates.
-                    // OWNER == NULL WITH A CARRIED TICKET (@reviewer/@spec, same-epoch stop->start):
+                    // OWNER == NULL WITH A CARRIED TICKET (same-epoch stop->start):
                     // this collector just installed its stamper with no admission of its own yet, and the
                     // tap still remembers the ticket the PREVIOUS collector was using for an unchanged
                     // epoch. That ticket is dead -- it belonged to the owner retired at stop(). The

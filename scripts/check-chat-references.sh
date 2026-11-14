@@ -87,14 +87,24 @@ run_selftest() {
     local base status=0 dirty_out clean_out
     base="$(cd "$(dirname "$0")/.." && pwd)/config/chat-reference-guard/fixtures"
 
-    echo "== negative control: the planted references must be found =="
+    echo "== negative control: every planted reference must be found =="
+    # Counting findings is not enough: a guard that catches five of seven planted references
+    # still "fails" the fixture and still passes a count-based test. Each planted line carries
+    # DENY, and the number of findings must equal the number of markers. A fixture with no
+    # markers would make this vacuous, which is the failure the check exists to prevent.
+    local dirty_out planted found_count
     dirty_out=$(for f in $(find "$base/dirty" -type f); do scan_file "$f"; done)
-    if [ -z "$dirty_out" ]; then
-        echo "FAIL: the dirty fixture produced no findings; the guard cannot fail." >&2
+    planted=$(grep -rh 'DENY' "$base/dirty" | wc -l | tr -d ' ')
+    found_count=$(printf '%s\n' "$dirty_out" | grep -c . )
+    if [ "$planted" -eq 0 ]; then
+        echo "FAIL: the dirty fixture carries no DENY markers; this control proves nothing." >&2
+        status=1
+    elif [ "$found_count" -ne "$planted" ]; then
+        echo "FAIL: $planted planted references, $found_count found. Missing:" >&2
+        grep -rh 'DENY' "$base/dirty" | sed 's/^[[:space:]]*/    /' >&2
         status=1
     else
-        echo "ok: dirty fixture produced $(printf '%s\n' "$dirty_out" | wc -l | tr -d ' ') finding(s)"
-        printf '%s\n' "$dirty_out" | sed 's/^/    /'
+        echo "ok: all $planted planted references found"
     fi
 
     echo "== false positives: real syntax that must NOT be flagged =="

@@ -54,17 +54,21 @@ BEGIN {
     n_quote = 0
     if (lang == "js" || lang == "go") {
         n_quote = 3
-        q[1] = "`";  spans[1] = 1
-        q[2] = "\""; spans[2] = 0
-        q[3] = "'";  spans[3] = 0
+        q[1] = "`";  spans[1] = 1; prose[1] = 0
+        q[2] = "\""; spans[2] = 0; prose[2] = 0
+        q[3] = "'";  spans[3] = 0; prose[3] = 0
     } else {
         n_quote = 2
-        q[1] = "\""; spans[1] = 0
-        q[2] = "'";  spans[2] = 0
+        q[1] = "\""; spans[1] = 0; prose[1] = 0
+        q[2] = "'";  spans[2] = 0; prose[2] = 0
     }
-    if (lang == "hash" && triple == 0) {
+    if (lang == "hash" && triple == 0 && yaml == 0) {
         # Shell quotes continue after a backslash; Python's single quotes do not.
         if (shell == 1) { spans[1] = 1; spans[2] = 1 }
+    }
+    if (yaml == 1) {
+        # A quoted scalar in a workflow is a value, so no delimiter is prose.
+        spans[1] = 1; spans[2] = 1
     }
     if (triple == 1) {
         # A triple-quoted string that spans lines. Python spells it both ways; Kotlin, C++ and
@@ -72,15 +76,15 @@ BEGIN {
         # language does not have opens a string on text that is really code.
         if (lang == "hash") {
             n_quote = 4
-            q[1] = "\"\"\""; spans[1] = 1
-            q[2] = "'''";  spans[2] = 1
-            q[3] = "\"";   spans[3] = 0
-            q[4] = "'";    spans[4] = 0
+            q[1] = "\"\"\""; spans[1] = 1; prose[1] = 1
+            q[2] = "'''";  spans[2] = 1; prose[2] = 1
+            q[3] = "\"";   spans[3] = 0; prose[3] = 0
+            q[4] = "'";    spans[4] = 0; prose[4] = 0
         } else {
             n_quote = 3
-            q[1] = "\"\"\""; spans[1] = 1
-            q[2] = "\"";   spans[2] = 0
-            q[3] = "'";    spans[3] = 0
+            q[1] = "\"\"\""; spans[1] = 1; prose[1] = 0
+            q[2] = "\"";   spans[2] = 0; prose[2] = 0
+            q[3] = "'";    spans[3] = 0; prose[3] = 0
         }
     }
 }
@@ -148,23 +152,36 @@ BEGIN {
             continue
         }
 
-        # A multi-character delimiter is tested first so a triple quote wins.
-        matched_longer = 0
+        # **The longest matching delimiter wins, whatever order the row lists them in.** Matching
+        # in table order meant a row listing a single quote before its triple never reached the
+        # triple: the single quote claimed the first character and a raw string was parsed as an
+        # empty string followed by junk. A row could be correct in every field and wrong from
+        # ordering alone.
+        best_q = 0
         for (qi = 1; qi <= n_quote; qi++) {
-            if (length(q[qi]) > 1 && substr(line, p, length(q[qi])) == q[qi]) {
-                quote = q[qi]
-                quote_index = qi
-                p += length(q[qi]) - 1
-                matched_longer = 1
-                break
+            if (substr(line, p, length(q[qi])) == q[qi] && length(q[qi]) > best_q) {
+                best_q = length(q[qi])
+                best_index = qi
             }
         }
-        if (matched_longer) continue
-        if (is_a_quote(ch)) {
-            for (qi = 1; qi <= n_quote; qi++) {
-                if (length(q[qi]) == 1 && q[qi] == ch) { quote_index = qi; break }
+        if (best_q > 0) {
+            quote = q[best_index]
+            quote_index = best_index
+            # **A string whose contents are prose is collected like a comment's.** Python's
+            # docstrings are prose because rationale and design notes live there -- the same kind
+            # of writing as a comment, in the same places a reference is most likely to survive a
+            # removal elsewhere. Nothing else qualifies: a JavaScript string is a value.
+            if (prose[quote_index] == 1) {
+                has_comment = 1
+                rest = substr(line, p + best_q)
+                close_idx = index(rest, quote)
+                comment_text = comment_text " " (close_idx == 0 ? rest : substr(rest, 1, close_idx - 1))
+                if (close_idx == 0) { p = n; continue }
+                p += best_q + close_idx + best_q - 2
+                quote = ""
+                continue
             }
-            quote = ch
+            p += best_q - 1
             continue
         }
 
@@ -180,10 +197,19 @@ BEGIN {
         marker_here = 0
         for (mi = 1; mi <= n_line; mi++) {
             if (substr(line, p, length(marker[mi])) == marker[mi]) {
-                # Core's rule: the marker is tested at a word start -- the preceding character
-                # must be whitespace, or there is none. In a `#` language this is what keeps a
-                # colour literal or a URL fragment from reading as a comment.
-                if (p == 1 || is_space(substr(line, p - 1, 1))) {
+                # **The word-start test applies to `#` alone.** `#` needs it because `x#y` is a
+                # colour, an anchor or a fixture string. `//` and `/*` do not, being unambiguous
+                # punctuation, and requiring it lost a comment butted straight against code.
+                #
+                # The test is the character immediately before the marker, not a running flag:
+                # a flag survives whitespace, so `foo  # note` and an indented comment under a
+                # line ending in a name were both dropped.
+                #
+                # Only some `#` languages need the break. In shell `a#b` is a word; in Python and
+                # YAML `x#y` IS a comment, because outside a string neither has a notion of a
+                # colour or a fragment.
+                if (marker[mi] != "#" || hash_needs_break == 0 || p == 1 ||
+                    substr(line, p - 1, 1) !~ /[A-Za-z0-9_$]/) {
                     marker_here = 1
                     break
                 }

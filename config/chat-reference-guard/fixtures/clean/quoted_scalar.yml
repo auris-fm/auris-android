@@ -1,0 +1,4 @@
+# A quoted scalar is a value, so text inside one is not prose and carries no comment.
+name: fixture
+env:
+  pattern: "x # per something"

@@ -10,13 +10,16 @@
 #
 # The rule in one sentence: a comment says what holds and why, and never who said it.
 #
-# SCOPE -- comment text only, and that is the point. Lane names collide with real syntax:
-#   @android:color/transparent   framework resource reference (Android XML and Kotlin)
-#   @cloudflare/workers-types    a scoped package import (TypeScript)
-#   @Spec... / @iOS...           a possible annotation
-# Matching raw text would either fail on day one or be loosened until it caught nothing,
-# so the guard reads comment bodies and matches whole words, rejecting a match that is
-# followed by ':' or '/'.
+# SCOPE -- comment text, plus the string forms whose contents are prose. Matching raw text
+# would either fail on day one or be loosened until it caught nothing, so the guard first
+# works out what is comment and what is code for each language, and matches only the former.
+#
+# A lane name collides with real syntax -- a framework resource attribute, a scoped package
+# import -- but those collisions are in CODE, and code is not scanned. So there is no
+# exemption for any lane shape, including a lane followed by ':' or '/', and a resource
+# attribute written inside a comment IS a finding. Do not add an exemption back: this tree
+# has no resource attribute in a comment, so one would cover a collision the guard never
+# sees while letting through the most common citation there is.
 #
 # NOT a citation guard for issue trackers, documentation or upstream Pocket Casts code:
 # those are out of the agreed scope, and widening it here would make the check fire on
@@ -36,14 +39,12 @@ set -o pipefail
 # ONE PATTERN LIST, copied verbatim from core PR 172 (`.github/scripts/check-chat-references.mjs`)
 # so all three repos hold one rule. Change it here only by changing it there first.
 #
-# The lane set and both shapes are core's. The POSIX awk in CI has no lookahead, so the rule is
-# expressed as match-then-reject: the lane as a whole word, then a rejection for a following
-# ':' or '/', which is what separates `@android:color` and `@cloudflare/` from a citation.
+# The lane set and both shapes are core's. The POSIX awk in CI has no lookahead, so a "whole word"
+# is expressed as the lane followed by a non-word character or the end of the text.
 CHAT_LANES='spec|reviewer|cloud|trainer|guru|android|ios|cindy|merlinran'
-# Case-insensitive, as core's `i` flag makes it: "Reviewer's" and "@Spec" are the same
-# reference as their lowercase forms.
+# Case-insensitive, as core's `i` flag makes it, so a capitalised lane name reads the same as
+# its lowercase form.
 CHAT_LANE_ERE="[@]([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn])([^A-Za-z0-9_-]|$)"
-CHAT_RESOURCE_ERE="[@]([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn])[:/]"
 
 # A lane name followed by a hex message id (7+ characters, same minimum as core, because an
 # ordinary word follows a lane name in prose far more often than an id does).
@@ -51,7 +52,8 @@ CHAT_HEX_ERE="(^|[^A-Za-z0-9_-])([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][R
 
 # Extensions the rule applies to: source and test files in the repos' own code.
 SOURCE_NAMES=(-name '*.kt' -o -name '*.java' -o -name '*.kts' -o -name '*.cpp' -o -name '*.h'
-              -o -name '*.ts' -o -name '*.go' -o -name '*.py' -o -name '*.mm' -o -name '*.swift')
+              -o -name '*.ts' -o -name '*.go' -o -name '*.py' -o -name '*.mm' -o -name '*.swift'
+              -o -name '*.sh' -o -name '*.yml' -o -name '*.yaml')
 
 usage() {
     sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
@@ -73,9 +75,9 @@ done
 
 # Print path:line: raw for every comment line that names a chat lane.
 #
-# Reading comment bodies rather than raw lines is what keeps `@android:` attributes and
-# `@cloudflare/` imports out of the result. String and char literals are blanked first so
-# a lane name inside a message template is not mistaken for a comment.
+# Working out what is comment and what is code is what keeps a framework resource attribute and
+# a scoped package import out of the result: both are code, and code is not scanned. String
+# literals are tracked so a lane name inside one is not mistaken for prose.
 # Comment and string syntax for an extension. Mirrors core PR 172's table so one rule holds in
 # all three repos. A language's own delimiters are the only thing that can answer "is this a
 # comment", and generalising from one language to all of them got real files wrong: a Python
@@ -90,21 +92,22 @@ done
 # The second field adds Python's triple-quoted strings, which span lines.
 chat_lang_for() {
     case "$1" in
-        *.ts)                                      echo "js 0 0 0" ;;
-        *.go)                                      echo "go 0 0 0" ;;
-        *.py)                                      echo "hash 1 0 0" ;;
-        *.sh)                                      echo "hash 0 1 0" ;;
+        *.ts)                                      echo "js 0 0 0 1 0" ;;
+        *.go)                                      echo "go 0 0 0 1 0" ;;
+        *.py)                                      echo "hash 1 0 0 0 0" ;;
+        *.sh)                                      echo "hash 0 1 0 1 0" ;;
+        *.yml|*.yaml)                              echo "hash 0 0 0 0 1" ;;
         # Kotlin, C++ and Swift all have a triple-quoted raw string that spans lines. Java does
         # not, but listing it there costs nothing: a Java file cannot contain the delimiter
         # without it being a compile error, so the row is about what the language allows.
-        *.kt|*.kts|*.cpp|*.h|*.swift|*.mm)         echo "c 1 0 1" ;;
-        *.java)                                    echo "c 0 0 0" ;;
-        *)                                         echo "c 0 0 0" ;;
+        *.kt|*.kts|*.cpp|*.h|*.swift|*.mm)         echo "c 1 0 1 1 0" ;;
+        *.java)                                    echo "c 0 0 0 1 0" ;;
+        *)                                         echo "c 0 0 0 1 0" ;;
     esac
 }
 
 scan_file() {
-    read -r lang triple shellmode nestmode <<< "$(chat_lang_for "$1")"
+    read -r lang triple shellmode nestmode hashbreak yamlmode <<< "$(chat_lang_for "$1")"
     # LC_ALL=C for BYTE semantics. The walk indexes characters with substr() and length(), and
     # in a UTF-8 locale awk aborts on a multibyte character it cannot convert ("towc: multibyte
     # conversion failure") -- one curly quote in a string literal was enough. Byte semantics are
@@ -112,11 +115,12 @@ scan_file() {
     # always >= 0x80 and can never be mistaken for a quote, a slash or a hash.
     LC_ALL=C awk -v lane_ere="$CHAT_LANE_ERE" \
         -v hex_ere="$CHAT_HEX_ERE" \
-        -v resource_ere="$CHAT_RESOURCE_ERE" \
         -v lang="$lang" \
         -v triple="${triple:-0}" \
         -v shell="${shellmode:-0}" \
         -v nest="${nestmode:-0}" \
+        -v hash_needs_break="${hashbreak:-1}" \
+        -v yaml="${yamlmode:-0}" \
         -f "$(dirname "$0")/chat-reference-guard.awk" "$1"
     # An awk that died mid-file prints no findings, which reads exactly like a clean file. Any
     # non-zero status other than a normal exit is surfaced so the run cannot pass on a scan that

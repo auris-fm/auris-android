@@ -19,7 +19,7 @@ import org.junit.Test
 /**
  * TEARDOWN ORDER AND COMPLETION CONTROL.
  *
- * Reviewer b915daaa caught a real regression I introduced: rewriting `stopVoiceControl` dropped
+ *caught a real regression I introduced: rewriting `stopVoiceControl` dropped
  * `stopEngine()`, so the engine was never stopped and capture state never cleared before routing and
  * resources were released. This control pins the ORDER that regression violated, and pins the
  * completion property (the returned job must not complete while a dispatch body's `finally` is still
@@ -98,7 +98,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `teardown completion does not report complete while a body finally is still held`() = runBlocking {
-        // Reviewer 0bba7db5: barriers so neither the child nor the joiner can be sampled unstarted,
+        // barriers so neither the child nor the joiner can be sampled unstarted,
         // cleanup so the held finally is always released. The JOIN is the subject under test: the
         // property is that a joiner of the ROOT job cannot complete while a child's finally is held.
         val scope = CoroutineScope(Dispatchers.IO + Job())
@@ -124,7 +124,7 @@ class TeardownOrderContractTest {
 
             // THE SUBJECT: a joiner of the root job, dispatched from an EXTERNAL scope (production
             // shape). It must stay incomplete for as long as the child's finally is held.
-            // EXPLICIT RUNNING-JOINER HANDSHAKE (reviewer 9003d3cc): the joiner signals that it has
+            // EXPLICIT RUNNING-JOINER HANDSHAKE: the joiner signals that it has
             // STARTED and is about to join, so the assertion below cannot sample an unstarted job.
             val joinerStarted = CompletableDeferred<Unit>()
             val joiner = CoroutineScope(Dispatchers.IO).launch {
@@ -155,7 +155,7 @@ class TeardownOrderContractTest {
     /**
      * Where a teardown step appears in the production source.
      *
-     * THE RELEASE STEPS MOVED (reviewer a9271b39): the initial teardown used to release inline, which
+     * THE RELEASE STEPS MOVED: the initial teardown used to release inline, which
      * bypassed the per-kind tracker the retry uses, so a retry repeated releases that had already
      * happened. Releases now live in `releaseResources` and are reached from the teardown. Order is
      * therefore asserted across the TEARDOWN and that helper: the helper must be called from inside
@@ -232,7 +232,7 @@ class TeardownOrderContractTest {
         return source
     }
 
-    // DELETED (reviewer 9003d3cc): the two "simulateStopEngine" tests were a re-implementation of
+    // DELETED: the two "simulateStopEngine" tests were a re-implementation of
     // production logic. Deleting or changing the real stopEngine could not fail them, so they proved
     // nothing about the production teardown. A behavioural control needs an Android Service instance,
     // which is blocked on the unapproved Hilt test dependency — so this seam is SOURCE-ORDER ONLY and
@@ -263,7 +263,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `every engine start is refused once teardown has begun, not only the top-level one`() {
-        // Reviewer e1b11171: startVoiceControl is not the only path that opens a capture. A child
+        // startVoiceControl is not the only path that opens a capture. A child
         // already inside startEngine when teardown begins must also be refused, or it opens a
         // stream the teardown is about to release from under it.
         val source = productionFileSource()
@@ -281,7 +281,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `a start is refused once teardown has begun`() {
-        // Reviewer fd3f5a4d: the final shutdown must EXCLUDE new starts. A start that slipped in
+        // the final shutdown must EXCLUDE new starts. A start that slipped in
         // would open a capture the teardown is about to release from under it.
         val source = productionStartSource()
         val guardAt = source.indexOf("stopInFlightJob != null")
@@ -312,7 +312,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `shutdown invalidates a pending start before doing anything else`() {
-        // Reviewer 543d284b: a start suspended inside ensureReady() can commit after teardown
+        // a start suspended inside ensureReady() can commit after teardown
         // released the backend it needs, so teardown must invalidate it up front.
         val source = productionStopVoiceControlSource()
         val invalidateAt = source.indexOf("engineStart.invalidatePendingStart()")
@@ -328,7 +328,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the production predicate receives the recorded outcome and the expected-cancellation set`() {
-        // Reviewer 51baa020: the helper was proven only in isolation. If production never PASSES the
+        // the helper was proven only in isolation. If production never PASSES the
         // recorded cause, the classification it enables is dead code. This pins the wiring.
         val source = productionFileSource()
         assertTrue(
@@ -347,7 +347,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `each release is recorded as it confirms, not batched afterwards`() {
-        // Reviewer 9f873b94: the retry path added the whole batch AFTER the release loop. A throw
+        // the retry path added the whole batch AFTER the release loop. A throw
         // halfway through therefore lost the record of kinds that HAD already released, and the
         // retry released them again — a repeated media-session or renderer release is destructive.
         // The record must be written per kind, immediately after that kind confirms.
@@ -366,7 +366,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the stop path decides its retry from the deferred's own record, not a side field`() {
-        // Reviewer 9d15bb44 follow-up: reading the separate `teardownFailure` field raced the
+        // reading the separate `teardownFailure` field raced the
         // completion handler that writes it. A re-stop could see isCompleted == true while the field
         // still held its previous value, and treat a HELD teardown as a finished, non-retryable one.
         // The record must come FROM the completed Deferred, so completion and outcome are one
@@ -387,7 +387,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `a retry is created under the lock and only while its source is still current`() {
-        // Reviewer 9d15bb44 follow-up: two concurrent stops could each decide to retry and let the
+        // two concurrent stops could each decide to retry and let the
         // SLOWER attempt publish last, so an older attempt's outcome overwrote a newer one and
         // resurrected a hold that had already been resolved. Creation must be serialized (under a
         // lock) and must refuse to start once its source teardown has been replaced.
@@ -415,7 +415,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `a start registers its barrier release only AFTER admission succeeds`() {
-        // Reviewer 9d15bb44 follow-up: the completion callback was installed BEFORE beginStart, so a
+        // the completion callback was installed BEFORE beginStart, so a
         // job whose parent scope was already cancelled could complete (and release) before it was
         // ever registered; beginStart would then register a job nothing would clear, and the teardown
         // would wait on that stale registration. Release must exist only for an ADMITTED job.
@@ -438,7 +438,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `an unproven barrier join holds resources instead of releasing them`() {
-        // Reviewer 9d15bb44 follow-up: the barrier-owned join used to time out with a log line and
+        // the barrier-owned join used to time out with a log line and
         // then carry on toward the releases, so a job the barrier owned could still be running while
         // the backend was freed underneath it. Fail CLOSED: an unproven join must return Held.
         val source = productionStopVoiceControlSource()
@@ -470,7 +470,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the start path actually ADMITS its job to the shutdown barrier`() {
-        // Reviewer 9f873b94, confirmed by grep: `beginStart` had no production caller at all. The
+        //, confirmed by grep: `beginStart` had no production caller at all. The
         // barrier only ever CLOSED, so `close()` always returned an empty set and the owned-job join
         // below looped over nothing. Every control on the barrier itself still passed, because they
         // construct it directly — a class whose admission half nothing calls is not evidence.
@@ -512,7 +512,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the platform stop path observes the teardown outcome instead of discarding it`() {
-        // Reviewer 47a3a267: the seam is the ONE stop authority. Calling lifecycle.stop() and
+        // the seam is the ONE stop authority. Calling lifecycle.stop() and
         // dropping the Deferred leaves a Held teardown invisible at the only place that can act on
         // it. (A mutant that discards it survived every other control, which is why this exists.)
         val source = productionFileSource()
@@ -524,7 +524,7 @@ class TeardownOrderContractTest {
             "the observation must distinguish Held from Released",
             source.contains("is TeardownResult.Held ->") && source.contains("failure = settled.failure"),
         )
-        // ONE OWNER OF THE OUTCOME (reviewer 9f873b94). Two independent launchers each awaited the
+        // ONE OWNER OF THE OUTCOME. Two independent launchers each awaited the
         // same Deferred and then wrote `teardownFailure`, so they raced: a re-stop could observe a
         // completed Deferred while the field still held its previous value, and a HELD teardown read
         // as successful and non-retryable. Both entries must route through the one recorder.
@@ -561,7 +561,7 @@ class TeardownOrderContractTest {
             productionFileSource().contains("private fun stopVoiceControl(): Deferred<TeardownResult>"),
         )
         // A THROWING RELEASE IS REPORTED AS AN AMBIGUOUS RELEASE, not a resumable Residual
-        // (reviewer 97ab6e9a). The verdict kind is load-bearing: a Residual is clearable by a
+        //. The verdict kind is load-bearing: a Residual is clearable by a
         // quiescence recheck, and replaying a release that may already have taken effect would
         // perform destructive cleanup twice.
         assertTrue(
@@ -615,7 +615,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the root job is captured before the scope is cancelled`() {
-        // Reviewer f457fbad: a child created just before cancellation, or a child of a child, must
+        // a child created just before cancellation, or a child of a child, must
         // not let the completion job observe a DIFFERENT root than the one being cancelled. So the
         // root is read before the cancel, not sampled from inside the completion coroutine.
         val source = productionStopVoiceControlSource()

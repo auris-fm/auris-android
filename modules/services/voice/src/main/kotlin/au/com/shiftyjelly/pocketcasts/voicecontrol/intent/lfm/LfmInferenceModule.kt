@@ -11,7 +11,7 @@ import javax.inject.Singleton
  * exactly one replaceable unit: the JNI touch happens on first use of [LfmNativeInference], which is
  * only reachable through this binding.
  *
- * WHY THE INTERFACE IS PUBLIC, MEASURED (reviewer 6707f03a asked for the actual error, not a
+ * WHY THE INTERFACE IS PUBLIC, MEASURED (asked for the actual error, not a
  * location argument): with `internal interface LfmInference`, compilation fails with
  *   LfmInferenceModule.kt:19:9 'public' function exposes its 'internal' return type 'LfmInference'
  *   LfmIntentRouter.kt:37:9 'public' function exposes its 'internal' parameter type 'LfmInference'

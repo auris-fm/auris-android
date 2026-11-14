@@ -37,7 +37,7 @@ class PlayerEpisodeIncarnationTest {
 
     @Test
     fun `an issued skip with no returned outcome is Unknown, not a refusal`() {
-        // @spec's 8147c3b11 contract on the REAL decision production runs. A skip whose scoped mutation
+        // This pins that contract on the REAL decision production runs. A skip whose scoped mutation
         // was ACCEPTED but carries no outcome was ISSUED and may already have run; reporting it as a
         // refusal looks like a retryable failure and invites a REPEAT of an operation the receiver
         // already performed.

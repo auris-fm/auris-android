@@ -1,7 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 /**
- * THE STRUCTURED ACTION RESULT (spec 03c96924).
+ * THE STRUCTURED ACTION RESULT.
  *
  * A sink reports what it ACTUALLY did at the point where it decides it — the focus-grant branch, a
  * missing episode, a thrown failure — independently of what it renders afterwards. Presentation and
@@ -42,7 +42,7 @@ sealed interface VoiceActionOutcome {
     data object NotObserved : VoiceActionOutcome
 
     /**
-     * An AUXILIARY operation completed (reviewer 8c77f5aa). The cloud turn ducks the host player
+     * An AUXILIARY operation completed. The cloud turn ducks the host player
      * before streaming; that grant is a real observation but it is NOT the turn's action result.
      * Reporting it distinctly is what lets the caller record the primary action as unobserved
      * instead of treating the auxiliary success as covering it.
@@ -69,7 +69,7 @@ internal fun VoiceActionOutcome.isAuxiliary(): Boolean = when (this) {
 }
 
 /**
- * True only for a fact that IS a primary action result (reviewer 00b0d7a9). A [VoiceActionOutcome.Dispatched]
+ * True only for a fact that IS a primary action result. A [VoiceActionOutcome.Dispatched]
  * proves the call was made and nothing more, so it does not clear the unobserved fallback; an
  * auxiliary fact never stands in for the primary action's result.
  */

@@ -121,7 +121,7 @@ class RoutedOutputObserverTest {
         // publication call runs to completion without a release landing inside it. The observer
         // exposes the boundary for exactly this, so the test does not depend on timing to arrange the
         // interleaving it is about -- a stress run that found no violation would show only that the
-        // window was not hit, which is what @spec ruled out as evidence.
+        // window was not hit, which is what ruled out as evidence.
         val observer = RoutedOutputObserver()
         val claim = observer.observe()
         claim.publishType(5)

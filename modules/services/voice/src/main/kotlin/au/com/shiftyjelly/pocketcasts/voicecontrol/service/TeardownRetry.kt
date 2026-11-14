@@ -6,7 +6,7 @@ import kotlinx.coroutines.Job
  * The one owner of a held teardown, and the decisions a retry needs.
  *
  * A teardown that could not prove the engine settled deliberately does NOT release its resources.
- * Retrying it is not an age-based timeout (spec d885d207): the same owner rechecks the CURRENT held
+ * Retrying it is not an age-based timeout: the same owner rechecks the CURRENT held
  * state, keeps observing the unfinished jobs, and releases only after verified quiescence. It also
  * remembers which releases already ran, so a retry can never repeat destructive cleanup.
  *
@@ -41,7 +41,7 @@ internal object TeardownRetry {
         recheck: () -> List<Job>,
         observe: Boolean = true,
         unresolvedHold: Any? = null,
-        // A JOB THAT IS GONE MAY HAVE FAILED ON ITS WAY OUT (reviewer 3ecf1db0). The initial
+        // A JOB THAT IS GONE MAY HAVE FAILED ON ITS WAY OUT. The initial
         // teardown classifies every owned job's finish; the retry only counted unfinished jobs, so a
         // processing job that completed ABNORMALLY after a residual hold looked indistinguishable
         // from one that settled cleanly, and the retry released. This callback is the SAME production
@@ -54,7 +54,7 @@ internal object TeardownRetry {
     ): Decision = when {
         !observe -> Decision.Unproven(IllegalStateException("retry requires continued observation"))
 
-        // A RECORDED HOLD BLOCKS THE RETRY EVEN WHEN THE LIST LOOKS EMPTY (reviewer 9f873b94).
+        // A RECORDED HOLD BLOCKS THE RETRY EVEN WHEN THE LIST LOOKS EMPTY.
         // Deciding on list emptiness alone let a retry release resources after a FAILED STOP or an
         // abnormal engine finish: the jobs were gone from the list, but the reason the teardown held
         // had never been resolved. Only a hold that is about quiescence can be cleared by observing

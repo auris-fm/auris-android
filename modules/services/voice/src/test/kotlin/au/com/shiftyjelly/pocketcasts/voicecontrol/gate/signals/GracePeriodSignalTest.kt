@@ -222,7 +222,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `an expired extension CLOSES its window rather than only reporting retirement`() = runTest {
-        // @reviewer's defect in my rework: the reset/extension timer notified retirement but no longer
+        // the defect in my rework: the reset/extension timer notified retirement but no longer
         // cleared `isActive`, so an expired extension left the window reading as OPEN -- the microphone
         // would stay in Continuous mode with nothing behind it.
         val signal = GracePeriodSignal(timeoutMs = 50L)
@@ -241,7 +241,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `an UNSTAMPED command that replaces a window still reports the window it ended`() = runTest {
-        // @reviewer: the unstamped branch called `openWindowLocked()` and DISCARDED the ended
+        // The unstamped branch called `openWindowLocked()` and DISCARDED the ended
         // generation, so a command that replaced a window emitted NO retirement callback. "A replacement
         // is an ending" -- and this was the one open path that ignored it.
         val retired = mutableListOf<Long>()
@@ -263,7 +263,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `the readers agree with the transitions they read`() {
-        // @reviewer's reader-lock finding. `isClosedByPrivacy` and `currentGeneration`
+        // the reader-lock finding. `isClosedByPrivacy` and `currentGeneration`
         // read the SAME fields the transitions write, so leaving them unlocked meant a reader could
         // observe a HALF-APPLIED transition. Holding the monitor must block them, exactly as it blocks a
         // writer -- if a reader answers while the monitor is held, it is reading a state mid-change.
@@ -425,7 +425,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `a completion PARKED at the monitor cannot reopen a window privacy closed`() {
-        // @reviewer's parked-completion control, and @spec's requirement that the origin/liveness
+        // the parked-completion control, and the requirement that the origin/liveness
         // validation sit INSIDE the same windowLock transaction as the extension. When the check runs
         // before the lock, a completion that passed it can be parked while a privacy close takes the
         // lock, then resume and -- on the strength of the earlier check -- REOPEN LISTENING. The
@@ -530,7 +530,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `a delayed arm cannot take over a window that already ended`() = runTest {
-        // @reviewer's finding. `armTimerForLocked` checked GENERATION ownership only -- and a PRIVACY
+        // the finding. `armTimerForLocked` checked GENERATION ownership only -- and a PRIVACY
         // CLOSE PRESERVES THE GENERATION, because it ends the window without advancing it. So a
         // completion that was valid when it started could still arm this window's timer AFTER the window
         // was closed: the closed window holds a live timer owned by nobody, and that timer later reports

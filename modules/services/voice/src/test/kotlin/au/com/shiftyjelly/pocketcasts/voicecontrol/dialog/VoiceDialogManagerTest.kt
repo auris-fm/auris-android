@@ -17,7 +17,7 @@ class VoiceDialogManagerTest {
 
     @Test
     fun `the dialog mints a logical request at registration and carries it to the completed intent`() {
-        // @spec's production registration ID producer: the identity is minted WHERE THE DIALOG IS
+        // THE PRODUCTION REGISTRATION ID PRODUCER: the identity is minted WHERE THE DIALOG IS
         // REGISTERED, carried through the dialog, and stamped on the intent it completes. Deriving it
         // later from the request text would merge distinct user acts that say the same thing.
         assertNull(manager.resolve("Rename a bookmark.", nativeCall("begin"), beginCall()))
@@ -46,7 +46,7 @@ class VoiceDialogManagerTest {
 
     @Test
     fun `an abandoned dialog reports its logical request so retention can forget it`() {
-        // @spec's lifecycle removal: a dialog replaced or abandoned has no retry coming, so the turn
+        // THE LIFECYCLE REMOVAL: a dialog replaced or abandoned has no retry coming, so the turn
         // retained for it must be forgotten -- holding it would let a later dispatch be admitted as a
         // retry of work that is finished.
         val forgotten = mutableListOf<String>()
@@ -200,7 +200,7 @@ class VoiceDialogManagerTest {
 
     @Test
     fun `completed dialog does not stamp the begin identity onto the completed intent`() {
-        // @spec ruling f6b25001: one admitted request ID per utterance, carried unchanged from
+        // one admitted request ID per utterance, carried unchanged from
         // diagnostics to wire dispatch. A pending dialog retains its begin identity for
         // correlation, but the completed intent must NOT carry it — the engine stamps the
         // current utterance's admitted identity instead.

@@ -31,7 +31,7 @@ internal interface VoiceServiceLifecycle {
     /**
      * Stop the pipeline; the returned job completes when teardown has really finished.
      *
-     * The result is NOT discarded (reviewer 47a3a267): [TeardownResult] distinguishes a clean
+     * The result is NOT discarded: [TeardownResult] distinguishes a clean
      * release from a teardown that deliberately HELD resources because the engine could not be
      * proven settled. A caller that awaits only the Job cannot tell those apart.
      */

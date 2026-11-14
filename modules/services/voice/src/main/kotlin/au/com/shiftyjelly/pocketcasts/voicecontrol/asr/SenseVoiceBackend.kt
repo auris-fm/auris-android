@@ -113,7 +113,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     private var loadVerified = false
 
     /**
-     * P1 (reviewer be375ea1): load evidence = THIS loader's successful creation from the
+     * P1: load evidence = THIS loader's successful creation from the
      * content-verified bytes of the pinned manifest identity ([SENSEVOICE_MANIFEST_ID]).
      */
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
@@ -156,19 +156,19 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         recognizer?.release()
         recognizer = null
         loadedDir = null
-        // P1 (reviewer be375ea1): released load state can NEVER claim the artifact for a
+        // P1: released load state can NEVER claim the artifact for a
         // later invocation.
         loadVerified = false
     }
 
     companion object {
-        // PINNED REVISION (reviewer 704ef15a): resolve/main is mutable, so the base URL names the
+        // PINNED REVISION: resolve/main is mutable, so the base URL names the
         // exact repo commit the artifacts were verified at (2365baeacb507f821a0c8120fcee3d484dba7a07).
         private const val SENSEVOICE_BASE_URL =
             "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07"
 
         /**
-         * Manifest identity source (reviewer 57719ad2): the dated upstream release tag (2024-07-17)
+         * Manifest identity source: the dated upstream release tag (2024-07-17)
          * PLUS the pinned repo commit — the record names the commit so the artifact set the weights
          * were verified at is unambiguous, not just the mutable repo head.
          */

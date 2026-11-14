@@ -184,7 +184,7 @@ class CloudRouteSink internal constructor(
     /**
      * True while this turn CHAIN owes the host player the restore of a duck it applied.
      *
-     * Ownership-scoped like [pauseReserved] (reviewer 4356625394): a turn's own `ducked` flag dies
+     * Ownership-scoped like [pauseReserved]: a turn's own `ducked` flag dies
      * with the turn, so a successor that supersedes a mid-answer turn inherits a ducked player with
      * no one to restore it -- the user's podcast stays quiet until another app takes audio focus.
      * The chain obligation transfers with ownership: whoever is the active turn at its finally
@@ -257,7 +257,7 @@ class CloudRouteSink internal constructor(
         sourceLanguage: String?,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
-            // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
+            // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (/f47e972): minted once
             // at admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
             // refusing here means no wire request exists that client logs cannot name. Never mint here.
             val admitted = logicalRequestId?.takeIf { it.isNotBlank() } ?: run {
@@ -367,7 +367,7 @@ class CloudRouteSink internal constructor(
         if (prepared == null && admittedId.isNullOrBlank()) {
             // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
             // client-owned identity would need the sink to mint one, and a wire request no client
-            // log can name is exactly the divergence spec 3b1def9 removes.
+            // log can name is exactly the divergenceremoves.
             Timber.w("cloud turn refused: no admitted request identity (request=%.40s)", request)
             return CloudTurnResult(
                 feedback = VoiceResponse.Silent,
@@ -394,11 +394,11 @@ class CloudRouteSink internal constructor(
         // A server Error terminal (or an empty/unanswerable turn) is a REFUSAL: the turn did
         // nothing for the user, so it must not earn recognition downstream.
         var refusedTerminal = false
-        // POSITIVE success (reviewer73ea2ad5): success is derived from the ACTUAL completed DONE
+        // POSITIVE success: success is derived from the ACTUAL completed DONE
         // terminal — never from the absence of a known failure. A flow that ends without Done
         // (EOF), or a turn that never reaches a terminal, is not successful.
         var sawDone = false
-        // POSITIVE success (reviewer 73ea2ad5): recorded only at an actual Done terminal whose
+        // POSITIVE success: recorded only at an actual Done terminal whose
         // outcome is Completed — an Interrupted Done or a transport failure must derive false,
         // never success-by-absence-of-failure.
         var sawDoneCompleted = false
@@ -483,7 +483,7 @@ class CloudRouteSink internal constructor(
                 val previousTurn = activeTurn
                 activeTurn = myJob
                 activeTurnId = myId
-                // STOP AT TRANSFER (reviewer 4357641034): the predecessor's buffered answer must
+                // STOP AT TRANSFER: the predecessor's buffered answer must
                 // stop the moment ownership moves, not when the successor exits. A successor whose
                 // server stream stalls otherwise keeps the predecessor's answer playing through the
                 // successor's whole turn and ahead of its own reply. Stopping under the same mutex
@@ -526,7 +526,7 @@ class CloudRouteSink internal constructor(
                 conversationId = admission.conversationId,
                 conversationMode = admission.mode,
                 capturedOrigin = origin,
-                // THE ADMITTED UTTERANCE IDENTITY, unchanged (spec 3b1def9/f47e972): stable per
+                // THE ADMITTED UTTERANCE IDENTITY, unchanged (/f47e972): stable per
                 // logical turn, a transport retry reuses it, and the server rejects a repeat rather
                 // than re-executing (no auto-retry is attempted by this client).
                 requestId = admittedId!!,
@@ -660,7 +660,7 @@ class CloudRouteSink internal constructor(
                         // playback (the assistant's reply is delivered as audio, not tokens).
                         // Duck the host player on the first frame; restore on Done.
                         //
-                        // OWNERSHIP-SERIALIZED MUTATION (reviewer faeb2546): the ownership check
+                        // OWNERSHIP-SERIALIZED MUTATION: the ownership check
                         // AND the duck/submit/play mutation run inside the same turnMutex block
                         // the successor's transfer uses, so a predecessor already processing a
                         // frame cannot submit or play AFTER the successor's transfer stop and
@@ -806,7 +806,7 @@ class CloudRouteSink internal constructor(
                         // code, then a generic local line, then the earcon — untrusted text is never
                         // spoken, and a code nobody has seen yet still says something.
                         // THE UTTERANCE'S LANGUAGE, not the device locale: the refusal is spoken
-                        // in the language the user spoke (spec 54287f13). Falls back to the default
+                        // in the language the user spoke. Falls back to the default
                         // line when the language is missing or unsupported.
                         val resolvedError = if (handledResult) {
                             ResolvedSpokenLine("", "en")
@@ -862,7 +862,7 @@ class CloudRouteSink internal constructor(
                             // Stop cloud audio if it was playing but the turn ended abnormally
                             // (cancellation, timeout, error). The PLAYER belongs to the chain, not
                             // to this invocation: a silent successor must still stop a predecessor's
-                            // still-buffered answer when it takes ownership (reviewer 4356625394).
+                            // still-buffered answer when it takes ownership.
                             if (audioPlayed || duckReserved) {
                                 audioPlayer?.stop()
                             }
@@ -896,7 +896,7 @@ class CloudRouteSink internal constructor(
                     ),
                 )
                 graceHold?.let { hold ->
-                    // THE OUTPUT-HOLD HANDOFF (spec ruling 7a6a62e3): when this turn WILL speak
+                    // THE OUTPUT-HOLD HANDOFF: when this turn WILL speak
                     // locally, its hold transfers to the renderer path — sink return is not the
                     // output boundary, and releasing here would unhold the window WHILE the refusal
                     // is still being spoken. The renderer's output terminal (completed playback,
@@ -941,7 +941,7 @@ class CloudRouteSink internal constructor(
             // could not be established, which is exactly the distinction the three-valued type exists to
             // carry out of the sink.
             action = outcomeOfTurn(actionOutcome),
-            // A LOCAL PLAYBACK FAILURE IS NOT SUCCESS (reviewer 664f82d0): the server may have
+            // A LOCAL PLAYBACK FAILURE IS NOT SUCCESS: the server may have
             // completed its turn, but the user did not hear it. Recognition must require actual
             // delivery, not just a server-side terminal.
             succeeded = sawDoneCompleted && !refusedTerminal && !localPlaybackFailed && endReason == Reason.TurnEnded,
@@ -1160,7 +1160,7 @@ class CloudRouteSink internal constructor(
                         // lambda rather than producing a value, so the expression's type collapses.
                         // RETURNED, NOT MERELY EVALUATED. A bare `when` here computes the outcome and
                         // then DISCARDS it, so execution falls through to the REFERENCE branch below and
-                        // an ordinary seek is followed by a reference seek -- @reviewer's measured
+                        // an ordinary seek is followed by a reference seek -- the measured
                         // regression from my conversion. The branch must RETURN its typed outcome.
                         return@withLock when (outcome) {
                             is EpisodeOperationResult.Refused -> ActionOutcome.None
@@ -1176,7 +1176,7 @@ class CloudRouteSink internal constructor(
                             }
 
                             is EpisodeOperationResult.Unknown -> {
-                                // UNKNOWN RECORDS NOTHING AS PERFORMED. @reviewer's measured defect was
+                                // UNKNOWN RECORDS NOTHING AS PERFORMED. the measured defect was
                                 // the opposite of what I described: Unknown became ACCEPTED and wrote
                                 // history, claiming a target the client never observed being reached.
                                 //
@@ -1436,7 +1436,7 @@ class CloudRouteSink internal constructor(
         // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. An UNKNOWN outcome keeps the PRE-ACTION
         // provenance -- what the client knew before the attempt -- but records no target, because
         // nothing established that the player reached it. Recording it would claim an observation
-        // nobody made, which is @reviewer's measured e201 defect.
+        // nobody made, which is the measured e201 defect.
         // The caller passes null when the TARGET was not observed -- but that suppresses only the
         // TARGET, not the PRE-ACTION provenance. Returning here would ALSO skip `preQuotePositionMs`,
         // discarding a value the owner had already captured: the same "unknown concerns execution, not

@@ -85,7 +85,7 @@ class EchoReferenceFilterTest {
         )
     }
 
-    // PAUSE EXPIRY THROUGH THE FILTER (@reviewer acceptance control): the same two-sided decision as
+    // PAUSE EXPIRY THROUGH THE FILTER: the same two-sided decision as
     // the stopped-answer control, but the retirement comes from the SINK PAUSE EVENT -- the real tap
     // drives the real recorder through its production collector, tap.onSinkPaused() ends the audible
     // reference, and after clock-only expiry speech resembling the PAUSED episode is accepted by the
@@ -134,7 +134,7 @@ class EchoReferenceFilterTest {
         job.cancel()
     }
 
-    // THE RING-ORDER/LAG BOUNDARY (4235652583, @reviewer): with a FULL retained ring (2 s), a short
+    // THE RING-ORDER/LAG BOUNDARY: with a FULL retained ring (2 s), a short
     // utterance's echo sits near the ring's END (the newest submitted audio, minus the acoustic
     // delay) -- not in the first 50..500 ms of the array. The reference is a NONPERIODIC chirp, so a
     // wrong lag cannot correlate by periodicity; the mic segment is delayed 200 ms and only 300 ms
@@ -187,7 +187,7 @@ class EchoReferenceFilterTest {
         )
     }
 
-    // THE ACTUAL CUE WRITER -> CONSUMER (4236341498, @spec b51b1c23/1026f360): the production
+    // THE ACTUAL CUE WRITER -> CONSUMER (4236341498,/1026f360): the production
     // EarconPlayer.writeCueReference path -- with a QUEUED and a PARTIAL acceptance -- feeds the
     // reference, and the anchor behaves per the conservative contract: the previously established
     // position is invalidated by the untimed cue contributions, and episode echo is still suppressed

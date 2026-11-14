@@ -31,7 +31,7 @@ data class ModelFile(
     /**
      * THE model manifest identity this file belongs to (e.g.
      * `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`) — a real published version tag from
-     * the model's own manifest, NOT the filename (reviewer 8288ac15).
+     * THE MODEL'S OWN MANIFEST, NOT the filename.
      */
     val manifestId: String = "",
 )

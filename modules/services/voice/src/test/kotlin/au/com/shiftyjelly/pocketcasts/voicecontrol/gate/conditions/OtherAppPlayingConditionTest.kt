@@ -17,7 +17,7 @@ class OtherAppPlayingConditionTest {
 
     @Test
     fun `a successor's unresolved observation does not inherit the previous cue's timeout`() {
-        // @spec's specific check. Cue A is unresolved long enough to consume most of its hold; a SECOND
+        // the specific check. Cue A is unresolved long enough to consume most of its hold; a SECOND
         // cue then becomes unresolved. If the anchor were kept across cues, B would inherit A's elapsed
         // time and expire almost immediately -- a hold that never actually covered B.
         var now = 0L
@@ -73,7 +73,7 @@ class OtherAppPlayingConditionTest {
 
     @Test
     fun `an unresolved observation does NOT hold the attribution open forever`() {
-        // @reviewer's second finding: Unknown bypassed the window with NO TIME LIMIT, so after the cue
+        // the second finding: Unknown bypassed the window with NO TIME LIMIT, so after the cue
         // ended every later active-music reading stayed attributed to us. A hold is a BOUND, not a state
         // change of ownership.
         var now = 0L
@@ -110,7 +110,7 @@ class OtherAppPlayingConditionTest {
 
     @Test
     fun `an unresolved cue observation holds our own audio open past the window`() {
-        // @spec's 96a3831c: the renderer's typed per-cue observation must have a PRODUCTION consumer.
+        // the 96a3831c: the renderer's typed per-cue observation must have a PRODUCTION consumer.
         // Beyond the bounded self-emission window, an UNKNOWN observation means we could not establish
         // that our cue stopped sounding -- so its audio is still OURS, and reading expiry as "ended"
         // would hand it to a foreign app and cut the microphone mid-cue.

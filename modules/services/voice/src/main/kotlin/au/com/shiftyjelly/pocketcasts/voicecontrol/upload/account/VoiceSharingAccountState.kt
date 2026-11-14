@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 import okio.Buffer
 
 /**
- * The account's membership projection, and nothing else (spec 06392988).
+ * The account's membership projection, and nothing else.
  *
  * This is ORDINARY account state: the server's answer to "is this account enrolled, and under
  * which epoch / disclosure" — the evidence collection consent and the Settings surface read. It is

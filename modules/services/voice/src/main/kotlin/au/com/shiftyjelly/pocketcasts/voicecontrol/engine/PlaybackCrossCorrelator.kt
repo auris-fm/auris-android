@@ -22,7 +22,7 @@ class PlaybackCrossCorrelator @Inject constructor() {
         micPositionMs: Long? = null,
     ): Boolean {
         val playbackBuffer = reference.samples
-        // BOUND, don't bail (reviewer 4356625095): the recorder's reference is 2 s = 32 000 samples
+        // BOUND, don't bail: the recorder's reference is 2 s = 32 000 samples
         // while a minimum VAD segment is 41 x 1024 = 41 984, so declining on length would skip
         // correlation for EVERY real segment and let the device's own answer audio be transcribed
         // and executed. Bound the analysis window to what still overlaps the reference in player
@@ -36,7 +36,7 @@ class PlaybackCrossCorrelator @Inject constructor() {
             // exactly as the length bail-out did, without silently masking every real segment.
             val windowBound = playbackBuffer.size - maxDelaySamples
             if (windowBound < MIN_ANALYSIS_SAMPLES) return false
-            // TAIL, not PREFIX (reviewer 6381507658): the recorder's reference holds the NEWEST 2 s,
+            // TAIL, not PREFIX: the recorder's reference holds the NEWEST 2 s,
             // so only the segment's NEWEST windowBound samples can overlap it in player time. The
             // prefix is older than the whole reference - its position window lies before offset 0
             // and the correlation is inert for every real VAD segment, leaving the device's own
@@ -70,7 +70,7 @@ class PlaybackCrossCorrelator @Inject constructor() {
         val offsetRange = when (candidate) {
             is CandidateRange.Unavailable -> {
                 // 50..500 ms window is offsets [maxOffset - maxDelay, maxOffset - minDelay],
-                // clamped into [0, maxOffset]. PARTIAL-REFERENCE POLICY (@spec 691ee13c): offsets
+                // clamped into [0, maxOffset]. PARTIAL-REFERENCE POLICY: offsets
                 // whose implied delay falls inside the window (e.g. maxOffset 1600 = 100 ms admits
                 // 0..800, i.e. delays 50..100 ms). A reference SHORTER than the minimum delay has
                 // no offset with a complete in-window candidate -- maxOffset < minDelay means even

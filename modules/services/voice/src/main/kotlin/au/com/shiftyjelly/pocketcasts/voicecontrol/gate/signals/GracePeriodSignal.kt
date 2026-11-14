@@ -233,7 +233,7 @@ class GracePeriodSignal @Inject constructor() {
     }
 
     /**
-     * The request-owned holds handed to the FEEDBACK RENDERER (spec ruling 7a6a62e3): a turn whose
+     * The request-owned holds handed to the FEEDBACK RENDERER: a turn whose
      * feedback is spoken/earcon keeps its hold past sink completion — sink return is NOT the output
      * boundary — until the renderer's actual output terminal (completion, failure, or clear).
      * Keyed by the same request ID the renderer observes, so sink and renderer meet without a
@@ -278,7 +278,7 @@ class GracePeriodSignal @Inject constructor() {
     fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
 
     /**
-     * EXPLICIT NO-HANDOFF RELEASE (reviewer 664f82d0): the service could not hand off to the renderer
+     * EXPLICIT NO-HANDOFF RELEASE: the service could not hand off to the renderer
      * (render threw, was cancelled before render, or the response was non-spoken so no renderer path
      * exists). The sink already transferred the hold; releasing here closes it at the actual failure
      * boundary rather than leaving it in the map. Exactly once — a late duplicate finds nothing.
@@ -343,7 +343,7 @@ class GracePeriodSignal @Inject constructor() {
             // VALIDATE AND EXTEND IN ONE TRANSACTION. Checking the origin and liveness BEFORE taking the
             // lock let a completion that arrived while the window was still open be PARKED at the lock,
             // then resume after a privacy close or a replacement and EXTEND THE WRONG WINDOW -- measured
-            // by @reviewer as listening reopening after privacy closed it. The check an earlier moment
+            // as listening reopening after privacy closed it. The check an earlier moment
             // authorises is not authorisation at the moment of the act, so both happen under the monitor
             // or the check does not constrain the act at all.
             val armFor = synchronized(windowLock) {

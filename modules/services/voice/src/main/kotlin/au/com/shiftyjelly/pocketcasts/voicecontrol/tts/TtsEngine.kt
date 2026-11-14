@@ -8,7 +8,7 @@ interface TtsEngine {
      *
      * @return whether an utterance was actually synthesized; `false` means the engine was released,
      *   uninitialized, or refused the queue, so the caller heard nothing and must fall back rather
-     *   than count the reply as delivered (reviewer 4356625551).
+     *   than count the reply as delivered.
      * @throws TtsPlaybackIncompleteException when playback did not drain within the wait bound, so a
      *   caller cannot mistake an incomplete answer for a completed one.
      */
@@ -37,7 +37,7 @@ class FakeTtsEngine : TtsEngine {
     private var released = false
 
     /**
-     * CONTROLLABLY SUSPENDED BACKEND (spec c9c37325): when set, [speak] suspends until the gate
+     * CONTROLLABLY SUSPENDED BACKEND: when set, [speak] suspends until the gate
      * completes — modelling synthesis+playback in flight — so a control can prove the hold survives
      * sink return and queued/playing audio, and releases only when output truly finishes.
      */
@@ -79,7 +79,7 @@ class FakeTtsEngine : TtsEngine {
             speakReturned?.complete(Unit)
             return true
         } finally {
-            // NON-CANCELLABLE CLEANUP (reviewer 7a04a952): models a real engine's stop/clear that
+            // NON-CANCELLABLE CLEANUP: models a real engine's stop/clear that
             // suspends. The control asserts the hold remains while this is blocked, then releases
             // exactly once after the gate completes.
             if (clearCompletedGate != null) {

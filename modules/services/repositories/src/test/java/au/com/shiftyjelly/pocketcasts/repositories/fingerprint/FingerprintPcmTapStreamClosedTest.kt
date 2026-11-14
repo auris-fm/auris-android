@@ -3,7 +3,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-// REGISTRATION/TEARDOWN BOUNDARY (@reviewer): onSinkFlush snapshots streamClosedCallbacks UNDER the
+// REGISTRATION/TEARDOWN BOUNDARY: onSinkFlush snapshots streamClosedCallbacks UNDER the
 // registry monitor and invokes OUTSIDE it -- a register/unregister concurrent with a flush can neither
 // see a half-mutated list nor block the playback thread on subscriber retirement code.
 class FingerprintPcmTapStreamClosedTest {
@@ -37,7 +37,7 @@ class FingerprintPcmTapStreamClosedTest {
         tap.onSinkFlush()
     }
 
-    // HELD FLUSH ACROSS REPLACEMENT (@reviewer): a flush IN PROGRESS when the subscription is
+    // HELD FLUSH ACROSS REPLACEMENT: a flush IN PROGRESS when the subscription is
     // replaced fires the OLD callback (it was in the snapshot taken under the monitor) exactly once,
     // and the NEW callback first fires on a LATER flush. The unregister of the old callback happening
     // DURING the held flush must not double-fire or skip it.

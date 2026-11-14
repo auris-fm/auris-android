@@ -67,7 +67,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         )
         // BOTH BRANCHES RENDER Silent — identical presentation, opposite results. The distinction
         // exists only here, at the focus result, so this is where the fact is emitted
-        // (spec 03c96924). A consumer reading the response would see one identical value.
+        //. A consumer reading the response would see one identical value.
         if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             Timber.i("[VoicePipeline] cloud audio ducked host player")
             onOutcome?.invoke(VoiceActionOutcome.AuxiliaryPerformed("audio_focus"))

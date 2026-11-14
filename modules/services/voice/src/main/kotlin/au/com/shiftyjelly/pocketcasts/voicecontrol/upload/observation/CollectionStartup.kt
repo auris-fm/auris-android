@@ -16,7 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 /**
- * Production composition owner for the collection boundary (reviewer 01877984 blocker 1: no
+ * Production composition owner for the collection boundary (blocker 1: no
  * caller graph existed). Injected singletons with no consumer are NOT composition — this class
  * is instantiated from the application's onCreate exactly like VoiceSharingAccountStartup
  * and [VoiceSharingAccountStartup], and it starts every loss subscription for real:

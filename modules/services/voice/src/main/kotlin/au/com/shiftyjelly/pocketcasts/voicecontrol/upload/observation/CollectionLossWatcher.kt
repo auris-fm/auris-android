@@ -10,7 +10,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
- * PRODUCTION loss subscriptions (reviewer 01877984 blocker 1): every path that can revoke
+ * PRODUCTION loss subscriptions (blocker 1): every path that can revoke
  * collection authority invokes [SegmentObserver.revoked] WITHOUT needing an engine event or a
  * read. Composed by VoiceObservationModule and started from the app surface; this is the caller
  * graph, not intended design:

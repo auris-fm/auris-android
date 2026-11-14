@@ -4,7 +4,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 /**
  * The signed-in account's ORDINARY sharing choice and real enrollment provenance, held durably.
  *
- * WHY THIS EXISTS (spec 1af5e705, reviewer evidence): admission used to read the in-memory membership
+ * WHY THIS EXISTS (, reviewer evidence): admission used to read the in-memory membership
  * projection, which only a server refresh in the CURRENT process can supply. Saved consent therefore
  * could not authorize a capture, and a user who had opted in was refused every time after a restart -
  * the ordinary path the spec mandates ("sharing on -> completed speech segment -> private file ->
@@ -57,7 +57,7 @@ class SavedSharingChoiceStore(
     /**
      * Record a server answer of NOT ENROLLED. Nothing the user decided at a surface produced
      * this, but it IS the account's actual current state: an old ENROLLED record left on disk
-     * would admit captures the server has already closed (@spec 3f1e939a). No epoch or disclosure
+     * would admit captures the server has already closed. No epoch or disclosure
      * is fabricated — the record simply fails every consent read.
      */
     fun recordNotEnrolled(account: String): Boolean {

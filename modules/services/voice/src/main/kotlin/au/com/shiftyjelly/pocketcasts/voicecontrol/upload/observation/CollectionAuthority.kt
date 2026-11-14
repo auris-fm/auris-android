@@ -25,7 +25,7 @@ data class IssuedAuthority(
 class CollectionAuthority @Inject constructor(
     private val accountStartup: VoiceSharingAccountStartup,
     /**
-     * THE SAVED ORDINARY CHOICE (spec 1af5e705). The durable record of what the user actually decided,
+     * THE SAVED ORDINARY CHOICE. The durable record of what the user actually decided,
      * written at the existing enrollment/withdrawal operations. Admission reads THIS rather than the
      * in-process membership projection, so saved consent authorizes a capture without waiting for a
      * server refresh in the current process.
@@ -58,7 +58,7 @@ class CollectionAuthority @Inject constructor(
     fun decide(): AuthorityDecision {
         val accountName = accountStartup.currentAccountName()
         val hasAccount = accountName != null
-        // THE SAVED ORDINARY CHOICE, NOT A REFRESH IN THIS PROCESS (spec 1af5e705). The membership
+        // THE SAVED ORDINARY CHOICE, NOT A REFRESH IN THIS PROCESS. The membership
         // projection stays in the app for the Settings display, but it is no longer an admission
         // prerequisite: requiring one made saved consent unusable after a restart and refused a user
         // who had already opted in. The record is account-scoped, so another account never inherits it.
@@ -67,7 +67,7 @@ class CollectionAuthority @Inject constructor(
         return AuthorityDecision(
             collectionPermitted = enrolled,
             fullRevocation = !enrolled,
-            // FIXED REASON at the decision site itself (@spec 56184117, Merlin a611202c): the refusal
+            // FIXED REASON at the decision site itself (, Merlin a611202c): the refusal
             // must name WHICH clause failed, not a generic gate-off. The reason is a fixed token, not
             // free text, and carries no account or epoch contents.
             refusalReason = when {

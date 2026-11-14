@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Test
 
 /**
- * Serialization and stale-result fencing (reviewer 9156a8ea point 2).
+ * Serialization and stale-result fencing.
  *
  * The scenarios below are the ones a user can actually produce by tapping twice or by switching
  * accounts while a request is in flight — not hypothetical interleavings. Each control asserts what
@@ -25,7 +25,7 @@ class MutationFenceTest {
 
     @Test
     fun `a stale labelling check must not invalidate a newer attempt`() {
-        // Reviewer 8ef73f3f: isCurrent claimed to be read-only but bumped generation / rebound the
+        // isCurrent claimed to be read-only but bumped generation / rebound the
         // session from a possibly-STALE owner snapshot. An OLD attempt's check, arriving after an
         // account switch or after a newer attempt was issued, could then invalidate the newer
         // attempt it had no business touching. The labelling check must be pure: it answers for the
@@ -65,7 +65,7 @@ class MutationFenceTest {
 
     @Test
     fun `the scoped path and isCurrent cannot deadlock against each other`() {
-        // Reviewer 445faa5c: applyIfCurrent with an owner scope takes owner -> fence, while the old
+        // applyIfCurrent with an owner scope takes owner -> fence, while the old
         // isCurrent took fence -> owner (it read liveSession() INSIDE synchronized(this)). Two
         // threads on those paths could each hold one lock and wait for the other. This control
         // forces BOTH placements deterministically:
@@ -179,7 +179,7 @@ class MutationFenceTest {
 
     @Test
     fun `a second enroll in the same session makes the first result stale`() = runTest {
-        // Reviewer d47d2326: successive same-session attempts shared one generation, so a queued
+        // successive same-session attempts shared one generation, so a queued
         // older response remained "current" even though the user had since asked for something else.
         val fence = MutationFence()
         val first = fence.issue(ownerSession = 1L)

@@ -251,7 +251,7 @@ class CloudAudioPlayer(
         trackFrames = 0L
         submittedSamples = 0L
         audioWritten = false
-        // The failure flag is owned by THIS playback run (reviewer 4356625874): play() is called for
+        // The failure flag is owned by THIS playback run: play() is called for
         // every frame the sink submits, so clearing it there let a transient write failure last
         // exactly one frame -- playback resumed past the gap and the sink still appended the error
         // earcon after nearly the whole answer. Reset it here, where the run begins.
@@ -326,8 +326,8 @@ class CloudAudioPlayer(
     fun trackFramesForTest(): Long = trackFrames
 
     /**
-     * Drains the queued frames and then WAITS until the output is observed to have played them, per
-     * @spec's completion ruling: frames handed to the track are SUBMITTED, not played, and a turn is
+     * Drains the queued frames and then WAITS until the output is observed to have played them:
+     * frames handed to the track are SUBMITTED, not played, and a turn is
      * complete only when the playback head reaches what was written.
      *
      * Returns [Completion.Consumed] when the head reaches the submitted count before [timeoutMs];
@@ -520,7 +520,7 @@ class CloudAudioPlayer(
         while (true) {
             val (frame, admission) = synchronized(frameBuffer) {
                 if (!playing || paused || generation != trackGeneration || audioTrack !== track) return
-                // A failed write ENDS the answer (reviewer 4356625874): the flag is not cleared by
+                // A failed write ENDS the answer: the flag is not cleared by
                 // later play() calls, so the drain must not keep consuming frames past the gap
                 // either -- an answer that failed is over, not resumable frame by frame.
                 if (audioWriteFailed) return

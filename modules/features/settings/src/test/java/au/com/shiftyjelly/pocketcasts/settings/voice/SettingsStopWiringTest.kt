@@ -52,7 +52,7 @@ class SettingsStopWiringTest {
             source.contains("voiceSharingSettings.enroll()") && source.contains("voiceSharingSettings.withdraw()"),
         )
         // The fragment must not mutate the stop store or own enrollment outcomes any more: the
-        // fragment's old inline path was exactly how unfenced branches crept in (reviewer a65eef2f).
+        // fragment's old inline path was exactly how unfenced branches crept in.
         val forbidden = listOf(
             "recordWithdrawalRequested()",
             "clearOnUserEnrollment()",
@@ -133,7 +133,7 @@ class SettingsStopWiringTest {
             source.contains("applyForOutcome(outcome)"),
         )
         // Each reconciliation call must be a lambda argument of applyForOutcome, not a bare call:
-        // a direct call is an unfenced branch by definition (reviewer 60647af3).
+        // a direct call is an unfenced branch by definition.
         val flat = source.replace(Regex("\\s+"), " ")
         for (call in listOf("withdrawalIntent.onServerAgrees()", "withdrawalIntent.onWithdrawalFailed()")) {
             val idx = flat.indexOf(call)

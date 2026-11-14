@@ -83,7 +83,7 @@ class RealServiceLifecycleControlTest {
         // flake). The injected monitor is the graph singleton the service uses.
         routeMonitor.cancelDebouncedRouteReadForTest()
         controllers.forEach { controller ->
-            // destroy() STARTS teardown; AWAIT IT (reviewer 57bf1be9): an asynchronous teardown
+            // destroy() STARTS teardown; AWAIT IT: an asynchronous teardown
             // left running from this test could land in the next test's assertions. The bound is
             // on the coroutine, not the test thread.
             controller.destroy()
@@ -128,7 +128,7 @@ class RealServiceLifecycleControlTest {
 
         controller.destroy()
 
-        // SCOPE (reviewer 8318db26): this proves the production SCOPE is cancelled. It does NOT
+        // SCOPE: this proves the production SCOPE is cancelled. It does NOT
         // prove the full resource teardown completed — that result is a Deferred this test does not
         // await, because the pipeline was never started here.
         assertFalse(
@@ -138,7 +138,7 @@ class RealServiceLifecycleControlTest {
     }
 
     /**
-     * SCOPE, stated narrowly on purpose (reviewer 8318db26): this starts from `isStarted == false`
+     * SCOPE, stated narrowly on purpose: this starts from `isStarted == false`
      * and asserts it stays false. It therefore exercises the platform STOP entry point's handling,
      * NOT the stopping of an admitted start or of running work — that needs a started pipeline this
      * harness does not stand up.

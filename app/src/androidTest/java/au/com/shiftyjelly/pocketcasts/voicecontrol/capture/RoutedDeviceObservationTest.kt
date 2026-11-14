@@ -14,7 +14,7 @@ import org.junit.runner.RunWith
 
 /**
  * Whether the platform can report where a live stream is ACTUALLY routed, which is the observation
- * @spec asked for to distinguish "available" from "selected".
+ * distinguish "available" from "selected".
  *
  * `AudioTrack` implements `AudioRouting`, so an owned, active track can answer this. Two facts are
  * established here: the observation exists on this device, and it is null while the stream is inactive —

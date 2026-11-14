@@ -19,7 +19,7 @@ import org.junit.Test
 /**
  * CONTRACT CONTROL for the lifecycle seam, against the PRODUCTION adapter class.
  *
- * Reviewer a85cf8fe found the previous version proved nothing: it used a fake with an unchecked
+ *found the previous version proved nothing: it used a fake with an unchecked
  * counter and never modelled the readiness window or a real teardown. The harness here models the
  * TWO properties the service actually has and the seam must report:
  *
@@ -97,7 +97,7 @@ class VoiceServiceLifecycleContractTest {
 
     @Test
     fun `a held teardown result survives the seam`() = runBlocking {
-        // Reviewer 47a3a267: the seam is the ONE stop authority. If it returned a bare Job, a
+        // the seam is the ONE stop authority. If it returned a bare Job, a
         // teardown that deliberately HELD resources would be indistinguishable from a clean release
         // at every caller. The result must cross the seam intact.
         val h = Harness()

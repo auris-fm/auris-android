@@ -28,7 +28,7 @@ import org.robolectric.annotation.Config
 import retrofit2.Retrofit
 
 /**
- * THE ORDINARY STARTUP ACQUISITION (spec ecc411b8): `initializeOnAppStart` previously installed
+ * THE ORDINARY STARTUP ACQUISITION: `initializeOnAppStart` previously installed
  * binding/listeners but never fetched the projection, and `refreshProjection` was reachable only
  * from the Settings surface — so "first genuine ordinary answer on reopen" was not actually wired,
  * and a spoken phrase would predictably refuse with no-saved-choice.

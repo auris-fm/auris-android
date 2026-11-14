@@ -111,7 +111,7 @@ object RealServiceReplacements {
 }
 
 /**
- * The EXTERNAL-NATIVE seam replacement (spec 3b9d5053). Replaces ONLY
+ * The EXTERNAL-NATIVE seam replacement. Replaces ONLY
  * [au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordNativeModule], whose binding is the
  * single JNI-touching adapter in the graph. The inert implementation fails init the way an absent
  * runtime does — `nativeInit` returns false, no throw — so the detector is honestly UNREADY, which
@@ -137,7 +137,7 @@ object InertWakeWordNativeReplacements {
 }
 
 /**
- * The recognizer's EXTERNAL-NATIVE seam replacement (spec 3b9d5053). Replaces ONLY
+ * The recognizer's EXTERNAL-NATIVE seam replacement. Replaces ONLY
  * [au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmInferenceModule], whose sole purpose is
  * binding the JNI engine. The inert implementation behaves like a runtime that loads nothing:
  * `load` returns false, `classify`/`generate`/`tokenize` report failure the way the native methods do

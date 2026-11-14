@@ -179,7 +179,7 @@ class ModelManager @Inject constructor(
 
     /**
      * Ready means every file exists AND, where the spec declares a sha256, the CACHED bytes
-     * actually hash to it (reviewer 704ef15a): an older cached artifact must not be labeled
+     * actually hash to it: an older cached artifact must not be labeled
      * with the pinned manifest identity. Unverified files force the ensureModel re-download.
      */
     fun isModelReady(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean {
@@ -187,12 +187,12 @@ class ModelManager @Inject constructor(
         return spec.files.all { file -> cachedFileVerified(targetDir, file) }
     }
 
-    /** Digest check off the caller's thread (reviewer ff30b294: hashing a 240MB model must
+    /** Digest check off the caller's thread (hashing a 240MB model must
      *  never run on the main or audio path). */
     suspend fun isModelReadyVerified(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean = withContext(Dispatchers.IO) { isModelReady(spec) }
 
     /**
-     * P1 (reviewer a00bb77d, 98ed63b3): the manifest identity this manager verifies for [spec]'s
+     * P1 (, 98ed63b3): the manifest identity this manager verifies for [spec]'s
      * bytes — or null when the cache does not currently match. It adds NO hashing implementation
      * of its own, but it does reuse the single acceptance predicate, so it MAY hash a cached
      * artifact and must never be called on the main/audio thread. Callers pair the identity with
@@ -206,7 +206,7 @@ class ModelManager @Inject constructor(
     }
 
     /** THE one cache-acceptance predicate: exists AND, where a digest is declared, the CACHED
-     *  bytes hash to it (reviewer 704ef15a) — an older cached artifact cannot be labeled with
+     *  bytes hash to it — an older cached artifact cannot be labeled with
      *  the pinned manifest identity. */
     private fun cachedFileVerified(
         targetDir: File,
@@ -228,7 +228,7 @@ class ModelManager @Inject constructor(
         }
         val targetDir = File(filesDir, spec.targetDir)
         downloadMutex.withLock {
-            // Same VERIFIED predicate inside the lock (reviewer 8e0f87c8): a stale cache must
+            // Same VERIFIED predicate inside the lock: a stale cache must
             // never early-return success here — it falls through to downloadFile, which
             // re-verifies/replaces.
             if (spec.files.all { file -> cachedFileVerified(targetDir, file) }) {

@@ -227,7 +227,7 @@ class EnrollmentControllerTest {
 
     @Test
     fun `an account transition cannot interleave with the currency decision and its effect`() = runTest {
-        // The second half of reviewer e313b32c: ownerSession() snapshots the authority under a
+        // The second half ofownerSession() snapshots the authority under a
         // DIFFERENT lock than the fence holds, so a session change can land after the snapshot but
         // before the effect - the effect then applies to an account the decision never described.
         // Holding the fence lock does not prevent this because the OWNER does not take that lock.
@@ -336,7 +336,7 @@ class EnrollmentControllerTest {
     @Test
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun `two queued enrolls in one session leave only the newest one applying`() = runTest {
-        // Reviewer d47d2326 asked for this at the CONTROLLER, not just the fence helper: two enroll
+        //asked for this at the CONTROLLER, not just the fence helper: two enroll
         // taps in the same session must not both settle, or the older response decides the screen.
         val gates = List(2) { CompletableDeferred<Unit>() }
         var issued = 0

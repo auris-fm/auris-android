@@ -80,7 +80,7 @@ class PlaybackCrossCorrelatorPositionTest {
         val micSize = 1600
         // maxOffset = 400 (25 ms) < minDelay (50 ms): even offset 0 implies a sub-floor delay, so
         // there is no complete in-window candidate -- the comparison is DECLINED (no bleed), never
-        // resolved by clamping onto fabricated offset zero (@spec 691ee13c).
+        // resolved by clamping onto fabricated offset zero.
         val burst = tone(micSize, 300.0)
         val shortReference = FloatArray(micSize + 400) { 0f }
         burst.copyInto(shortReference, 0)
@@ -217,7 +217,7 @@ class PlaybackCrossCorrelatorPositionTest {
 
     @Test
     fun `a trusted position whose delay interval misses the reference returns no bleed, without correlating`() {
-        // @spec's ruling, superseding the earlier blanket "fall back to the full window": a VALID,
+        // the ruling, superseding the earlier blanket "fall back to the full window": a VALID,
         // TRUSTED timing constraint is authoritative. When its delay interval has no overlap with the
         // retained reference there is no admissible candidate, and matching an old waveform is not
         // evidence of a temporally possible echo -- so the answer is no bleed, reached WITHOUT
@@ -247,7 +247,7 @@ class PlaybackCrossCorrelatorPositionTest {
 
     @Test
     fun `an in-span stale region is not bleed even though its offset matches the delay window`() {
-        // @spec's separate case: a reference LONGER than the mic position, so the position is valid
+        // the separate case: a reference LONGER than the mic position, so the position is valid
         // and the delay interval overlaps the reference -- but the matching audio sits far outside the
         // interval. This is the case the older fixture's name and comment describe, and it is
         // deliberately NOT a rewrite of that fixture: the 16_000-sample one stays as it is, asserting
@@ -275,7 +275,7 @@ class PlaybackCrossCorrelatorPositionTest {
 
     @Test
     fun `both overlap edges are pinned at equality and one millisecond outside it`() {
-        // @reviewer's strengthening: BOTH clamp boundaries carry matching audio, so the mutation has a
+        // the strengthening: BOTH clamp boundaries carry matching audio, so the mutation has a
         // failing signal at either end rather than only where the bleed happened to sit. Every value
         // below is computed from the reference's real geometry, not chosen:
         //
@@ -333,7 +333,7 @@ class PlaybackCrossCorrelatorPositionTest {
         )
     }
 
-// REVIEWER 4356625095 BOUNDARY: a real VAD segment is at least 41 x 1024 = 41 984 samples while
+// BOUNDARY: a real VAD segment is at least 41 x 1024 = 41 984 samples while
 // the recorder's reference buffer is 2 s = 32 000 samples, so a reference-shorter-than-segment
 // bail-out would skip correlation for EVERY real segment and let the device's own answer audio
 // be transcribed and executed. The analysis window must be BOUNDED to the reference length, not

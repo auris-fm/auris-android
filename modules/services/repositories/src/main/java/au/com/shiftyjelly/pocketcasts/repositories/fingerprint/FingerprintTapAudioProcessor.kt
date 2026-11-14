@@ -16,7 +16,7 @@ class FingerprintTapAudioProcessor(
     private val episodeReferenceEligibility: EpisodeReferenceEligibility? = null,
 ) : BaseAudioProcessor() {
 
-    // LIFECYCLE TRANSITION IS THE CONTRACT (4235652501, @reviewer 7fc5a3b8): media3 configures the
+    // LIFECYCLE TRANSITION IS THE CONTRACT (4235652501,): media3 configures the
     // processor chain only when the renderer (re)enables, and a NOT_SET configuration BYPASSES this
     // processor entirely -- a capture session starting during existing playback could then never
     // activate it. The processor therefore stays CONFIGURED whenever it is constructed (the player

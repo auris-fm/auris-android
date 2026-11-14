@@ -13,7 +13,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-// @reviewer thread 4235702596: RETIREMENT OWNS THE STOP/DRAIN EVENT ITSELF, not successor
+// RETIREMENT OWNS THE STOP/DRAIN EVENT ITSELF, not successor
 // supersession. The existing flush control in PlaybackBufferRecorderTest proves the paused producer
 // dies when a SUCCESSOR emits -- that is supersession, and it leaves the real gap: pause/stop with
 // NOTHING playing afterwards never reaches an epoch bump any stamper sees, so admission stayed live
@@ -121,7 +121,7 @@ class FlushRetirementNoSuccessorTest {
         job.cancel()
     }
 
-    // REGISTRATION OWNERSHIP (@reviewer): a start() over a still-installed callback -- repeated start
+    // REGISTRATION OWNERSHIP: a start() over a still-installed callback -- repeated start
     // without stop -- must replace, not stack: after the second start, a flush retires the NEW owner's
     // admission only. The stale closure firing would retire against collector state the old run no
     // longer controls, and a same-callback double registration would fire twice per event.
@@ -185,7 +185,7 @@ class FlushRetirementNoSuccessorTest {
         jobB.cancel()
     }
 
-    // MEDIA3 PAUSE TRACE + PAUSE ACOUSTIC CONTRACT (@spec confirmed; media3 1.10.1
+    // MEDIA3 PAUSE TRACE + PAUSE ACOUSTIC CONTRACT ( confirmed; media3 1.10.1
     // DecoderAudioRenderer.onStopped calls audioSink.pause() ONLY -- flush()=onPositionReset/seek,
     // reset()=onDisabled/stop). Pause is a real sink event and ends the episode's current
     // audible-reference admission: only the bounded delay tail survives, it expires without another
@@ -216,7 +216,7 @@ class FlushRetirementNoSuccessorTest {
         emit(-5_000) // stamped with the LIVE pre-pause ticket; delivery withheld across the pause
         tap.onSinkPaused()
 
-        // REFUSAL OBSERVED SEPARATELY FROM EXPIRY (@spec): drain the held chunk at the PAUSE instant,
+        // REFUSAL OBSERVED SEPARATELY FROM EXPIRY: drain the held chunk at the PAUSE instant,
         // BEFORE any clock movement -- at this point nothing has expired, so the -5_000 amplitude's
         // absence is pure admission refusal (the ticket died at the pause), not tail expiry.
         runCurrent()

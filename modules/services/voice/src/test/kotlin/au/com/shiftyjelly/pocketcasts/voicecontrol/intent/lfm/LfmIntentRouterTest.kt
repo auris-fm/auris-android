@@ -35,7 +35,7 @@ class LfmIntentRouterTest {
 
     @Test
     fun diagnostics_carryTheAdmittedUtteranceIdentity() = runTest {
-        // Spec 3b1def9: the routing diagnostic records THE admitted utterance UUID, not a second ID
+        // the routing diagnostic records THE admitted utterance UUID, not a second ID
         // minted at the routing boundary. The exported VoiceRouter record must pair with the turn by
         // identity, so the value is an input to recognize(), never generated here.
         val inference = FakeLfmInference().apply {

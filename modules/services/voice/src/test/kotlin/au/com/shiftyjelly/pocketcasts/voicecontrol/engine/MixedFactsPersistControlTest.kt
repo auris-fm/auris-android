@@ -52,7 +52,7 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
 /**
- * THE MIXED→PERSISTED-RECORD CONTROL spec d62b77f8 requires (unconditional): a REAL
+ * THE MIXED→PERSISTED-RECORD CONTROLrequires (unconditional): a REAL
  * [VoiceAsrEngine], REAL [ContributionRetentionSink], REAL [SegmentObserver] and REAL engine
  * invocation record. The only stand-in is the executor boundary, and the facts travel through the
  * SAME invocation-local channel production uses. Asserted is the observation the engine APPLIED to

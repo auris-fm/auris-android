@@ -44,7 +44,7 @@ class SegmentObserver(
     private var openPrepaidClipBytes: Long = Long.MAX_VALUE
 
     /**
-     * THE single retained/reserved-byte authority for the open capture (reviewer 55433b71):
+     * THE single retained/reserved-byte authority for the open capture:
      * sink-side charged bytes INCLUDING outstanding (not yet committed/released) reservations.
      * Every growth decision checks THIS, never an engine-fed sample counter.
      */
@@ -60,7 +60,7 @@ class SegmentObserver(
     var maxRetainedBytes: Long = DEFAULT_MAX_RETAINED_BYTES
 
     /**
-     * P1 (reviewer 0cd7e39d): the sink owns retained state; the INVOKED backend/router identity
+     * P1: the sink owns retained state; the INVOKED backend/router identity
      * is stored beside the candidate (never on the issued context). A backend replaced between
      * the SpeechStarted selection and the actual invocation cannot misattribute: the invocation
      * note is what the record claims.
@@ -129,7 +129,7 @@ class SegmentObserver(
         val decision = authority() // ONE decision read: the reason comes from the SAME evaluation
         val permitted = gate.accepts(decision) // decision read before the monitor
         if (!permitted) {
-            // Name the failing clause, not a generic gate-off (@spec 56184117): the fixed token comes
+            // Name the failing clause, not a generic gate-off: the fixed token comes
             // from the decision that was actually evaluated, one read, no second state read.
             val reason = decision.refusalReason?.name?.lowercase()?.replace('_', '-') ?: "unknown"
             Timber.i("voice-capture admission: declined (gate-off reason=%s)", reason)
@@ -157,7 +157,7 @@ class SegmentObserver(
             // invocation call site that reads the live grace signal synchronously.
             wakeRequired = wakeRequired,
         )
-        // INVALID SIZES refuse before any arithmetic or admission (reviewer fde5349e): a negative
+        // INVALID SIZES refuse before any arithmetic or admission: a negative
         // producer size would create a negative open charge and REDUCE the sink budget reservation.
         // ZERO stays legal: the empty-prefix admission is a real, retained capture (deltas grow it).
         if (producerSize < 0) {
@@ -212,8 +212,8 @@ class SegmentObserver(
 
     // Transfers the drained first chunk into the reserved prefix using ITS admit token; a
     // refusal/throw path must call releaseInitialChunk so that token's charge leaves exactly once
-    // (reviewer 23cae70e b4). [validSamples] = samples actually drained; array capacity may
-    // exceed the valid range and stays fully charged while adopted (reviewer 79b2b5c9 b1/b3).
+    // (b4). [validSamples] = samples actually drained; array capacity may
+    // exceed the valid range and stays fully charged while adopted (b1/b3).
     // Returns the SINK's actual transfer result — never hard true on refusal.
     fun adoptFirstChunk(admission: AdmissionHandle, firstChunk: ShortArray, validSamples: Int = firstChunk.size): Boolean = synchronized(lock) {
         val context = admission.context
@@ -243,7 +243,7 @@ class SegmentObserver(
 
     /** Producer drop for an initial allocation that never transferred. Addressed by the HANDLE
      * from [Admission] — valid AFTER revocation closed the capture or a successor opened: the
-     * sink releases THAT token, not "the current open capture's" (reviewer 79b2b5c9 b2). */
+     * sink releases THAT token, not "the current open capture's" (b2). */
     fun releaseInitialChunk(admission: AdmissionHandle) {
         val token = admission.initialToken ?: return
         synchronized(lock) { if (admissionToken === token) admissionToken = null }
@@ -284,11 +284,11 @@ class SegmentObserver(
     }
 
     // Producer drop path: even when the capture is already closed/revoked, the sink MUST see the
-    // release so a lease-held charge leaves the budget exactly once (reviewer 8273382e b4).
-    // Advances accounting ONLY when the sink actually adopted (reviewer 23cae70e b2).
+    // release so a lease-held charge leaves the budget exactly once (b4).
+    // Advances accounting ONLY when the sink actually adopted (b2).
     fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean = synchronized(lock) {
         // BOTH the engine path and the compatibility path commit through HERE, so the capacity
-        // accounting has exactly one definition (reviewer 55433b71 follow-up).
+        // accounting has exactly one definition.
         if (open?.captureId != context.captureId || token == null) {
             // Refused commit: the producer still owns the array; its charge leaves ONLY through
             // releaseDelta when the producer drops it — do not adopt or double-release here.
@@ -412,7 +412,7 @@ class SegmentObserver(
             return false
         }
         val (frames, rate) = framesProvider()
-        // FROZEN CLIP BOUND AT COMPLETION (reviewer be120bf2 #1): a refused growth/final-tail
+        // FROZEN CLIP BOUND AT COMPLETION (#1): a refused growth/final-tail
         // reserveDelta leaves the capture open, and the completion drain can hand back the FULL
         // native segment. Enforce the frozen encoded-WAV bound HERE, before any flatten or
         // allocation, with Long totals (2 bytes/sample + the 44-byte header). Refusal terminates

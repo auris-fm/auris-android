@@ -20,6 +20,9 @@ static OboeAudioCapture* gCapture = nullptr;
 static RetireableProcessorHandle<NativeVadProcessor> gVadProcessor;
 static std::mutex gCaptureMutex;
 
+// Early-wake cutoff remembered across processor lifetimes (see nativeSetEarlyWakeCutoff).
+static std::atomic<int32_t> gEarlyWakeCutoff {0};
+
 // NARROW TEST SEAM (host ownership test only; see src/test/cpp/JniBridgeOwnershipTest.cpp).
 // Counts every PUBLICATION of a VAD processor through gVadProcessor. The host test needs to
 // observe attachment DIRECTLY -- an idle attached VAD emits no events and holds no speech PCM, so
@@ -157,6 +160,8 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
     // processor deleted out from under it.
     gVadProcessor.retire();
     auto* processor = new NativeVadProcessor(gCapture);
+    // Apply the remembered cutoff BEFORE start: the VAD thread reads it from its first chunk on.
+    processor->setEarlyWakeCutoff(gEarlyWakeCutoff.load());
     if (!processor->start()) {
         delete processor;
         // Capture is still valid — caller will stop/close it
@@ -254,16 +259,24 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCapt
 
 extern "C" JNIEXPORT jint JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeWaitForVadEvent(
-    JNIEnv* /*env*/,
+    JNIEnv* env,
     jclass /*clazz*/,
-    jint timeoutMs)
+    jint timeoutMs,
+    jlongArray generationOut)
 {
     NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return -1;
     }
-    const int result = processor->waitForEvent(static_cast<int32_t>(timeoutMs));
+    // Every event carries its utterance generation, so the Kotlin side can drop a delayed event
+    // for a finished utterance instead of mistaking it for one about the utterance in progress.
+    int32_t generation = -1;
+    const int result = processor->waitForEvent(static_cast<int32_t>(timeoutMs), &generation);
     gVadProcessor.release();
+    if (generationOut != nullptr && env->GetArrayLength(generationOut) > 0) {
+        jlong value = static_cast<jlong>(generation);
+        env->SetLongArrayRegion(generationOut, 0, 1, &value);
+    }
     return result;
 }
 
@@ -337,6 +350,70 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     const int result = processor->getSpeechPcmSize();
     gVadProcessor.release();
     return result;
+}
+
+// Narrow test seam (see JniBridgeOwnershipTest.cpp scenario D): the currently published VAD
+// processor, or null. Observation only; gates nothing.
+NativeVadProcessor* publishedVadProcessorForTest() {
+    auto* processor = gVadProcessor.acquire();
+    gVadProcessor.release();
+    return processor;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetEarlyWakeCutoff(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint samples)
+{
+    // Remember the cutoff across processor LIFETIMES, not just apply it to a live one: the Kotlin
+    // attach path configures it BEFORE nativeStartCaptureAndVad creates the processor, so a
+    // live-only write is a silent no-op and event 4 never fires. start applies the remembered
+    // value to each processor it creates.
+    gEarlyWakeCutoff.store(static_cast<int32_t>(samples));
+    auto* processor = gVadProcessor.acquire();
+    if (processor != nullptr) {
+        processor->setEarlyWakeCutoff(static_cast<int32_t>(samples));
+    }
+    gVadProcessor.release();
+}
+
+// ONE call returns generation, onset and size AND copies the PCM, all under the speech mutex: a
+// snapshot that cannot describe two different utterances is the whole point of replacing the three
+// separate getters this used to be.
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetInProgressSnapshot(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jshortArray jBuffer,
+    jlongArray jHeader)
+{
+    NativeVadProcessor* processor = gVadProcessor.acquire();
+    if (processor == nullptr) {
+        return 0;
+    }
+
+    jsize capacity = env->GetArrayLength(jBuffer);
+    jshort* elements = env->GetShortArrayElements(jBuffer, nullptr);
+    if (elements == nullptr) {
+        gVadProcessor.release();
+        return 0;
+    }
+    jlong headerRaw[3] = {0, 0, 0};
+    int32_t copied = processor->getInProgressSnapshot(
+        reinterpret_cast<int16_t*>(elements),
+        static_cast<int32_t>(capacity),
+        headerRaw);
+
+    env->ReleaseShortArrayElements(jBuffer, elements, 0); // copy back
+    jlong header[3] = {
+        static_cast<jlong>(headerRaw[0]),
+        static_cast<jlong>(headerRaw[1]),
+        static_cast<jlong>(headerRaw[2]),
+    };
+    env->SetLongArrayRegion(jHeader, 0, 3, header);
+    gVadProcessor.release();
+    return static_cast<jint>(copied);
 }
 
 // Frames the VAD has consumed from capture since start. Exposed so a test can assert captured audio

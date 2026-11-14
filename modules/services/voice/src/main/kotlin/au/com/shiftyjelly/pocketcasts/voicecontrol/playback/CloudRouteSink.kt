@@ -85,7 +85,30 @@ class CloudRouteSink internal constructor(
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     /** Test seam: a custom OkHttp client for the route socket (MockWebServer wiring). */
     private val okHttpClient: okhttp3.OkHttpClient? = null,
+    /**
+     * Holds connections opened early, before the turn existed. Null disables adoption: every turn
+     * dials for itself.
+     */
+    private val earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
 ) : VoiceCloudRouteSink {
+
+    init {
+        // FIRST AUDIBLE is observed here because this is where the turn's identity lives: the player
+        // only knows that sound started, and the timing table needs to know FOR WHICH TURN.
+        // The stage is the PRESENTATION instant — the first AudioTimestamp with framePosition > 0,
+        // in the track's monotonic nanoTime base (the timing clock's own base) — not the
+        // submission-side stamp, which can be seconds early on an underrun. The audible listener
+        // stays for the ducking/gate consumers; it no longer speaks for this stage.
+        audioPlayer?.addFirstAudibleListener { presentationNanos ->
+            activeTimingRequestId.get()?.let { id ->
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                    id,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible,
+                    presentationNanos,
+                )
+            }
+        }
+    }
 
     @Inject constructor(
         cloudConfig: CloudConfig,
@@ -100,6 +123,7 @@ class CloudRouteSink internal constructor(
         playbackContextMonitor: PlaybackContextMonitor,
         audioPlayer: CloudAudioPlayer?,
         gracePeriodSignal: GracePeriodSignal,
+        earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         tokenProvider = tokenProvider,
@@ -121,6 +145,7 @@ class CloudRouteSink internal constructor(
         // turn's own pause when the answer completes, unless playback actually stopped or a user
         // command superseded it.
         privacyClosureCount = playbackContextMonitor::playbackStopClosureCount,
+        earlyConnectionOpener = earlyConnectionOpener,
     )
 
     /**
@@ -152,6 +177,14 @@ class CloudRouteSink internal constructor(
     private val turnMutex = Mutex()
     private var activeTurnId: Long = 0
 
+    /**
+     * The request id whose timing table the FIRST AUDIBLE mark belongs to, set while this sink is
+     * actively serving that turn and cleared when the turn ends. The audible fact itself comes from
+     * the player, one consumer among several, so it arrives through the listener list.
+     */
+    // Atomic so an old turn's clear cannot erase a successor's id written between the
+    // comparison and the store (a plain @Volatile check-and-set is not atomic).
+    private val activeTimingRequestId = java.util.concurrent.atomic.AtomicReference<String?>(null)
     private var activeTurn: Job? = null
 
     /**
@@ -317,7 +350,17 @@ class CloudRouteSink internal constructor(
 
     override suspend fun dispatchPreparedReporting(prepared: CloudRouteTurn, isRetry: Boolean, onDuck: ((VoiceActionOutcome) -> Unit)?): CloudTurnResult {
         val claim = conversationAdmission.claimDispatch(prepared, isRetry)
-            ?: return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
+            ?: run {
+                // Refused BEFORE a route opened, so routeTurn's own end-of-turn finish never runs:
+                // finish the record here, or the registry keeps a live entry per refused turn.
+                // No action ran — the turn never routed — so cancelled, not action_failed.
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                    prepared.requestId,
+                    cancelled = true,
+                    failed = false,
+                )
+                return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
+            }
         if (!claim.ownsDispatch) {
             claim.completion.join()
             // The original owner handles feedback and recognition; a duplicate produces no effects.
@@ -475,6 +518,10 @@ class CloudRouteSink internal constructor(
         // throw or cancellation during setup (context build, route opening, the
         // initial pause) must still release ownership and restore audio, or the
         // successor could inherit a paused player with no owner.
+        // TURN-LOCAL timing id, declared at function scope so the finally can finish THIS id
+        // rather than whatever the shared field holds at exit — a superseded turn must not
+        // publish its successor's table.
+        var myTimingRequestId: String? = null
         try {
             // A newer turn supersedes the previous one. Registration and the
             // initial pause share the turn mutex, so a predecessor's suspending
@@ -536,6 +583,9 @@ class CloudRouteSink internal constructor(
                 routeHint = hint,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+            // From here until the turn ends, FIRST AUDIBLE belongs to this request.
+            myTimingRequestId = turn.requestId
+            activeTimingRequestId.set(turn.requestId)
             val events = openRoute(turn)
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
@@ -883,6 +933,16 @@ class CloudRouteSink internal constructor(
                             activeTurnId = 0
                             activeTurn = null
                         }
+                        // THE RECORD-LIFETIME RULE (reviewer, task81): this sink owns a cloud
+                        // turn's end. The engine handed the record off at dispatch without
+                        // publishing — publishing there would have unregistered the id before
+                        // CloudRequestSent and FirstAudible were marked. Finish and publish HERE,
+                        // non-cancellable, for every exit path.
+                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                            myTimingRequestId,
+                            cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true,
+                            failed = endReason == Reason.TurnFailed,
+                        )
                     }
                 }
             } finally {
@@ -929,6 +989,9 @@ class CloudRouteSink internal constructor(
         if (selectedKind != null) {
             Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, feedbackKind = selectedKind))
         }
+        // This turn is done: a later audible is not its first audible. Clear only when THIS
+        // turn still owns the field — a successor may already have replaced it.
+        activeTimingRequestId.compareAndSet(myTimingRequestId, null)
         return CloudTurnResult(
             feedback = finalFeedback,
             // THE LANGUAGE THE LINE WAS ACTUALLY RESOLVED IN: an utterance-language line carries
@@ -977,6 +1040,13 @@ class CloudRouteSink internal constructor(
             }
             override fun onSendAttempted(requestId: String) {
                 Trace.record(Event(Kind.Turn, Reason.TurnSocketSendComplete, Source.Cloud, requestId = requestId, errorCode = "SEND_ATTEMPTED"))
+                // The auth frame leaving for the wire is the cloud-request stage the timing table
+                // names. The engine registered this turn's record under this id.
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
+                    requestId,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.CloudRequestSent,
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos(),
+                )
             }
             override fun onSendResult(
                 requestId: String,
@@ -992,9 +1062,17 @@ class CloudRouteSink internal constructor(
                 val boundedCode = errorCode?.let { if (it in ALLOWED_ERROR_CODES) it else "unknown" }
                 Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode, terminalOrigin = origin.name))
             }
-            override fun onConnectionFailed(requestId: String) {
-                // Transport connection failure — distinct from lifecycle retirement.
-                Trace.record(Event(Kind.Turn, Reason.TurnConnectionFailed, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_CONNECTION_FAILED"))
+            override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
+                // A socket close is labelled by what the turn still needed from it. While the turn
+                // is waiting for its answer, a dead socket IS a connection failure. Once the
+                // terminal has arrived or the exchange has been cancelled, the turn is done with
+                // the socket and this close is its teardown — reporting that as a connection
+                // failure says a finished turn failed to connect.
+                if (stillNeeded) {
+                    Trace.record(Event(Kind.Turn, Reason.TurnConnectionFailed, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_CONNECTION_FAILED"))
+                } else {
+                    Trace.record(Event(Kind.Turn, Reason.TurnSocketClosedAfterEnd, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_TEARDOWN"))
+                }
             }
         }
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)
@@ -1004,6 +1082,7 @@ class CloudRouteSink internal constructor(
             okHttpClient = okHttpClient ?: CloudTurnRoute.defaultOkHttpClient(),
             transport = transport,
             observer = transportObserver,
+            earlyConnections = earlyConnectionOpener,
         ).route(turn)
     }
 

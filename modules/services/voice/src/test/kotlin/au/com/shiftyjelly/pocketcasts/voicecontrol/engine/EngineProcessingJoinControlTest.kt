@@ -121,7 +121,7 @@ class EngineProcessingJoinControlTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
                 micExposureProvider = { MicExposure.NoMic },
-                onIntent = { _, _ -> },
+                onIntent = { _, _, _ -> },
             )
             // Wait until the engine actually reached its processing launch (attachCapture was called).
             withTimeout(5_000) {
@@ -172,7 +172,7 @@ class EngineProcessingJoinControlTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
                 micExposureProvider = { MicExposure.NoMic },
-                onIntent = { _, _ -> },
+                onIntent = { _, _, _ -> },
             )
             // Barrier for the premise itself: the job must have FINISHED before stop() runs, not
             // Merely started failing. The flow's completion hook fires while the job is still
@@ -243,7 +243,7 @@ class EngineProcessingJoinControlTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.NoMic },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         try {
             startOnce()
@@ -331,7 +331,7 @@ class EngineProcessingJoinControlTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
                 micExposureProvider = { MicExposure.NoMic },
-                onIntent = { _, _ -> },
+                onIntent = { _, _, _ -> },
             )
             withTimeout(5_000) { heldFlow.subscriptionCount.first { it > 0 } }
             engine.stop()

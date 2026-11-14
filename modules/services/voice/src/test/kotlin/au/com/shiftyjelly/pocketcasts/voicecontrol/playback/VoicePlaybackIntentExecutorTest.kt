@@ -6,6 +6,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSigna
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -203,6 +206,80 @@ class VoicePlaybackIntentExecutorTest {
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("add:my bookmark"), sinks.bookmark.calls)
+    }
+
+    @Test
+    fun `a cloud dispatch cancelled mid-turn keeps the record for the sink's own end`() = runTest {
+        // Once the dispatch call is made the SINK owns the record's end — even when that call is
+        // cancelled mid-turn. The executor's finally must not publish a cancelled turn as
+        // ActionFailed ahead of the sink's own cancelled finish, so after cancellation the record
+        // is still live, and finishing it cancelled is the sink's job.
+        val dispatchStarted = CompletableDeferred<Unit>()
+        val hangingSink = object : VoiceCloudRouteSink by FakeCloudRouteSink() {
+            // OVERRIDE THE REPORTING ENTRY: the executor's first-attempt path calls
+            // dispatchPreparedReporting, and Kotlin `by` delegation routes interface-default
+            // methods to the delegate, so overriding dispatchPrepared alone would be bypassed.
+            override suspend fun dispatchPreparedReporting(
+                prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+                isRetry: Boolean,
+                onDuck: ((VoiceActionOutcome) -> Unit)?,
+            ): CloudTurnResult {
+                dispatchStarted.complete(Unit)
+                kotlinx.coroutines.suspendCancellableCoroutine<Unit> { }
+                throw IllegalStateException("unreachable: cancelled before resume")
+            }
+        }
+        val executor = FakeSinks(cloudRouteOverride = hangingSink).executor()
+        val requestId = "cancel-test-request"
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+
+        val job = launch {
+            executor.execute(
+                VoiceIntent.CloudRoute(request = "question", tier = VoiceIntent.CloudTier.Premium),
+                timingRequestId = requestId,
+            )
+        }
+        dispatchStarted.await()
+        job.cancelAndJoin()
+
+        assertTrue(
+            "a cancelled dispatch belongs to the sink: the executor must not finish the record itself",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(requestId)
+    }
+
+    @Test
+    fun `a refused cloud turn before the sink leaves no live timing entry`() = runTest {
+        // A cloud dispatch refused BEFORE the sink (here: a retry of an unknown logical request)
+        // never opens a route, so the sink's own end-of-turn finish never runs. The executor must
+        // finish the record itself, or the registry keeps one live entry per dropped turn.
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val requestId = "leak-test-request"
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+
+        val response = executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "question",
+                tier = VoiceIntent.CloudTier.Premium,
+                logicalRequestId = "never-prepared",
+                isRetry = true,
+            ),
+            timingRequestId = requestId,
+        )
+
+        assertEquals(VoiceResponse.Silent, response)
+        assertFalse(
+            "a turn refused before the sink must not keep a live timing entry",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
     }
 
     @Test
@@ -1136,7 +1213,7 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
 
-        val response = executor.execute(VoiceIntent.Queue.Clear) { facts += it }
+        val response = executor.execute(VoiceIntent.Queue.Clear, onOutcome = { facts += it })
 
         // The fake renders success; the production sink renders CONFIRM_REQUIRED after the same
         // Dispatch. Either way the earcon is presentation and the fact below is the outcome.
@@ -1153,7 +1230,7 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
 
-        val response = executor.execute(VoiceIntent.Playback.Pause) { facts += it }
+        val response = executor.execute(VoiceIntent.Playback.Pause, onOutcome = { facts += it })
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         // A success earcon is not evidence of completion: the sink call returning is dispatch only.
@@ -1168,7 +1245,7 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor()
         val facts = mutableListOf<VoiceActionOutcome>()
 
-        val response = executor.execute(VoiceIntent.Playback.Resume) { facts += it }
+        val response = executor.execute(VoiceIntent.Playback.Resume, onOutcome = { facts += it })
 
         assertEquals(VoiceResponse.Silent, response)
         // Dispatched is not a result: the executor also records the
@@ -1190,13 +1267,13 @@ class VoicePlaybackIntentExecutorTest {
         val latch = java.util.concurrent.CountDownLatch(2)
         val a = Thread {
             kotlinx.coroutines.runBlocking {
-                executor.execute(VoiceIntent.Playback.Pause) { aFacts += it }
+                executor.execute(VoiceIntent.Playback.Pause, onOutcome = { aFacts += it })
             }
             latch.countDown()
         }
         val b = Thread {
             kotlinx.coroutines.runBlocking {
-                executor.execute(VoiceIntent.Playback.Resume) { bFacts += it }
+                executor.execute(VoiceIntent.Playback.Resume, onOutcome = { bFacts += it })
             }
             latch.countDown()
         }
@@ -1233,7 +1310,7 @@ class VoicePlaybackIntentExecutorTest {
         var pauseCompleted = false
         val pauseThread = Thread {
             kotlinx.coroutines.runBlocking {
-                executor.execute(VoiceIntent.Playback.Pause) { pauseFacts += it }
+                executor.execute(VoiceIntent.Playback.Pause, onOutcome = { pauseFacts += it })
                 pauseCompleted = true
                 pauseDone.countDown()
             }
@@ -1321,7 +1398,7 @@ class VoicePlaybackIntentExecutorTest {
         val facts = mutableListOf<VoiceActionOutcome>()
 
         // A REAL cloud turn: the production sink reaches its focus branch and reports the grant.
-        sinks.executor().execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium)) { facts += it }
+        sinks.executor().execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium), onOutcome = { facts += it })
 
         // The duck's grant IS observed...
         assertTrue(
@@ -1857,5 +1934,91 @@ class VoicePlaybackIntentExecutorTest {
         )
 
         org.junit.Assert.assertNotSame("a confirmed action resets inactivity", timerBefore, signal.timerJobForTest())
+    }
+
+    @Test
+    fun `a local action marks the live turn's timing table when the id is supplied`() = runTest {
+        // The executor stamps the mark with the RECORD's own clock; the test pins that clock so
+        // the stage's lag against the acoustic-end baseline is an exact quantity, not a mock
+        // artifact. The executor must never read a second clock of its own.
+        val savedClock = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = { 1_250_000_000L }
+        val admittedId = "local-timing-id"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        try {
+            executor.execute(VoiceIntent.Playback.Pause, timingRequestId = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = savedClock
+        }
+        assertEquals(
+            "the mark is the record clock's instant, against the acoustic-end baseline",
+            250L,
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+        )
+        assertEquals(listOf("pause"), sinks.fakePlayback.calls)
+    }
+
+    @Test
+    fun `the local action stage is marked after the action runs, not at entry`() = runTest {
+        // THE FIRST OBSERVATION WINS: a stage marked at entry would freeze the instant
+        // BEFORE the action ran and the post-action mark would be silently dropped, so the table
+        // would understate every local turn. The fake sink ADVANCES the record clock while it
+        // runs, so only a post-action mark can carry the advanced instant.
+        val clock = longArrayOf(1_000_000_000L)
+        val savedClock = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = { clock[0] }
+        val admittedId = "local-order-id"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, clock[0])
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        sinks.fakePlayback.onCall = { clock[0] += 5_000_000L }
+        try {
+            executor.execute(VoiceIntent.Playback.Pause, timingRequestId = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos = savedClock
+        }
+        assertEquals(
+            "only a mark taken after the action can see the clock the action advanced",
+            5L,
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+        )
+    }
+
+    @Test
+    fun `a local action with no timing id leaves the table untouched`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        // No record registered under any id the executor could reach; the executor itself must
+        // not throw or mint one.
+        val response = executor.execute(VoiceIntent.Playback.Pause)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
+        assertEquals(listOf("pause"), sinks.fakePlayback.calls)
+    }
+
+    @Test
+    fun `a cloud turn's execution does not mark the local action stage`() = runTest {
+        val admittedId = "cloud-timing-id"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        try {
+            executor.execute(VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Premium, logicalRequestId = admittedId), timingRequestId = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        assertNull(
+            "a cloud action's timing belongs to the sink, not the executor",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.LocalActionExecuted),
+        )
     }
 }

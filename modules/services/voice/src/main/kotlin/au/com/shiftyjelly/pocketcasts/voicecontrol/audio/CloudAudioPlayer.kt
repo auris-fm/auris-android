@@ -99,6 +99,44 @@ class CloudAudioPlayer(
      */
     var onPlaybackAudibleChanged: ((Boolean) -> Unit)? = null
 
+    /**
+     * Additional audible observers, so more than one consumer can watch the same fact (the DI
+     * module already owns the single-delegate property above). Invoked together with it.
+     */
+    private val audibleListeners = mutableListOf<(Boolean) -> Unit>()
+
+    fun addAudibleListener(listener: (Boolean) -> Unit) {
+        synchronized(audibleListeners) { audibleListeners += listener }
+    }
+
+    /**
+     * Observers of the turn's REAL first audible: the first presentation-evidence instant, the
+     * first [android.media.AudioTimestamp] whose framePosition is positive, reported with the
+     * timestamp's nanoTime (the track's CLOCK_MONOTONIC presentation base, the same base the
+     * timing table's clock uses). A submission-side stamp says frames were HANDED to the track,
+     * which can be seconds before the listener hears anything; this fires only when the track
+     * says it has actually presented. Once per playback run — reset at [play]/[stop].
+     */
+    private val firstAudibleListeners = mutableListOf<(Long) -> Unit>()
+
+    /** True once THIS run has reported first audible; reset when a run starts. */
+    // Atomic: the heartbeat and the stop-path sample run on different dispatchers, so both can
+    // pass a plain Boolean check; compareAndSet keeps first audible exactly once per run.
+    private val firstAudibleFired = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun addFirstAudibleListener(listener: (Long) -> Unit) {
+        synchronized(firstAudibleListeners) { firstAudibleListeners += listener }
+    }
+
+    private fun notifyFirstAudible(nanoTime: Long) {
+        synchronized(firstAudibleListeners) { firstAudibleListeners.toList() }.forEach { it(nanoTime) }
+    }
+
+    private fun notifyAudible(audible: Boolean) {
+        onPlaybackAudibleChanged?.invoke(audible)
+        synchronized(audibleListeners) { audibleListeners.toList() }.forEach { it(audible) }
+    }
+
     /** Ticks the audible stamp while we are playing, so it cannot go stale mid-answer. */
     private var audibleHeartbeat: Job? = null
     private val frameBuffer = mutableListOf<ByteArray>()
@@ -391,6 +429,9 @@ class CloudAudioPlayer(
             answerAdmission = null
             frameBuffer.clear()
             if (playing) {
+                // Sample BEFORE stop(): a stopped track's timestamp can be stale or unavailable,
+                // and this stop may be the only sample point a short answer gets.
+                sampleFirstAudible()
                 audioTrack?.stop()
                 playing = false
                 paused = false
@@ -446,12 +487,23 @@ class CloudAudioPlayer(
         }
         observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
-        onPlaybackAudibleChanged?.invoke(true)
+        notifyAudible(true)
+        // A new run presents again: clear the previous run's latch so the next answer gets its
+        // own first-audible instant.
+        firstAudibleFired.set(false)
         audibleHeartbeat = heartbeatScope.launch {
+            // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
+            // can finish and stop the heartbeat before the first delay elapses, and would then
+            // never report a first audible at all. The tick below keeps sampling later frames.
+            sampleFirstAudible()
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
                 if (!isPlaying) break
-                onPlaybackAudibleChanged?.invoke(true)
+                notifyAudible(true)
+                // Presentation evidence rides the same tick: if the track has presented its
+                // first frame by now, this run's first audible is THAT instant, not the
+                // submission stamp above.
+                sampleFirstAudible()
             }
         }
     }
@@ -459,7 +511,28 @@ class CloudAudioPlayer(
     private fun stopAudibleHeartbeat() {
         audibleHeartbeat?.cancel()
         audibleHeartbeat = null
-        onPlaybackAudibleChanged?.invoke(false)
+        // LAST CHANCE: an answer that finished inside the first heartbeat interval presented
+        // between the ticks; sample on the way out so short answers still report first audible.
+        sampleFirstAudible()
+        notifyAudible(false)
+    }
+
+    /**
+     * Sample the track's presentation clock once and fire first audible on the first evidence.
+     * Idempotent: the [firstAudibleFired] latch makes every repeat call a no-op, so a sampled
+     * run reports first audible exactly once no matter how many paths sample it.
+     */
+    private fun sampleFirstAudible() {
+        // VALIDATE FIRST, latch second: the first sample right after play() usually finds no
+        // presentation yet, and latching before that check would make every later sample a
+        // no-op — losing first audible on every short turn. compareAndSet keeps the fire
+        // exactly once even when the heartbeat and the stop path sample together.
+        val ts = audioTrack?.let { track ->
+            readAudioTimestamp?.invoke(track) ?: android.media.AudioTimestamp().takeIf { track.getTimestamp(it) }
+        }
+        if (ts != null && ts.framePosition > 0 && firstAudibleFired.compareAndSet(false, true)) {
+            notifyFirstAudible(ts.nanoTime)
+        }
     }
 
     private val heartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

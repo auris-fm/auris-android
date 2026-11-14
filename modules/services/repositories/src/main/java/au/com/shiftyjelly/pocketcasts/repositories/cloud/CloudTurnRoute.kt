@@ -1,10 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import okhttp3.OkHttpClient
+import timber.log.Timber
 
 /** The codecs this client can play, in preference order. */
 object CloudRouteCodecs {
@@ -41,6 +43,12 @@ class CloudTurnRoute(
     /** Socket seam: the unit suite has no WebSocket upgrade, so the transport is injectable. */
     private val transport: CloudTurnTransport? = null,
     private val observer: CloudTurnTransportObserver? = null,
+    /**
+     * Holds connections opened early, before the turn existed.
+     *
+     * Null disables adoption: every turn dials for itself, exactly as before this seam existed.
+     */
+    private val earlyConnections: EarlyConnectionOpener? = null,
 ) {
     fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = flow {
         // Fail closed, and fail loudly: no token means no request is attempted.
@@ -67,7 +75,31 @@ class CloudTurnRoute(
             conversationId = turn.conversationId,
             conversationMode = turn.conversationMode,
         )
-        val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient, observer)
+        // Adopt the connection opened for THIS utterance, if one is still held and usable.
+        //
+        // Keyed on the turn's own identity, so a turn can never borrow a connection opened for
+        // another utterance. `takeFor` returns null when nothing was held, the handle belonged
+        // elsewhere, it was already spent, or it aged past the staleness bound -- and every one of
+        // those means the same thing here: dial for yourself. A stale handle is discarded silently,
+        // because falling back to a dial is not an error the user should ever see.
+        val adopted = earlyConnections?.let { opener ->
+            try {
+                opener.takeFor(turn.requestId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                // An early connection is only ever an optimisation: if the opener misbehaves, the
+                // turn must still dial for itself rather than fail.
+                Timber.w(t, "Early connection could not be taken")
+                null
+            }
+        }
+        // Adoption lives on the concrete transport: it is the thing that owns a socket, and the
+        // one-method interface exists so tests can substitute a transport wholesale. An injected
+        // transport dials its own way and adoption does not apply to it.
+        val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient, observer).also {
+            if (adopted != null) it.adopt(adopted)
+        }
         // Everything the socket reports is the turn's outcome — including a refused upgrade, which
         // arrives as `connection_lost` and ends the turn rather than being retried elsewhere.
         emitAll(socket.exchange(frame))

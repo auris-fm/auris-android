@@ -273,7 +273,7 @@ class VoiceControlCaptureRestartTest {
         }
         override fun isCapturing() = capturing
 
-        override fun waitForVadEvent(timeoutMs: Int): Int {
+        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int {
             // Block while capture is live so the collected flow stays alive; return "no event"
             // once capture has ended so a disposed engine's loop exits promptly.
             val deadline = System.currentTimeMillis() + timeoutMs
@@ -286,6 +286,13 @@ class VoiceControlCaptureRestartTest {
         override fun getSpeechPcm(buffer: ShortArray) = 0
         override fun getSpeechPcmSize() = 0
         override fun getSpeechOnsetSample() = 0
+        override fun getInProgressSnapshot(buffer: ShortArray, header: LongArray): Int {
+            header[0] = 0
+            header[1] = 0
+            header[2] = 0
+            return 0
+        }
+        override fun setEarlyWakeCutoff(samples: Int) = Unit
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
     }

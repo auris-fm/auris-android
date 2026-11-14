@@ -26,6 +26,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -56,6 +57,31 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `a dispatch the sink refuses before routing leaves no live timing entry`() = runTest {
+        // A turn whose retained identity was retired (forgetRetained) is refused at claimDispatch,
+        // BEFORE any route opens — so routeTurn's end-of-turn finish never runs. The sink must
+        // finish the record itself, or the registry keeps one live entry per refused turn.
+        val deps = TestDeps()
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        val prepared = sink.prepareTurn("question", playbackContext, capturedOrigin = 1, logicalRequestId = "one-utterance")!!
+        val requestId = prepared.requestId
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+        deps.conversationAdmission.forgetRetained("one-utterance")
+
+        val result = sink.dispatchPrepared(prepared)
+
+        assertEquals(VoiceResponse.Silent, result.feedback)
+        assertFalse(
+            "a turn refused before routing must not keep a live timing entry",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
+    }
 
     @Test
     fun `concurrent callbacks prepare exactly one retained wire identity`() = runTest {
@@ -2310,6 +2336,69 @@ class CloudRouteSinkTest {
         sink.routeToCloud("second", playbackContext, admitted = testWireId).feedback
         firstCancelled.await()
         assertTrue(first.isCancelled)
+    }
+
+    @Test
+    fun `a superseded turn publishes its own timing table and leaves the successor's alone`() = runTest(UnconfinedTestDispatcher()) {
+        // THE BLOCKER THE BOT FOUND: the finish path read the shared activeTimingRequestId, so a
+        // turn superseded mid-flight finished and published its SUCCESSOR's record under the
+        // successor's id, losing both tables. Each turn must publish its own table under its own
+        // request id, whatever a successor did to the shared field meanwhile.
+        val aOnWire = CompletableDeferred<Unit>()
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        val idA = "wire-superseded"
+        val idB = "wire-successor"
+        for (id in listOf(idA, idB)) {
+            val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
+            record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
+        }
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    // A is live on the wire when B arrives, and is superseded mid-flight — the
+                    // interleaving that made the finish path read the successor's state off the
+                    // shared field instead of the turn's own id.
+                    flow {
+                        aOnWire.complete(Unit)
+                        awaitCancellation()
+                    }
+                } else {
+                    flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(0, 0))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { sink.routeToCloud("first", playbackContext, admitted = idA).feedback }
+        aOnWire.await()
+        sink.routeToCloud("second", playbackContext, admitted = idB).feedback
+        // A's publish runs in its non-cancellable cleanup; wait for the job, but never hang the
+        // suite on it — a timeout fails the assertions below with what did publish.
+        withTimeoutOrNull(5_000) { first.join() }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = previousSink
+        for (id in listOf(idA, idB)) {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(id)
+        }
+
+        // EACH TURN PUBLISHES EXACTLY ITS OWN TABLE, under its own request id: the old
+        // finish path published the superseded turn's marks under the successor's id (or
+        // lost them to a null), so either A's block is missing or B's is duplicated.
+        assertEquals(
+            "one published table per turn",
+            setOf(idA, idB),
+            published.mapNotNull { Regex("request_id=(\\S+)").find(it)?.groupValues?.get(1) }.toSet(),
+        )
+        assertTrue(
+            "the superseded turn's table names its own cancellation",
+            published.any { it.contains("request_id=$idA") && it.contains("outcome=cancelled") },
+        )
+        assertTrue(
+            "the successor's table names its own commit",
+            published.any { it.contains("request_id=$idB") && it.contains("outcome=committed") },
+        )
     }
 
     @Test
@@ -4624,7 +4713,7 @@ class CloudRouteSinkTest {
         override fun onTerminalReceived(requestId: String, origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin, errorCode: String?) {
             events += "terminal:${origin.name}:$errorCode"
         }
-        override fun onConnectionFailed(requestId: String) {
+        override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
             events += "connection_failed"
         }
     }
@@ -4648,9 +4737,9 @@ class CloudRouteSinkTest {
                         assertEquals(testWireId, rid)
                         // Auth resolved, then the handshake fails — never Connected.
                         observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
-                        observer?.onConnectionFailed(rid)
+                        observer?.onConnectionFailed(rid, stillNeeded = true)
                         recording.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
-                        recording.onConnectionFailed(rid)
+                        recording.onConnectionFailed(rid, stillNeeded = true)
                         emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
                     }
                 }
@@ -4747,5 +4836,138 @@ class CloudRouteSinkTest {
             "You have reached your Auris free daily limit. Please try again tomorrow.",
             (feedback as VoiceResponse.Spoken).text,
         )
+    }
+
+    @Test
+    fun `the send attempt marks the live turn's timing table with the cloud request stage`() = runTest {
+        val admittedId = testWireId
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        // Acoustic end on the capture clock's monotonic ns base: 1s.
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        // THE REAL BRIDGE: the sink's own observer sees the send attempt, as the
+                        // transport invokes it on the wire.
+                        observer?.onSendAttempted(rid)
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        // The registry route lands in the live record: without the sink's observer mark the stage
+        // is absent, and the acoustic-end baseline makes its absence (not a null lag) the failure.
+        assertNotNull(
+            "cloud request stage must be marked through the registry",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.CloudRequestSent),
+        )
+    }
+
+    @Test
+    fun `the first audible from the player marks the active turn's timing table`() = runTest {
+        val admittedId = testWireId
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        // Acoustic end on the capture clock's monotonic ns base: 1s.
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        // The sink now registers for PRESENTATION evidence (first AudioTimestamp with a positive
+        // framePosition), not the submission-side audible stamp.
+        val firstAudibleListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstAudibleListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstAudibleListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // The player's first-audible callback arrives DURING the turn, through
+                        // the listener the sink registered — after the turn it is not the first.
+                        // The instant is the track's presentation nanoTime (monotonic ns).
+                        firstAudibleListeners.forEach { it(5_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        assertTrue("sink must register a first-audible listener", firstAudibleListeners.isNotEmpty())
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        assertNotNull(
+            "first audible must be marked through the registry while the turn is live",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible),
+        )
+    }
+
+    @Test
+    fun `the record lives until the cloud turn actually ends - published once, not at handoff`() = kotlinx.coroutines.test.runTest {
+        // REVIEWER (task81): the engine published the table the moment it dispatched the intent,
+        // and publish() unregisters the id — so the sink's CloudRequestSent, the player's
+        // FirstAudible and the disposition arrived at an EMPTY registry and were silently
+        // dropped. The record must live through the whole async turn: the sink publishes at the
+        // turn's real end (Done, failure or cancellation), inside its non-cancellable cleanup.
+        val admittedId = testWireId
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        val firstAudibleListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstAudibleListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstAudibleListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // First audible arrives mid-turn, as the player would report it.
+                        firstAudibleListeners.forEach { it(5_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        val text = published.joinToString("\n")
+        assertTrue("the table must be published at the turn's real end: '$text'", text.isNotEmpty())
+        assertTrue("the published table carries first_audible: '$text'", text.contains("stage=first_audible"))
+        assertTrue("the published table carries the committed outcome: '$text'", text.contains("outcome=committed"))
     }
 }

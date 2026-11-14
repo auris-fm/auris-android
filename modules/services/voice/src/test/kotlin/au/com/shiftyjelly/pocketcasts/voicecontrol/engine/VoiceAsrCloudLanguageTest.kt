@@ -317,7 +317,7 @@ class VoiceAsrCloudLanguageTest {
             ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { dispatched, _ ->
+            onIntent = { dispatched, _, _ ->
                 intents += dispatched
                 launch {
                     try {

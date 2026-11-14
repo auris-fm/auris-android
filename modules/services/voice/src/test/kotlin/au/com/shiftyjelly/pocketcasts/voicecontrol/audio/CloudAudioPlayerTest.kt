@@ -12,6 +12,28 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
+/**
+ * Per-test shadow for the REAL AudioTrack the player builds: answers getTimestamp with an armed
+ * presentation instant, which the stock shadow cannot do. Only the test that exercises the
+ * production fallback arms it; everything else sees the stock behaviour.
+ */
+@org.robolectric.annotation.Implements(android.media.AudioTrack::class)
+class TimestampedAudioTrackShadow : org.robolectric.shadows.ShadowAudioTrack() {
+    @org.robolectric.annotation.Implementation
+    fun getTimestamp(timestamp: android.media.AudioTimestamp): Boolean {
+        if (!armed) return false
+        timestamp.nanoTime = nanoTime
+        timestamp.framePosition = framePosition
+        return true
+    }
+
+    companion object {
+        @JvmStatic var armed = false
+        @JvmStatic var nanoTime = 0L
+        @JvmStatic var framePosition = 0L
+    }
+}
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class CloudAudioPlayerTest {
@@ -29,6 +51,7 @@ class CloudAudioPlayerTest {
     @After
     fun tearDown() {
         player.release()
+        TimestampedAudioTrackShadow.armed = false
     }
 
     @Test
@@ -120,6 +143,117 @@ class CloudAudioPlayerTest {
         player.play()
 
         assertTrue("play must be reported as us making sound", states.firstOrNull() == true)
+    }
+
+    @Test
+    fun `first audible is PRESENTATION evidence, not submission`() {
+        // REVIEWER (task81): the timing table's FirstAudible came from the submission-side
+        // audible stamp (frames handed to the track), which can be seconds before the listener
+        // actually hears anything. The real instant is the track's presentation clock: the first
+        // AudioTimestamp with framePosition > 0. Its nanoTime is the monotonic instant the timing
+        // table wants.
+        var ts = android.media.AudioTimestamp().apply {
+            this.nanoTime = 99_000_000L
+            this.framePosition = 512L
+        }
+        player.readAudioTimestamp = { ts }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        Thread.sleep(2_500)
+
+        assertEquals("exactly one first-audible per playback run", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
+    @Config(shadows = [TimestampedAudioTrackShadow::class])
+    fun `without any test seam the platform getTimestamp fallback reports first audible`() {
+        // Production never sets any test seam: first audible must come from the track's own
+        // getTimestamp, exactly as renderedFrame reads it. Robolectric's stock ShadowAudioTrack
+        // cannot report a timestamp, so a per-test shadow arms one on the REAL track the player
+        // builds — no app-code test hook involved.
+        TimestampedAudioTrackShadow.armed = true
+        TimestampedAudioTrackShadow.nanoTime = 99_000_000L
+        TimestampedAudioTrackShadow.framePosition = 512L
+
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        player.stop()
+
+        assertEquals("first audible fires via the platform fallback", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
+    fun `an answer that stops inside the first heartbeat interval still reports first audible, exactly once`() {
+        // The heartbeat's first tick lands a full interval after play(); an answer that finishes
+        // before it cancels the heartbeat without a tick. Sampling must happen on the way out
+        // (and at heartbeat start), or a sub-second answer never reports first audible at all.
+        player.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                this.nanoTime = 99_000_000L
+                this.framePosition = 512L
+            }
+        }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        // Stop BEFORE the first heartbeat tick could run: the answer ended sub-second.
+        player.stop()
+
+        assertEquals("exactly one first-audible for a sub-second answer", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
+    fun `a framePosition of zero is not presentation - first audible stays unfired`() {
+        // An underrun or a track that has not yet presented anything reports framePosition 0.
+        // That is SUBMISSION with no evidence, exactly the instant this fix refuses to claim.
+        var ts = android.media.AudioTimestamp().apply {
+            this.nanoTime = 99_000_000L
+            this.framePosition = 0L
+        }
+        player.readAudioTimestamp = { ts }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        Thread.sleep(2_500)
+
+        assertTrue("no presentation evidence means no first-audible claim", fired.isEmpty())
+    }
+
+    @Test
+    fun `first audible resets per playback run`() {
+        // A reused player must be able to report first audible again for the NEXT answer: the
+        // once-only latch is per run, not per player lifetime.
+        var framePosition = 512L
+        player.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                this.nanoTime = 1_000L
+                this.framePosition = framePosition
+            }
+        }
+        var firings = 0
+        player.addFirstAudibleListener { _ -> firings += 1 }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        Thread.sleep(2_500)
+        player.stop()
+        player.play()
+        Thread.sleep(2_500)
+
+        assertEquals("the second run presents again, so the latch must have reset", 2, firings)
     }
 
     @Test

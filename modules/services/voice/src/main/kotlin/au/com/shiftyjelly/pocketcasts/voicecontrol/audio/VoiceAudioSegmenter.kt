@@ -7,7 +7,30 @@ interface VoiceAudioSegmenter {
 sealed interface VoiceSegmenterResult {
     data object Silence : VoiceSegmenterResult
     data object SpeechStarted : VoiceSegmenterResult
-    data object SpeechContinuing : VoiceSegmenterResult
+
+    /**
+     * The in-progress utterance crossed the early-wake window while still speaking.
+     *
+     * [utteranceGeneration] is the generation of the utterance the cutoff belongs to, straight
+     * from the native event. A consumer that has moved on to a later utterance drops the event
+     * instead of scoring or deciding on the wrong audio: a cutoff for utterance A arriving after
+     * B started must never read B's snapshot and accept B as A.
+     */
+    data class SpeechContinuing(val utteranceGeneration: Long?) : VoiceSegmenterResult
+
+    /**
+     * The first silent frame after speech: the utterance may be over, but the endpoint has not been
+     * decided yet.
+     *
+     * Reported because the cloud connection is opened here, overlapping the end-of-speech wait and
+     * ASR rather than following them. [Silence] cannot carry that job -- it also describes silence
+     * with no speech before it, and the engine must never open a connection for speech that was not
+     * addressed to the app.
+     *
+     * Fires once per pause, so an utterance that pauses and resumes reports it more than once; the
+     * consumer is responsible for treating repeats within one utterance as the same utterance.
+     */
+    data object TrailingSilenceBegan : VoiceSegmenterResult
     data class SpeechEnded(
         val frames: List<PcmAudioFrame>,
         val speechOnsetSample: Int = 0,
@@ -37,6 +60,13 @@ sealed interface VoiceSegmenterResult {
          * observation's frame position.
          */
         val segmentEndStreamPosition: Long? = null,
+        /**
+         * The generation of the utterance this completed segment belongs to, as carried by its
+         * end event. Native guarantees the PCM/onset/end fields of this same object ARE that
+         * utterance's completed snapshot, so a consumer can rely on their pairing instead of
+         * re-deriving it from shared latest-state getters.
+         */
+        val utteranceGeneration: Long? = null,
     ) : VoiceSegmenterResult
     data class Rejected(val reason: RejectionReason) : VoiceSegmenterResult
 }
@@ -88,6 +118,31 @@ fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentStartMs(): Long? {
     val segmentStartPosition = endPosition - segmentSamples
     return captureTimeNsForPosition(observation, segmentStartPosition)?.div(1_000_000L)
 }
+
+/**
+ * The monotonic instant (ms) the segment's LAST SPEECH SAMPLE was CAPTURED — the acoustic end the
+ * timing table starts from. Anchored at the SPEECH end, not the end of the retained buffer: the
+ * buffer includes trailing silence and the drain, so anchoring there places the acoustic end AFTER
+ * the user stopped speaking and hides exactly the latency the table measures. The speech-end
+ * sample's stream position is `segmentEndStreamPosition - totalRetainedSamples + speechEndSample`,
+ * and the clock observation only supplies the instant that position is converted against.
+ *
+ * Null when the speech-end evidence, the accounted end position or the timestamp observation is
+ * missing: an absent binding must stay absent — the timing table leaves the stage unmarked rather
+ * than substituting the buffer end or "now".
+ */
+fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndNs(): Long? {
+    val endPosition = segmentEndStreamPosition ?: return null
+    val observation = captureClock ?: return null
+    // 0 means the segmenter does not report the speech end — unknown, not "the first sample".
+    val speechEndSample = speechEndSample.takeIf { it > 0 } ?: return null
+    val totalRetainedSamples = frames.sumOf { it.samples.size.toLong() }
+    val speechEndStreamPosition = endPosition - totalRetainedSamples + speechEndSample
+    return captureTimeNsForPosition(observation, speechEndStreamPosition)
+}
+
+/** Milliseconds form of [captureTimeOfSegmentEndNs], for callers outside the timing table. */
+fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentEndMs(): Long? = captureTimeOfSegmentEndNs()?.div(1_000_000L)
 
 enum class RejectionReason {
     /**

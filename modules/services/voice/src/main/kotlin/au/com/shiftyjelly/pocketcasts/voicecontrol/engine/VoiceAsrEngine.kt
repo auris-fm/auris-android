@@ -5,13 +5,17 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
 import androidx.annotation.RequiresPermission
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.InProgressUtteranceReader
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentEndNs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentStartMs
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
@@ -39,8 +43,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Contributi
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.EarlyWakeScore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
@@ -93,6 +99,23 @@ class VoiceAsrEngine @Inject constructor(
     // Upload observation is OFF unless a composition module binds all three collaborators;
     // Dagger never applies Kotlin defaults, so an unbound constructor fails at build time.
     @ApplicationContext private val context: Context,
+    /** One clock for every timing mark, so the table's differences are real quantities. The
+     * table's own clock (TurnTimingRecord.clockNanos) shares this base, so request-id stamps and
+     * stage marks are comparable; System.nanoTime is CLOCK_MONOTONIC, so unit tests need no
+     * Android framework shadows to construct the engine. */
+    private val elapsedClockMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    /**
+     * Opens the route connection early, while the turn is still being recognised.
+     *
+     * Null disables the optimisation; production supplies it. An early connection only saves a
+     * round trip, so every failure here is silent by construction -- the turn dials for itself.
+     */
+    private val earlyConnectionOpener: EarlyConnectionOpener? = null,
+    /**
+     * Reads the utterance the native VAD is still accumulating. Null disables early wake scoring:
+     * the verdict then only exists at the endpoint, as before.
+     */
+    private val inProgressUtterance: InProgressUtteranceReader? = null,
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -164,7 +187,9 @@ class VoiceAsrEngine @Inject constructor(
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null
-    private var onIntent: ((VoiceIntent, InvocationToken?) -> Unit)? = null
+    /** Hands an intent to the executor, with the invocation token for its result attribution
+     * and the admitted request id for its timing table. */
+    private var onIntent: ((VoiceIntent, InvocationToken?, String?) -> Unit)? = null
     private var micExposureProvider: (() -> MicExposure)? = null
 
     @Volatile
@@ -215,7 +240,8 @@ class VoiceAsrEngine @Inject constructor(
         micExposureProvider: () -> MicExposure,
         // The dispatch handler receives the INVOCATION token for this specific dispatch, or null when
         // the intent belongs to no retained capture. Results are reported back against that token.
-        onIntent: (VoiceIntent, InvocationToken?) -> Unit,
+        // The admitted request id rides along so the executor can mark the utterance's timing table.
+        onIntent: (VoiceIntent, InvocationToken?, String?) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
         // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
         // scopes the reaction to its start generation so only an unexpected end is acted on.
@@ -279,6 +305,16 @@ class VoiceAsrEngine @Inject constructor(
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
                         is VoiceSegmenterResult.SpeechStarted -> {
+                            // A new utterance must not inherit a verdict or an identity scored for
+                            // the last one. Both live across the endpoint (SpeechEnded), where the
+                            // endpoint path still needs them: the turn must carry the SAME id the
+                            // early connection was opened under, or it replaces that connection
+                            // with one no turn will ever claim.
+                            inFlightUtteranceId = null
+                            earlyWakeResult = null
+                            earlyUtteranceGeneration = null
+                            earlyScoringRetired = false
+                            earlyWakeAcknowledged = false
                             // Freeze the capture context SYNCHRONOUSLY here — before any await
                             // boundary — and keep the ISSUED value for every later stage of THIS
                             // capture. Refused captures yield null and are excluded downstream.
@@ -330,9 +366,50 @@ class VoiceAsrEngine @Inject constructor(
                             // here copied the previous utterance's audio into the current clip.
                             // SpeechEnded already collects the whole utterance from the segment
                             // event, which is the only clip source.
+                            // The detector scores only the first EarlyWakeScore.cutoffMillis() after
+                            // onset, so for an utterance at least that long the wake answer is fully
+                            // determined while the user is still speaking. Score it as soon as that
+                            // much audio exists: this is what lets the verdict exist at the trailing-
+                            // silence onset, and the connection open there, outside grace too.
+                            // A cutoff event carries the generation of the utterance it belongs to.
+                            // The event queue is FIFO but the engine is async: a cutoff for utterance
+                            // A can be popped after A ended and B started. Acting on it would read
+                            // B's snapshot and accept B as A — so the event's generation is matched
+                            // BEFORE any score. Where no generation is known yet (no snapshot seen,
+                            // segmenters that do not report it), the snapshot check inside the score
+                            // remains the guard.
+                            val eventGeneration = result.utteranceGeneration
+                            val known = earlyUtteranceGeneration
+                            if (eventGeneration != null && known != null && eventGeneration != known) {
+                                Timber.i(
+                                    "[VoicePipeline] stale early-wake cutoff (gen %d, current %d); dropped",
+                                    eventGeneration,
+                                    known,
+                                )
+                            } else {
+                                scoreWakeEarly(expectedGeneration = eventGeneration)
+                            }
+                        }
+
+                        is VoiceSegmenterResult.TrailingSilenceBegan -> {
+                            // The utterance may be over: this is where the cloud connection starts
+                            // opening, so the handshake overlaps the endpoint wait and ASR instead
+                            // of following them. Fires once per pause, so an utterance that pauses
+                            // and resumes reports it again -- the opener keys on the tag, so a
+                            // repeat keeps the connection this utterance already opened rather
+                            // than dialling a second one.
+                            openEarlyConnectionIfAddressed()
                         }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
+                            // This utterance is over. Its identity is NOT cleared here: the
+                            // endpoint path below mints, opens and transcribes under this id, and
+                            // the next SpeechStarted clears it for the next utterance.
+                            wakePositiveForCurrentUtterance = false
+                            // The early-verdict fields are NOT reset here: this event is about to
+                            // run the endpoint path, which must still see the early verdict (to
+                            // score the detector once and to fire grace and the earcon once). The
+                            // next SpeechStarted clears them for the next utterance.
                             val totalSamples = result.frames.sumOf { it.samples.size }
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
@@ -355,9 +432,41 @@ class VoiceAsrEngine @Inject constructor(
                                 }
                             }
 
-                            val request = shouldTranscribe(result, openContext)
+                            // The acoustic end is the table's zero point: the instant the user
+                            // stopped speaking, after which every cost is the client's. It comes
+                            // from the capture sample accounting, not "now": the drain between the
+                            // last captured sample and this delivery is CLIENT cost, and stamping
+                            // it here would hide exactly the latency the table exists to measure.
+                            // Absent accounting stays absent — the table starts at the endpoint.
+                            val timing = TurnTimingRecord(
+                                requestId = "utt-" + elapsedClockMs(),
+                            )
+                            // The acoustic end is marked on the record's ONE monotonic clock:
+                            // the capture timestamp observation is AudioRecord's nanoTime-domain
+                            // instant, the same base as TurnTimingRecord.clockNanos(), so the
+                            // endpoint decision's elapsed against it is a real quantity. (The
+                            // AudioRecord nanoTime base equals System.nanoTime's base — both are
+                            // CLOCK_MONOTONIC.)
+                            result.captureTimeOfSegmentEndNs()?.let { captureEndNs ->
+                                timing.mark(TurnTimingRecord.Stage.AcousticEnd, captureEndNs)
+                            }
+                            // The segmenter has already decided the utterance ended by the time
+                            // it reports the segment, so the decision is observed here, next to
+                            // the acoustic end and distinct from it.
+                            timing.mark(TurnTimingRecord.Stage.EndpointDecision, TurnTimingRecord.clockNanos())
+
+                            val request = shouldTranscribe(result, openContext, timing)
                             if (request != null) {
-                                transcribeSegment(result, request)
+                                // Registered under the turn's ADMITTED id, the one every producer
+                                // outside the engine knows: the wire request id on the route socket,
+                                // the executor's logical id. CloudRequestSent, LocalActionExecuted
+                                // and FirstAudible mark through the registry by that id.
+                                TurnTimingRecord.registerFor(request.admittedId, timing)
+                                transcribeSegment(result, request, timing)
+                            } else {
+                                // Nothing ran for this utterance: publish the table so the
+                                // dropped turn is still visible with its real stages.
+                                timing.publish()
                             }
                             openContext = null
                         }
@@ -478,13 +587,13 @@ class VoiceAsrEngine @Inject constructor(
      * join arms publication — finalizing before publication is what lets the record carry a
      * result instead of a permanent unknown.
      */
-    private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?) -> Unit), intent: VoiceIntent) {
+    private fun invokeHandler(handler: ((VoiceIntent, InvocationToken?, String?) -> Unit), intent: VoiceIntent, admittedId: String?) {
         val capture = pendingExecutionContext
         pendingExecutionContext = null
         val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
         if (token != null) synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
         try {
-            handler(intent, token)
+            handler(intent, token, admittedId)
         } catch (t: Throwable) {
             // A SYNCHRONOUS handler throw must not strand the token: settle it here so the
             // invocation finalizes (recorded fact or explicit unknown) exactly once.
@@ -526,7 +635,7 @@ class VoiceAsrEngine @Inject constructor(
          * this point forward can name the same request. Carried through to the
          * wire request_id unchanged.
          */
-        val admittedId: String = java.util.UUID.randomUUID().toString(),
+        val admittedId: String,
     )
 
     /**
@@ -556,9 +665,147 @@ class VoiceAsrEngine @Inject constructor(
         return false
     }
 
+    /**
+     * The utterance currently in flight, from trailing silence to its next resume.
+     *
+     * The connection is opened per UTTERANCE, and the tag must be the same one the turn will later
+     * carry, so the identity has to exist before the endpoint decision -- not be minted there.
+     * It is cleared when the segment closes, so the next utterance gets its own.
+     */
+    private var inFlightUtteranceId: String? = null
+
+    /**
+     * Opens the route connection early, if this utterance is one the app should answer at all.
+     *
+     * Addressed means the app is the intended recipient: a positive wake result, or the grace
+     * period that follows one. Speech that was never addressed must never open a connection -- the
+     * server would learn that someone spoke near the phone.
+     *
+     * Only the first trailing silence of an utterance opens. Later ones are the same utterance
+     * resuming, and the opener keeps the connection it already holds for that tag.
+     */
+    private fun openEarlyConnectionIfAddressed() {
+        val opener = earlyConnectionOpener ?: return
+        val addressed = currentMode == ListeningMode.Continuous || wakePositiveForCurrentUtterance
+        if (!addressed) return
+        val tag = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString().also { inFlightUtteranceId = it }
+        // The moment the early connection is REQUESTED, so the log can place it against end of
+        // speech. This runs on every trailing silence, including resumes that reuse the connection
+        // the opener already holds, so it is named for the request rather than a dial it may not
+        // perform. The tag is logged because the turn later takes the connection by tag: a mismatch
+        // between this tag and the turn's own is invisible otherwise, and would look exactly like
+        // "the early connection never opened".
+        Timber.i("[VoicePipeline] early connection requested tag=%s mode=%s", tag, currentMode)
+        opener.openForLater(tag)
+    }
+
+    /**
+     * Whether the wake result for the utterance in flight is already positive.
+     *
+     * Trailing silence can arrive before the wake decision is final; when it does, the connection
+     * is opened later, at the moment the verdict turns positive.
+     */
+    private var wakePositiveForCurrentUtterance: Boolean = false
+
+    /** The wake result scored from the in-progress utterance, or null before the cutoff was reached. */
+    private var earlyWakeResult: WakeWordResult? = null
+
+    /** The native utterance generation the early state belongs to; null until the first snapshot. */
+    private var earlyUtteranceGeneration: Long? = null
+
+    /** Set when a snapshot crossed a generation boundary: no more early scoring this utterance. */
+    private var earlyScoringRetired = false
+
+    /** Whether the early hit already fired grace and the earcon, so the finished-segment path fires them once. */
+    private var earlyWakeAcknowledged = false
+
+    /**
+     * Score the wake word from the utterance in progress, once enough audio exists.
+     *
+     * The window handed to the detector is exactly the prefix a finished segment would give it
+     * (onset-relative, [EarlyWakeScore.CUTOFF_SAMPLES] long), so the early score IS the finished
+     * score, not an approximation of it. A negative result is cached too: re-scoring the same
+     * window every frame would spend detector time on a decided question.
+     */
+    private suspend fun scoreWakeEarly(expectedGeneration: Long? = null) {
+        if (earlyWakeResult != null || earlyScoringRetired) return
+        val reader = inProgressUtterance ?: return
+        if (!wakeWordDetector.isReady) return
+        val sampleRateHz = reader.sampleRateHz()
+        // ONE snapshot call: generation, onset, size and PCM under one lock. A snapshot whose
+        // generation does not match this utterance describes audio across a finalization boundary;
+        // it is dropped and early scoring is retired for this utterance — no retry, because the
+        // endpoint path scores that utterance anyway. An event-supplied expected generation must
+        // match too: the snapshot and the event that triggered this score must describe the SAME
+        // utterance, not merely both be "current".
+        val header = LongArray(3)
+        val buffer = ShortArray(EarlyWakeScore.CUTOFF_SAMPLES * 2)
+        val copied = reader.readSnapshot(buffer, header)
+        if (copied <= 0) return
+        val generation = header[0]
+        if (expectedGeneration != null && generation != expectedGeneration) {
+            Timber.i(
+                "[VoicePipeline] snapshot gen %d does not match the cutoff's gen %d; dropping, endpoint will score",
+                generation,
+                expectedGeneration,
+            )
+            earlyScoringRetired = true
+            return
+        }
+        val currentGeneration = earlyUtteranceGeneration
+        when {
+            currentGeneration == null -> earlyUtteranceGeneration = generation
+
+            generation != currentGeneration -> {
+                Timber.i("[VoicePipeline] early snapshot crossed an utterance boundary; dropping, endpoint will score")
+                earlyScoringRetired = true
+                return
+            }
+        }
+        val onset = header[1].toInt()
+        val available = header[2].toInt()
+        val request = EarlyWakeScore.request(
+            speechOnsetSample = onset,
+            availableSamples = available,
+            sampleRateHz = sampleRateHz,
+            isGraceActive = currentMode == ListeningMode.Continuous,
+        ) ?: return
+        // The detector runs on this collector; scoring blocks the segmenter loop briefly, which the
+        // native capture buffer absorbs. Scoring is once per utterance, not per frame.
+        val read = copied
+        if (read < request.startSample + request.lengthSamples) return
+        val prefix = FloatArray(request.lengthSamples) {
+            buffer[request.startSample + it].toFloat() / 32768f
+        }
+        val result = runCatching { wakeWordDetector.detect(prefix, sampleRateHz, 0) }.getOrElse { e ->
+            // An early score that cannot be produced is not a failure the user sees: the finished
+            // segment still runs the detector at the endpoint, exactly as it always did.
+            Timber.w(e, "[VoicePipeline] early wake scoring failed, deferring to endpoint")
+            return
+        }
+        Timber.i("[VoicePipeline] early wake %s", if (result.detected) "hit" else "miss")
+        earlyWakeResult = result
+        if (result.detected) {
+            wakePositiveForCurrentUtterance = true
+            acknowledgeEarlyWake()
+            // The verdict now exists BEFORE the trailing-silence onset for any utterance longer
+            // than the cutoff, so the onset open covers outside grace too.
+            openEarlyConnectionIfAddressed()
+        }
+    }
+
+    /** Fires grace and the wake earcon once per utterance, from the early hit or the endpoint. */
+    private fun acknowledgeEarlyWake() {
+        if (earlyWakeAcknowledged) return
+        earlyWakeAcknowledged = true
+        gracePeriodSignal.onWakeWordDetected()
+        audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
+    }
+
     private suspend fun shouldTranscribe(
         segment: VoiceSegmenterResult.SpeechEnded,
         capture: CaptureContext?,
+        timing: TurnTimingRecord,
     ): TranscribeRequest? {
         // Build float samples from the segment
         val totalSamples = segment.frames.sumOf { it.samples.size }
@@ -608,6 +855,10 @@ class VoiceAsrEngine @Inject constructor(
             framesProvider = { segment.frames.map { it.samples } to (segment.frames.firstOrNull()?.sampleRateHz ?: 16000) },
         )
 
+        // The final wake result, as the detector reported it. Recorded before any decision that
+        // depends on it, so a negative result is still a measured stage.
+        timing.mark(TurnTimingRecord.Stage.WakeResult, TurnTimingRecord.clockNanos())
+
         val mode = currentMode
         val wakeCmp = when {
             wwResult.threshold.isNaN() -> if (wwResult.detected) "hit" else "miss"
@@ -618,13 +869,16 @@ class VoiceAsrEngine @Inject constructor(
         if (wwResult.detected) {
             // Open or reset the conversation grace period. This causes
             // ListeningModePolicy to switch to Continuous for subsequent utterances.
-            gracePeriodSignal.onWakeWordDetected()
-
-            // Always acknowledge detection with the WAKE_WORD earcon
-            audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
+            // When the early score already fired these for this utterance, they fire only
+            // once: the user hears one earcon and grace starts once for one wake word.
+            acknowledgeEarlyWake()
 
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
-            return TranscribeRequest(
+            // The verdict is final here. If the first trailing silence arrived before it (the usual
+            // case outside grace), this is the moment the connection may be opened.
+            wakePositiveForCurrentUtterance = true
+            openEarlyConnectionIfAddressed()
+            val addressed = TranscribeRequest(
                 capture = capture,
                 noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
                 samples = floatSamples,
@@ -632,7 +886,11 @@ class VoiceAsrEngine @Inject constructor(
                 sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
                 wakePositive = true,
                 completionSample = wwResult.completionSample,
+                // The identity the early connection was opened under. Reusing it here is what lets
+                // the turn adopt that connection; a fresh id would open a connection no turn claims.
+                admittedId = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString(),
             )
+            return addressed
         }
 
         // Negative detection
@@ -644,6 +902,7 @@ class VoiceAsrEngine @Inject constructor(
                     noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
                     samples = floatSamples,
                     wakePositive = false,
+                    admittedId = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString(),
                 )
             }
 
@@ -664,6 +923,33 @@ class VoiceAsrEngine @Inject constructor(
     private suspend fun transcribeSegment(
         segment: VoiceSegmenterResult.SpeechEnded,
         request: TranscribeRequest,
+        timing: TurnTimingRecord,
+    ) {
+        // OWNERSHIP TRAILING CLEANUP: the record was registered for the admitted id before this
+        // call, and ownership transfers to the async downstream only at a dispatch site (executor
+        // for a local action, route sink for a cloud turn). Every exit BEFORE a dispatch — no
+        // handler, router unavailable, bleed drop, ASR failure or empty/non-content transcript —
+        // would leave the registry holding one live entry forever, so the finally finishes any
+        // record that is still registered when segment processing ends without a dispatch.
+        var dispatched = false
+        var cancelled = false
+        try {
+            transcribeSegmentBody(segment, request, timing) { dispatched = true }
+        } catch (ce: java.util.concurrent.CancellationException) {
+            cancelled = true
+            throw ce
+        } finally {
+            if (!dispatched && TurnTimingRecord.isActive(request.admittedId)) {
+                TurnTimingRecord.finishFor(request.admittedId, cancelled = cancelled, failed = true)
+            }
+        }
+    }
+
+    private suspend fun transcribeSegmentBody(
+        segment: VoiceSegmenterResult.SpeechEnded,
+        request: TranscribeRequest,
+        timing: TurnTimingRecord,
+        onDispatch: () -> Unit,
     ) {
         val b = backend ?: return
         val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
@@ -710,6 +996,7 @@ class VoiceAsrEngine @Inject constructor(
             Timber.w(t, "[VoicePipeline] asr provider failed")
             return
         }
+        timing.mark(TurnTimingRecord.Stage.AsrDone, TurnTimingRecord.clockNanos())
         val asrMs = System.currentTimeMillis() - asrStartedAt
         val durationMs = (floatSamples.size * 1000L / sampleRateHz).toInt()
         val transcript = WakeTranscriptTrimmer.commandText(
@@ -863,7 +1150,14 @@ class VoiceAsrEngine @Inject constructor(
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
-        processUtterance(routePrep.input!!, addressed = request.wakePositive, capture = request.capture, admittedId = request.admittedId)
+        processUtterance(
+            routePrep.input!!,
+            addressed = request.wakePositive,
+            capture = request.capture,
+            admittedId = request.admittedId,
+            timing = timing,
+            onDispatch = onDispatch,
+        )
     }
 
     /** Samples of [frames] beyond the first [skip] — the exact delta the producer added. */
@@ -898,7 +1192,14 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal fun intentCategory(intent: VoiceIntent): String? = PredictedIntentName.of(intent)
 
-    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, capture: CaptureContext?, admittedId: String) {
+    private suspend fun processUtterance(
+        input: IntentRoutingInput,
+        addressed: Boolean,
+        capture: CaptureContext?,
+        admittedId: String,
+        timing: TurnTimingRecord? = null,
+        onDispatch: () -> Unit = {},
+    ) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: run {
             // No handler is wired, so routing cannot happen for this capture. Recorded as its own
@@ -954,6 +1255,7 @@ class VoiceAsrEngine @Inject constructor(
         // that happen to say the same words do not. The dialog path mints its own for
         // clarification flows; this is the producer for a plain utterance.
         val outcome = recognizer.recognize(input, ctx, admittedId)
+        timing?.mark(TurnTimingRecord.Stage.RoutingDone, TurnTimingRecord.clockNanos())
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
         val diagnostic = outcome.diagnostic
@@ -969,6 +1271,7 @@ class VoiceAsrEngine @Inject constructor(
             // that window's identity and cannot extend a later one.
             routed(intentCategory(intent))
             pendingExecutionContext = capture
+            onDispatch()
             invokeHandler(
                 handler,
                 // Bind the immutable input for this recognition, not model-authored cloud text.
@@ -987,7 +1290,13 @@ class VoiceAsrEngine @Inject constructor(
                     // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
                     // prepared once and may be retried. A local intent has no wire identity to reuse.
                     .let { it.withLogicalRequest(admittedId) },
+                admittedId,
             )
+            // The record's lifetime transfers with the intent: the engine does NOT publish
+            // here — publish() unregisters the admitted id, and the async arm downstream (the
+            // executor for a local action, the route sink for a cloud turn, the audio player for
+            // first audible) still marks through the registry after this dispatch returns. The
+            // producer that owns the turn's end finishes and publishes the table.
             return
         }
 
@@ -1000,6 +1309,11 @@ class VoiceAsrEngine @Inject constructor(
             reason,
             input.routerTranscript,
         )
+        // The router ran and produced no intent. That is not an executed action, and the table
+        // says so rather than leaving the reader to infer it from a missing stage. The OUTCOME is
+        // recorded here; whether the table is PUBLISHED yet is decided below, because a turn that
+        // escalates to the cloud has not ended.
+        timing?.markOutcome(TurnTimingRecord.Outcome.ActionFailed)
 
         // P1: the recognizer's OWN reported decision travels — a null
         // intent is NOT always no_candidates (it may be validation or a model failure), and
@@ -1007,9 +1321,20 @@ class VoiceAsrEngine @Inject constructor(
         // its normal outcome. NONTERMINAL fact.
         capture?.let { joinOutcome(CollectionOutcome.RoutingNone(it.captureId, diagnostic?.reason)) }
 
+        val escalation = CloudEscalationPolicy.decide(reason, addressed)
+        // THE RECORD STAYS OPEN WHILE THE CLOUD OWNS THE TURN. A local `no_intent` that escalates
+        // does not end the turn: the cloud answers it, and the FIRST SOUND is what finishes the
+        // table. publish() unregisters the record, so publishing here made the route sink's
+        // first-audible mark land on nothing — measured on the Pixel (07:49:13), where the answer
+        // played and no `first_audible` stage was ever recorded. Only a turn that ends locally
+        // (rejection, earcon, spoken fallback, error) publishes at this point.
+        if (escalation != CloudEscalation.DISPATCH) {
+            timing?.publish()
+        }
+
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
-        when (CloudEscalationPolicy.decide(reason, addressed)) {
+        when (escalation) {
             // A rejection, not a failure. A wake-negative capture lands here — a follow-up the wake
             // did not cover in its own segment, or speech caught from the room.
             // Heard something we could not route and the user was not addressing us: a tone is
@@ -1056,6 +1381,7 @@ class VoiceAsrEngine @Inject constructor(
                 routed("cloud_escalation")
                 pendingExecutionContext = capture
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
+                onDispatch()
                 invokeHandler(
                     handler,
                     VoiceIntent.CloudRoute(
@@ -1071,6 +1397,7 @@ class VoiceAsrEngine @Inject constructor(
                         // names one identity rather than two.
                         logicalRequestId = admittedId,
                     ),
+                    admittedId,
                 )
             }
         }

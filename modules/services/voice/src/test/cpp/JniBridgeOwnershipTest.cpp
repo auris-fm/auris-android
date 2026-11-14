@@ -26,6 +26,7 @@
 #include <cstdio>
 
 #include "OboeAudioCapture.h"
+#include "NativeVadProcessor.h"
 
 // The JNIEnv implementation lives in JniBridgeHostPlatformStubs.cpp (platform boundary); this
 // control only needs its pointer.
@@ -46,6 +47,8 @@ jboolean Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativ
     JNIEnv*, jclass, jint sampleRate, jint channels, jobject assetManager);
 void Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCaptureAndVad(
     JNIEnv*, jclass);
+void Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetEarlyWakeCutoff(
+    JNIEnv*, jclass, jint samples);
 
 // Narrow observation seams inside the production TU (see file header). The counter sees every
 // gVadProcessor.publish call -- attachment is observed DIRECTLY, not inferred from event emptiness:
@@ -56,6 +59,11 @@ extern long long gVadAttachesForTest;
 // Installs the capture object the entries would have created on device (a host cannot open a real
 // Oboe stream). Definition lives in jni_bridge.cpp; nullptr restores the pristine path.
 void setCaptureFactoryOverrideForTest(OboeAudioCapture* capture);
+
+// Narrow test seam: the currently published VAD processor (or null). The cutoff-before-start
+// scenario must inspect the REAL processor the attach created, not a copy of its config.
+namespace au_com_shiftyjelly_pocketcasts_voicecontrol_audio { class NativeVadProcessor; }
+NativeVadProcessor* publishedVadProcessorForTest();
 
 namespace {
 
@@ -179,6 +187,31 @@ int main() {
                 env, nullptr, kTestSampleRate, kChannels, nullptr);
         check(attached == JNI_FALSE, "attach without a running stream fails closed");
         check(gVadAttachesForTest == 0, "a refused attach publishes no processor");
+    }
+
+    // Scenario D -- the early-wake cutoff is configured BEFORE the attach (attachCapture's
+    // order), so it must land on the processor the attach creates, not vanish against a
+    // processor that does not exist yet.
+    {
+        setCaptureFactoryOverrideForTest(new SilentCapture());
+        gVadAttachesForTest = 0;
+        JNIEnv* env = host_jni_env();
+        check(Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInputCapture(
+                  env, nullptr, kTestSampleRate, kChannels) == 41, "scenario D opens its stream");
+        check(Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInputStream(
+                  env, nullptr) == JNI_TRUE, "scenario D starts its stream");
+        Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetEarlyWakeCutoff(
+            env, nullptr, /*samples=*/1234);
+        check(Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCaptureAndVad(
+                  env, nullptr, kTestSampleRate, kChannels, nullptr) == JNI_TRUE,
+              "scenario D attaches");
+        const auto* processor = publishedVadProcessorForTest();
+        check(processor != nullptr, "scenario D published a processor to inspect");
+        check(processor != nullptr && processor->earlyWakeCutoff() == 1234,
+              "a cutoff set BEFORE the attach must land on the processor the attach creates");
+        Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCaptureAndVad(
+            env, nullptr);
+        setCaptureFactoryOverrideForTest(nullptr);
     }
 
     if (gFailures != 0) {

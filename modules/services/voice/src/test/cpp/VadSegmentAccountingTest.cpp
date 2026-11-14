@@ -119,13 +119,14 @@ std::vector<Segment> run(const std::deque<bool>& script, int pauseAfter = -1,
     capture.pauseAfterFrames = pauseAfter;
     capture.pauseFor = pauseFor;
     NativeVadProcessor processor(&capture);
+    int32_t gen = -1;
     std::vector<Segment> segments;
     if (!processor.start()) return segments;
     // waitForEvent: 1 = speech started, 2 = speech ended, 0 = timeout, -1 = stopped.
     while (true) {
         const int event = // Generous on purpose: the per-read pause stretches the script to ~10s, and a timeout here
         // aborts mid-script rather than failing a check — which is exactly what an 8s value did.
-        processor.waitForEvent(30000);;
+        processor.waitForEvent(30000, &gen);;
         if (event == 2) {
             segments.push_back({processor.getSpeechOnsetSample(), processor.getSpeechEndSample(),
                                 processor.getSpeechPcmSize()});
@@ -213,6 +214,7 @@ bool waitForChild(pid_t pid, int timeoutMs, int* status) {
 }
 
 int main() {
+    int32_t gen = -1;
     std::printf("native VAD segment accounting\n");
 
     // (0) UNTHREAD-U1: the stuck-detector branch. A detector stuck
@@ -245,11 +247,11 @@ int main() {
                 synced = processor.awaitRunLoopExitForTest(30000);
                 check(synced, "synchronization: the worker must complete before the terminal read");
             }
-            const int event = processor.waitForEvent(60000);
+            const int event = processor.waitForEvent(60000, &gen);
             lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; break; }  // TERMINAL
             if (event == 2) { segmentsEmitted++; continue; }
-            if (event == 1) { continue; }  // ordinary mid-run event
+            if (event == 1 || event == 3 || event == 4) { continue; }  // ordinary mid-run events; 3/4 = early-wake
             if (event == 0) { timedOut = true; break; }
             if (event == -1) { break; }
             std::printf("      stuck-case unexpected event=%d\n", event);
@@ -467,11 +469,12 @@ int main() {
         // must reach kTargetTotalFrames (55) for the endpoint to close.
         for (int i = 0; i < 60 && !closed; i++) {
             push(quiet);
-            if (processor.waitForEvent(5) == 2) closed = true;
+            if (processor.waitForEvent(5, &gen) == 2) closed = true;
         }
         while (!closed) {
-            if (processor.waitForEvent(30000) == 2) closed = true;
-            else break;
+            const int e = processor.waitForEvent(30000, &gen);
+            if (e == 2) closed = true;
+            else if (e != 1 && e != 3 && e != 4) break;  // 3/4: non-terminal early-wake events
         }
         check(closed, "the ring-path script produces a segment");
         if (closed) {
@@ -551,9 +554,9 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
         while (!closed) {
-            const int e = processor.waitForEvent(30000);
+            const int e = processor.waitForEvent(30000, &gen);
             if (e == 2) { closed = true; }
-            else if (e != 1) break;
+            else if (e != 1 && e != 3 && e != 4) break;  // 3/4: trailing-silence/cutoff, non-terminal
         }
         check(closed, "the slow-consumer script produces a segment");
         if (closed) {
@@ -617,11 +620,12 @@ int main() {
         // additional silence for the endpoint (kTargetTotalFrames 55) while polling for the close.
         for (int i = 0; i < 30 && !closed; i++) {
             push(quiet, kFrame);
-            if (processor.waitForEvent(5) == 2) closed = true;
+            if (processor.waitForEvent(5, &gen) == 2) closed = true;
         }
         while (!closed) {
-            if (processor.waitForEvent(30000) == 2) closed = true;
-            else break;
+            const int e = processor.waitForEvent(30000, &gen);
+            if (e == 2) closed = true;
+            else if (e != 1 && e != 3 && e != 4) break;  // 3/4: non-terminal early-wake events
         }
         check(closed, "audio still forms a segment after a drop");
         if (closed) {
@@ -933,11 +937,13 @@ int main() {
             bool closed = false;
             for (int i = 0; i < 60 && !closed; i++) {
                 push(quiet);
-                if (processor.waitForEvent(5) == 2) closed = true;
+                const int e = processor.waitForEvent(5, &gen);
+                if (e == 2) closed = true;
             }
             while (!closed) {
-                if (processor.waitForEvent(30000) == 2) closed = true;
-                else break;
+                const int e = processor.waitForEvent(30000, &gen);
+                if (e == 2) closed = true;
+                else if (e != 1 && e != 3 && e != 4) break;  // 3/4: non-terminal early-wake events
             }
             check(closed, "the extraction script produces a segment");
             if (closed) {

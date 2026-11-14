@@ -49,7 +49,7 @@ class MicrophoneCaptureTest {
 
         override fun isCapturing(): Boolean = capturing
 
-        override fun waitForVadEvent(timeoutMs: Int): Int = -1
+        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int = -1
 
         override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = 0
         override fun getSpeechPcm(buffer: ShortArray): Int = 0
@@ -57,6 +57,13 @@ class MicrophoneCaptureTest {
         override fun getSpeechPcmSize(): Int = 0
 
         override fun getSpeechOnsetSample(): Int = 0
+        override fun getInProgressSnapshot(buffer: ShortArray, header: LongArray): Int {
+            header[0] = 0
+            header[1] = 0
+            header[2] = 0
+            return 0
+        }
+        override fun setEarlyWakeCutoff(samples: Int) = Unit
 
         override fun getSpeechEndSample(): Int = 0
         override fun getSpeechEndStreamPosition(): Long = 0L

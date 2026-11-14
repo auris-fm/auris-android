@@ -186,9 +186,6 @@ class TurnTimingRecord(private val requestId: String) {
         /** Test seam: whether [id] still has a live record (a published one removes itself). */
         internal fun isActive(id: String): Boolean = active.containsKey(id)
 
-        /** Test seam: the ids that still have a live record, for a readable assertion message. */
-        internal fun liveIdsForTest(): Set<String> = active.keys.toSet()
-
         fun unregister(id: String) {
             active.remove(id)
         }

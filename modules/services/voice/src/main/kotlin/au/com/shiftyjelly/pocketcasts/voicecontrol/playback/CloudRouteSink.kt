@@ -1062,9 +1062,17 @@ class CloudRouteSink internal constructor(
                 val boundedCode = errorCode?.let { if (it in ALLOWED_ERROR_CODES) it else "unknown" }
                 Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode, terminalOrigin = origin.name))
             }
-            override fun onConnectionFailed(requestId: String) {
-                // Transport connection failure — distinct from lifecycle retirement.
-                Trace.record(Event(Kind.Turn, Reason.TurnConnectionFailed, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_CONNECTION_FAILED"))
+            override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
+                // A socket close is labelled by what the turn still needed from it. While the turn
+                // is waiting for its answer, a dead socket IS a connection failure. Once the
+                // terminal has arrived or the exchange has been cancelled, the turn is done with
+                // the socket and this close is its teardown — reporting that as a connection
+                // failure says a finished turn failed to connect.
+                if (stillNeeded) {
+                    Trace.record(Event(Kind.Turn, Reason.TurnConnectionFailed, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_CONNECTION_FAILED"))
+                } else {
+                    Trace.record(Event(Kind.Turn, Reason.TurnSocketClosedAfterEnd, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_TEARDOWN"))
+                }
             }
         }
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)

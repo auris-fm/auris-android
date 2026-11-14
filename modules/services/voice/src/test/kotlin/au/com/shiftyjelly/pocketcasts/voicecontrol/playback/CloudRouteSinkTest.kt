@@ -4713,7 +4713,7 @@ class CloudRouteSinkTest {
         override fun onTerminalReceived(requestId: String, origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin, errorCode: String?) {
             events += "terminal:${origin.name}:$errorCode"
         }
-        override fun onConnectionFailed(requestId: String) {
+        override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
             events += "connection_failed"
         }
     }
@@ -4737,9 +4737,9 @@ class CloudRouteSinkTest {
                         assertEquals(testWireId, rid)
                         // Auth resolved, then the handshake fails — never Connected.
                         observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
-                        observer?.onConnectionFailed(rid)
+                        observer?.onConnectionFailed(rid, stillNeeded = true)
                         recording.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
-                        recording.onConnectionFailed(rid)
+                        recording.onConnectionFailed(rid, stillNeeded = true)
                         emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
                     }
                 }

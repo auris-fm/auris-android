@@ -61,6 +61,12 @@ class WebSocketCloudTurnTransport(
 
         val offeredCodecs = (frame as CloudTurnFrame.Authenticate).codecs
         val negotiatedCodec = AtomicReference<String?>(null)
+        // A socket failure is only news about a turn that is still waiting for one. These two
+        // record the ways a turn stops waiting: the server sent its terminal, or the collector
+        // went away and cancelled the exchange. After either, the socket is being closed because
+        // the turn does not need it, and a close coming back through onFailure is teardown.
+        val terminalArrived = java.util.concurrent.atomic.AtomicBoolean(false)
+        val exchangeCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
         // Built only when this exchange dials. An adopted exchange has no use for it: the socket
         // and its upgrade request already exist, and building one here would pretend the early
         // open had not happened.
@@ -109,8 +115,9 @@ class WebSocketCloudTurnTransport(
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
                     // Handshake rejected — socket opened but upgrade refused. Not a send rejection
-                    // because send was never attempted.
-                    observer?.onConnectionFailed(requestId)
+                    // because send was never attempted. This is always news: the turn is waiting
+                    // for a handshake it will never get.
+                    observer?.onConnectionFailed(requestId, stillNeeded = true)
                     emitTerminal(
                         channel,
                         CloudRouteEvent.Error(
@@ -171,6 +178,9 @@ class WebSocketCloudTurnTransport(
                             event.code,
                         )
                     }
+                    if (event is CloudRouteEvent.Done || event is CloudRouteEvent.Error) {
+                        terminalArrived.set(true)
+                    }
                     // ONLY a server terminal ends the turn: Done/Error enqueue then finish the
                     // channel so the consumer drains in order and the flow completes. emitOrFail
                     // alone would leave the channel open and the collector suspended forever (the
@@ -187,7 +197,12 @@ class WebSocketCloudTurnTransport(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val requestId = frame.requestId
                 Timber.w(t, "Cloud route socket failed")
-                observer?.onConnectionFailed(requestId)
+                // A close after the terminal or after cancellation is the teardown this exchange
+                // asked for, not a connection the turn lost.
+                observer?.onConnectionFailed(
+                    requestId,
+                    stillNeeded = !terminalArrived.get() && !exchangeCancelled.get(),
+                )
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
@@ -249,7 +264,10 @@ class WebSocketCloudTurnTransport(
                             }
 
                             is RawSocketEvent.Failed -> {
-                                observer?.onConnectionFailed(frame.requestId)
+                                observer?.onConnectionFailed(
+                                    frame.requestId,
+                                    stillNeeded = !terminalArrived.get() && !exchangeCancelled.get(),
+                                )
                                 channel.trySend(CloudRouteEvent.Error(CloudRouteErrorCodes.CONNECTION_LOST, ""))
                                 channel.close()
                                 return@launch
@@ -304,6 +322,9 @@ class WebSocketCloudTurnTransport(
         }
 
         awaitClose {
+            // From here the turn has stopped collecting, so any close the socket reports is this
+            // teardown coming back through the listener rather than a connection it lost.
+            exchangeCancelled.set(true)
             // An adopted socket belongs to ITS EXCHANGE once adopted: completion, error and
             // cancellation all close it here, so a finished turn can never leave a socket open.
             // Before adoption it belongs to its connection, whose own bookkeeping closes it.

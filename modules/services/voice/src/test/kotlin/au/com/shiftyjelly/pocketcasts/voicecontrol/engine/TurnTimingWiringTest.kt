@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,13 +40,27 @@ class TurnTimingWiringTest {
     private val original = TurnTimingRecord.sink
     private val originalClock = TurnTimingRecord.clockNanos
 
+    @Before
+    fun clearRegistry() {
+        // The registry is static, and one test here deliberately leaves a turn open (that is the
+        // behaviour under test). Clearing at the START is what keeps it from leaking into the next
+        // test: an @After could not know whether a leftover is the subject or the debris.
+        activeRegistry().keys.forEach { TurnTimingRecord.unregister(it.toString()) }
+    }
+
     @After
     fun restore() {
         TurnTimingRecord.sink = original
         TurnTimingRecord.clockNanos = originalClock
-        // The registry is static: a test that deliberately leaves a turn open must not leak that
-        // entry into the next test's emptiness assertion.
-        TurnTimingRecord.liveIdsForTest().forEach { TurnTimingRecord.unregister(it) }
+    }
+
+    /** The companion's live registry, read through the field rather than a test-only accessor. */
+    private fun activeRegistry(): Map<*, *> {
+        val companion = TurnTimingRecord.Companion
+        val field = (companion.javaClass.declaredFields + TurnTimingRecord::class.java.declaredFields)
+            .firstOrNull { it.name == "active" } ?: throw AssertionError("registry field not found")
+        field.isAccessible = true
+        return field.get(companion) as? Map<*, *> ?: emptyMap<Any?, Any?>()
     }
 
     @Test
@@ -247,11 +262,7 @@ class TurnTimingWiringTest {
 
         // The pump may still be mid-flight; let it settle before reading the registry.
         testScheduler.advanceUntilIdle()
-        val companion = TurnTimingRecord.Companion
-        val field = (companion.javaClass.declaredFields + TurnTimingRecord::class.java.declaredFields)
-            .firstOrNull { it.name == "active" } ?: throw AssertionError("registry field not found")
-        field.isAccessible = true
-        @Suppress("UNCHECKED_CAST") val active = field.get(companion) as? Map<*, *> ?: emptyMap<Any?, Any?>()
+        val active = activeRegistry()
         assertTrue(
             "a turn dropped before dispatch must leave no live timing entry: ${active.keys} " +
                 "recordLines=" + synchronized(published) { published.toList() }.joinToString("|"),
@@ -374,7 +385,7 @@ class TurnTimingWiringTest {
         // the only way the route sink's first-audible mark can land on it.
         assertTrue(
             "a turn that escalated to the cloud must keep its timing record live: registry held " +
-                TurnTimingRecord.liveIdsForTest(),
+                activeRegistry().keys,
             TurnTimingRecord.isActive(id!!),
         )
         testScheduler.advanceUntilIdle()

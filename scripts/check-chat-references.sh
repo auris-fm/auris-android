@@ -143,6 +143,16 @@ if [ "$mode" = "selftest" ]; then
 fi
 
 if [ "${#paths[@]}" -eq 0 ]; then
+    # Two kinds of exclusion, and the difference is the leading './':
+    #   './.git/*', './.gradle/*', './config/chat-reference-guard/fixtures/*'
+    #       ROOT-ONLY. A nested `docs/.git` is not a build artefact, and a nested copy of the
+    #       fixtures is not the guard's own planted references.
+    #   '*/build/*'
+    #       A NAME, excluded at ANY depth, because Gradle writes a `build/` into every module
+    #       and the generated code in each is not source anyone edits.
+    # Say which kind a rule is when adding one: a name that quietly became root-only, or a
+    # root path that quietly started matching at depth, is how a guard stops covering a tree
+    # while still reporting on it.
     while IFS= read -r f; do paths+=("$f"); done < <(
         cd "$root" && find . \( "${SOURCE_NAMES[@]}" \) \
             -not -path './.git/*' -not -path '*/build/*' -not -path './.gradle/*' \

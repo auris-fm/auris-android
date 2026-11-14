@@ -43,6 +43,9 @@ class TurnTimingWiringTest {
     fun restore() {
         TurnTimingRecord.sink = original
         TurnTimingRecord.clockNanos = originalClock
+        // The registry is static: a test that deliberately leaves a turn open must not leak that
+        // entry into the next test's emptiness assertion.
+        TurnTimingRecord.liveIdsForTest().forEach { TurnTimingRecord.unregister(it) }
     }
 
     @Test
@@ -193,6 +196,29 @@ class TurnTimingWiringTest {
         whenever(backend.transcribe(any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult(text = ""),
         )
+        // This turn must END LOCALLY, so the recognizer reports a reason the escalation policy
+        // answers without the cloud (a rejection/earcon), not a DISPATCH reason: the test is about
+        // the pre-dispatch cleanup path, not about escalation.
+        whenever(recognizer.ensureReady()).thenReturn(Result.success(Unit))
+        whenever(recognizer.recognize(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult(
+                intent = null,
+                diagnostic = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic(
+                    modelRelease = null,
+                    quant = null,
+                    inputFormat = null,
+                    sourceLanguage = null,
+                    translationKind = "none",
+                    classifierLabel = null,
+                    finalOutcome = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic.OUTCOME_NO_INTENT,
+                    failedStage = "no_match",
+                    reason = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic.REASON_NO_MATCH,
+                    stageLatencyMs = emptyMap(),
+                    totalLatencyMs = 12,
+                    requestId = "test-empty",
+                ),
+            ),
+        )
 
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = audioProcessor,
@@ -219,14 +245,143 @@ class TurnTimingWiringTest {
         )
         testScheduler.advanceUntilIdle()
 
+        // The pump may still be mid-flight; let it settle before reading the registry.
+        testScheduler.advanceUntilIdle()
         val companion = TurnTimingRecord.Companion
         val field = (companion.javaClass.declaredFields + TurnTimingRecord::class.java.declaredFields)
             .firstOrNull { it.name == "active" } ?: throw AssertionError("registry field not found")
         field.isAccessible = true
         @Suppress("UNCHECKED_CAST") val active = field.get(companion) as? Map<*, *> ?: emptyMap<Any?, Any?>()
         assertTrue(
-            "a turn dropped before dispatch must leave no live timing entry: ${active.keys}",
+            "a turn dropped before dispatch must leave no live timing entry: ${active.keys} " +
+                "recordLines=" + synchronized(published) { published.toList() }.joinToString("|"),
             active.isEmpty(),
+        )
+    }
+
+
+    @Test
+    fun `a locally declined turn that escalates keeps its record open for the first audible mark`() = runTest {
+        // THE DEVICE FINDING (Pixel, 07:49:13 local): the router declined the utterance, the turn
+        // escalated to the cloud, the answer played -- and no first_audible was recorded anywhere.
+        // The no_intent path published the table BEFORE the escalation decision, and publish()
+        // unregisters the record, so the route sink's later first-audible mark landed on nothing.
+        TurnTimingRecord.sink = { _, message -> synchronized(published) { published += message } }
+
+        val context = mock<Context>()
+        val audioManager = mock<AudioManager>()
+        val audioProcessor = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor>()
+        val utteranceFilter = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter>()
+        val recognizer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer>()
+        val wakeWordDetector = mock<WakeWordDetector>()
+        val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
+        val feedback = mock<AudioFeedbackRenderer>()
+        val translationStage = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage>()
+        val backend = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend>()
+
+        whenever(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        whenever(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        whenever(audioProcessor.attachCapture()).thenReturn(true)
+        whenever(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        // The escalation is rejected before dispatch unless its captured window is still live.
+        whenever(gracePeriodSignal.capturedGeneration()).thenReturn(1L)
+        whenever(gracePeriodSignal.isCurrent(any())).thenReturn(true)
+        // THREE SECONDS of speech (48_000 samples at 16 kHz). A segment shorter than
+        // WAKE_ONLY_TOLERANCE_MS (120 ms = 1920 samples) counts as "wake only" for ANY wake
+        // reading and would be dropped before routing; this one is a real command.
+        whenever(audioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(ShortArray(48_000) { (it % 251).toShort() }, 16_000)),
+                    speechOnsetSample = 0,
+                    speechEndSample = 48_000,
+                    captureClock = longArrayOf(48_000, 1_000_000_000L, 16_000, 1),
+                    segmentEndStreamPosition = 48_000,
+                ),
+            ),
+        )
+        whenever(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        // The wake ends 0.6 s in, far before the 3 s speech end, so this is a COMMAND.
+        whenever(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            WakeWordResult(detected = true, confidence = 0.9f, completionSample = 9_600, threshold = 0.812f),
+        )
+        whenever(backend.ensureReady()).thenReturn(Result.success(Unit))
+        whenever(backend.requiredModel).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec(emptyList(), ""))
+        whenever(backend.capabilities).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities(setOf("en")))
+        // English detected, and English is the target: prepareRoutingInput skips the separate
+        // translation stage, so the mocked translator is never consulted.
+        whenever(backend.transcribe(any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult(
+                text = "Can you suggest some reading.",
+                detectedLanguage = "en",
+            ),
+        )
+        // THE ROUTER DECLINES, and CloudEscalationPolicy sends that reason to the cloud.
+        whenever(recognizer.ensureReady()).thenReturn(Result.success(Unit))
+        whenever(recognizer.recognize(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult(
+                intent = null,
+                diagnostic = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic(
+                    modelRelease = null,
+                    quant = null,
+                    inputFormat = null,
+                    sourceLanguage = "en",
+                    translationKind = "none",
+                    classifierLabel = null,
+                    finalOutcome = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic.OUTCOME_NO_INTENT,
+                    failedStage = "mapper_dialog",
+                    reason = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic.REASON_MAPPER_OR_DIALOG_FAILED,
+                    stageLatencyMs = emptyMap(),
+                    totalLatencyMs = 775,
+                    requestId = "test-request",
+                ),
+            ),
+        )
+
+        var dispatchedId: String? = null
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = audioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = feedback,
+            translationStage = translationStage,
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
+            context = context,
+            elapsedClockMs = { 5_000_000L },
+        )
+        engine.scope = this
+        engine.start(
+            backend = backend,
+            audioRoute = au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute.Speaker,
+            listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.WakeWord,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed },
+            onIntent = { _, _, admittedId -> dispatchedId = admittedId },
+        )
+        testScheduler.advanceUntilIdle()
+
+        val id = dispatchedId
+        assertTrue(
+            "the declined turn must escalate to the cloud, dispatching a turn: published=" +
+                synchronized(published) { published.toList() }.joinToString("\n"),
+            id != null,
+        )
+        // The escalation handed the turn to the sink, so its record must STILL be live: that is
+        // the only way the route sink's first-audible mark can land on it.
+        assertTrue(
+            "a turn that escalated to the cloud must keep its timing record live: registry held " +
+                TurnTimingRecord.liveIdsForTest(),
+            TurnTimingRecord.isActive(id!!),
+        )
+        testScheduler.advanceUntilIdle()
+        val text = synchronized(published) { published.toList() }.joinToString("\n")
+        assertTrue(
+            "the record must not have been published before the cloud owns the turn: got '$text'",
+            !text.contains("stage=acoustic_end"),
         )
     }
 

@@ -1303,9 +1303,10 @@ class VoiceAsrEngine @Inject constructor(
             input.routerTranscript,
         )
         // The router ran and produced no intent. That is not an executed action, and the table
-        // says so rather than leaving the reader to infer it from a missing stage.
+        // says so rather than leaving the reader to infer it from a missing stage. The OUTCOME is
+        // recorded here; whether the table is PUBLISHED yet is decided below, because a turn that
+        // escalates to the cloud has not ended.
         timing?.markOutcome(TurnTimingRecord.Outcome.ActionFailed)
-        timing?.publish()
 
         // P1: the recognizer's OWN reported decision travels — a null
         // intent is NOT always no_candidates (it may be validation or a model failure), and
@@ -1313,9 +1314,20 @@ class VoiceAsrEngine @Inject constructor(
         // its normal outcome. NONTERMINAL fact.
         capture?.let { joinOutcome(CollectionOutcome.RoutingNone(it.captureId, diagnostic?.reason)) }
 
+        val escalation = CloudEscalationPolicy.decide(reason, addressed)
+        // THE RECORD STAYS OPEN WHILE THE CLOUD OWNS THE TURN. A local `no_intent` that escalates
+        // does not end the turn: the cloud answers it, and the FIRST SOUND is what finishes the
+        // table. publish() unregisters the record, so publishing here made the route sink's
+        // first-audible mark land on nothing — measured on the Pixel (07:49:13), where the answer
+        // played and no `first_audible` stage was ever recorded. Only a turn that ends locally
+        // (rejection, earcon, spoken fallback, error) publishes at this point.
+        if (escalation != CloudEscalation.DISPATCH) {
+            timing?.publish()
+        }
+
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
-        when (CloudEscalationPolicy.decide(reason, addressed)) {
+        when (escalation) {
             // A rejection, not a failure. A wake-negative capture lands here — a follow-up the wake
             // did not cover in its own segment, or speech caught from the room.
             // Heard something we could not route and the user was not addressing us: a tone is

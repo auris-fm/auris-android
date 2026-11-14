@@ -164,7 +164,7 @@ class SegmentObserverTest {
 
     @Test
     fun `handoff refuses when the ORIGINAL issued authority fails owner-transaction validation`() {
-        // Reviewer 8fe69937 blocker 2: a fresh Boolean/new projection must NOT reauthorize an old
+        //blocker 2: a fresh Boolean/new projection must NOT reauthorize an old
         // capture. Gate stays LIVE; only the OWNER-side validation of the frozen value fails.
         val losses = mutableListOf<String>()
         val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })

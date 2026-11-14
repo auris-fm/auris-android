@@ -352,7 +352,7 @@ class PlaybackBufferRecorderTest {
         }
         assertEquals("episode keeps its full solo duration across the scoped stop", baseline.size, bOff)
 
-        // ADMISSION CLOSES WITH RETIREMENT (@spec): a callback admitted BEFORE the stop but released
+        // ADMISSION CLOSES WITH RETIREMENT: a callback admitted BEFORE the stop but released
         // AFTER it must reintroduce NOTHING -- no samples, no continuation, no position claim -- and
         // must not corrupt what the successor owns under its own id. The contract is stricter than
         // "restarts fresh": the retired identity contributes nothing at all until a wholesale retire()
@@ -403,7 +403,7 @@ class PlaybackBufferRecorderTest {
         assertEquals("expired tail must be gone from reference() too", 0, recorder.reference().samples.count { it == 0.9f })
     }
 
-    // HELD OBSERVATION ACROSS RETIREMENT AND A SUCCESSOR. @spec's admission case in its observation
+    // HELD OBSERVATION ACROSS RETIREMENT AND A SUCCESSOR. the admission case in its observation
     // form: an observation captured before the stop, delivered after it, must neither re-anchor the
     // correlator to the retired incarnation nor disturb a successor's own observation.
     @Test
@@ -493,7 +493,7 @@ class PlaybackBufferRecorderTest {
         assertEquals("reference() agrees", 0, recorder.reference().samples.count { it == 0.35f })
     }
 
-    // A DUPLICATE STOP MUST NOT EXTEND A RETIRED TAIL'S LIFETIME (@reviewer). The first retirement
+    // A DUPLICATE STOP MUST NOT EXTEND A RETIRED TAIL'S LIFETIME. The first retirement
     // fixes the deadline; a second call at a later instant re-arms nothing (putIfAbsent), so expiry
     // still happens one tail-duration after the FIRST stop.
     @Test
@@ -603,7 +603,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `the anchor RETURNS once the hole has been overwritten, so the guard is not a permanent latch`() {
-        // @spec's requirement: a hole is a property of the RETAINED RANGE, not a latch on the recorder.
+        // THE REQUIREMENT: a hole is a property of the RETAINED RANGE, not a latch on the recorder.
         // After one dropped chunk, an anchor suppressed forever would discard a good alignment for the
         // rest of the session. Once the ring has overwritten the audio before the hole, every retained
         // sample lies on one side of it and the window is contiguous again.
@@ -641,7 +641,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `a contribution that does not meet the surviving tail is not accepted as adjacent`() {
-        // @spec's retirement-seam defect: `retire()` cleared `expectedNextPositionMs` while samples
+        // THE RETIREMENT-SEAM DEFECT: `retire()` cleared `expectedNextPositionMs` while samples
         // survived, so the FIRST post-retire contribution could not be compared against the tail. A
         // contribution that does not meet the tail was therefore accepted as adjacent, hiding a
         // discontinuity the retained window cannot cover.
@@ -734,7 +734,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `a DROPPED chunk does not leave a window that claims a span it does not cover`() {
-        // @reviewer's finding, taken to the path where it actually bites. The tap's flow is DROP_OLDEST
+        // the finding, taken to the path where it actually bites. The tap's flow is DROP_OLDEST
         // with 64 slots and this change made PlaybackBufferRecorder a second consumer, so `tryEmit` can
         // silently discard the OLDEST chunk -- the collector's stream then has a HOLE nothing announces.
         //
@@ -1027,7 +1027,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `a media position and a monotonic time must not be mixed into one span`() {
-        // THE HAZARD @spec identified: two sources write positions on DIFFERENT AXES into one field.
+        // THE HAZARD identified: two sources write positions on DIFFERENT AXES into one field.
         // The episode tap writes a MEDIA position (seconds into the episode); the cloud answer writes
         // a MONOTONIC time (the render clock). Subtracting one from the other produces a number that is
         // neither, and pairing it against the microphone instant would report a delay that is really
@@ -1061,7 +1061,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `an episode-only window offers no anchor because its axis is not the microphone's`() {
-        // @spec's single-axis case, and the one a mixed-axis guard alone does not cover. This window
+        // THE SINGLE-AXIS CASE, and the one a mixed-axis guard alone does not cover. This window
         // is internally CONSISTENT -- every contribution is a media position -- but the microphone
         // instant is a monotonic time, so offering this start would pair seconds-into-an-episode with
         // a wall-clock instant and report the gap between two unrelated origins as an echo delay.
@@ -1104,7 +1104,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `an untimed contribution does not set the window's axis`() {
-        // @spec's case: earcons and TTS supply no timestamp. They contribute samples and must not
+        // THE CASE: earcons and TTS supply no timestamp. They contribute samples and must not
         // inherit an axis, because an inherited axis would make the window look placeable on a clock
         // nothing measured for this audio -- and the recorder's answer would then anchor the whole
         // window to the other producer's origin.
@@ -1119,7 +1119,7 @@ class PlaybackBufferRecorderTest {
         recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1027L))
 
         // REVERSED, and the reversal is the point: this case originally asserted that the window
-        // STILL anchors, which encoded the behaviour @spec corrected. An untimed contribution is not
+        // STILL anchors, which encoded the behaviour corrected. An untimed contribution is not
         // merely neutral -- it invalidates any anchor, because the untimed samples are now part of the
         // span whose start would be reported. An untimed chunk still must not SET an axis (it is not a
         // media position), but the consequence of its presence is no anchor at all, not a retained one.
@@ -1135,7 +1135,7 @@ class PlaybackBufferRecorderTest {
     @Test
     fun `an untimed contribution after a timed one removes the anchor`() {
         // REVERSED like the case above, and for the same reason: the earlier version asserted the
-        // anchor survived, which is the reading @spec corrected. The samples are still retained -- the
+        // anchor survived, which is the reading corrected. The samples are still retained -- the
         // reference must remain complete for WHAT it holds -- but the window can no longer be placed.
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
@@ -1156,7 +1156,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `an unanchored contribution invalidates an anchor the window already had`() {
-        // @spec's requirement: an untimed contribution must not simply be ignored once an anchor
+        // THE REQUIREMENT: an untimed contribution must not simply be ignored once an anchor
         // exists. The anchor describes the START of the retained window, and untimed audio joining
         // that window moves the start to a sample whose sounding time nothing measured -- so keeping
         // the old anchor would place those samples at a moment derived from another producer's clock.
@@ -1195,7 +1195,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `the observation's frame selects the retained block and the window ends at what has sounded`() {
-        // @spec's assignment: the actual rendered-block mapping. Two chunks on the track's index;
+        // THE ASSIGNMENT: the actual rendered-block mapping. Two chunks on the track's index;
         // the observation names a frame inside the SECOND, so only the FIRST has fully sounded and the
         // window must end there -- later queued PCM is not rendered progress and must not stand for it.
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
@@ -1292,7 +1292,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `the mapping recovers once untimed audio has fully retired and timed samples follow`() {
-        // @spec's recovery condition: retiring one timed block and clearing its observation does not
+        // THE RECOVERY CONDITION: retiring one timed block and clearing its observation does not
         // alone prove recovery. Here an UNTIMED contribution joins the window, fully retires, and a
         // later coherent timed block is then selectable -- the mapping must anchor again, because the
         // untimed audio no longer contaminates the retained span.
@@ -1345,7 +1345,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `the fallback window never offers an anchor`() {
-        // @spec's check on the fallback path: when renderedReference() cannot anchor, the fallback
+        // THE CHECK ON THE FALLBACK PATH: when renderedReference() cannot anchor, the fallback
         // must not restore an estimated or stale anchor through reference(). window() is what the
         // production supplier falls back to, and its position is null by construction.
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
@@ -1430,7 +1430,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `renewed admission survives global retire while the stale ticket stays dead`() {
-        // @spec's control 2 mechanism at the recorder boundary: an ONGOING owner renews explicitly;
+        // CONTROL 2's MECHANISM at the recorder boundary: an ONGOING owner renews explicitly;
         // route retirement (global retire) invalidates the STALE ticket but not the renewed one, and
         // the retained tail still expires by elapsed time alone.
         var nowMs = 1_000_000L
@@ -1499,7 +1499,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `a callback holding only a pre-retirement ticket cannot write its first block after retire`() {
-        // @spec's admission case at the ticket level: this producer NEVER wrote before retirement, so no
+        // the admission case at the ticket level: this producer NEVER wrote before retirement, so no
         // id-membership ledger could have judged it -- but its ticket belongs to the dead generation, and
         // the genuinely-new successor (fresh ticket) lands.
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
@@ -1679,7 +1679,7 @@ class PlaybackBufferRecorderTest {
         job.cancel()
     }
 
-    // CONTROL @reviewer 4235702596: the capture-session boundary must retire, not merely cancel the
+    // CONTROLthe capture-session boundary must retire, not merely cancel the
     // tap. Before this, stop() left up to the whole retained window in the ring and a later start()
     // subscribed on top of it -- so the FIRST utterance of a NEW session could correlate against PCM
     // the PREVIOUS session submitted. stop() is the recorder's own session boundary (its only
@@ -1715,14 +1715,14 @@ class PlaybackBufferRecorderTest {
         assertEquals("retained samples are the newest ones", afterStop.size, afterStop.count { it > 0.5f })
 
         // A new session records afresh; the old bulk cannot be part of its reference.
-        // SAME-EPOCH RESTART (@reviewer/@spec): no seek/flush happened, so the tap still carries the
+        // SAME-EPOCH RESTART: no seek/flush happened, so the tap still carries the
         // previous collector's (now dead) ticket for an unchanged epoch. Ownership must transfer at
         // stamper installation -- otherwise the first emission after restart returns the dead ticket
         // and the new session records NOTHING while appearing healthy.
         val job2 = recorder.start(this)
         runCurrent()
         val newData = ShortArray(16_000) { -18_000 }
-        // CONTINUATION OF THE SAME STREAM (@reviewer): no new anchor, so no epoch bump -- the tap is
+        // CONTINUATION OF THE SAME STREAM: no new anchor, so no epoch bump -- the tap is
         // still on lastEmittedEpoch with the previous collector's dead carried ticket. This is exactly
         // the same-epoch stop->start shape where ownership must transfer at stamper installation.
         tap.onPcm(ByteBuffer.wrap(s16le(newData)), format)
@@ -1741,7 +1741,7 @@ class PlaybackBufferRecorderTest {
 
     // POSITION ATTRIBUTION (4236341498, conservative contract): an UNTIMED cue contribution must
     // INVALIDATE a window anchor it is not covered by -- the anchor can never be presented as
-    // covering audio whose sounding time is unknown (@spec 6e52d610).
+    // covering audio whose sounding time is unknown.
     @Test
     fun `an untimed cue write invalidates a window anchor that would otherwise cover it`() = runTest {
         val tap = FingerprintPcmTap()
@@ -1762,7 +1762,7 @@ class PlaybackBufferRecorderTest {
         )
     }
 
-    // CONTROL @reviewer 4235702596 (episode renderer stop/pause hook): the media3 sink forwards BOTH
+    // CONTROL(episode renderer stop/pause hook): the media3 sink forwards BOTH
     // flush() and reset() to tap.onSinkFlush(), which bumps the stream epoch. The stamper must treat
     // that as supersession: retire the paused/seeked-away producer (its samples get an expiry, a held
     // old callback cannot re-enter) and admit the successor under a fresh ticket -- the same stale-
@@ -1806,7 +1806,7 @@ class PlaybackBufferRecorderTest {
         )
         // The pre-flush in-flight chunk carried A's emission-time ticket; A died at the flush, so any
         // surviving A audio is a RETIRED tail and must expire from every consumer on elapsed time
-        // alone -- @reviewer's stopped-answer-only shape, applied to the episode path.
+        // alone -- the stopped-answer-only shape, applied to the episode path.
         val retiredA = -1_000 / 32768f
         assertTrue(
             "episode B must be stored under its own fresh admission",

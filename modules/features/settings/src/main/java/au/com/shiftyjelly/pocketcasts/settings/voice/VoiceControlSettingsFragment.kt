@@ -200,7 +200,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
             // switch must render from the durable record even before any projection has landed).
             val sharing = if (sharingState.settingAvailable && (sharingState.projectionObserved || sharingState.durableChoiceKnown)) sharingState else null
             // The destructive confirmation is OWNED BY THE VIEWMODEL and bound to the session that
-            // opened it (reviewer 20b681f0): confirming after an account switch is rejected, never
+            // opened it: confirming after an account switch is rejected, never
             // silently re-owned by the new account.
             if (sharingState.deleteConfirmationOpen) {
                 AlertDialog(

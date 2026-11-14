@@ -23,7 +23,7 @@ class AudioFeedbackRenderer(
     private val earconPlayer: EarconPlayer,
     private val ttsEngine: TtsEngine,
     /**
-     * The grace signal, for OUTPUT-HOLD release (spec ruling 7a6a62e3): a turn whose spoken
+     * The grace signal, for OUTPUT-HOLD release: a turn whose spoken
      * feedback keeps its grace hold past sink completion releases it HERE, at the renderer's true
      * output terminal — the awaited TTS call in [speakWithHeartbeat] returns only after the
      * AudioTrack has played and drained, so the submit note denotes COMPLETED output, not
@@ -105,7 +105,7 @@ class AudioFeedbackRenderer(
         lateinit var job: Job
 
         /**
-         * THIS INVOCATION'S earcon admission, set when the cue is accepted (reviewer b25287c6: the
+         * THIS INVOCATION'S earcon admission, set when the cue is accepted (the
          * token is invocation-local state, not a renderer-wide last-value a successor could overwrite).
          */
         var earconAdmission: EarconPlayer.AdmissionToken? = null
@@ -174,7 +174,7 @@ class AudioFeedbackRenderer(
     /**
      * Renders one response and returns whether it ACCEPTED OWNERSHIP of any transferred output hold.
      * True means the renderer will release the hold at its own terminal; false means the caller must
-     * release (the renderer cannot or will not play this response). Reviewer 664f82d0: map insertion
+     * release (the renderer cannot or will not play this response).map insertion
      * alone is not acknowledgement.
      */
     fun render(response: VoiceResponse, language: String = "en", requestId: String? = null): Boolean {
@@ -198,13 +198,13 @@ class AudioFeedbackRenderer(
         // second "cancelled" record, and its finally clears nothing of THIS invocation's.
         val thisCall = RenderInvocation(requestId)
         currentInvocation?.takeIf { it.job.isActive }?.let { prior ->
-            // SUPERSESSION RELEASE ORDER (reviewer 664f82d0): the predecessor's output must reach
+            // SUPERSESSION RELEASE ORDER: the predecessor's output must reach
             // its terminal BEFORE the hold releases. Cancelling first risks releasing while cleanup
             // still suspends (stop/clear), which violates stopped-before-release. The flag is set so
             // the predecessor's own catch does not double-record; the cancel runs AFTER, and the
             // predecessor's finally releases the hold at its actual terminal boundary.
             prior.requestId?.let { recordDrop(it, "superseded", "superseded_by_new_render") }
-            // A NEVER-STARTED predecessor's body catch/finally will never run (reviewer b25287c6):
+            // A NEVER-STARTED predecessor's body catch/finally will never run:
             // cancelling its job orphans the transferred hold. The release happens HERE — safe,
             // because no output has started, so there is nothing to stop or clear first.
             if (!prior.started.get()) releaseOutputHold(prior.requestId, cancelled = true)
@@ -258,7 +258,7 @@ class AudioFeedbackRenderer(
                     is VoiceResponse.Earcon -> {
                         earconAdmitted = playEarcon(response.id)
                         recordEarconOutcome()
-                        // EARCON TERMINAL IS CONSUMPTION, NOT ADMISSION (reviewer 664f82d0): the hold
+                        // EARCON TERMINAL IS CONSUMPTION, NOT ADMISSION: the hold
                         // releases when the cue is observed to have played every accepted frame. No
                         // spoken half, so the earcon terminal alone ends the output.
                         thisCall.earconAdmission = lastEarconAdmission
@@ -276,7 +276,7 @@ class AudioFeedbackRenderer(
                         // The awaited call returns only after playback drained — this IS the
                         // output terminal, not mere acceptance. No earcon component.
                         val delivered = speakWithHeartbeat(response.text, language)
-                        // ONE SHARED SPEECH-OUTCOME RULE (reviewer 4356625551 + follow-up): the
+                        // ONE SHARED SPEECH-OUTCOME RULE (+ follow-up): the
                         // synthesis-failure fallback lives in ONE helper so the Spoken and Combined
                         // branches cannot drift -- a Combined reply with a failed synthesis used to
                         // still record spoken_submitted and release as delivered.
@@ -341,7 +341,7 @@ class AudioFeedbackRenderer(
                 releaseOutputHold(requestId, cancelled = true)
                 throw cancellation
             } catch (failure: Exception) {
-                // ALL TERMINAL FAILURES RELEASE (reviewer 664f82d0): a generic render/TTS exception is
+                // ALL TERMINAL FAILURES RELEASE: a generic render/TTS exception is
                 // as much an output terminal as an incomplete playback — the held window must not wait
                 // on output that will never sound. Observed as submission_failed, hold released.
                 if (requestId != null) {
@@ -404,7 +404,7 @@ class AudioFeedbackRenderer(
         // while believing it held its own.
         val admitted = earconPlayer.play(id)
         // THE TOKEN IDENTIFIES THIS PLAYING OF THE CUE: the terminal watcher below reads its
-        // completion — admission alone is NOT consumption (reviewer 664f82d0 / spec e6cb3052).
+        // completion — admission alone is NOT consumption.
         lastEarconAdmission = admitted
         if (admitted != null) {
             // NO UNCONDITIONAL ATTRIBUTION. `play` reporting true means the sink ACCEPTED the cue, which
@@ -818,13 +818,13 @@ class AudioFeedbackRenderer(
         }
         // Surfaces TtsPlaybackIncompleteException (or any other failure) to the caller.
         utterance.join()
-        // REVIEWER 4356625551: false means the engine never synthesized (uninitialized, refused
+        // false means the engine never synthesized (uninitialized, refused
         // queue, onError) -- the caller must not count the reply as delivered.
         synthesized
     }
 
     /**
-     * ONE TRUTHFUL SPEECH OUTCOME (reviewer 4356625551, follow-up 58d1f1b9): when the TTS engine
+     * ONE TRUTHFUL SPEECH OUTCOME (, follow-up 58d1f1b9): when the TTS engine
      * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
      * error earcon and the hold release as not-delivered, in BOTH the Spoken and Combined branches.
      * Shared here so the two branches cannot drift again.
@@ -850,7 +850,7 @@ class AudioFeedbackRenderer(
     }
 
     /**
-     * ONE OWNED EARCON TERMINAL (reviewer b25287c6): awaits THIS invocation's admission until the
+     * ONE OWNED EARCON TERMINAL: awaits THIS invocation's admission until the
      * cue is observed to have played every accepted frame (Consumed) or the observation times out.
      * Runs INSIDE the render job, so supersession/session-end cancellation reaches it and the
      * job's cancellation terminal clears output and releases the hold on every exit. Returns

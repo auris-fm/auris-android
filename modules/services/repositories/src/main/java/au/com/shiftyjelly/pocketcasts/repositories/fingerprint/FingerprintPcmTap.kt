@@ -33,7 +33,7 @@ class FingerprintPcmTap @Inject constructor() {
         /**
          * Opaque admission ticket captured at EMISSION from the registered stamper (null when none).
          * A queued chunk carries the ticket its stream held WHEN THE CHUNK WAS CREATED -- a consumer
-         * must never mint or renew admission at delivery time (@spec/@reviewer): work that was already
+         * must never mint or renew admission at delivery time: work that was already
          * in flight across a wholesale retirement stays dead, and only FUTURE emissions from a renewed
          * live owner carry fresh tickets.
          */
@@ -58,7 +58,7 @@ class FingerprintPcmTap @Inject constructor() {
      * AND reset(), which covers pause/seek/stop in this renderer) and a foreground transition to
      * background ([handlePlaybackState]). A subscriber retires its held admission AT THE EVENT; the
      * epoch bump alone only ever superseded admission when a SUCCESSOR later emitted, which left a
-     * paused-then-idle episode holding live admission with no owner event closing it (@reviewer,
+     * paused-then-idle episode holding live admission with no owner event closing it
      * thread 4235702596).
      */
     private val streamClosedCallbacks = mutableListOf<() -> Unit>()
@@ -122,7 +122,7 @@ class FingerprintPcmTap @Inject constructor() {
         // THE STOP/DRAIN EVENT ITSELF, not a later successor emission: an owner that wants to close
         // admission at the real boundary subscribes here (streamClosedCallbacks). Runs BEFORE the
         // epoch bump so retirement is complete before any new-stream stamping can happen.
-        // SNAPSHOT UNDER THE REGISTRY MONITOR, INVOKE OUTSIDE IT (@reviewer): toList() racing an
+        // SNAPSHOT UNDER THE REGISTRY MONITOR, INVOKE OUTSIDE IT: toList() racing an
         // unsynchronized register/unregister on another thread is undefined on a MutableList; and
         // invoking under the monitor would run arbitrary retirement code while a concurrent
         // register/unregister blocks the playback thread.

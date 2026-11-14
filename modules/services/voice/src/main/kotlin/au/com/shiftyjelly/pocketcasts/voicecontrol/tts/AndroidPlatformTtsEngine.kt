@@ -57,7 +57,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     var drainWaitMs: Long = MAX_DRAIN_WAIT_MS
 
     /**
-     * Bound on the synthesis wait (reviewer 4356632247). An engine that ACCEPTS the request but
+     * Bound on the synthesis wait. An engine that ACCEPTS the request but
      * never delivers onDone/onError/onStop (engine process death, an OEM engine dropping
      * callbacks) used to leave speak() suspended forever while speakWithHeartbeat kept reporting
      * emission -- suppressing every later utterance for the rest of the session. Overridable for
@@ -202,7 +202,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // shared engine.
             val utteranceId = "voice-tts-" + UTTERANCE_ID_SEQ.incrementAndGet()
             var ownershipToken = -1
-            // BOUNDED WAIT (reviewer 4356632247): a SUCCESS-queued utterance whose callbacks never
+            // BOUNDED WAIT: a SUCCESS-queued utterance whose callbacks never
             // arrive must fail the utterance rather than suspend speak() forever. Timing out
             // cancels the suspension, whose invokeOnCancellation stops the engine if THIS utterance
             // still owns it -- the same cleanup a successor or an explicit cancel would run.
@@ -316,7 +316,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
         superseded: () -> Boolean,
     ) = withContext(Dispatchers.IO) {
         playbackIncomplete = false
-        // TRUTHFUL PLAYBACK OUTCOME (reviewer 486205ae): speak() reports delivery to a caller that
+        // TRUTHFUL PLAYBACK OUTCOME: speak() reports delivery to a caller that
         // releases output holds on it, so "synthesized a file but played nothing" must NOT be a
         // silent success. Decode failure, track-creation failure, and a zero-sample clip all throw
         // the typed incomplete exception the renderer already treats as a drop/failure boundary.
@@ -334,7 +334,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
         // against an unlocked successor write, so the publication and the clear must share one
         // boundary or the successor can be published into a slot an older cleanup is about to null.
         // The utterance's recorder ADMISSION is minted with its track and closed when the track is
-        // released -- an owned producer identity, never a null write (@spec).
+        // released -- an owned producer identity, never a null write.
         val utteranceAdmission = playbackBufferRecorder.openAdmission(TTS_PRODUCER_BASE + mine)
         currentUtteranceAdmission = utteranceAdmission
         synthesisLock.withLock { activeTrack = track }
@@ -425,7 +425,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                     sampleRateHz = clip.sampleRateHz,
                     startSample = offset,
                     count = written,
-                    // THE IMMUTABLE ADMISSION CAPTURED WITH THIS UTTERANCE'S LOCAL TRACK (@reviewer):
+                    // THE IMMUTABLE ADMISSION CAPTURED WITH THIS UTTERANCE'S LOCAL TRACK:
                     // reading the shared field here would attribute old audio to a successor that has
                     // since published its own -- the write must carry the identity of the stream it is.
                     admission = utteranceAdmission,
@@ -437,7 +437,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // elapsed time — synthesis, startup and waiting can all consume time without draining.
             var waited = 0L
             // The drain observes the LOCAL track through runCatching: engine-level release() STOPS
-            // this track from another thread (@reviewer), and a stopped-or-released instance may
+            // this track from another thread, and a stopped-or-released instance may
             // refuse position reads. A refused read ends the wait as an incomplete outcome below --
             // it never becomes evidence that audio played, and it cannot crash the shutdown path.
             var positionBroken = false
@@ -450,7 +450,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 waited += 10
             }
             framesWritten = offset
-            // Read FIRST, then consult the flag (@reviewer ca0a39554 review): checking positionBroken
+            // Read FIRST, then consult the flag (review): checking positionBroken
             // before this final read lets a THROWING final read return headPosition()'s fallback and
             // be mistaken for a fully drained utterance. Every failed read -- including this one --
             // must produce the explicit incomplete outcome below.
@@ -509,7 +509,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     /**
      * Clears [activeTrack] only when it still refers to [track] -- this utterance's own instance --
      * but ALWAYS retires [admission], the immutable admission captured with this utterance's local
-     * track (@reviewer/@spec). Ownership of the shared slot may have passed to a successor; the
+     * track. Ownership of the shared slot may have passed to a successor; the
      * ENDED stream is still this one's, and leaving its admission open would keep its tail matchable
      * with no owner left to close it. Clearing the shared field stays ownership-guarded.
      */
@@ -534,7 +534,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
     /**
      * How many utterances RELEASED their own local track (in the utterance's finally). Test
-     * visibility for the release-ownership contract (@reviewer 4236364948): releasing the native
+     * visibility for the release-ownership contract: releasing the native
      * object belongs to the owner whose loops read it; engine-level release() only silences.
      */
     @Volatile
@@ -606,7 +606,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             startSample = startSample,
             count = count,
         )
-        // OWNED like every other reference writer (@spec): the caller passes the admission minted with
+        // OWNED like every other reference writer: the caller passes the admission minted with
         // THIS utterance's track, so its retained tail gets a deadline and stale callbacks cannot
         // re-enter -- and a held old write can never append under a successor's ticket either.
         playbackBufferRecorder.write(
@@ -616,7 +616,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     }
 
     /**
-     * Optional track-construction override for controls (@reviewer ca0a39554 review): a test can
+     * Optional track-construction override for controls (review): a test can
      * supply an AudioTrack subclass that records release() and refuses position reads afterwards,
      * making premature engine-level release observable at the instance boundary. Null uses the real
      * platform construction below. This is a construction seam only -- production behavior is the
@@ -625,7 +625,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     internal var trackFactoryForTest: ((Int) -> AudioTrack?)? = null
 
     // An installed factory OVERRIDES track creation outright: a null it returns IS the failure
-    // (reviewer b0a21f8d), never a reason to fall through to the real constructor.
+    //, never a reason to fall through to the real constructor.
     private fun buildTrack(sampleRateHz: Int): AudioTrack? {
         val factory = trackFactoryForTest
         // The null-check is on the FACTORY's presence, not its result: an installed factory's null
@@ -668,7 +668,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             activeTrack = null
             current
         }
-        // STOP ONLY (@reviewer 4236364948): this method runs while the utterance coroutine may be
+        // STOP ONLY: this method runs while the utterance coroutine may be
         // blocked in track.write or reading playbackHeadPosition on another thread. Releasing the
         // AudioTrack here frees the native object underneath those reads -- playbackHeadPosition on
         // a released track throws IllegalStateException, turning a clean shutdown into a failure.

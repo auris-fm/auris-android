@@ -251,7 +251,7 @@ open class PlaybackManager @Inject constructor(
      * to skip.
      *
      * **Automatic transitions count too, deliberately** (focus loss, transient
-     * loss). An interruption this app did not cause is not evidence that a cloud
+     * loss). An interruption this app did not cause is not evidence that a
      * turn's pause should be undone: resuming after a call, or after another app
      * took audio, would be the turn deciding an interruption is over when it
      * cannot know that. Leaving playback under the user's hand costs one press of
@@ -1560,7 +1560,7 @@ open class PlaybackManager @Inject constructor(
         if (seekTarget.first.episodeUuid != episodeUuid) return false
 
         // THE MUTATION IS GUARDED, NOT AUDITED. A refusal AFTER `seekToTimeMs` returns has already let the
-        // seek happen on whatever the player came to address -- @reviewer's strengthened control observes
+        // seek happen on whatever the player came to address -- the strengthened control observes
         // exactly that, and a returned `false` cannot undo a mutation. Detecting the damage is not
         // preventing it.
         //

@@ -35,7 +35,7 @@ class PlaybackManagerPlaybackSinkTest {
         ApplicationProvider.getApplicationContext(),
     )
 
-    // FOCUS-LISTENER IDENTITY (4236727145, @reviewer 2803feab): the AudioManager boundary, collected.
+    // FOCUS-LISTENER IDENTITY (4236727145,): the AudioManager boundary, collected.
     // Android keys a focus grant to the listener instance it was handed; restore() must abandon THAT
     // instance, not a fresh lambda. A mocked AudioManager records both calls, so an identity mismatch
     // (the shipped defect: restore abandoned `[:]`) fails on the instance comparison.
@@ -128,7 +128,7 @@ class PlaybackManagerPlaybackSinkTest {
         expectUnknown: Boolean,
         expectRefused: Boolean = false,
     ) = runTest {
-        // @spec's remaining item: the ACTUAL owner's skip, through its PUBLIC entry point. The decision
+        // the remaining item: the ACTUAL owner's skip, through its PUBLIC entry point. The decision
         // was verified in isolation (172e220ff); this drives the real method and its callers.
         val manager = org.mockito.Mockito.mock(
             PlaybackManager::class.java,
@@ -279,7 +279,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `the REAL manager refuses a re-pointing that does NOT advance the incarnation counter`() = runTest {
-        // @reviewer's remaining gap: only the paused-load branch advances the counter, while the playing
+        // the remaining gap: only the paused-load branch advances the counter, while the playing
         // and queue-selection reconfiguration paths need not. A seek relying on the COUNTER alone would
         // therefore miss a re-pointing made by a path that does not advance it.
         //
@@ -365,7 +365,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `an UNKNOWN execution is NOT a refusal, so a caller cannot retry it as one`() = runTest {
-        // @spec's distinction: "distinguish receiver refusal/failure from timeout or lost outcome...
+        // THE DISTINCTION: "distinguish receiver refusal/failure from timeout or lost outcome...
         // unknown execution remains unknown through manager, history and skip/quote callers; do not map
         // it to a retryable refusal."
         //
@@ -388,7 +388,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `an ACCEPTED operation with an UNAVAILABLE position is still accepted`() = runTest {
-        // @spec's distinction, and the defect it caught in my previous version: a successful load of a new
+        // the distinction, and the defect it caught in my previous version: a successful load of a new
         // episode has NO pre-action position on the receiver -- the receiver is still on the old one --
         // but the load is ACCEPTED. Deriving acceptance from the position's presence would REJECT an
         // operation that is about to succeed. The two are separate facts.
@@ -443,7 +443,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `the DEFAULT bound seek REFUSES rather than throwing or seeking unrestricted`() = runTest {
-        // @spec's direct-default control: "the direct default must return the declared refused outcome
+        // the direct-default control: "the direct default must return the declared refused outcome
         // without throwing." A caller that reaches the default directly must get a REFUSAL it can act on,
         // not a crash and not an unrestricted seek. The default cannot enforce the binding, so pretending
         // otherwise -- by seeking anyway -- is the substitution the contract exists to prevent.
@@ -476,7 +476,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `an UNKNOWN execution survives the sink as Unknown, not as Refused`() = runTest {
-        // @reviewer's cloud-consumer failure: a ScopedMutation marked unknown passed through the real sink
+        // the cloud-consumer failure: a ScopedMutation marked unknown passed through the real sink
         // but reached the caller as Refused. That is the collapse the whole distinction exists to prevent:
         // Refused reads as "nothing happened, safe to retry", and a retry could REPEAT an operation the
         // player already performed.
@@ -562,7 +562,7 @@ class PlaybackManagerPlaybackSinkTest {
      * check must happen where the change is visible -- after the suspending call returns. Every
      * adapter-level fixture stubs the owner and therefore cannot see this at all.
      *
-     * @reviewer's control, adopted; it failed here until the post-seek episode read was added.
+     * the control, adopted; it failed here until the post-seek episode read was added.
      */
     private fun probeActualManagerReuse(reuse: Boolean) = runTest {
         val manager = mock<PlaybackManager>()
@@ -660,7 +660,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `a replacement landing WHILE the owner's Main dispatch is queued is refused`() = runTest {
-        // @spec's controlled case. `seekToTimeMsInternalIfEpisode` suspends to publish the media-session
+        // the controlled case. `seekToTimeMsInternalIfEpisode` suspends to publish the media-session
         // position BEFORE the player mutation, and the replacement is made to land in that suspension --
         // while the Main dispatch it is waiting on is still queued, not merely "before the call".
         //
@@ -706,7 +706,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `the episode is re-decided AT the mutation, so a change across the suspension is refused`() = runTest {
-        // @reviewer's finding: `seekToTimeMsInternal` reads the episode, then SUSPENDS in
+        // the finding: `seekToTimeMsInternal` reads the episode, then SUSPENDS in
         // `withContext(Dispatchers.Main)` before the player mutation -- and a replacement can land in
         // that suspension. A read taken before the suspensions therefore does not exclude a change
         // ACROSS them.
@@ -754,7 +754,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `the owner's answer is AWAITED, not read from a flag written inside a launch`() = runTest {
-        // @reviewer's source finding: `seekIfPlayingToTimeMs` used to SET A FLAG INSIDE A LAUNCHED
+        // the source finding: `seekIfPlayingToTimeMs` used to SET A FLAG INSIDE A LAUNCHED
         // COROUTINE and return it immediately -- so when dispatch queued the coroutine, the caller read
         // the flag's INITIAL value and reported a REFUSAL for a seek that then performed. The outcome is
         // the owner's decision, so the caller must WAIT for it.

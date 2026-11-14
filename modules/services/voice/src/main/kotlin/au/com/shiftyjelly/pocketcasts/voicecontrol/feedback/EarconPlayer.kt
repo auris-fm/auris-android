@@ -184,7 +184,7 @@ class EarconPlayer(
     // Plays `id` and returns THE ADMISSION IT TOOK, or null when the cue was not admitted.
     //
     // A null result is a START acknowledgement that did NOT happen -- it does not claim the audio has
-    // been emitted, and treating acceptance as completion is the conflation @spec ruled out. The drain
+    // been emitted, and treating acceptance as completion is the conflation this guards against. The drain
     // runs on this player's own thread, so the caller is released when submission finishes rather than
     // after the clip has played. Only PCM the sink ACCEPTED feeds the reference, so a partial write
     // cannot leave the reference claiming audio that was never submitted.
@@ -664,7 +664,7 @@ class EarconPlayer(
             // write, so a REFUSED successor still leaves the track replaced; the stale snapshot must
             // not survive it paired with a track its admission never wrote to (719c64c8).
             currentFrontier = null
-            // INDEPENDENT RELEASE (reviewer 4356632394): a single runCatching around both calls
+            // INDEPENDENT RELEASE: a single runCatching around both calls
             // skips release() when stop() throws -- the pattern this file's own release()/stopAdmissionNow
             // comments forbid. Each gets its own guard.
             current.runCatching { stop() }
@@ -698,7 +698,7 @@ class EarconPlayer(
             created.play()
         } catch (t: Throwable) {
             // The new track was never assigned to `track`, so dropping the local reference would
-            // leak the native side (reviewer 4356632394): release it before rethrowing.
+            // leak the native side: release it before rethrowing.
             created.runCatching { release() }
             throw t
         }
@@ -712,8 +712,8 @@ class EarconPlayer(
     /**
      * Decodes a PCM WAV resource to mono 16-BIT samples AT THE CLIP'S OWN RATE.
      *
-     * The rate is read from the file header and preserved (the track is created at it), per @spec's
-     * rate policy: playback keeps original fidelity and only the reference copy is normalized.
+     * The rate is read from the file header and preserved (the track is created at it): playback
+     * keeps original fidelity and only the reference copy is normalized.
      *
      * Handles the format the bundles actually use (16-bit PCM, possibly stereo); anything else is
      * rejected rather than silently mis-read, since a wrong interpretation would put wrong audio in
@@ -753,11 +753,11 @@ class EarconPlayer(
     /**
      * THE ACTUAL CUE WRITER the accepted-submission path uses, extracted so a control can drive it
      * directly (queued and partial acceptances included) without clip assets. POSITION ATTRIBUTION
-     * (4236341498, conservative per @spec 6e52d610): cue timing is explicitly UNAVAILABLE --
+     * (4236341498, conservative per): cue timing is explicitly UNAVAILABLE --
      * recordAccepted observes accepted/submitted samples, not render instants, and a write-instant
      * timestamp would be submission time relabeled as sounding time. The UNTIMED write invalidates
      * any window anchor the cue's unknown sounding time cannot cover. OWNED like every other
-     * reference writer (@spec): the samples carry the admission minted when the cue took the track.
+     * reference writer: the samples carry the admission minted when the cue took the track.
      */
     internal fun writeCueReference(
         recorder: PlaybackBufferRecorder,

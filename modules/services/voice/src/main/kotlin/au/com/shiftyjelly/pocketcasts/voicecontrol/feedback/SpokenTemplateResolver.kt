@@ -34,7 +34,7 @@ class SpokenTemplateResolver(
     /**
      * Resolves a line AND the language tag its TTS voice must use: the utterance's language when
      * a line exists for it, else "en" with the default English line. The two always match, so a
-     * fallback can never pair one language's text with another's voice (spec ruling 7c7575f6).
+     * fallback can never pair one language's text with another's voice.
      */
     fun resolveLocalized(intentKey: String, language: String?): ResolvedSpokenLine {
         val lang = language?.trim()?.substringBefore('-')?.lowercase()?.takeIf { it.isNotEmpty() }
@@ -68,7 +68,7 @@ class SpokenTemplateResolver(
     }
 
     /**
-     * Resolves a line for the UTTERANCE's language (spec 54287f13): the refusal is spoken in the
+     * Resolves a line for the UTTERANCE's language: the refusal is spoken in the
      * language the user spoke, never the device UI locale. Order: an explicit per-language table,
      * then the app's locale resources for that language, then the default line. A language this
      * build does not carry falls back to the default (English) line — never to silence.

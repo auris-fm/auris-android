@@ -59,7 +59,7 @@ class CloudTurnRouteTest {
 
     @Test
     fun `discovery with no current episode omits the episode and position fields entirely`() = runTest {
-        // @spec's contract check: a turn with nothing playing must still dispatch, carrying an ABSENT
+        // THE CONTRACT CHECK: a turn with nothing playing must still dispatch, carrying an ABSENT
         // playback context -- and the absence must survive to the wire. An empty episode id or a zero
         // position would both be real values: the first claims a subject the turn does not have, the
         // second places it at the very start of a recording nobody is playing.

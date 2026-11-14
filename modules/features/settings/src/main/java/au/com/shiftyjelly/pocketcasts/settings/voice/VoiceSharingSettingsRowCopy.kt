@@ -9,7 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.ui.VoiceSharingSetting
  * The sharing rows' secondary copy, mapped from the reviewed ViewModel's durable state.
  *
  * Extracted as a pure function over a string resolver so the BINDING's mapping is unit-testable
- * without Robolectric (reviewer 578bb62a: VM-only controls cannot prove the fragment's mapping).
+ * without Robolectric (VM-only controls cannot prove the fragment's mapping).
  * The composable layer supplies `stringResource`; this object owns only the decision.
  */
 object VoiceSharingSettingsRowCopy {

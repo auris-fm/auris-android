@@ -124,7 +124,7 @@ class VoiceControlService : Service() {
     /**
      * The start that has been ACCEPTED but may still be waiting for model readiness. `engineStart`
      * only flips true once capture is really up, so without this a second start would slip into the
-     * readiness window (reviewer a85cf8fe). Cleared when the start coroutine finishes, so a failed
+     * readiness window. Cleared when the start coroutine finishes, so a failed
      * start can be retried.
      */
     private var startInFlightJob: Job? = null
@@ -164,7 +164,7 @@ class VoiceControlService : Service() {
      *
      * A teardown that leaves resources in place is NOT a success: the audio stack may still be held
      * and a retry is required. This makes that visible to whatever observes the teardown job
-     * (reviewer 6ce4ad78) instead of reporting a normal completion.
+     * instead of reporting a normal completion.
      */
     internal var teardownFailure: TeardownFailure? = null
 
@@ -177,11 +177,11 @@ class VoiceControlService : Service() {
     internal val allReleaseKinds: List<String> get() = ALL_RELEASES
 
     // What a HELD teardown already released. A retry must skip these: repeating a media-session or
-    // renderer release is destructive, not merely redundant (spec d885d207).
+    // renderer release is destructive, not merely redundant.
     private val releasedResources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     // Guards creation of a retry so two concurrent stops cannot each publish an attempt, letting an
-    // older one overwrite a newer one (reviewer 9d15bb44 follow-up).
+    // older one overwrite a newer one.
     private val retryLock = Any()
 
     // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
@@ -191,7 +191,7 @@ class VoiceControlService : Service() {
     private var teardownOutcome: TeardownOutcome? = null
 
     companion object {
-        // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
+        // Bounded re-sampling rounds for engine work; exhaustion refuses to release.
         private const val MAX_ENGINE_JOIN_ROUNDS = 8
 
         // A barrier-owned job that never finishes must not hang the teardown; the engine quiescence
@@ -199,7 +199,7 @@ class VoiceControlService : Service() {
         private const val BARRIER_JOIN_TIMEOUT_MS = 5_000L
 
         // Every kind of resource this service releases, in release order. Shared by the initial
-        // teardown and the retry so both track progress identically (reviewer a9271b39).
+        // teardown and the retry so both track progress identically.
         private val ALL_RELEASES = listOf(
             "backend",
             "session",
@@ -258,7 +258,7 @@ class VoiceControlService : Service() {
         val response = try {
             voicePlaybackIntentExecutor.execute(intent, turnOutcome)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
+            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY: the sink may already
             // have transferred this turn's hold to the renderer path. Rethrow without releasing and
             // the hold is orphaned — the render handoff below never runs. Release whatever was
             // transferred (a no-op when nothing was), then rethrow so structured concurrency unwinds.
@@ -272,14 +272,14 @@ class VoiceControlService : Service() {
         // Carry the cloud turn's request ID into the renderer for diagnostic join.
         val cloudIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
         val renderRequestId = cloudIntent?.logicalRequestId
-        // THE UTTERANCE'S LANGUAGE drives TTS (spec 54287f13): the reply — including a localized
+        // THE UTTERANCE'S LANGUAGE drives TTS: the reply — including a localized
         // refusal — is spoken in the language the user spoke, not the device locale. Falls back
         // to English when the ASR detected nothing this build understands.
         // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
         // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
         // local defaults to English, never the raw detected language nor the device locale.
         val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
-        // ACKNOWLEDGED HANDOFF (reviewer 664f82d0): the renderer accepts ownership of the hold by
+        // ACKNOWLEDGED HANDOFF: the renderer accepts ownership of the hold by
         // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
         // service releases the transferred hold here at the actual failure boundary — never leaving
         // it in the map. Cancellation is re-thrown after release so structured concurrency still
@@ -298,7 +298,7 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * THE LIFECYCLE SEAM, reporting THIS service's own authority (reviewer a85cf8fe):
+     * THE LIFECYCLE SEAM, reporting THIS service's own authority:
      * `startedOrStarting` covers the readiness window, and `stopPipeline` returns a job that
      * completes only after the pipeline has finished tearing down.
      */
@@ -315,7 +315,7 @@ class VoiceControlService : Service() {
 
     /** Returns true when a start was accepted; false when one is already running or in flight. */
     private fun startVoiceControl(): Boolean {
-        // FINAL SHUTDOWN EXCLUDES NEW STARTS (reviewer fd3f5a4d): once teardown has begun, a start
+        // FINAL SHUTDOWN EXCLUDES NEW STARTS: once teardown has begun, a start
         // must be refused rather than opening a capture the teardown is about to release from under
         // it. The teardown retains its job, so this stays true for the rest of the service's life.
         if (stopInFlightJob != null) {
@@ -358,7 +358,7 @@ class VoiceControlService : Service() {
         // Handle models first: defer mode observation until readiness completes.
         // This avoids lazy init on first utterance — the ASR model and the
         // LFM inference runtime are fully prepared before audio capture.
-        // ALL-EXIT OWNERSHIP CLEANUP (reviewer dab802ec): invokeOnCompletion runs even when the
+        // ALL-EXIT OWNERSHIP CLEANUP: invokeOnCompletion runs even when the
         // coroutine is cancelled BEFORE its body first runs (a launch finally does not), and the
         // try/catch below covers a launch that fails before the Job exists. Settlement is one-shot
         // in the engine, so every exit path converges on exactly one publication.
@@ -371,7 +371,7 @@ class VoiceControlService : Service() {
         // created at all: the teardown already owns the shutdown and will not wait for a job that
         // did not exist when it closed. The foreground notification started above is undone the
         // same way every other early refusal in this method undoes it.
-        // ADMIT AN OWNERSHIP TICKET BEFORE ANY WORK RUNS (reviewer a9271b39). The previous version
+        // ADMIT AN OWNERSHIP TICKET BEFORE ANY WORK RUNS. The previous version
         // launched first and admitted afterwards, which had two holes: the body could already be
         // running (and spawning children) before `beginStart` had a chance to refuse, and a start that
         // completed very fast could release its own registration before it was ever inserted,
@@ -534,7 +534,7 @@ class VoiceControlService : Service() {
             stopSelf()
             return false
         }
-        // REGISTER THE RELEASE ONLY AFTER ADMISSION SUCCEEDED (reviewer 9d15bb44 follow-up). It used
+        // REGISTER THE RELEASE ONLY AFTER ADMISSION SUCCEEDED. It used
         // to be installed BEFORE beginStart, so if the parent scope was already cancelled the job's
         // completion could fire first: release() ran for a job that had not been registered yet, and
         // beginStart then registered it into a set nothing would ever clear — a stale registration
@@ -568,7 +568,7 @@ class VoiceControlService : Service() {
         }
         Timber.i("Selected ASR backend: %s", backend::class.simpleName)
 
-        // Digest verification runs on IO (reviewer ff30b294): hashing a cached model never
+        // Digest verification runs on IO: hashing a cached model never
         // blocks the main/audio path.
         val needDownload = !modelManager.isModelReadyVerified(backend.requiredModel) ||
             !modelManager.isLfmModelReady()
@@ -638,7 +638,7 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * P1 (reviewer a00bb77d): wiring hands each backend WHAT IT NEEDS TO RUN, plus — where the
+     * P1: wiring hands each backend WHAT IT NEEDS TO RUN, plus — where the
      * bytes were verified — the manifest identity that verification already produced. The lookup
      * reuses ModelManager's cache predicate and MAY hash a cached artifact, which is why its only
      * caller is [ensureModelsReady] — reached from the start job launched on `Dispatchers.IO`
@@ -705,7 +705,7 @@ class VoiceControlService : Service() {
                     Timber.i("[VoicePipeline] engine not started: start was invalidated")
                     return@startIfNotRunning false
                 }
-                // RECHECK SHUTDOWN AFTER THE SUSPENSION (reviewer 543d284b): the pre-suspension guard
+                // RECHECK SHUTDOWN AFTER THE SUSPENSION: the pre-suspension guard
                 // only proves teardown had not begun when the start was admitted. ensureReady() can
                 // block for a model load, and a teardown that began meanwhile would release the
                 // backend this start is about to use.
@@ -1023,7 +1023,7 @@ class VoiceControlService : Service() {
     ) {
         // THE OBSERVABLE SEAM: the dispatch lifecycle (debounce settle, invocation-local fact
         // channel, all-exit one-shot settlement) lives in VoiceIntentDispatcher so REAL controls
-        // can drive it — overlap→persist, pre-body cancellation, handler throw (spec 250ddcc3).
+        // can drive it — overlap→persist, pre-body cancellation, handler throw.
         intentDispatcher.dispatch(
             scope = serviceScope,
             engine = voiceAsrEngine.get(),
@@ -1070,17 +1070,17 @@ class VoiceControlService : Service() {
 
     /**
      * Stops the pipeline and returns a job that completes when teardown has REALLY finished
-     * (reviewer a85cf8fe). The previous version returned an already-completed job, which told an
+     *. The previous version returned an already-completed job, which told an
      * awaiting caller that children had settled when they had not. This awaits the cancelled
      * children — `modeJob`, the acquisition job and the in-flight start — under `NonCancellable`, so
      * the returned job is a truthful completion signal. `serviceScope` is cancelled first so nothing
      * can be restarted behind the join.
      */
     private fun stopVoiceControl(): Deferred<TeardownResult> {
-        // A HELD teardown is RETRIED by its owner (spec d885d207), not joined forever: rechecking the
+        // A HELD teardown is RETRIED by its owner, not joined forever: rechecking the
         // CURRENT state is the only thing that can turn a hold into a release. A running teardown is
         // still joined, and a RELEASED teardown keeps its identity so nothing is freed twice.
-        // CONSUME THE DEFERRED'S OWN RESULT (reviewer 9d15bb44 follow-up). Reading the separate
+        // CONSUME THE DEFERRED'S OWN RESULT. Reading the separate
         // `teardownFailure` field here raced the completion handler that writes it: a re-stop could
         // see `isCompleted == true` while the field still held its previous value, and treat a HELD
         // teardown as a finished, non-retryable one. The record now comes FROM the completed
@@ -1090,7 +1090,7 @@ class VoiceControlService : Service() {
             val failure = settleRecord(existing).failure ?: return existing
             return retryHeldTeardown(failure, existing)
         }
-        // INVALIDATE ANY PENDING START UP FRONT (reviewer 543d284b): a start suspended inside
+        // INVALIDATE ANY PENDING START UP FRONT: a start suspended inside
         // ensureReady() would otherwise commit after this teardown released the backend it needs.
         engineStart.invalidatePendingStart()
         // CLOSE THE BARRIER FIRST: from here on no start is admitted, and the returned set is exactly
@@ -1101,7 +1101,7 @@ class VoiceControlService : Service() {
         // CAPTURE THE ROOT NOW, before the cancel below. A child that outlives this call (a job
         // created just before cancellation, or a child of a child) must not be able to make the
         // completion job observe a DIFFERENT root than the one this teardown is cancelling
-        // (reviewer f457fbad).
+        //.
         val rootJob = serviceScope.coroutineContext[Job]
 
         // Cancel, stop, join, then release (reviewers 0bba7db5 + dbde4427).
@@ -1131,7 +1131,7 @@ class VoiceControlService : Service() {
                 // before the close, work it spawned) would otherwise be left running while the
                 // backend is released underneath it — precisely what the barrier exists to prevent.
                 ownedByShutdown.forEach { owned ->
-                    // A TIMEOUT IS NOT PERMISSION TO RELEASE (reviewer 9d15bb44 follow-up). This
+                    // A TIMEOUT IS NOT PERMISSION TO RELEASE. This
                     // used to log and carry on toward the releases, so a job the barrier owned could
                     // still be running while the backend was freed underneath it — exactly what the
                     // barrier exists to prevent. An unproven join now becomes a Held teardown; the
@@ -1146,11 +1146,11 @@ class VoiceControlService : Service() {
                 }
                 // The engine's processing jobs are NOT children of the service scope, so they need
                 // their own join. SNAPSHOT THEM ONLY NOW, AFTER the service children have finished
-                // (reviewer e1b11171): the engine's stop() is called from several service children,
+                //: the engine's stop() is called from several service children,
                 // and a child that ran during this teardown may have cancelled a job that did not
                 // exist when the teardown started. Sampling before the join made that job
                 // invisible and let the backend be released under it.
-                // UNCONDITIONAL FINAL STOP before the snapshot (reviewer 543d284b): a child could
+                // UNCONDITIONAL FINAL STOP before the snapshot: a child could
                 // have left the engine with live work that no earlier stop() cancelled. Stopping
                 // here makes that work visible to the snapshot below instead of racing it.
                 // FAIL CLOSED (reviewers 1092c632 + 9294defb): a failed final stop, round
@@ -1160,11 +1160,11 @@ class VoiceControlService : Service() {
                     stop = { voiceAsrEngine.get().stop() },
                     unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },
                     join = { job -> job.join() },
-                    // JUDGE OWNERSHIP, NOT JUST WHAT COULD BE JOINED (reviewer a9271b39): a job
+                    // JUDGE OWNERSHIP, NOT JUST WHAT COULD BE JOINED: a job
                     // that failed before this snapshot was never in `join`'s path and never judged,
                     // so a pre-snapshot failure could still release as a clean stop.
                     owned = { voiceAsrEngine.get().ownedJobs },
-                    // EXPECTED CANCELLATION IS NOT FAILURE (reviewer 47a3a267): this teardown
+                    // EXPECTED CANCELLATION IS NOT FAILURE: this teardown
                     // cancels these very jobs, so blanket-treating isCancelled as abnormal marked a
                     // normal shutdown as Held. Job exposes no public failure-cause accessor in this
                     // coroutines version, so the service reports abnormal ONLY when the job can be
@@ -1183,7 +1183,7 @@ class VoiceControlService : Service() {
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so
                 // touching them from this IO job would be an off-thread release.
-                // PRUNE AFTER THE DECISION THAT CONSUMED THE OUTCOMES (reviewer 51baa020): the maps
+                // PRUNE AFTER THE DECISION THAT CONSUMED THE OUTCOMES: the maps
                 // must not grow one entry per stop, but pruning before judging would erase the very
                 // evidence the verdict depends on.
                 runCatching { voiceAsrEngine.get().pruneConsumedBookkeeping(onlyKeep = emptySet()) }
@@ -1198,7 +1198,7 @@ class VoiceControlService : Service() {
                     }
                 }.fold(
                     onSuccess = { TeardownResult.Released },
-                    // A THROWING RELEASE IS A HELD TEARDOWN TOO (reviewer 3104ba44): the outcome is
+                    // A THROWING RELEASE IS A HELD TEARDOWN TOO: the outcome is
                     // reported, never thrown out of this unrouted launch.
                     onFailure = { error ->
                         Timber.e(error, "[VoicePipeline] resource release failed")
@@ -1216,7 +1216,7 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * Retry a HELD teardown against the CURRENT state (spec d885d207).
+     * Retry a HELD teardown against the CURRENT state.
      *
      * The hold is not age-based: the same owner rechecks the unfinished jobs, and only verified
      * quiescence allows the remaining releases. Releases already recorded are skipped, and the
@@ -1227,7 +1227,7 @@ class VoiceControlService : Service() {
         previousSource: Deferred<TeardownResult>,
     ): Deferred<TeardownResult> {
         Timber.i("[VoicePipeline] retrying held teardown (${previous.reason})")
-        // SERIALIZED CREATION (reviewer 9d15bb44 follow-up): two concurrent stops could each decide
+        // SERIALIZED CREATION: two concurrent stops could each decide
         // to retry, start an attempt, and let the SLOWER one publish last, so an older attempt's
         // outcome overwrote a newer one and resurrected a hold that had already been resolved.
         // Creation and publication happen under one lock, and an attempt is only started while the
@@ -1250,7 +1250,7 @@ class VoiceControlService : Service() {
                         abnormalFinish = { job -> abnormalEngineFinish(job) },
                         heldJobs = { voiceAsrEngine.get().ownedJobs.toList() },
                         // A hold that is NOT about quiescence cannot be cured by an empty list
-                        // (reviewer 9f873b94): a failed stop or abnormal finish stays unproven.
+                        //: a failed stop or abnormal finish stays unproven.
                         // ONLY A QUIESCENCE HOLD MAY BE CLEARED BY OBSERVING QUIESCENCE (reviewer
                         // 97ab6e9a). `Residual` with no error is a work-outstanding hold that a
                         // recheck can legitimately resolve. `AmbiguousRelease` is NOT: the release
@@ -1288,7 +1288,7 @@ class VoiceControlService : Service() {
                             )
                         }
                         // NO BATCH ADD: releaseResources records each kind as it confirms, so
-                        // re-adding would claim kinds whose release threw (reviewer 9f873b94).
+                        // re-adding would claim kinds whose release threw.
                         if (TeardownRetry.fullyReleased(all, releasedResources)) {
                             TeardownResult.Released
                         } else {
@@ -1311,10 +1311,10 @@ class VoiceControlService : Service() {
      * The releases themselves, skipping anything already recorded as released.
      *
      * Splitting them out is what makes a retry safe: a repeated media-session or renderer release is
-     * destructive, so only pending kinds may run (spec d885d207).
+     * destructive, so only pending kinds may run.
      */
     private fun releaseResources(pending: List<String>) {
-        // RECORD EACH RELEASE AS IT CONFIRMS (reviewer 9f873b94). Adding the whole batch after the
+        // RECORD EACH RELEASE AS IT CONFIRMS. Adding the whole batch after the
         // loop meant a throw halfway through lost the record of kinds that HAD already released, so a
         // retry would release them a second time — and a repeated media-session or renderer release
         // is destructive. Marking each one immediately makes the record match what really happened.
@@ -1352,7 +1352,7 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * Observe a teardown result the platform path receives (reviewer 47a3a267).
+     * Observe a teardown result the platform path receives.
      *
      * The seam is the ONE stop authority, so its result must not be dropped here: a Held teardown
      * means the audio stack may still be owned, and that has to stay visible instead of the caller
@@ -1360,7 +1360,7 @@ class VoiceControlService : Service() {
      */
     // Judge an engine job's finish. The POLICY lives in EngineQuiescence so it is executable in a
     // control: a cancellation the engine initiated is expected shutdown, and a job that completed
-    // without cancellation is clean (reviewer 47a3a267).
+    // without cancellation is clean.
     private fun abnormalEngineFinish(job: Job): Throwable? {
         val engine = voiceAsrEngine.get()
         // The recorded outcome and the expected-cancellation set are passed through (reviewer
@@ -1379,7 +1379,7 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * THE ONE OWNER OF A TEARDOWN'S OUTCOME (reviewer 9f873b94).
+     * THE ONE OWNER OF A TEARDOWN'S OUTCOME.
      *
      * There used to be two side-channel launches — one in the stop path, one at the platform seam —
      * each awaiting the same Deferred and then writing [teardownFailure]. They raced. A re-stop could
@@ -1387,20 +1387,20 @@ class VoiceControlService : Service() {
      * `isCompleted` also read a stale `teardownFailure = null` and treated a HELD teardown as a
      * successful, non-retryable stop.
      *
-     * The stop path does NOT read this field to decide a retry (reviewer 9d15bb44 follow-up): it
+     * The stop path does NOT read this field to decide a retry: it
      * consumes the completed Deferred's own result via [settleRecord], so an attempt's outcome is
      * always the one that attempt produced. This field exists for status and health surfaces, where a
      * slightly later publish is harmless. Claiming the two can never disagree would be false.
      */
     private fun recordTeardownOutcome(teardown: Deferred<TeardownResult>) {
-        // THE ATTEMPT THIS CALLBACK BELONGS TO, captured now (reviewer 97ab6e9a). Serializing
+        // THE ATTEMPT THIS CALLBACK BELONGS TO, captured now. Serializing
         // CREATION was not enough: the completion callbacks still published unconditionally, so an
         // older attempt finishing late could overwrite a newer attempt's outcome and reinstate a
         // hold that had already been resolved. Publication is guarded by the SAME ownership protocol
         // as creation, and an attempt may only publish while it is still the current one.
         val attempt = teardown
         teardown.invokeOnCompletion {
-            // KEYED BY ATTEMPT, NOT BY "FIRST EVER" (reviewer a9271b39). A compareAndSet(null, ...)
+            // KEYED BY ATTEMPT, NOT BY "FIRST EVER". A compareAndSet(null, ...)
             // recorded the FIRST teardown forever, so a Held->Released retry could never replace it
             // and `teardownFailure` stayed stale: the retry would succeed and the service would go on
             // reporting a hold. Each attempt now owns its own record, and the CURRENT attempt is the

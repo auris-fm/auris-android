@@ -23,7 +23,7 @@ import org.mockito.kotlin.mock
  * must finalize it exactly once, and a late report or settle for that invocation must not resurrect
  * it or publish a second time.
  *
- * EVIDENCE SCOPE (corrected after reviewer f175ac72): this exercises the REAL engine's
+ * EVIDENCE SCOPE (corrected after): this exercises the REAL engine's
  * stop/report/settle consumption concurrently, but the invocation is opened through the test seam
  * [au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.openInvocationForTest] and the
  * sink overrides retention publication to count observations. It closes the narrow exactly-once

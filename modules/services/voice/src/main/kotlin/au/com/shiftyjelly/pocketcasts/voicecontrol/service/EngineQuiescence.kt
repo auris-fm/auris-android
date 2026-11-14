@@ -7,7 +7,7 @@ import kotlinx.coroutines.Job
  *
  * This is deliberately a pure value type rather than inline logic in [VoiceControlService]: the
  * teardown's safety property — "do not release what may still be in use" — has to be *executable*,
- * not just readable in the service's source text (reviewer 9294defb).
+ * not just readable in the service's source text.
  */
 internal object EngineQuiescence {
     /**
@@ -23,7 +23,7 @@ internal object EngineQuiescence {
      * The cause when an engine job FAILED, or null when its end was expected.
      *
      * The teardown cancels these jobs deliberately, so a cancellation the ENGINE initiated is
-     * expected shutdown and must not be reported as a held failure (reviewer 47a3a267). A job that
+     * expected shutdown and must not be reported as a held failure. A job that
      * finished without cancellation is clean. Because Job exposes no public failure-cause accessor
      * in this coroutines version, a cancellation the engine did not initiate stays conservative:
      * it is treated as a failure rather than claimed as success.
@@ -41,13 +41,13 @@ internal object EngineQuiescence {
         // the recorded cause must actually BE a cancellation, and a cancellation wrapping a real
         // cause is not one. Anything else keeps its verdict.
         if (job in expectedCancellation && recordedCause.isCancellationLike()) return null
-        // A RECORDED FAILURE WINS (reviewer 1ff17ee6): a job that had already failed before the stop
+        // A RECORDED FAILURE WINS: a job that had already failed before the stop
         // must keep its own failure, even though the teardown also referenced it.
         recordedCause?.let { cause ->
             // A cancellation WRAPPING a real cause is not an exemption: report the real cause, so a
             // failure thrown during cleanup is visible as itself rather than as "cancelled".
             if (cause is kotlinx.coroutines.CancellationException) {
-                // A BARE CANCELLATION IS ONLY EXPECTED IF WE CAUSED IT (reviewer a9271b39). Returning
+                // A BARE CANCELLATION IS ONLY EXPECTED IF WE CAUSED IT. Returning
                 // null for every CancellationException accepted cancellation by ANYONE as success —
                 // exactly the external-cancellation case this function exists to catch. When the
                 // engine did not cancel this job, an unexplained cancellation is [ABANDONED_CANCELLATION].
@@ -103,7 +103,7 @@ internal object EngineQuiescence {
         /**
          * A release was ATTEMPTED and threw, so it is UNKNOWN whether the effect happened.
          *
-         * This is distinct from [Residual] on purpose (reviewer 97ab6e9a). A residual join means
+         * This is distinct from [Residual] on purpose. A residual join means
          * "work is still running", which quiescence can genuinely resolve later. A release that
          * threw may have completed its effect before failing, so replaying it could perform
          * destructive cleanup twice. Nothing a recheck can observe proves otherwise, so this verdict
@@ -123,7 +123,7 @@ internal object EngineQuiescence {
         stop: () -> Unit,
         unfinished: () -> List<Job>,
         join: suspend (Job) -> Unit,
-        // EVERY job the engine ever created (reviewer a9271b39). `unfinished` alone cannot see a
+        // EVERY job the engine ever created. `unfinished` alone cannot see a
         // job that finished — cancelled, or failed — BEFORE the first snapshot, so a pre-snapshot
         // failure was never judged and the shutdown could still report Settled. Ownership is the
         // set that outlives completion; it is what the verdict must scan for abnormal finishes.
@@ -140,7 +140,7 @@ internal object EngineQuiescence {
             // Re-sample each round: joining is not atomic with the snapshot, and the engine may
             // register work faster than we drain it.
             unfinished().filterNot { it in joined }.forEach { job ->
-                // A THROWING JOIN IS NOT PROOF OF COMPLETION (reviewer bdb914a6): it must become a
+                // A THROWING JOIN IS NOT PROOF OF COMPLETION: it must become a
                 // verdict, not an exception escaping into whatever handles the caller. Only a
                 // returned join proves the job finished.
                 val wait = runCatching { join(job) }
@@ -150,12 +150,12 @@ internal object EngineQuiescence {
             // Quiescence is "nothing UNFINISHED remains", not "the list is empty": the engine keeps
             // completed jobs listed until their completion callback prunes them.
             if (unfinished().none { !it.isCompleted }) {
-                // COMPLETION IS NOT SUCCESS (reviewer 47a3a267): a failed job joins cleanly, so the
+                // COMPLETION IS NOT SUCCESS: a failed job joins cleanly, so the
                 // outcomes are inspected. Judge from the CAPTURED jobs, never by re-reading the live
                 // list — pruning means the same shutdown could otherwise be classified Held or
                 // Settled purely on prune timing.
                 //
-                // JUDGE OWNERSHIP TOO, NOT ONLY WHAT WE JOINED (reviewer a9271b39): a job that had
+                // JUDGE OWNERSHIP TOO, NOT ONLY WHAT WE JOINED: a job that had
                 // already finished before the first snapshot never appears in `joined`, so scanning
                 // it alone let a pre-snapshot failure through as Settled. `owned` is sampled ONCE
                 // here, at verdict time, and judged together with the joined set.
@@ -188,7 +188,7 @@ internal data class TeardownFailure(val verdict: EngineQuiescence.Verdict) {
  * How a teardown ended.
  *
  * Returned rather than thrown: the teardown runs in an unrouted coroutine, so an exception would be
- * uncaught and could take the process down (reviewer 3104ba44). A [Held] result means the engine
+ * uncaught and could take the process down. A [Held] result means the engine
  * could not be proven settled and the dependent resources were deliberately NOT released.
  */
 internal sealed interface TeardownResult {

@@ -47,7 +47,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `speak before initialization reports failure instead of silent delivery`() = runTest {
-        // REVIEWER 4356625551: the engine used to swallow this case silently, so the renderer
+        // the engine used to swallow this case silently, so the renderer
         // counted a reply as delivered while the user heard nothing. speak must REPORT that no
         // synthesis happened.
         assertFalse(engine.speak("hello", "en"))
@@ -55,7 +55,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `an accepted synthesis whose callbacks never arrive fails the utterance within the bound`() {
-        // REVIEWER 4356632247: an engine that queues SUCCESS but never delivers onDone/onError/onStop
+        // an engine that queues SUCCESS but never delivers onDone/onError/onStop
         // used to leave speak() suspended forever; speakWithHeartbeat kept reporting emission, so
         // the user's next utterance was suppressed for the whole session.
         //
@@ -110,7 +110,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `synthesized audio that cannot be decoded is an incomplete delivery, not success`() {
-        // REVIEWER 486205ae: speak() used to return true after playSynthesized() even when the WAV
+        // speak() used to return true after playSynthesized() even when the WAV
         // decode failed -- a file was synthesized, no audio was heard, and the caller still released
         // the delivery hold as clean. The typed incomplete failure is the truthful outcome.
         // The fake writes GARBAGE bytes for this utterance, so the platform "succeeds" while the
@@ -152,7 +152,7 @@ class AndroidPlatformTtsEngineTest {
         val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         wired.trackFactoryForTest = { null }
-        // NO REAL-TRACK FALLBACK (reviewer b0a21f8d): with the factory installed, a null result
+        // NO REAL-TRACK FALLBACK: with the factory installed, a null result
         // must be the terminal. If the engine still fell through to the real constructor, playback
         // would proceed and reach the write loop -- countable here.
         var writeAttempts = 0
@@ -263,7 +263,7 @@ class AndroidPlatformTtsEngineTest {
             // Complete it the way the platform does, so the call resumes normally.
             fake.listener?.onDone(fake.lastUtteranceId)
             runBlocking { job.join() }
-            // The fake writes no WAV, so playback now fails TRUTHFULLY (reviewer 486205ae); the
+            // The fake writes no WAV, so playback now fails TRUTHFULLY; the
             // failure must not cancel the scope -- a later utterance must still run, which is the
             // property this test exists to prove.
             assertTrue(
@@ -355,7 +355,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `a late onDone from a cancelled utterance must not complete its successor`() {
-        // Reviewer 3aaab695 (original finding 4236364898): the utterance listener is SHARED across
+        // the utterance listener is SHARED across
         // speak() calls -- B's setOnUtteranceProgressListener REPLACES A's, so any LATE callback
         // from the cancelled A is delivered into B's listener, which resumes B's captured
         // continuation WITHOUT checking the utterance id. A cancel / B start / late A onDone thus
@@ -365,7 +365,7 @@ class AndroidPlatformTtsEngineTest {
         val scope = CoroutineScope(Dispatchers.Default)
 
         // B (and A, had it completed) now ends in TtsPlaybackIncompleteException under Robolectric,
-        // which cannot audibly drain a track (reviewer 486205ae): the launches catch so the typed
+        // which cannot audibly drain a track: the launches catch so the typed
         // failure stays local -- these tests are about utterance-id routing, not playback.
         val first = scope.launch {
             try {
@@ -537,7 +537,7 @@ class AndroidPlatformTtsEngineTest {
         onSynthesize: (utteranceId: String) -> Unit = {},
     ): Triple<AndroidPlatformTtsEngine, FakeSynthesizer, PlaybackBufferRecorder> {
         val fake = FakeSynthesizer(onSynthesize)
-        // ON BY DEFAULT since reviewer 486205ae: speak() now reports a synthesized-but-unplayable
+        // ON BY DEFAULT sincespeak() now reports a synthesized-but-unplayable
         // utterance as TtsPlaybackIncompleteException instead of a silent success, so a fake that
         // writes no WAV would turn every onDone-completing test into an uncaught failure. Tests
         // that specifically exercise the no-audio paths opt OUT (emitRealWav = false). The drain
@@ -680,7 +680,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `cancelling while a write is blocked stops the owned output without waiting for the write`() {
-        // @spec's correction to the supersession fix: between-write checks cover SUPERSESSION, but a
+        // the correction to the supersession fix: between-write checks cover SUPERSESSION, but a
         // write already BLOCKED when cancellation lands cannot reach the next check -- the stop must
         // be initiated BY the cancellation, while the write is still blocked, and a plain completion
         // hook would wait for the very write it needs to interrupt.
@@ -744,7 +744,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `a successor claiming during the old utterance's synthesis does not let the old playback adopt its generation`() {
-        // @spec's ordering: the ownership token must be carried from the SYNTHESIS claim. If playback
+        // the ordering: the ownership token must be carried from the SYNTHESIS claim. If playback
         // re-read the global generation, an old utterance whose successor claimed during its own
         // synthesis would ADOPT the successor's generation, believe itself the owner, and its
         // teardown would stop the successor's output.
@@ -804,7 +804,7 @@ class AndroidPlatformTtsEngineTest {
             fake.stopCalls,
         )
         assertNull("the old playback must not throw in this ordering (failure=$oldFailure)", oldFailure)
-        // @spec's flag assertion: the old utterance never reached playback, so it must not have
+        // the flag assertion: the old utterance never reached playback, so it must not have
         // claimed the shared flag -- an utterance that wrote nothing has no playing audio to report.
         assertFalse(
             "a superseded utterance that never wrote must not leave the playback flag set",
@@ -815,7 +815,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `a superseded reply stops at the next write instead of continuing under the successor`() {
-        // @spec's focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
+        // the focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
         // write -- the state a slow or contended output actually produces. While it is blocked, a
         // successor claims the engine; when the write unblocks, the old reply must perform NO
         // further writes. The job-completion hook cannot provide this: a blocked write never
@@ -1226,7 +1226,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `engine release during a blocked write never queries a released track`() {
-        // @reviewer 4236364948: AudioFeedbackRenderer.release() calls engine release() while this
+        // AudioFeedbackRenderer.release() calls engine release() while this
         // utterance is BLOCKED in track.write on IO -- and the old release() stopped AND RELEASED the
         // same AudioTrack. The loop then resumed, evaluated playbackHeadPosition on the released
         // instance, and threw IllegalStateException: stopping voice control mid-answer turned speak()
@@ -1322,7 +1322,7 @@ class AndroidPlatformTtsEngineTest {
     @Test
     @Suppress("DEPRECATION")
     fun `engine release silences the owned track without freeing it while the owner still reads`() {
-        // @reviewer ca0a39554 review: the ownership contract must be observable at the instance
+        //review: the ownership contract must be observable at the instance
         // boundary, not inferred from counters that stay green when the forbidden release returns.
         // The injected track records release() and refuses position reads afterwards -- exactly the
         // native hazard shape (IllegalStateException on a freed AudioTrack) -- so premature
@@ -1424,7 +1424,7 @@ class AndroidPlatformTtsEngineTest {
     @Test
     @Suppress("DEPRECATION")
     fun `a throwing final position read cannot become successful completion`() {
-        // @reviewer ca0a39554 review: `if (positionBroken) 0 else headPosition()` consulted the flag
+        //review: `if (positionBroken) 0 else headPosition()` consulted the flag
         // BEFORE the final read, so a final read that threw AFTER earlier successful reads returned
         // the fallback == framesWritten and could pass the shortfall check as success. The fix reads
         // once, then checks the flag. The injected track throws only from the second position read,

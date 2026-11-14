@@ -33,13 +33,13 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
 /**
- * THE ACTUAL CLOUD → PERSIST CHAIN (reviewer 58889f29): a REAL
+ * THE ACTUAL CLOUD → PERSIST CHAIN: a REAL
  * [PlaybackManagerPlaybackSink] grants audio focus, a REAL
  * [VoicePlaybackIntentExecutor] decides what to report through its production
  * `execute(intent, onOutcome)` channel, and the engine applies the aggregate to the
  * retained capture.
  *
- * EVIDENCE SCOPE (corrected after reviewer f175ac72): the duck runs on the real sink over a mocked
+ * EVIDENCE SCOPE (corrected after): the duck runs on the real sink over a mocked
  * AudioManager, and the cloud route is a TEST adapter that calls it. The reported facts then travel
  * the same mapping the dispatcher uses and are applied to a test-opened invocation. This is NOT
  * the production dispatch path, and it does not reach persisted bytes; that composition is

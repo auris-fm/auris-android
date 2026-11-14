@@ -23,7 +23,7 @@ private val ISSUED_AUTHORITY = IssuedAuthority("a@b.c", "epoch-1", "disclosure-1
  * falls back to its own default. On the pre-delta tree that default is `UnavailableCaptureAllowance`,
  * which refuses every capture — so this test is RED for exactly the right reason: capture is blocked
  * by the ABSENCE OF AN ALLOWANCE rather than by consent or policy. A control that injected a
- * permissive fixture would pass before and after and prove nothing (reviewer ce3eae70).
+ * permissive fixture would pass before and after and prove nothing.
  */
 class CaptureWithoutAllowanceTest {
 

@@ -154,7 +154,7 @@ class WebSocketCloudTurnTransportFailureTest {
     /**
      * A refused TERMINAL ENQUEUE must still end the turn observably.
      *
-     * @spec's distinction: the transport has TWO buffers -- its internal `channel` (4096), which
+     * THE DISTINCTION: the transport has TWO buffers -- its internal `channel` (4096), which
      * `emitTerminal` enqueues into, and `callbackFlow`'s own output buffer, which the consumer
      * drains. Filling the second and observing ITS failure says nothing about a refused terminal
      * enqueue, which is the case that silently completed in the original defect.

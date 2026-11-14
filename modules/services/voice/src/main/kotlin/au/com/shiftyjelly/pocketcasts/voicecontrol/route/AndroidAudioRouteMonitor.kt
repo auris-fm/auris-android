@@ -196,7 +196,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         // stream reports what it is routed to, that overrides enumeration: enumeration says what COULD
         // be, the observation says what IS. When no stream reports -- the paired-but-inactive case --
         // the route is Unknown, because substituting availability for an observation would impose
-        // headset setup on a session that may be using the speaker. @spec's rule, and it is what makes
+        // headset setup on a session that may be using the speaker. the rule, and it is what makes
         // "paired" different from "routed".
         routedOutputObserver?.current()?.let { routed ->
             val devices = enumerated()

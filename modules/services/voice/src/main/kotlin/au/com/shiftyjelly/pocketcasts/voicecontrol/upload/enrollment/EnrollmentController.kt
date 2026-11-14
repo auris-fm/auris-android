@@ -99,7 +99,7 @@ class EnrollmentController(
     private val ownerSession: () -> Long,
     /**
      * Runs a block under the OWNER transaction, so an account/session transition cannot interleave
-     * with a currency decision and its effect (reviewer e313b32c). Absent in tests that have no owner
+     * with a currency decision and its effect. Absent in tests that have no owner
      * authority; the fence lock still applies, but only the owner transaction makes the session
      * reading atomic WITH the transition that changes it.
      */

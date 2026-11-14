@@ -4,7 +4,7 @@ import java.util.UUID
 
 /**
  * Immutable capture context, FROZEN SYNCHRONOUSLY at the segment START on the pipeline thread
- * (plan Task 3, spec dc4cb5af). The SAME object value is handed to the wake detector, ASR,
+ * (plan Task 3,). The SAME object value is handed to the wake detector, ASR,
  * routing and execution call sites so outcomes join by issued identity, never by "whatever
  * capture is current" at outcome time.
  */
@@ -29,7 +29,7 @@ data class CaptureContext(
     val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef =
         au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
     /**
-     * The TRANSLATION provenance OBSERVED for this capture (reviewer 8288ac15): null when no
+     * The TRANSLATION provenance OBSERVED for this capture: null when no
      * translation ran or its identity was not observed. Never claimed when unobserved.
      */
     val translation: TranslationProvenance? = null,
@@ -51,14 +51,14 @@ data class TranslationProvenance(
     /** The target language the result is in (observed), when a result exists. */
     val targetLanguage: String?,
     /**
-     * P1 (reviewer 7033f4d9): a KNOWN skip of the separate translation stage, in the existing
+     * P1: a KNOWN skip of the separate translation stage, in the existing
      * owning vocabulary (backend_handles_translation / source_language_unavailable /
      * translator_unavailable / source_language_target_language). A skip is a known fact, not
      * honest-unknown; capability alone never asserts a produced result.
      */
     val skipReason: String? = null,
     /**
-     * P1 (reviewer be375ea1): the stage RAN and failed / returned invalid output — a known
+     * P1: the stage RAN and failed / returned invalid output — a known
      * FAILURE fact (state failed), never laundered into a skip or unknown.
      */
     val failedWith: String? = null,
@@ -80,7 +80,7 @@ sealed interface SegmentObservation {
         override val context: CaptureContext,
         val producerSamples: Int,
         /**
-         * The SELECTED prepaid metadata bound, FROZEN at admission (reviewer fde5349e): it travels
+         * The SELECTED prepaid metadata bound, FROZEN at admission: it travels
          * with the capture into the retained candidate, so persistence reads immutable frozen
          * state. NULL refuses publication fail-closed - missing metadata authority never means
          * unconstrained. Positive fixtures pass an explicit bound.
@@ -104,7 +104,7 @@ sealed interface SegmentObservation {
         override val context: CaptureContext,
         /** The production first-chunk array; the sink ADOPTS it (no upload-side copy). Its
          * CAPACITY may exceed the drained VALID range — the whole allocation stays charged until
-         * the buffer is dropped (reviewer 79b2b5c9 b1/b3); audio readers must slice to
+         * the buffer is dropped (b1/b3); audio readers must slice to
          * [validSamples]. */
         val firstChunk: ShortArray,
         /** Samples actually drained into [firstChunk] (distinctive-partial-copy proof). */
@@ -203,7 +203,7 @@ interface SegmentSink {
     /**
      * Pre-allocation admission: reserve EXACTLY [SegmentObservation.Admission.producerSamples]'s
      * bytes against the aggregate budget BEFORE the producer copies anything out, and register a
-     * PER-ALLOCATION reservation token carrying that capacity (reviewer 23cae70e b3/b4). The
+     * PER-ALLOCATION reservation token carrying that capacity (b3/b4). The
      * token — not any global counter — is what commit/release consume. Null = refused.
      */
     fun admit(observation: SegmentObservation.Admission): ReservationToken? = null
@@ -250,7 +250,7 @@ interface SegmentSink {
 }
 
 /**
- * Per-allocation reservation handle (reviewer 23cae70e b3): identifies ONE reserved capacity
+ * Per-allocation reservation handle (b3): identifies ONE reserved capacity
  * window. Commit/release operations address THIS token; charges can never cross captures or
  * allocations through a shared counter.
  */

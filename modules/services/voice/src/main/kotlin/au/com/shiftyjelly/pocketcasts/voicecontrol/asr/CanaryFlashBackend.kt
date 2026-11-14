@@ -139,7 +139,7 @@ class CanaryFlashBackend @Inject constructor(
     private var loadVerified = false
 
     /**
-     * P1 (reviewer be375ea1): load evidence = THIS loader's successful preparation from the
+     * P1: load evidence = THIS loader's successful preparation from the
      * content-verified bytes of the pinned manifest identity ([CANARY_MANIFEST_ID]).
      */
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
@@ -210,7 +210,7 @@ class CanaryFlashBackend @Inject constructor(
     companion object {
         // INT8 export of NVIDIA canary-180m-flash (en/de/es/fr), confirmed on HuggingFace:
         // csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8
-        // PINNED REVISION (reviewer 704ef15a): resolve/main is mutable and the upstream export has
+        // PINNED REVISION: resolve/main is mutable and the upstream export has
         // no version tags, so the base URL names the exact repo commit the artifacts were verified
         // at (9077164e0d3dd1d5353743e89ceaa1d3a770838c) — the LFS oids below pin file content.
         private const val CANARY_BASE_URL =
@@ -221,7 +221,7 @@ class CanaryFlashBackend @Inject constructor(
         private const val CANARY_TARGET_DIR = "canary-flash-model"
 
         /**
-         * Manifest identity source (reviewer 57719ad2, 704ef15a): the upstream INT8 export has no
+         * Manifest identity source (, 704ef15a): the upstream INT8 export has no
          * version tags, so immutability comes from the PINNED REPO COMMIT (content pinned by the
          * LFS sha256s on the weight files), not from the repo name. The manifest names that commit.
          */

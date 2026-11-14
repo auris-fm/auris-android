@@ -88,7 +88,7 @@ class TeardownRetryControlTest {
 
     @Test
     fun `a retry will not release past a hold that quiescence cannot explain`() = runBlocking {
-        // Reviewer 9f873b94: deciding on list emptiness alone let a retry release resources after a
+        // deciding on list emptiness alone let a retry release resources after a
         // FAILED STOP or an abnormal engine finish. The jobs were gone from the list, but the reason
         // the teardown held had never been resolved — so an empty list was not evidence of safety.
         val unresolved = EngineQuiescence.Verdict.StopFailed(IllegalStateException("the final stop threw"))
@@ -127,7 +127,7 @@ class TeardownRetryControlTest {
 
     @Test
     fun `a residual hold that ends in an abnormal job failure is NOT quiescence`() = runBlocking {
-        // Reviewer 3ecf1db0. The retry used to count unfinished jobs only. A processing job that
+        // The retry used to count unfinished jobs only. A processing job that
         // completed ABNORMALLY after a residual hold had already left the live list, so it looked
         // exactly like a clean settle and the retry released. The production predicate must be
         // re-run on the jobs the hold covered.

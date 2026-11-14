@@ -297,13 +297,13 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun start(scope: CoroutineScope): Job {
         tapJob?.cancel()
-        // ADMISSION IS STAMPED AT EMISSION (@spec/@reviewer): the tap asks for a ticket when each chunk
+        // ADMISSION IS STAMPED AT EMISSION: the tap asks for a ticket when each chunk
         // is CREATED, on the playback thread. Chunks already queued when a wholesale retirement happened
         // carry DEAD tickets and are refused at delivery -- consumption must never mint or renew, or
         // stale in-flight work would be laundered into a new generation. Renewal here covers only
         // FUTURE emissions of the live episode owner.
         var currentAdmission: Admission? = null
-        // THE STOP/DRAIN EVENT ITSELF (@reviewer 4235702596): the tap fires this on every sink flush()
+        // THE STOP/DRAIN EVENT ITSELF: the tap fires this on every sink flush()
         // and reset(), which is what media3 pause/seek/stop reach. Retiring the held admission HERE,
         // before any successor emission, closes admission at the real boundary; the epoch bump alone
         // only superseded it when a SUCCESSOR later emitted, leaving a paused-then-idle episode holding
@@ -317,7 +317,7 @@ class PlaybackBufferRecorder @Inject constructor(
                 }
             }
         }
-        // PAUSE ACOUSTIC CONTRACT (@spec/@reviewer): a sink pause ends the current audible-reference
+        // PAUSE ACOUSTIC CONTRACT: a sink pause ends the current audible-reference
         // admission -- only the bounded delay tail survives and expires without another write; queued
         // pre-pause work is refused at delivery. currentAdmission is deliberately KEPT: resume
         // continues the same logical stream, so the stamper's renewal branch admits future playback
@@ -330,7 +330,7 @@ class PlaybackBufferRecorder @Inject constructor(
                 }
             }
         }
-        // REPLACEMENT OWNS THE SLOT (@reviewer): unregister the PRIOR closures before installing the
+        // REPLACEMENT OWNS THE SLOT: unregister the PRIOR closures before installing the
         // new ones -- a start() over a still-installed subscription must replace, not stack.
         streamCloseCallback?.let { fingerprintPcmTap.unregisterStreamClosed(it) }
         streamPausedCallback?.let { fingerprintPcmTap.unregisterStreamPaused(it) }
@@ -360,7 +360,7 @@ class PlaybackBufferRecorder @Inject constructor(
                         opened.ticket
                     }
 
-                    // The ACTIVE OWNER decides renewal from its RETAINED Admission (@reviewer): after a
+                    // The ACTIVE OWNER decides renewal from its RETAINED Admission: after a
                     // wholesale retire() the ticket registry is intentionally empty, so ownership cannot
                     // be recovered by looking the carried ticket up there -- that made renewal
                     // unreachable and every same-epoch emission dead forever. The owner still drives
@@ -381,7 +381,7 @@ class PlaybackBufferRecorder @Inject constructor(
                 // A chunk emitted with no stamper installed carries no ticket; a queued chunk whose
                 // ticket died carries one that is no longer registered. Neither is accepted -- the
                 // recorder refuses by construction, and nothing here mints or renews admission.
-                // Registry access is under the SAME lock as stamping and retirement (@reviewer): the
+                // Registry access is under the SAME lock as stamping and retirement: the
                 // HashMap must never be read while another thread mutates it. Write-time staleness
                 // validation stays as the final guard.
                 val admission = synchronized(lock) { chunk.admissionTicket?.let { liveByTicket[it] } }
@@ -423,7 +423,7 @@ class PlaybackBufferRecorder @Inject constructor(
                 streamPausedCallback = null
             }
         }
-        // SESSION BOUNDARY RETIREMENT (@reviewer 4235702596): leaving up to the whole retained window
+        // SESSION BOUNDARY RETIREMENT: leaving up to the whole retained window
         // of audio behind let the FIRST utterance of a new capture session correlate against PCM the
         // PREVIOUS session submitted -- the same stale-reference case retirement exists for. This is
         // the recorder's own boundary (its only production caller is the service teardown, where no
@@ -479,7 +479,7 @@ class PlaybackBufferRecorder @Inject constructor(
 
     /** Caller holds [lock]. See [retireProducer]. */
     private fun retireProducerLocked(admission: Admission) {
-        // ACOUSTIC OWNERSHIP IS KEYED BY THE ADMISSION INCARNATION (@reviewer/@spec): a renewed stream
+        // ACOUSTIC OWNERSHIP IS KEYED BY THE ADMISSION INCARNATION: a renewed stream
         // shares its logical producer id with the dead one, and old expiry/retirement keyed by that id
         // would zero audio the RENEWED ticket wrote. The ticket is globally unique per incarnation, so
         // ring tags, deadlines, block withdrawal, and observation withdrawal all name the incarnation.
@@ -487,7 +487,7 @@ class PlaybackBufferRecorder @Inject constructor(
         run {
             liveByTicket.remove(ticket)
             closedTickets += ticket
-            // IDEMPOTENT IN TIME (@reviewer): a duplicate stop must NOT restart the deadline -- a stale
+            // IDEMPOTENT IN TIME: a duplicate stop must NOT restart the deadline -- a stale
             // second call would extend the retired tail's matchable lifetime. putIfAbsent keeps the
             // ORIGINAL expiry; the refusal flag is already closed.
             tailExpiryMs.putIfAbsent(ticket, monotonicNowMs() + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE)
@@ -532,7 +532,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // Whole-recorder retirement (stop or route change) ends EVERY producer's stream through
             // this recorder, so all continuations go. A single stream ending is [retireProducer].
             continuations.clear()
-            // GLOBAL RETIREMENT INVALIDATES EVERY OUTSTANDING ADMISSION ATOMICALLY (@spec/@reviewer).
+            // GLOBAL RETIREMENT INVALIDATES EVERY OUTSTANDING ADMISSION ATOMICALLY.
             // Bumping the admission generation kills all tickets minted before this instant -- including
             // a callback from a producer whose FIRST write was still held, which no historical id-ledger
             // could distinguish from a genuinely new successor. Continuing owners renew explicitly via
@@ -544,7 +544,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // A continuing owner re-stamps at its NEXT emission via renewAdmissionLocked, which re-opens
             // into the fresh generation -- queued chunks keep their now-dead tickets and are refused.
             liveByTicket.clear()
-            // DEADLINES SURVIVE THE RESET FOR RETAINED TAILS (@reviewer): any producer whose samples are
+            // DEADLINES SURVIVE THE RESET FOR RETAINED TAILS: any producer whose samples are
             // still retained keeps (or receives) an expiry measured from THIS retirement -- the hardware
             // path they were heard through is being torn down, but the acoustic tail may still reach the
             // microphone briefly and must age out on elapsed time, not linger matchable forever.
@@ -702,7 +702,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // retirement boundary, not to a refused callback.
             if (!isAdmissionLiveLocked(admission)) {
                 // Withdrawal is keyed by TICKET: a refused stale observation clears only an anchor of its
-                // OWN incarnation; a successor sharing the producer id keeps its live anchor (@reviewer).
+                // OWN incarnation; a successor sharing the producer id keeps its live anchor.
                 if (renderObservation?.ticket == ticket) renderObservation = null
                 return
             }
@@ -834,7 +834,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // same lock that orders the ring write: concurrent writers cannot mix carry/phase, and a
             // concurrent retire() cannot clear continuations mid-chunk.
             // Continuation is keyed by the INCARNATION too: a renewed stream on the same logical id must
-            // not inherit the dead one's resampling carry (@reviewer point 2).
+            // not inherit the dead one's resampling carry.
             val continuation = continuations.getOrPut(ProducerClockKey(ticket, sourceSampleRateHz)) {
                 Continuation()
             }
@@ -964,7 +964,7 @@ class PlaybackBufferRecorder @Inject constructor(
 
     // Test-visible INCARNATION tags for the ring slots in [snapshot] order (oldest first), so a
     // control can assert WHICH admission wrote which audio -- presence alone cannot tell an old
-    // stream's own-tagged tail from contamination under a successor's ticket (@reviewer).
+    // stream's own-tagged tail from contamination under a successor's ticket.
     fun ownerTagIdsForTest(): LongArray = synchronized(lock) {
         if (!filled && writePos == 0) return LongArray(0)
         val size = if (filled) buffer.size else writePos

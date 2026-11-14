@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The rule the cloud sink and the pipeline rely on (spec 54287f13): a line is spoken in the
+ * The rule the cloud sink and the pipeline rely on: a line is spoken in the
  * UTTERANCE's language when this build carries a translation for it, and falls back to the
  * default (English) line otherwise — never to silence, and never to the device UI locale.
  */
@@ -45,7 +45,7 @@ class SpokenLineTest {
 }
 
 /**
- * REAL RESOURCE CONTROLS (reviewer 8004f444 / spec ruling 7c7575f6): these run against the
+ * REAL RESOURCE CONTROLS: these run against the
  * module's actual locale resources through Robolectric application contexts, so a UI-locale
  * leak into the fallback table fails here rather than hiding behind custom test maps.
  */

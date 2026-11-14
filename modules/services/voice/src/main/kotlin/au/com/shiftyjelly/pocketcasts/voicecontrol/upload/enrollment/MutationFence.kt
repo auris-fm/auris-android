@@ -5,7 +5,7 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Serializes membership mutations and fences every result against the attempt that produced it
- * (reviewer 9156a8ea point 2).
+ *.
  *
  * THE TWO DEFECTS THIS CLOSES:
  *
@@ -47,7 +47,7 @@ class MutationFence {
     fun issue(ownerSession: Long): Attempt {
         val generationAtIssue = synchronized(this) {
             // EVERY issue takes a fresh generation, including within one session. An earlier version
-            // reused the generation for successive same-session attempts (reviewer d47d2326), so two
+            // reused the generation for successive same-session attempts, so two
             // queued enrolls shared one generation and the OLDER response still looked current once
             // it returned - the newer intent lost to the older one even though both were serialized.
             //
@@ -91,9 +91,9 @@ class MutationFence {
      */
     fun isCurrent(attempt: Attempt, liveSession: () -> Long): Boolean {
         // The session is snapshotted BEFORE the fence lock is taken (lock order owner -> fence
-        // everywhere; see applyIfCurrent, reviewer 445faa5c).
+        // everywhere; see applyIfCurrent,).
         //
-        // This check is NON-MUTATING (reviewer 8ef73f3f): an old labelling check that bumped
+        // This check is NON-MUTATING: an old labelling check that bumped
         // generation/rebound the session from a possibly-STALE snapshot could invalidate or rebind a
         // NEWER attempt issued after the snapshot was taken. Detection of an account switch is
         // therefore answered here by comparison alone; the state change belongs to the APPLY decision
@@ -120,7 +120,7 @@ class MutationFence {
 
     /**
      * Runs [effect] only if [attempt] is still authoritative, with the decision and the effect
-     * performed under THIS fence's lock (reviewer 60647af3, a65eef2f).
+     * performed under THIS fence's lock (, a65eef2f).
      *
      * Why this lives here and not in the caller: a caller-side lock cannot make check-then-act
      * indivisible against THIS object's own mutations. [issue] and [supersede] do not acquire a
@@ -140,7 +140,7 @@ class MutationFence {
         /**
          * Optional OWNER-TRANSACTION scope. When supplied, the session reading, the currency decision
          * and the effect all run INSIDE the owner lock, so an account transition cannot land between
-         * them (reviewer e313b32c).
+         * them.
          *
          * Without it, `liveSession()` takes its own snapshot under a different authority's lock: the
          * session could change immediately after the snapshot and the effect would then apply to an
@@ -154,7 +154,7 @@ class MutationFence {
         // OUTERMOST scope and the fence lock nests inside it. decideLocked snapshots the session
         // BEFORE taking the fence lock, so even the scope-less path never acquires the owner lock
         // while holding the fence lock - isCurrent and this path cannot deadlock against the scoped
-        // path (reviewer 445faa5c). The earlier claim that opposite orders never occur was false.
+        // path. The earlier claim that opposite orders never occur was false.
         if (underOwnerTransaction != null) {
             return underOwnerTransaction { decideLocked(attempt, liveSession, effect) }
         }

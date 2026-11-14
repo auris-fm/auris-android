@@ -12,7 +12,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The FRAGMENT BINDING's copy mapping (reviewer 578bb62a: VM-only controls cannot prove the
+ * The FRAGMENT BINDING's copy mapping (VM-only controls cannot prove the
  * fragment's mapping). The mapping is extracted as a pure function and pinned here.
  */
 class VoiceSharingSettingsRowCopyTest {

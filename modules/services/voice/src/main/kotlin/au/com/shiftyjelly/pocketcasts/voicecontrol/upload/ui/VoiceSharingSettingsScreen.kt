@@ -62,7 +62,7 @@ fun VoiceSharingSettingsScreen(
         )
         if (state.pending) {
             Text(
-                // The pending label names the operation actually in flight (reviewer ae7922f9):
+                // The pending label names the operation actually in flight:
                 // an enrollment in flight must not say "turning sharing off".
                 text = stringResource(
                     when (state.pendingOperation) {
@@ -90,7 +90,7 @@ fun VoiceSharingSettingsScreen(
         if (state.status == SettingsOperationStatus.RELEASE_FAILED) {
             Text(
                 // The server accepted the enrollment but the durable local stop could not be
-                // released: collection stays paused and the user is told why (reviewer a2136dd9).
+                // released: collection stays paused and the user is told why.
                 text = stringResource(R.string.voice_sharing_local_stop_failed),
                 style = MaterialTheme.typography.caption,
             )

@@ -1,0 +1,38 @@
+name: "Chat references in comments"
+
+# A comment that cites a chat message id or quotes a ruling states WHO said a thing
+# instead of WHAT the rule is. The citation goes stale as soon as the conversation
+# scrolls away, and the next reader cannot check it, because the message it points at may
+# not be visible to them and the citation never carried the reasoning.
+#
+# This job fails on those references so the next one is caught at push rather than found
+# by a reader a month later. The pattern list is shared with the core and iOS repos so all
+# three hold one rule.
+#
+# Runs on every PR and on pushes to main: the pull_request event covers branches, and the
+# push event keeps main guarded after merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chat-references:
+    name: "scripts:check-chat-references"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The guard's own selftest runs first. It is the negative control: a guard that never
+      # fires reports "clean" for every tree, which reads exactly like a tree with no
+      # references. If the planted fixtures stop being caught, the scan below proves nothing
+      # and this job must not report a pass.
+      - name: "Guard selftest (planted references must fail, real syntax must pass)"
+        run: ./scripts/check-chat-references.sh --selftest
+
+      - name: "Scan source and test comments"
+        run: ./scripts/check-chat-references.sh --root .

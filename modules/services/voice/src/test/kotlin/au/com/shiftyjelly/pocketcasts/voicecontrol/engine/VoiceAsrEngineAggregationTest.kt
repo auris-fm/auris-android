@@ -6,7 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * THE AGGREGATION SEMANTICS CONTROL (spec 250ddcc3): settlement publishes the SUPPORTED aggregate
+ * THE AGGREGATION SEMANTICS CONTROL: settlement publishes the SUPPORTED aggregate
  * of an invocation's per-action observations — full agreement publishes that outcome; ANY
  * disagreement publishes the explicit schema unknown (never an invented single outcome over
  * conflicting facts); nothing observed publishes unknown too.

@@ -43,7 +43,7 @@ class LfmIntentRouter internal constructor(
     private var loadedFormat: RouterInputFormat? = null
 
     /**
-     * P1 (reviewer 7033f4d9): the loader's OWN verified identity — [loadedRelease] is set only
+     * P1: the loader's OWN verified identity — [loadedRelease] is set only
      * after a successful native load of the manifest-verified release. Null until then.
      */
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {

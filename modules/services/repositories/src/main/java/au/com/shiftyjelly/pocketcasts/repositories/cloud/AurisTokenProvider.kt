@@ -39,8 +39,8 @@ class AurisTokenProvider(
     /**
      * The cache monitor. The coroutine [mutex] single-flights the NETWORK exchange; this monitor
      * owns every PUBLICATION and every synchronous read of [cached], so a non-suspending reader
-     * observes the same coherent sequence of entries the writers published (reviewer 57246e46:
-     * two different locks do not synchronize).
+     * observes the same coherent sequence of entries the writers published, so
+     * two different locks do not synchronize.
      * Entries are immutable, so a snapshot taken under this monitor is stable outside it.
      */
     private val cacheLock = Any()

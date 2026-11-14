@@ -1058,7 +1058,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a no_match from a wake-detected segment speaks the unclear-command line`() = runTest {
-        // The other side of the spec's rule: the user was addressing us and we could not route it,
+        // The other side of the the rule: the user was addressing us and we could not route it,
         // so they hear the line rather than a tone. Without a resolver holding the key the engine
         // falls back to that same earcon, which is what made this path untestable before.
         val resolver = SpokenTemplateResolver(
@@ -1258,7 +1258,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `an escalation after a successor wake is refused and spends no allowance`() = runTest {
-        // @reviewer's suspension case: recognition begins in generation 1, a successor wake opens
+        // the suspension case: recognition begins in generation 1, a successor wake opens
         // generation 2 WHILE it is suspended, and it then returns no intent. The escalation must be
         // refused -- it belongs to a window that is no longer live, and dispatching under the successor
         // would let old recognition spend the successor's allowance.

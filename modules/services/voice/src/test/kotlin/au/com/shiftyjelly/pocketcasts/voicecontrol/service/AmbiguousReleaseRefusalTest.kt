@@ -7,7 +7,7 @@ import org.junit.Test
 /**
  * An ambiguous release must never be replayed.
  *
- * THE PROPERTY, in the reviewer's terms (97ab6e9a): a release that THREW may have taken effect
+ * THE PROPERTY, in the the terms (97ab6e9a): a release that THREW may have taken effect
  * the property, in theterms (97ab6e9a): a release that threw may have taken effect
  * before throwing, so retrying it could perform destructive cleanup twice. This is not something a
  * quiescence recheck can resolve — unlike an outstanding-work hold, where the recheck is exactly the
@@ -34,7 +34,7 @@ class AmbiguousReleaseRefusalTest {
 
     @Test
     fun `a superseded attempt may not publish its outcome`() {
-        // Reviewer 97ab6e9a: serializing CREATION was not enough. The completion callbacks still
+        // serializing CREATION was not enough. The completion callbacks still
         // published unconditionally, so an older attempt finishing late could overwrite a newer
         // attempt's outcome and reinstate a hold that had already been resolved. Publication must be
         // guarded by attempt identity, under the same lock as creation.

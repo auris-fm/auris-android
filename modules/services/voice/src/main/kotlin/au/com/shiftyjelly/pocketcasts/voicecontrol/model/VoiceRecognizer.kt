@@ -21,7 +21,7 @@ interface VoiceRecognizer {
     fun release()
 
     /**
-     * P1 (reviewer 7033f4d9): the verified loaded model identity — established by THIS
+     * P1: the verified loaded model identity — established by THIS
      * implementation's own successful loader — or null when routing has not run with an
      * established artifact. Loading alone is not routing; callers attach the ref only at the
      * actual invocation.

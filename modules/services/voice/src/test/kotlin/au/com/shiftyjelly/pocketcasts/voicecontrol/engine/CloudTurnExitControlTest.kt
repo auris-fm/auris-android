@@ -24,11 +24,11 @@ import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
 /**
- * EVERY EXIT CARRIES THE PRIMARY UNKNOWN (reviewer 00b0d7a9): a cloud duck can report its
+ * EVERY EXIT CARRIES THE PRIMARY UNKNOWN: a cloud duck can report its
  * auxiliary grant and then the stream throws or is cancelled. In both cases the turn's own result
  * is unobserved, so the aggregate must be the explicit unknown — never the auxiliary success.
  *
- * EVIDENCE SCOPE (corrected after reviewer f175ac72): this drives the real
+ * EVIDENCE SCOPE (corrected after): this drives the real
  * [VoicePlaybackIntentExecutor] and the real [PlaybackManagerPlaybackSink] over a MOCKED
  * AudioManager/PlaybackManager, with a TEST cloud-route adapter standing at that boundary. It then
  * applies the dispatcher's mapping and the static aggregation directly. It does NOT cover

@@ -27,7 +27,7 @@ internal fun projectionJson(
 }
 
 /**
- * Task 2 contract controls (reviewer 99f9d241): exact JSON types/values with NO coercion, an
+ * Task 2 contract controls: exact JSON types/values with NO coercion, an
  * explicitly duplicate-detecting strict parser, lifecycle generation issued SYNCHRONOUSLY at
  * request issuance (not account ID, not async flow observation — a conflating flow must not be
  * the invalidation mechanism), token-scoped authority applies (only the originally issued
@@ -230,7 +230,7 @@ class VoiceSharingAccountStateTest {
         assertNull(st.parseProjection(unquoted))
     }
 
-    // --- reviewer 6bcf0d6e: exact decimal lexeme ---
+    // ---exact decimal lexeme ---
 
     @Test
     fun `schema_version near-1 fraction that ROUNDS to 1_0 fails - exact decimal lexeme`() {

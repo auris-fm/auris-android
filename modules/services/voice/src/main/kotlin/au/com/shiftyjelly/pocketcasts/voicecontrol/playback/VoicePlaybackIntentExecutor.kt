@@ -128,7 +128,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
     }
 
     /**
-     * THE ACTION-RESULT CHANNEL (spec 03c96924, reviewer 3fb01865): the sink's structured fact
+     * THE ACTION-RESULT CHANNEL: the sink's structured fact
      * travels through an INVOCATION-LOCAL callback parameter, never a mutable singleton slot —
      * two overlapping dispatches each carry their own reporter, and one dispatch's cleanup can
      * never detach another's.
@@ -138,7 +138,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         outcome: TurnOutcome = TurnOutcome(),
         onOutcome: ((VoiceActionOutcome) -> Unit)? = null,
     ): VoiceResponse {
-        // AUXILIARY vs PRIMARY (reviewer 8c77f5aa): a cloud turn's audio FOCUS is an AUXILIARY
+        // AUXILIARY vs PRIMARY: a cloud turn's audio FOCUS is an AUXILIARY
         // operation — its success says nothing about whether the turn's own actions ran. So
         // primary results are tracked SEPARATELY from auxiliary ones: with no primary fact, the
         // explicit NotObserved is appended even when a duck fact WAS reported. Treating "any
@@ -146,14 +146,14 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         var primaryReported = false
         val observed: ((VoiceActionOutcome) -> Unit)? = onOutcome?.let { cb ->
             { fact: VoiceActionOutcome ->
-                // DISPATCH IS NOT A RESULT (reviewer 00b0d7a9): Dispatched says the call was made,
+                // DISPATCH IS NOT A RESULT: Dispatched says the call was made,
                 // never that it took effect, so it must not clear the unobserved fallback — the
                 // dispatcher maps it to nothing, which would otherwise drop the only unknown marker.
                 if (fact.isObservedPrimaryResult()) primaryReported = true
                 cb(fact)
             }
         }
-        // GUARANTEED COMPLETION (reviewer 00b0d7a9): the fallback runs on EVERY exit — a normal
+        // GUARANTEED COMPLETION: the fallback runs on EVERY exit — a normal
         // return, a throw, or cancellation. A cloud duck can report its auxiliary grant and then
         // the stream throws or cancels; the primary action's result is still unobserved then, and
         // saying so is what prevents the auxiliary success from being published as the turn's
@@ -344,7 +344,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
     ): TurnCapability = when {
         intent !is VoiceIntent.CloudRoute -> TurnCapability.Recognized
 
-        // A REFUSED OR FAILED TURN DID NOTHING FOR THE USER (reviewer9489ae5a / spec f02f8dae): a
+        // A REFUSED OR FAILED TURN DID NOTHING FOR THE USER: a
         // limit refusal reaches an error terminal with no action, and the old code read only the
         // action outcome — None fell into the recognized branch — so a refusal EXTENDED the window.
         // The sink reports whether the turn reached DONE; anything else is unverified.
@@ -367,7 +367,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
     private suspend fun executePlayback(intent: VoiceIntent.Playback, onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = when (intent) {
         // DISPATCH, not effect: the suspend call returning proves the manager was asked, and these
         // sinks render Silent either way. Reporting Dispatched (not Performed) keeps the fact to
-        // what this call site actually observes (spec 3ed49695).
+        // what this call site actually observes.
         VoiceIntent.Playback.Pause -> playbackSink.pause().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 
         VoiceIntent.Playback.Resume -> playbackSink.resume().asLocalResponse().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
@@ -472,7 +472,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         is VoiceIntent.Queue.MoveToBottom -> queueSink.moveToBottom(intent.episode)
 
         // DISPATCHED, not Performed: clearUpNextAsync() returning proves the clear was REQUESTED,
-        // not that the queue emptied (spec 3ed49695). The point of reporting at all is that the
+        // not that the queue emptied. The point of reporting at all is that the
         // CONFIRM_REQUIRED earcon it renders afterwards says nothing about either.
         VoiceIntent.Queue.Clear -> queueSink.clear().also { onOutcome?.invoke(VoiceActionOutcome.Dispatched) }
 

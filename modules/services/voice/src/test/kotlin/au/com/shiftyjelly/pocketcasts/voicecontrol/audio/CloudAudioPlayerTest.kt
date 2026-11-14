@@ -656,7 +656,7 @@ class CloudAudioPlayerTest {
 
     @Test
     fun `a write failure holds for the whole answer, not just one frame`() {
-        // REVIEWER 4356625874: play() runs for every frame the sink submits, so clearing the
+        // play() runs for every frame the sink submits, so clearing the
         // failure flag there made the "stop this answer" contract last exactly one frame -- a
         // transient failure reported once, playback resumed past the gap, and the sink still
         // appended the error earcon after nearly the whole answer. The flag must hold until the
@@ -887,7 +887,7 @@ class CloudAudioPlayerTest {
 
     @Test
     fun `a player claims the routed observation and clears it when it retires`() {
-        // The production connection @spec directed: a player must actually participate in the shared
+        // The production connection directed: a player must actually participate in the shared
         // routed observation, and must withdraw it on release so a stopped player does not leave a route
         // behind for whatever runs next. Removing either call fails this.
         val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
@@ -947,7 +947,7 @@ class CloudAudioPlayerTest {
 
     @Test
     fun `a player whose stream cannot report a clock never advertises a monotonic anchor`() {
-        // @spec's requested caller-path case, at the production call site rather than the recorder.
+        // THE REQUESTED CALLER-PATH CASE, at the production call site rather than the recorder.
         // Robolectric's AudioTrack cannot report a timestamp, so `renderClockMs` returns null and this
         // exercises exactly the platform condition the `observable` flag exists for.
         //
@@ -1001,8 +1001,8 @@ class CloudAudioPlayerTest {
 
     @Test
     fun `a chunk is placed by the frame identity of the observation, not the observation's own time`() {
-        // @spec's assignment: preserve framePosition and nanoTime TOGETHER and use the pair to locate
-        // the chunk against the track's submitted frames. The defect this pins is the one @reviewer
+        // THE ASSIGNMENT: preserve framePosition and nanoTime TOGETHER and use the pair to locate
+        // the chunk against the track's submitted frames. The defect this pins is the one
         // named: getTimestamp reports the frame SOUNDING NOW, which at submission time is earlier
         // audio, and treating its instant as this chunk's position applies the whole buffer depth as
         // though it were zero.
@@ -1140,7 +1140,7 @@ class CloudAudioPlayerTest {
 
     @Test
     fun `completion is consumed when the playback head reaches what was submitted`() {
-        // @spec's ruling: frames handed to the track are SUBMITTED, not played. This case lets the
+        // THE RULING: frames handed to the track are SUBMITTED, not played. This case lets the
         // head reach the submitted count, so the player must report the audio as actually consumed.
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),

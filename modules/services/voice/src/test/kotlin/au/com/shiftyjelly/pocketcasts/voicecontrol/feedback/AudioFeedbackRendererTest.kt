@@ -124,7 +124,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a failed synthesis falls back to the error earcon instead of counting as delivered`() = runTest {
-        // REVIEWER 4356625551: when the TTS engine cannot synthesize (never initialized, queue
+        // when the TTS engine cannot synthesize (never initialized, queue
         // refused, onError), the renderer used to record `spoken_submitted` and release the output
         // hold as a clean completion -- the user heard NOTHING while the turn counted as delivered.
         // The renderer must fall back to the error earcon instead.
@@ -251,7 +251,7 @@ class AudioFeedbackRendererTest {
         signal.onWakeWordDetected()
         val renderer = AudioFeedbackRenderer(earconPlayer, ttsEngine, signal)
         // A scheduler we never run: the first render's body is queued but NEVER starts, exactly the
-        // window in which its catch/finally can never run (reviewer b25287c6).
+        // window in which its catch/finally can never run.
         val scheduler = kotlinx.coroutines.test.UnconfinedTestDispatcher()
         val pausedScope = kotlinx.coroutines.CoroutineScope(
             kotlinx.coroutines.Job() + kotlinx.coroutines.test.StandardTestDispatcher(scheduler.scheduler),
@@ -266,7 +266,7 @@ class AudioFeedbackRendererTest {
         renderer.render(VoiceResponse.Silent, requestId = "successor-B")
         // The supersession site itself must release — the body's catch/finally will never run.
         assertTrue("hold must not be orphaned by a never-started supersession", !signal.hasOutputHold("never-started-A"))
-        // NO-HANDOFF/DISPOSAL ordering (reviewer b4fc46a6): the disposal path must also refuse
+        // NO-HANDOFF/DISPOSAL ordering: the disposal path must also refuse
         // ownership rather than accept-then-leak — render on a disposed renderer reports false.
         renderer.release()
         val accepted = renderer.render(VoiceResponse.Spoken("after dispose"), requestId = "disposed-c")
@@ -328,7 +328,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a cue SHORTER than the heartbeat is still observed and attributed`() = runTest {
-        // @spec's short-cue requirement, using @reviewer's 100-frame cue (about 6 ms at 16 kHz).
+        // the short-cue requirement, using the 100-frame cue (about 6 ms at 16 kHz).
         //
         // A cue shorter than one heartbeat has a bound BELOW one tick, so a loop that required the tick
         // to fit inside the bound NEVER RAN -- and a cue never observed was never attributed, however
@@ -369,7 +369,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a cue observed CONSUMED is attributed, because completion IS measured rendering`() = runTest {
-        // @reviewer's measured case. The head had ALREADY passed every accepted frame when the first
+        // the measured case. The head had ALREADY passed every accepted frame when the first
         // observation happened, so `completion()` reported Consumed immediately. The heartbeat returned
         // on Consumed WITHOUT noting, so a cue that finished between observations was never attributed --
         // treated as if completion proved nothing, when it is in fact the STRONGEST evidence of sounding.
@@ -388,7 +388,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `an OLD observer cannot overwrite its successor's published outcome`() = runTest {
-        // @spec's measured race: `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment after
+        // the measured race: `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment after
         // `completion()` returns, so CANCELLATION ALONE CANNOT PROTECT IT -- an old observer resuming
         // after a successor has published can overwrite the successor's result.
         //
@@ -509,7 +509,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `the renderer covers the admission the PLAY returned, not a later one`() = runTest {
-        // @spec 2243570a, the producer-to-owner handoff window: playEarcon called play() and then read
+        //, the producer-to-owner handoff window: playEarcon called play() and then read
         // "the current admission" SEPARATELY. Between those two, a SUCCESSOR can take the track -- so the
         // renderer would hold the successor's token while believing it held its own, and its later stop
         // would release an admission it never made. The token now comes back FROM the play.
@@ -548,7 +548,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `the observation WAITS OUT the remaining interval to its deadline`() = runTest {
-        // @reviewer's measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
+        // the measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
         // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --
         // the cue was never observed AT the boundary. The loop now sleeps exactly as far as the deadline.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
@@ -608,7 +608,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a permanently QUEUED cue is observed for a BOUNDED time, not forever`() = runTest {
-        // @reviewer's measured defect in my policy implementation: my queued limit was computed as
+        // the measured defect in my policy implementation: my queued limit was computed as
         // `2_000 + elapsed` EACH PASS, so it grew with the loop and could NEVER be reached -- a
         // permanently queued cue was observed forever and the deadline was a formality, not a bound.
         // The limit is ABSOLUTE from submission.
@@ -645,7 +645,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a cue still QUEUED past its estimate is still observed until it sounds`() = runTest {
-        // @reviewer's second measured case, and the same defect in a different shape: the observation
+        // the second measured case, and the same defect in a different shape: the observation
         // stopped when the cue's ESTIMATED duration passed, while the cue was still queued. The estimate
         // is a bound on the WAIT, not a statement that the cue is over -- stopping at it ends the
         // observation BEFORE the sound it is waiting for.
@@ -733,7 +733,7 @@ class AudioFeedbackRendererTest {
         renderer.playEarcon(EarconId.WAKE_WORD)
 
         // NO NOTE AT ACCEPTANCE. The cue was accepted and has not been observed to sound yet, so the
-        // attribution must not be set -- @spec's render-start rule. The coverage is what covers the
+        // attribution must not be set -- the render-start rule. The coverage is what covers the
         // queued delay; the ATTRIBUTION follows the first observed frame.
         assertEquals(
             "acceptance alone must not be attributed: the cue may still be queued",
@@ -786,7 +786,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `attribution ends when the cue is OBSERVED consumed, not when the estimate elapses`() {
-        // @spec's distinction: the accepted-frame duration is an estimate of queued audio, not
+        // THE DISTINCTION: the accepted-frame duration is an estimate of queued audio, not
         // completion. The coverage must end on the OUTPUT's report, so a cue that finishes early
         // stops being attributed early -- and one still sounding keeps the gate informed.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
@@ -859,7 +859,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `ending the session stops subsequent cue attribution`() {
-        // @reviewer's lifecycle probe: after endSession, an already-accepted cue must not keep
+        // the lifecycle probe: after endSession, an already-accepted cue must not keep
         // claiming fresh output -- the session is over, so nothing it was attributed to is still
         // sounding for the user.
         renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
@@ -882,7 +882,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a cue stops being observed once its bounded post-start limit is spent`() {
-        // @spec's policy SUPERSEDES the original "own span" ceiling: a cue is observed for at most
+        // the policy SUPERSEDES the original "own span" ceiling: a cue is observed for at most
         // max(2_000 ms, accepted PCM duration + 1_000 ms) from its FIRST measured rendering. For a
         // 1_500 ms cue that is 2_500 ms, so the observation is BOUNDED and does not run forever -- which
         // is the property the older case was protecting, now stated against the rule that replaced it.
@@ -1114,7 +1114,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a held continuation that ARRIVED is refused, preserving its successor`() = runTest {
-        // THE CORRECTED CONTROL, per @reviewer's 325d7bd4 and @spec's instruction.
+        // THE CORRECTED CONTROL, per the 325d7bd4 and the instruction.
         //
         // TWO THINGS THE EARLIER VERSIONS GOT WRONG, both of them preconditions rather than assertions:
         //  1. `coverageIsRunningForTest` reports only whether the CURRENT job is active. By the time it was
@@ -1192,7 +1192,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `B's writes and head progression are observed while A's held job is cancelled`() {
-        // THE COMBINED OUTCOME @spec asked for, which the two separate controls did not provide: a REAL
+        // THE COMBINED OUTCOME the two separate controls did not provide: a REAL
         // EarconPlayer and controlled track INSIDE the renderer fixture, so B's accepted writes and
         // queued-to-consumed progression are observed in the SAME scenario where A's actual job is held
         // and cancelled. The renderer takes any EarconPlayer, so this swaps the mock for the real one.
@@ -1309,7 +1309,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `an observer held across a successor's CALLBACK GAP must not publish the successor's completion as its own`() {
-        // 21c36ea8 / reviewer 63f99bed -- THE CALLBACK-GAP RACE, reproduced against UNCHANGED production.
+        // THE CALLBACK-GAP RACE, reproduced against UNCHANGED production.
         //
         // The interleaving: A's observer is the CURRENT coverage job, parked at the hold seam AFTER its
         // wait and BEFORE its completion read. B -- the SAME sound, WAKE_WORD -- is admitted and its
@@ -1429,7 +1429,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a successor's frontier mutation that lands before its admission marker must not steal the current observer's verdict`() {
-        // Reviewer 52b786fe / @spec 3125932c -- THE WRITER-INTERNAL WINDOW the first control cannot
+        ///-- THE WRITER-INTERNAL WINDOW the first control cannot
         // reach. The callback-gap control waits for play() to RETURN, so B's marker has already moved
         // and A correctly bails. But B's publication is TWO steps -- frontier fields, then the
         // admission marker -- and marker-last ordering alone does not exclude a reader landing
@@ -1527,7 +1527,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a throwing stop still releases the replaced track, and a throwing play releases the created one`() {
-        // REVIEWER 4356632394: one runCatching around stop()+release() skipped release when stop
+        // one runCatching around stop()+release() skipped release when stop
         // threw (the lambda aborts), leaking the native track; and a created track whose play()
         // threw was never assigned to `track`, so the reference drop orphaned it too.
         val context = org.robolectric.RuntimeEnvironment.getApplication()
@@ -1578,7 +1578,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a rate-change track replacement leaves the old cue's verdict on ITS OWN track, refused successor or not`() {
-        // Reviewer 719c64c8 window: ensureTrack replaces the track on a rate change WITHOUT retiring
+        //window: ensureTrack replaces the track on a rate change WITHOUT retiring
         // the current admission's snapshot. A then reads the NEW track's playback head against A's
         // OLD bounds. The sharpest form is the REFUSED successor: the replacement happens during
         // ensureTrack, BEFORE the write, so a refused B leaves the track replaced and the stale
@@ -1647,7 +1647,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a stop that lands DURING head sampling must not let the sampled head become a verdict`() {
-        // Reviewer 719c64c8: the head read is not validated against stop/release. Land the stop
+        // the head read is not validated against stop/release. Land the stop
         // RE-ENTRANTLY inside the head sample itself -- the sample call performs the stop, then
         // returns a large head. Without a post-sampling revalidation, the in-flight verdict publishes
         // Consumed for a cue whose admission was already stopped and retired. (A latch-based handshake

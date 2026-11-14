@@ -12,7 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * ONE-LOCK VALIDATE-AND-CONSUME (reviewer 9d5ee1ca/c15bf037): settlement must compare the FULL
+ * ONE-LOCK VALIDATE-AND-CONSUME (/c15bf037): settlement must compare the FULL
  * token and consume the record in the SAME lock interval. The previous remove-then-restore shape
  * opened a window where a concurrent report could attach to a record that had already been
  * removed (fact lost) or where restoring a mismatched record resurrected a stopped invocation.

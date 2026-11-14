@@ -29,7 +29,7 @@ class FingerprintTapAudioProcessorTest {
         flush(AudioProcessor.StreamMetadata.DEFAULT)
     }
 
-    // LIFECYCLE CONTRACT (4235652501, @reviewer 7fc5a3b8): the processor is ALWAYS configured -- a
+    // LIFECYCLE CONTRACT (4235652501,): the processor is ALWAYS configured -- a
     // NOT_SET configuration bypasses it entirely and would make a capture session that starts during
     // playback unable to activate it. Forwarding is gated per buffer instead.
     @Test

@@ -39,7 +39,7 @@ class RecordingUploader(
      */
     private val eligible: (FolderQueue.Recording) -> Boolean = { true },
     /** The QUEUE's delete, so a gate refusal is deleted AND logged on the one path every
-     *  deletion uses (reviewer fdab4ba5ff nit). */
+     *  deletion uses. */
     private val deleteRefused: (FolderQueue.Recording) -> Unit = {},
 ) {
     /**

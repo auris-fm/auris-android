@@ -172,7 +172,7 @@ class MicrophoneCapture @Inject constructor(
      */
     fun drainSpeechTail(out: ShortArray, previousTotal: Int, producedSize: Int): Int {
         if (!isRecording || producedSize <= previousTotal || out.isEmpty()) return 0
-        // EXACT-SIZE ranged copy-out (reviewer 2e1d5b0b b3): the native API fills ONLY the
+        // EXACT-SIZE ranged copy-out (b3): the native API fills ONLY the
         // [previousTotal, previousTotal+out.size) range directly into the caller's RESERVED
         // delta array — no whole-prefix ShortArray, no temp, no second copy.
         return hardware.getSpeechPcmRange(out, previousTotal)
@@ -247,7 +247,7 @@ class MicrophoneCapture @Inject constructor(
                 activeEngine = null
                 // Only the engine that still OWNS the active capture ends eligibility: a stale
                 // engine finishing while a replacement holds the session must not end it
-                // (@reviewer fe77cc24).
+                //.
                 episodeReferenceEligibility.setCaptureActive(false)
             }
             if (currentGeneration == engine.generation) {

@@ -699,15 +699,15 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a REFUSED reference seek does not record history, and a refused quote does not either`() = runTest {
-        // The reference branch is where measured this, and it is a different branch from
+    fun `a REFUSED reference seek does not record history`() = runTest {
+        // The reference branch is where this was measured, and it is a different branch from
         // `position_seconds`: that one routes to the plain seek, this one through the fingerprint
         // mapping. A case for one cannot see a defect in the other -- which is how my first version of
         // this control passed while the reference branch still recorded history on a refusal.
         //
-        // Both reference verbs are covered because both recorded first: `seek_to` with
-        // `reference_position_ms`, and `play_quote`.
-        listOf("seek_to" to "reference_position_ms", "play_quote" to "reference_position_ms").forEach { (action, field) ->
+        // `seek_to` is the only remaining reference verb: the quote actions that shared this path
+        // were removed with the protocol.
+        listOf("seek_to" to "reference_position_ms").forEach { (action, field) ->
             val state = CloudPlaybackContextState()
             val deps = TestDeps(
                 cloudPlaybackContextState = state,
@@ -790,7 +790,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -935,7 +935,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1016,7 +1016,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1642,7 +1642,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1716,7 +1716,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `play_quote records previous position on the reference timeline`() = runTest {
+    fun `a reference seek records the previous position on the reference timeline`() = runTest {
         val fingerprint = mock<FingerprintTimingManager>()
         whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
         whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
@@ -1728,7 +1728,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1749,9 +1749,7 @@ class CloudRouteSinkTest {
             45_000L,
             state.snapshot(playbackContext.episodeId).previousReferencePositionMs,
         )
-        // stop_quote recovery still uses the playback-timeline position.
         assertTrue(deps.playback.calls.contains("seekTo:45"))
-        assertTrue(deps.playback.calls.contains("resume"))
     }
 
     @Test
@@ -1774,7 +1772,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -2055,14 +2053,14 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `play_quote captures position seeks and resumes`() = runTest {
+    fun `a reference seek maps the reference timeline onto the sink timeline`() = runTest {
         val deps = TestDeps(
             clientPositionMs = 60_000L,
             routeInvoker = withHold(
                 flowOf(
                     CloudRouteEvent.Action(
                         tool = "playback",
-                        action = "play_quote",
+                        action = "seek_to",
                         params = mapOf("reference_position_ms" to 900_000L),
                     ),
                     CloudRouteEvent.Done(1, 0),
@@ -2071,35 +2069,16 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play the reference", playbackContext, admitted = testWireId).feedback
 
-        assertEquals(
-            // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
-            // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
-            listOf("pause", "seekTo:945", "resume"),
-            deps.playback.calls,
+        // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
+        // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
+        // Asserted by containment because a seek does not resume, so the exact list differs from a
+        // quote's "seek, then resume"; the mapping under test is the seekTo argument.
+        assertTrue(
+            "expected a mapped seek of 945s, got ${deps.playback.calls}",
+            deps.playback.calls.contains("seekTo:945"),
         )
-    }
-
-    @Test
-    fun `stop_quote restores pre-quote playback position`() = runTest {
-        val deps = TestDeps(
-            clientPositionMs = 60_000L,
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 900_000L),
-                ),
-                CloudRouteEvent.Action("playback", "stop_quote", emptyMap()),
-                CloudRouteEvent.Done(1, 0),
-            ),
-        )
-        val sink = deps.sink()
-
-        sink.routeToCloud("quote", playbackContext, admitted = testWireId).feedback
-
-        assertTrue(deps.playback.calls.contains("seekTo:60"))
     }
 
     @Test
@@ -2401,8 +2380,8 @@ class CloudRouteSinkTest {
                 flowOf(
                     CloudRouteEvent.Action(
                         tool = "playback",
-                        action = "play_quote",
-                        params = mapOf("reference_position_ms" to 45_000_000L),
+                        action = "resume",
+                        params = emptyMap(),
                     ),
                     CloudRouteEvent.Done(1, 0),
                 ),
@@ -2411,7 +2390,7 @@ class CloudRouteSinkTest {
         deps.playback.resumeGate = gate
         val sink = deps.sink()
 
-        // Turn A: auto-pause, then its play_quote action resumes — suspending
+        // Turn A: auto-pause, then its resume action resumes — suspending
         // inside the player while A still owns it.
         val first = launch { sink.routeToCloud("first", playbackContext, admitted = testWireId).feedback }
         deps.playback.resumeStarted.await()

@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# The read-back check @spec adopted as the fifth: every job that writes a commit status must
+# The read-back check is the fifth: every job that writes a commit status must
 # DECLARE statuses: write, because GitHub sets absent permissions to `none` and a rejected
 # write fails the job.
 #

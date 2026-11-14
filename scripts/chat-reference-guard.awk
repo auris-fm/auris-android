@@ -246,10 +246,10 @@ BEGIN {
 
     # **No exemption at all.** An earlier version exempted a lane followed by a colon or a
     # slash, on the grounds that a framework resource looks like a citation. But the tree has no
-    # resource attribute inside a comment: every `@android:` occurrence is an XML attribute. The
-    # exemption therefore covered a collision the guard never sees, while letting through the most
-    # common citation there is, "as @lane: said". A resource attribute written in a comment IS a
-    # finding. Do not add the exemption back.
+    # resource attribute inside a comment: every framework-resource occurrence is an XML
+    # attribute and none is in Kotlin. The exemption therefore covered a collision the guard never
+    # sees, while letting through the most common citation there is, "as @lane: said". A resource
+    # attribute written in a comment IS a finding. Do not add the exemption back.
     #
     # The owner of each remaining mention is judged on its own, so one match cannot suppress the
     # rest of the line.

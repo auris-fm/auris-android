@@ -50,11 +50,10 @@ CHAT_LANE_ERE="[@]([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo
 # ordinary word follows a lane name in prose far more often than an id does).
 CHAT_HEX_ERE="(^|[^A-Za-z0-9_-])([Ss][Pp][Ee][Cc]|[Rr][Ee][Vv][Ii][Ee][Ww][Ee][Rr]|[Cc][Ll][Oo][Uu][Dd]|[Tt][Rr][Aa][Ii][Nn][Ee][Rr]|[Gg][Uu][Rr][Uu]|[Aa][Nn][Dd][Rr][Oo][Ii][Dd]|[Ii][Oo][Ss]|[Cc][Ii][Nn][Dd][Yy]|[Nn][Ii][Gg][Hh][Tt][Ss][Hh][Ii][Ff][Tt]|[Mm][Ee][Rr][Ll][Ii][Nn][Rr][Aa][Nn]) +[0-9a-fA-F]{7,}([^A-Za-z0-9]|$)"
 
-# Extensions the rule applies to: source and test files in the repos' own code.
-SOURCE_NAMES=(-name '*.kt' -o -name '*.java' -o -name '*.kts' -o -name '*.cpp' -o -name '*.h'
-              -o -name '*.ts' -o -name '*.go' -o -name '*.py' -o -name '*.mm' -o -name '*.swift'
-              -o -name '*.sh' -o -name '*.yml' -o -name '*.yaml'
-              -o -name '*.toml' -o -name '.gitignore')
+# Directories skipped, by name or root-relative path. A name without a slash matches any path
+# segment; a path with a slash is root-relative.
+EXCLUDED_DIRS='build .gradle .git config/chat-reference-guard/fixtures'
+
 
 usage() {
     sed -n '3,38p' "$0" | sed 's/^# \{0,1\}//'
@@ -104,6 +103,9 @@ chat_lang_for() {
         # TOML carries the dependency rationale, so its comments are prose like a Python
         # docstring's; it has Python's triple-quote spelling too.
         *.toml)                                    echo "hash 1 0 0 0 0" ;;
+        # Ruby and awk both take hash comments, and both appear in this tree: Ruby in the CI
+        # scripts, awk in this guard. Neither has a block-comment form.
+        *.rb|*.awk)                                echo "hash 0 0 0 0 0" ;;
         # A .gitignore explains why an entry is ignored, which is exactly the kind of note a
         # rationale reference attaches to. A hash needs a word break, as in shell.
         *.gitignore)                               echo "hash 0 0 0 1 0" ;;
@@ -140,6 +142,156 @@ scan_file() {
         echo "check-chat-references: the scanner failed on $1 (status $awk_status)" >&2
         return 2
     fi
+}
+
+# The file list comes from git, not from the disk. Walking the filesystem made the answer depend
+# on the machine: an untracked file was read locally and not in CI, so a clean local run and a
+# green CI run could disagree about what had been scanned. Git already knows which files belong
+# to the repository.
+#
+# **A symlink is skipped, not followed.** Git records the link itself (mode 120000) rather than
+# its target, and following one can leave the tree or loop while reading files nobody is
+# reviewing. This repo tracks `.claude/skills` as a link.
+#
+# **An unknown file type fails.** Collecting only the types this script knows meant a new one --
+# a .toml with dependency rationale, a .rb script -- was silently never read, and the scan said
+# clean. Zero files read and zero references found are the same output, so every tracked file
+# must either have a row in chat_lang_for, or be recorded in no_comments_reason.
+# The file type's disposition: "scan" for a type chat_lang_for knows, or the reason it carries
+# nothing to read. Printing nothing means no decision was made, which is an error.
+type_disposition() {
+    local file="$1" base key
+    base="${file##*/}"
+    # A basename that is itself a known type wins over its extension: `gradlew` has none, and
+    # `build.gradle` must not be read as `.gradle` the way `slice(lastIndexOf("."))` would want.
+    case "$base" in
+        Dockerfile|gradlew|gradlew.bat|Gemfile|Dangerfile|CODEOWNERS|Fastfile|config|shared-pipeline-vars|repo-id)
+            echo "nothing: a script or a flat declaration with no rationale comment" ; return ;;
+        .gitignore) echo "scan"; return ;;
+    esac
+    key=".${base##*.}"
+    case "$key" in
+        *.kt|*.kts|*.java|*.cpp|*.h|*.swift|*.mm|*.ts|*.go|*.py|*.sh|*.yml|*.yaml|*.toml|*.rb|*.awk|*.gradle|*.proto)
+            echo "scan"; return ;;
+        *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.ttf|*.otf|*.woff|*.woff2)
+            echo "nothing: a binary asset"; return ;;
+        *.wav|*.mp3|*.mp4|*.flac)
+            echo "nothing: media"; return ;;
+        *.so|*.jar|*.onnx|*.tflite|*.bin)
+            echo "nothing: a compiled or model artefact"; return ;;
+        *.pem|*.keystore|*.enc|*.lock|*.pub)
+            echo "nothing: generated or opaque"; return ;;
+        *.json|*.jsonl)
+            echo "nothing: data; a fixture may record text as records"; return ;;
+        *.xml)
+            echo "nothing: resource markup; this guard reads no comments there"; return ;;
+        *.md)
+            echo "nothing: prose documents a handle openly as data; this check reads comments only"; return ;;
+        *.txt|*.pro|*.properties|*.properties-example|*.configure|*.editorconfig|*.gitattributes|*.env-example)
+            echo "nothing: a flat list or a value"; return ;;
+        *.java-version|*.ruby-version)
+            echo "nothing: a version string"; return ;;
+        *.gitleaksignore|.a8c-secrets/repo-id)
+            echo "nothing: a list of paths"; return ;;
+    esac
+    echo ""
+}
+
+
+
+# The file type's disposition: "scan" for a type chat_lang_for knows, or the reason it carries
+# nothing to read. Printing nothing means no decision was made, which is an error.
+type_disposition() {
+    local file="$1" base key
+    base="${file##*/}"
+    # A basename that is itself a known type wins over its extension: `gradlew` has none, and
+    # `build.gradle` must not be read as `.gradle` the way `slice(lastIndexOf("."))` would want.
+    case "$base" in
+        Dockerfile|gradlew|gradlew.bat|Gemfile|Dangerfile|CODEOWNERS|Fastfile|config|shared-pipeline-vars|repo-id)
+            echo "nothing: a script or a flat declaration with no rationale comment" ; return ;;
+        .gitignore) echo "scan"; return ;;
+    esac
+    key=".${base##*.}"
+    case "$key" in
+        *.kt|*.kts|*.java|*.cpp|*.h|*.swift|*.mm|*.ts|*.go|*.py|*.sh|*.yml|*.yaml|*.toml|*.rb|*.awk|*.gradle|*.proto)
+            echo "scan"; return ;;
+        *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.ttf|*.otf|*.woff|*.woff2)
+            echo "nothing: a binary asset"; return ;;
+        *.wav|*.mp3|*.mp4|*.flac)
+            echo "nothing: media"; return ;;
+        *.so|*.jar|*.onnx|*.tflite|*.bin)
+            echo "nothing: a compiled or model artefact"; return ;;
+        *.pem|*.keystore|*.enc|*.lock|*.pub)
+            echo "nothing: generated or opaque"; return ;;
+        *.json|*.jsonl)
+            echo "nothing: data; a fixture may record text as records"; return ;;
+        *.xml)
+            echo "nothing: resource markup; this guard reads no comments there"; return ;;
+        *.md)
+            echo "nothing: prose documents a handle openly as data; this check reads comments only"; return ;;
+        *.txt|*.pro|*.properties|*.properties-example|*.configure|*.editorconfig|*.gitattributes|*.env-example)
+            echo "nothing: a flat list or a value"; return ;;
+        *.java-version|*.ruby-version)
+            echo "nothing: a version string"; return ;;
+        *.gitleaksignore|.a8c-secrets/repo-id)
+            echo "nothing: a list of paths"; return ;;
+    esac
+    echo ""
+}
+
+# The file list comes from git, not from the disk. Walking the filesystem made the answer depend
+# on the machine: an untracked file was read locally and not in CI, so a clean local run and a
+# green CI run could disagree about what had been scanned. Git already knows which files belong
+# to the repository.
+#
+# **A symlink is skipped, not followed, and so is a submodule.** Git records a link as its own
+# entry rather than its target, and following one can leave the tree, read the same content twice,
+# or loop. A submodule's files are not in this repository at all, so there is nothing to decide
+# about their type and nothing to claim about having read them. This repo tracks `.claude/skills`
+# as a link and has no submodules today.
+#
+# **An unknown file type fails.** Collecting only the types this script knows meant a new one -- a
+# `.toml` with dependency rationale, a `.rb` script -- was silently never read, and the scan said
+# clean. Zero files read and zero references found print the same thing, so every tracked file
+# must either have a row in chat_lang_for or a reason recorded by type_disposition.
+list_tracked_files() {
+    local root="$1" entry head file mode
+    if ! (cd "$root" && git rev-parse --git-dir >/dev/null 2>&1); then
+        echo "check-chat-references: $root is not a git checkout." >&2
+        echo "check-chat-references: this reads tracked files; a disk walk would scan a" >&2
+        echo "check-chat-references: different set here than in CI." >&2
+        return 2
+    fi
+    # **NUL-separated, read with `read -d ''`.** A path may contain a newline, and splitting on
+    # newlines would truncate it without saying so. `read -d ''` is the one reader here that takes
+    # a NUL delimiter intact: a command substitution drops NULs, and the awk in CI cannot use one
+    # as RS. Each entry is "<mode> <sha> <stage>\t<path>".
+    while IFS= read -r -d '' entry; do
+        head="${entry%%$'\t'*}"
+        file="${entry#*$'\t'}"
+        [ -z "$file" ] && continue
+        mode="${head%% *}"
+        case "$mode" in 120000|160000) continue ;; esac
+        excluded_path "$file" || continue
+        printf '%s\n' "$file"
+    done < <(cd "$root" && git ls-files -s -z) | sort
+}
+
+# A name matches any path segment at any depth; an entry containing a slash is root-relative.
+excluded_path() {
+    local file="$1" dir seg rest
+    for dir in $EXCLUDED_DIRS; do
+        case "$dir" in
+            */*) [ "$file" = "$dir" ] && return 1
+                 [ "${file#"$dir"/}" != "$file" ] && return 1 ;;
+            *)   rest="$file/"
+                 while [ -n "$rest" ]; do
+                     seg="${rest%%/*}"; rest="${rest#*/}"
+                     [ "$seg" = "$dir" ] && return 1
+                 done ;;
+        esac
+    done
+    return 0
 }
 
 run_selftest() {
@@ -235,6 +387,51 @@ run_selftest() {
         echo "ok: a scan that died exits 2"
     fi
 
+    # == the file list comes from git, and skips what git marks as a link ==
+    # A directory of files is not what the check reads, so these build a real checkout. A symlink
+    # and a gitlink are built with update-index --cacheinfo: that is the index entry the listing
+    # actually reads, and it needs no submodule checkout that no one's CI has.
+    local list_root
+    list_root="$(mktemp -d)"
+    (
+        cd "$list_root" || exit 1
+        git init -q .
+        printf 'val planted = "@spec said"\n' > Plain.kt
+        printf 'val linked = "@spec said"\n' > Target.kt
+        ln -s Target.kt Link.kt
+        git add Plain.kt Target.kt
+        git update-index --add --cacheinfo 120000,"$(git rev-parse :Target.kt)",Link.kt
+        git update-index --add --cacheinfo 160000,"$(git rev-parse :Target.kt)",Sub
+    ) >/dev/null 2>&1
+    listed="$(list_tracked_files "$list_root" 2>/dev/null | sort | tr '\n' ' ')"
+    case "$listed" in
+        "Plain.kt Target.kt ")
+            echo "ok: symlink and gitlink skipped, files kept" ;;
+        *)
+            echo "FAIL: listing was '$listed'; a symlink or gitlink was read as a file." >&2
+            status=1 ;;
+    esac
+    # A path containing a newline must survive: splitting on newlines truncates it silently.
+    (
+        cd "$list_root" || exit 1
+        printf 'val nl = 1\n' > "$(printf 'has\nnewline.kt')"
+        git add "$(printf 'has\nnewline.kt')"
+    ) >/dev/null 2>&1
+    if list_tracked_files "$list_root" 2>/dev/null | grep -q 'newline.kt'; then
+        echo "ok: a path containing a newline survives the listing"
+    else
+        echo "FAIL: a path containing a newline was truncated or dropped." >&2
+        status=1
+    fi
+    # A root that is not a checkout must fail, not report no files.
+    if list_tracked_files "$(dirname "$list_root")" >/dev/null 2>&1; then
+        echo "FAIL: a non-git root reported a file list instead of failing." >&2
+        status=1
+    else
+        echo "ok: a non-git root fails instead of listing nothing"
+    fi
+    rm -rf "$list_root"
+
     if [ "$status" -eq 0 ]; then echo "selftest: PASS"; else echo "selftest: FAIL"; fi
     return "$status"
 }
@@ -245,26 +442,16 @@ if [ "$mode" = "selftest" ]; then
 fi
 
 if [ "${#paths[@]}" -eq 0 ]; then
-    # Two kinds of exclusion, and the difference is the leading './':
-    #   './.git/*', './.gradle/*', './config/chat-reference-guard/fixtures/*'
-    #       ROOT-ONLY. A nested `docs/.git` is not a build artefact, and a nested copy of the
-    #       fixtures is not the guard's own planted references.
-    #   '*/build/*'
-    #       A NAME, excluded at ANY depth, because Gradle writes a `build/` into every module
-    #       and the generated code in each is not source anyone edits.
-    # Say which kind a rule is when adding one: a name that quietly became root-only, or a
-    # root path that quietly started matching at depth, is how a guard stops covering a tree
-    # while still reporting on it.
-    while IFS= read -r f; do paths+=("$f"); done < <(
-        # -L so a symlinked directory is walked, as core does: this tree has `.claude/skills`
-        # pointing at `.agents/skills`, which holds only Markdown today, but a symlink to a
-        # directory of source would otherwise be invisible to the scan. `find -L` reports a
-        # cycle as an error rather than looping, and 2>/dev/null keeps that from failing the run
-        # on a tree it has already covered.
-        cd "$root" && find -L . \( "${SOURCE_NAMES[@]}" \) \
-            -not -path './.git/*' -not -path '*/build/*' -not -path './.gradle/*' \
-            -not -path './config/chat-reference-guard/fixtures/*' -type f 2>/dev/null | sed 's|^\./||'
-    )
+    # The listing runs in a subshell, so its exit status does not survive `paths+=` on its own.
+    # Writing it to a file is what keeps "cannot list" from reading as "nothing to scan": both
+    # print no paths, and only one of them means the tree was covered.
+    listing_file="$(mktemp)"
+    if ! list_tracked_files "$root" > "$listing_file"; then
+        rm -f "$listing_file"
+        exit 2
+    fi
+    while IFS= read -r f; do paths+=("$f"); done < "$listing_file"
+    rm -f "$listing_file"
 fi
 
 if [ "${#paths[@]}" -eq 0 ]; then
@@ -278,10 +465,24 @@ found=0
 # clean tree and for a broken invocation, and nothing downstream can tell them apart.
 hits_file="$(mktemp)"
 trap 'rm -f "$hits_file"' EXIT
+undecided=0
 for p in "${paths[@]}"; do
     case "$p" in
         /*) target="$p" ;;
         *)  target="$root/$p" ;;
+    esac
+    # Decide the type BEFORE reading it. An undecided type must fail whether or not its bytes
+    # would have parsed, and a binary read as text is a different problem from an unread type.
+    disposition="$(type_disposition "$p")"
+    case "$disposition" in
+        scan) ;;
+        nothing:*) continue ;;
+        *)
+            echo "check-chat-references: no decision for '${p##*.}' (in $p)" >&2
+            echo "check-chat-references: give it a row in chat_lang_for, or record in" >&2
+            echo "check-chat-references: type_disposition that it carries nothing to read." >&2
+            undecided=$((undecided + 1))
+            continue ;;
     esac
     if [ ! -f "$target" ]; then
         echo "check-chat-references: cannot read $p" >&2
@@ -290,6 +491,11 @@ for p in "${paths[@]}"; do
     fi
     scan_file "$target" >> "$hits_file"
 done
+
+if [ "$undecided" -gt 0 ]; then
+    echo "check-chat-references: $undecided file type(s) with no decision; nothing was proven." >&2
+    exit 2
+fi
 
 while IFS= read -r hit; do
     [ -z "$hit" ] && continue

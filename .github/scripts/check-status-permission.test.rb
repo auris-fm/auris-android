@@ -90,7 +90,7 @@ CASES = {
   # comment inside a block scalar: `start_with?('#')` keeps it, `include?('#')` drops it and the
   # writer disappears. Verified: under the loose filter this case fails.
   'a live call with a TRAILING comment in a BLOCK scalar is still a writer' => [job(BLOCK_TRAILING_COMMENT, perms: ['contents: read']), 1, /does not declare statuses: write/],
-  # ROW 4 (@ios's, ported): commented out AND the permission declared. The previous version passed
+  # ROW 4: commented out AND the permission declared. The previous version passed
   # this silently — a dead guard satisfied by a permission that no longer guards anything. The
   # wanted behaviour is that it fails loudly instead, so the divergence is pinned rather than
   # left as a behaviour nobody would notice changing.

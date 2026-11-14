@@ -894,11 +894,11 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `an UNKNOWN outcome keeps the pre-action provenance while recording NO target`() = runTest {
-        // "Preserve the owner's known value; Unknown concerns execution, not whether its
-        // pre-action snapshot existed." The TARGET is suppressed because nothing established the player
-        // reached it; the PRE-ACTION position is kept because the owner captured it before the attempt.
-        // An early return on a null target would discard BOTH, which is the defect this pins.
+    fun `an UNKNOWN outcome records no history`() = runTest {
+        // An UNKNOWN outcome records nothing: nothing established that the player reached the target,
+        // and a previous position with no destination describes a seek that has no history. The
+        // observation is the stored positions, so this fails if any record is written -- including one
+        // carrying only the pre-action provenance.
         val state = CloudPlaybackContextState()
         val deps = TestDeps(
             cloudPlaybackContextState = state,

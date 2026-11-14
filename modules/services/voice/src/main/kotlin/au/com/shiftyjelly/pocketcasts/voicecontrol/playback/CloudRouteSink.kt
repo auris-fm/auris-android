@@ -124,12 +124,6 @@ class CloudRouteSink internal constructor(
     )
 
     /**
-     * Per-turn audio bookkeeping. Deliberately NOT instance state: this sink
-     * is a singleton and a superseded turn unwinds on another thread, so
-     * shared flags would let turn A's restore resume playback for turn B
-     * (A resumes and clears the flag, then B streams over playing audio).
-     */
-    /**
      * Turn ownership and player-state transitions, serialized by one mutex.
      *
      * A monitor lock is not enough: the restore *suspends* (resume loads the
@@ -1164,10 +1158,10 @@ class CloudRouteSink internal constructor(
                                 // the opposite of what I described: Unknown became ACCEPTED and wrote
                                 // history, claiming a target the client never observed being reached.
                                 //
-                                // The PRE-ACTION provenance is still kept, because it is what the client
-                                // knew BEFORE the attempt and it is needed if a later observation
-                                // resolves the outcome; the TARGET is not, because nothing established
-                                // that the player reached it.
+                                // An UNKNOWN outcome records NOTHING. Passing no target keeps the
+                                // record from being written at all -- `record` is the only writer and
+                                // it is reached only with a target -- so this attempt contributes no
+                                // history, because nothing established where the player ended up.
                                 capturePreActionPosition(
                                     targetReferenceMs = null,
                                     acceptedEpisodeId = outcome.episodeId,
@@ -1292,9 +1286,10 @@ class CloudRouteSink internal constructor(
      *
      * THE THREE OUTCOMES ARE DISTINCT AND STAY DISTINCT:
      *   Accepted -> the target was observed; record the pre-action provenance AND the target.
-     *   Unknown  -> the attempt was made and nothing established its result; record the PRE-ACTION
-     *               provenance only. Recording the target would claim an observation nobody made, and
-     *               returning false would present an unknowable execution as "nothing happened".
+     *   Unknown  -> the attempt was made and nothing established its result; record NOTHING. A target
+     *               would claim an observation nobody made, and a previous position with no destination
+     *               describes a seek that has no history, and returning false would present an
+     *               unknowable execution as "nothing happened".
      *   Refused  -> nothing happened; record nothing.
      */
     private fun handleSeekOutcome(
@@ -1347,10 +1342,10 @@ class CloudRouteSink internal constructor(
         // was snapshotted by the manager at the mutation, so it IS the position before the action. The
         // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
         // the starting point -- reading it here would record the destination as the previous position.
-        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. An UNKNOWN outcome keeps the PRE-ACTION
-        // provenance -- what the client knew before the attempt -- but records no target, because
-        // nothing established that the player reached it. Recording it would claim an observation
-        // nobody made, which is @reviewer's measured e201 defect.
+        // AN UNOBSERVED ATTEMPT RECORDS NOTHING. For an UNKNOWN outcome the target is null, so the
+        // return below fires and no record is written -- a previous position with no destination
+        // describes a seek that has no history. Recording a target would claim an observation
+        // nobody made.
         // THE FLAG GATES THE TARGET ITSELF. Keeping `recordTarget` as a parameter but never consulting
         // it made it decorative: the target was recorded for an Unknown outcome exactly as before.
         val target = targetReferenceMs.takeIf { recordTarget }

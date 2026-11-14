@@ -199,45 +199,6 @@ type_disposition() {
 
 
 
-# The file type's disposition: "scan" for a type chat_lang_for knows, or the reason it carries
-# nothing to read. Printing nothing means no decision was made, which is an error.
-type_disposition() {
-    local file="$1" base key
-    base="${file##*/}"
-    # A basename that is itself a known type wins over its extension: `gradlew` has none, and
-    # `build.gradle` must not be read as `.gradle` the way `slice(lastIndexOf("."))` would want.
-    case "$base" in
-        Dockerfile|gradlew|gradlew.bat|Gemfile|Dangerfile|CODEOWNERS|Fastfile|config|shared-pipeline-vars|repo-id)
-            echo "nothing: a script or a flat declaration with no rationale comment" ; return ;;
-        .gitignore) echo "scan"; return ;;
-    esac
-    key=".${base##*.}"
-    case "$key" in
-        *.kt|*.kts|*.java|*.cpp|*.h|*.swift|*.mm|*.ts|*.go|*.py|*.sh|*.yml|*.yaml|*.toml|*.rb|*.awk|*.gradle|*.proto)
-            echo "scan"; return ;;
-        *.png|*.jpg|*.jpeg|*.gif|*.webp|*.ico|*.ttf|*.otf|*.woff|*.woff2)
-            echo "nothing: a binary asset"; return ;;
-        *.wav|*.mp3|*.mp4|*.flac)
-            echo "nothing: media"; return ;;
-        *.so|*.jar|*.onnx|*.tflite|*.bin)
-            echo "nothing: a compiled or model artefact"; return ;;
-        *.pem|*.keystore|*.enc|*.lock|*.pub)
-            echo "nothing: generated or opaque"; return ;;
-        *.json|*.jsonl)
-            echo "nothing: data; a fixture may record text as records"; return ;;
-        *.xml)
-            echo "nothing: resource markup; this guard reads no comments there"; return ;;
-        *.md)
-            echo "nothing: prose documents a handle openly as data; this check reads comments only"; return ;;
-        *.txt|*.pro|*.properties|*.properties-example|*.configure|*.editorconfig|*.gitattributes|*.env-example)
-            echo "nothing: a flat list or a value"; return ;;
-        *.java-version|*.ruby-version)
-            echo "nothing: a version string"; return ;;
-        *.gitleaksignore|.a8c-secrets/repo-id)
-            echo "nothing: a list of paths"; return ;;
-    esac
-    echo ""
-}
 
 # The file list comes from git, not from the disk. Walking the filesystem made the answer depend
 # on the machine: an untracked file was read locally and not in CI, so a clean local run and a

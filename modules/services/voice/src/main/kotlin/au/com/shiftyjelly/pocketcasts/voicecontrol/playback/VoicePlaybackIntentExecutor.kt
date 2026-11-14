@@ -588,10 +588,10 @@ interface VoicePlaybackSink {
     /**
      * Resume, only while [expectedEpisodeId] is still the selected episode.
      *
-     * Null means the caller has no episode-specific subject -- the standalone resume action is
-     * episode-INDEPENDENT -- while a quote's resume carries the recording it was played from, because
-     * resuming a replacement would start audio the user never asked for under a request about a
-     * different episode.
+     * Null means the caller has no episode-specific subject -- a bare resume is episode-INDEPENDENT --
+     * while a bound caller carries the recording the turn is on, because resuming a replacement would
+     * start audio the user never asked for under a request about a different episode. `CloudRouteSink`
+     * is the caller that binds: its `resume` guard passes the turn's episode.
      */
     suspend fun resume(expectedEpisodeId: String? = null): EpisodeOperationResult
     suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult

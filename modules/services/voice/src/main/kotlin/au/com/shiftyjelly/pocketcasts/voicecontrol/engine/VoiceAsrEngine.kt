@@ -689,11 +689,13 @@ class VoiceAsrEngine @Inject constructor(
         val addressed = currentMode == ListeningMode.Continuous || wakePositiveForCurrentUtterance
         if (!addressed) return
         val tag = inFlightUtteranceId ?: java.util.UUID.randomUUID().toString().also { inFlightUtteranceId = it }
-        // The moment the early dial STARTS, so the log can place it against end of speech. Without
-        // this the only evidence that a connection was opened early is its later use by the turn,
-        // which cannot distinguish "opened during the user's trailing silence" from "opened when
-        // the turn began" — the difference the optimisation exists to make.
-        Timber.i("[VoicePipeline] early connection dial tag=%s mode=%s", tag, currentMode)
+        // The moment the early connection is REQUESTED, so the log can place it against end of
+        // speech. This runs on every trailing silence, including resumes that reuse the connection
+        // the opener already holds, so it is named for the request rather than a dial it may not
+        // perform. The tag is logged because the turn later takes the connection by tag: a mismatch
+        // between this tag and the turn's own is invisible otherwise, and would look exactly like
+        // "the early connection never opened".
+        Timber.i("[VoicePipeline] early connection requested tag=%s mode=%s", tag, currentMode)
         opener.openForLater(tag)
     }
 

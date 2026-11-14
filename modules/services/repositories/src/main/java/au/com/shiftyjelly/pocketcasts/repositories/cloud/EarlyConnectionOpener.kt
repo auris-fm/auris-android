@@ -70,23 +70,37 @@ class EarlyConnectionOpener(
      */
     suspend fun takeFor(tag: String): CloudTurnConnection? = withContext(dispatcher) {
         lock.withLock {
-            val current = held ?: return@withLock null
-            if (current.ownerTag != tag) return@withLock null
+            // Every refusal below has the same visible consequence -- the turn dials for itself --
+            // and they are indistinguishable afterwards unless each says why. A tag mismatch in
+            // particular looks exactly like "the early connection never opened", so the tag that
+            // was held is logged beside the one the turn asked for.
+            val current = held ?: run {
+                Timber.i("Early connection take tag=%s: none held", tag)
+                return@withLock null
+            }
+            if (current.ownerTag != tag) {
+                Timber.i("Early connection take tag=%s: held tag=%s does not match", tag, current.ownerTag)
+                return@withLock null
+            }
             held = null
             if (current.isStale(now(), maxAgeMs)) {
+                Timber.i("Early connection take tag=%s: stale", tag)
                 current.close()
                 return@withLock null
             }
             if (current.isDead) {
                 // A failure or close already arrived on this socket: adopting it would end a turn
                 // that had not started. The turn dials fresh.
+                Timber.i("Early connection take tag=%s: dead", tag)
                 current.close()
                 return@withLock null
             }
             if (!current.adopt()) {
+                Timber.i("Early connection take tag=%s: adopt refused", tag)
                 current.close()
                 return@withLock null
             }
+            Timber.i("Early connection take tag=%s: adopted age=%dms", tag, now() - current.openedAtMs)
             current
         }
     }

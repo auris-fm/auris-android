@@ -256,6 +256,39 @@ class EarlyConnectionAdoptionControlTest {
             "an adopted socket must report its open, or the early connection is unobservable: ${observer.events}",
             observer.events.contains("socket_opened"),
         )
+        assertTrue(
+            "the open must be reported before the first frame is sent, or the send looks like a dialled socket's: ${observer.events}",
+            observer.events.indexOf("socket_opened") < observer.events.indexOf("send_attempted"),
+        )
+    }
+
+    /**
+     * A handle that owns no event buffer still has an open socket, and reporting it is the only
+     * evidence the turn had one. Without it this path is indistinguishable from a turn that never
+     * opened a socket at all.
+     */
+    @Test
+    fun `a bufferless adopted connection reports the socket as opened before sending`() = runTest {
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport(
+            baseUrl = "https://example.invalid",
+            okHttpClient = OkHttpClient(),
+            observer = observer,
+        )
+        transport.dial = { _: Request, _: WebSocketListener -> throw IllegalStateException("must not dial") }
+        // events = null: the handle owns a socket but buffers no events for replay.
+        transport.adopt(SocketCloudTurnConnection("utt-1", openedAtMs = 0L))
+
+        withTimeoutOrNull(2_000) { transport.exchange(turn).first() }
+
+        assertTrue(
+            "a bufferless adopted socket must report its open: ${observer.events}",
+            observer.events.contains("socket_opened"),
+        )
+        assertTrue(
+            "the open must be reported before the send: ${observer.events}",
+            observer.events.indexOf("socket_opened") < observer.events.indexOf("send_attempted"),
+        )
     }
 
     /** Records the observer callbacks the transport actually makes. */

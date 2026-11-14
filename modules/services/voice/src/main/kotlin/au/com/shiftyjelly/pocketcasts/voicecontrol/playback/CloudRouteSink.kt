@@ -129,16 +129,6 @@ class CloudRouteSink internal constructor(
      * shared flags would let turn A's restore resume playback for turn B
      * (A resumes and clears the flag, then B streams over playing audio).
      */
-    private class TurnState {
-        /**
-         * Whether an action in this turn was ISSUED with an unknowable outcome.
-         *
-         * Recorded on the TURN because the Boolean `executeAction` result cannot express it: it reaches
-         * the turn's final outcome from inside a function whose whole contract is performed-or-not.
-         */
-        var actionUnknown: Boolean = false
-    }
-
     /**
      * Turn ownership and player-state transitions, serialized by one mutex.
      *
@@ -435,7 +425,6 @@ class CloudRouteSink internal constructor(
                 )
             }
         }
-        val turnState = TurnState()
         // THE TURN'S ACTION OUTCOME IS THREE-VALUED, not a flag. A Boolean collapses "the action was
         // confirmed performed" with "the action was attempted and its outcome is unknown", so an
         // unknowable execution would be reported as DELIVERED -- claiming a success nobody observed.
@@ -636,7 +625,6 @@ class CloudRouteSink internal constructor(
                             event.tool,
                             event.action,
                             event.params,
-                            turnState,
                             myId,
                             plannedEpisodeId = context.episodeId,
                         )
@@ -1101,7 +1089,6 @@ class CloudRouteSink internal constructor(
         tool: String,
         action: String,
         params: Map<String, Any?>,
-        turnState: TurnState,
         myId: Long,
         plannedEpisodeId: String?,
     ): ActionOutcome {
@@ -1166,8 +1153,7 @@ class CloudRouteSink internal constructor(
                             is EpisodeOperationResult.Accepted -> {
                                 capturePreActionPosition(
                                     positionSeconds * 1000L,
-                                    turnState,
-                                    outcome.episodeId,
+                                        outcome.episodeId,
                                     outcome.preActionPositionMs,
                                 )
                                 ActionOutcome.Confirmed
@@ -1184,7 +1170,6 @@ class CloudRouteSink internal constructor(
                                 // that the player reached it.
                                 capturePreActionPosition(
                                     targetReferenceMs = null,
-                                    turnState = turnState,
                                     acceptedEpisodeId = outcome.episodeId,
                                     preActionPositionMs = outcome.preActionPositionMs,
                                     recordTarget = false,
@@ -1203,7 +1188,7 @@ class CloudRouteSink internal constructor(
                     // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
                     // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
                     // never a live re-read, and only an OBSERVED outcome records the target.
-                    return@withLock handleSeekOutcome(outcome, referenceMs, turnState)
+                    return@withLock handleSeekOutcome(outcome, referenceMs)
                 }
 
                 "pause" -> {
@@ -1315,14 +1300,12 @@ class CloudRouteSink internal constructor(
     private fun handleSeekOutcome(
         outcome: EpisodeOperationResult,
         targetReferenceMs: Long,
-        turnState: TurnState,
     ): ActionOutcome = when (outcome) {
         is EpisodeOperationResult.Refused -> ActionOutcome.None
 
         is EpisodeOperationResult.Accepted -> {
             capturePreActionPosition(
                 targetReferenceMs = targetReferenceMs,
-                turnState = turnState,
                 acceptedEpisodeId = outcome.episodeId,
                 preActionPositionMs = outcome.preActionPositionMs,
             )
@@ -1332,7 +1315,6 @@ class CloudRouteSink internal constructor(
         is EpisodeOperationResult.Unknown -> {
             capturePreActionPosition(
                 targetReferenceMs = targetReferenceMs,
-                turnState = turnState,
                 acceptedEpisodeId = outcome.episodeId,
                 preActionPositionMs = outcome.preActionPositionMs,
                 recordTarget = false,
@@ -1344,15 +1326,14 @@ class CloudRouteSink internal constructor(
 
     private fun capturePreActionPosition(
         targetReferenceMs: Long?,
-        turnState: TurnState,
         acceptedEpisodeId: String?,
         preActionPositionMs: Long?,
         /**
          * Whether the TARGET was observed to be reached, so it may be recorded.
          *
-         * FALSE FOR AN UNKNOWN OUTCOME: the pre-action provenance is kept because it describes what the
-         * client knew BEFORE the attempt, but the target is not, because nothing established that the
-         * player reached it. Recording it would claim an observation nobody made.
+         * FALSE FOR AN UNKNOWN OUTCOME, and it suppresses the whole record rather than the target
+         * alone: nothing established that the player reached the target, so the attempt produces no
+         * history at all. With no target there is no destination to attach a previous position to.
          */
         recordTarget: Boolean = true,
     ) {
@@ -1390,9 +1371,11 @@ class CloudRouteSink internal constructor(
         // reattribute the position to a recording the action never touched. The live provider is the
         // wrong authority here: it answers "what is selected NOW", which is the question this is
         // deliberately not asking.
-        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. The provenance above is committed
-        // regardless because it describes what the client knew BEFORE the attempt; the TARGET
-        // is not, because nothing established the player reached it.
+        // NOTHING IS RECORDED WHEN THE TARGET WAS NOT OBSERVED. The provenance above is not written
+        // on its own: `record` is the only writer, and it is reached only with a target, so an UNKNOWN
+        // outcome records neither the previous position nor the target -- nothing established where
+        // the player ended up, and a previous position for that attempt would describe a seek whose
+        // history has no destination.
         if (acceptedEpisodeId == null || target == null) return
         cloudPlaybackContextState.record(
             // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:

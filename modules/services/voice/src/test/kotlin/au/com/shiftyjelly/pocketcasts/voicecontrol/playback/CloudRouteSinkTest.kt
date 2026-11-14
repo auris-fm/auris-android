@@ -705,8 +705,8 @@ class CloudRouteSinkTest {
         // mapping. A case for one cannot see a defect in the other -- which is how my first version of
         // this control passed while the reference branch still recorded history on a refusal.
         //
-        // `seek_to` is the only remaining reference verb: the quote actions that shared this path
-        // were removed with the protocol.
+        // `seek_to` is the only reference verb: the quote actions that shared this path were
+        // removed with the protocol.
         listOf("seek_to" to "reference_position_ms").forEach { (action, field) ->
             val state = CloudPlaybackContextState()
             val deps = TestDeps(
@@ -779,35 +779,6 @@ class CloudRouteSinkTest {
         assertTrue(
             "a skip planned for A must not proceed against B (calls=${deps.playback.calls})",
             !deps.playback.calls.any { it.startsWith("skipForward:") },
-        )
-    }
-
-    @Test
-    fun `a quote resume does not resume a replacement episode`() = runTest {
-        // The quote's own resume is bound to the recording the quote came from.
-        val deps = TestDeps(
-            episodeId = "A",
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "seek_to",
-                    params = mapOf("reference_position_ms" to 45_000_000L),
-                ),
-                CloudRouteEvent.Done(1, 0),
-            ),
-        )
-        deps.playback.currentEpisodeIdForTest = "B"
-        val sink = deps.sink()
-
-        sink.routeToCloud(
-            "play from the reference",
-            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-            admitted = testWireId,
-        ).feedback
-
-        assertTrue(
-            "a quote whose episode was replaced must not seek or resume (calls=${deps.playback.calls})",
-            !deps.playback.calls.any { it.startsWith("seekTo:") || it == "resume" },
         )
     }
 
@@ -1700,7 +1671,7 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
-        // preQuote is playback-timeline; the context state must carry the
+        // The previous position is playback-timeline; the context state must carry the
         // reference-timeline conversion (45s reference == 60s playback here).
         assertEquals(
             "episode-id",
@@ -2035,8 +2006,8 @@ class CloudRouteSinkTest {
 
         // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
         // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
-        // Asserted by containment because a seek does not resume, so the exact list differs from a
-        // quote's "seek, then resume"; the mapping under test is the seekTo argument.
+        // Asserted by containment rather than the whole list, so the test pins the mapping it is
+        // about (the seekTo argument) and not the surrounding call sequence.
         assertTrue(
             "expected a mapped seek of 945s, got ${deps.playback.calls}",
             deps.playback.calls.contains("seekTo:945"),

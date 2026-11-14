@@ -26,6 +26,8 @@
 
 BEGIN {
     in_block = 0
+    depth = 0
+    block_nests = (nest == 1)
     block_open = "/*"
     block_close = "*/"
     quote = ""
@@ -97,16 +99,30 @@ BEGIN {
             # consumed and the walk continues in the same loop, so the reopened block is
             # entered rather than treated as the end of the comment.
             #
+            # **Kotlin nests block comments, so the walk tracks a depth, not a flag.** In
+            # `/* outer /* inner */ still comment */` the inner close does not end the outer
+            # comment. Closing at the first `*/` ended it there and left the rest of the outer
+            # comment to be read as code, which is how a citation in it went unseen.
+            #
             # The text read here IS comment text, including when the block opened and closed on
             # this very line -- a one-line doc comment is the common case, and forgetting to set
             # has_comment made every `/** ... */` on a single line invisible.
-            rest = substr(line, p)
-            idx = index(rest, block_close)
             has_comment = 1
-            if (idx == 0) { comment_text = comment_text " " rest; break }
-            comment_text = comment_text " " substr(rest, 1, idx - 1)
-            in_block = 0
-            p += idx + length(block_close) - 2
+            rest = substr(line, p)
+            open_idx = block_nests ? index(rest, block_open) : 0
+            close_idx = index(rest, block_close)
+            # A nested opener that comes before the next closer deepens the comment.
+            if (open_idx != 0 && (close_idx == 0 || open_idx < close_idx)) {
+                depth++
+                comment_text = comment_text " " substr(rest, 1, open_idx - 1)
+                p += open_idx + length(block_open) - 2
+                continue
+            }
+            if (close_idx == 0) { comment_text = comment_text " " rest; break }
+            comment_text = comment_text " " substr(rest, 1, close_idx - 1)
+            depth--
+            if (depth <= 0) { in_block = 0; depth = 0 }
+            p += close_idx + length(block_close) - 2
             continue
         }
 
@@ -156,6 +172,7 @@ BEGIN {
         # forms, so a regex test first would swallow a real comment.
         if (has_block && substr(line, p, 2) == block_open) {
             in_block = 1
+            depth = 1
             p += length(block_open) - 1
             continue
         }
@@ -198,11 +215,15 @@ BEGIN {
     if (!has_comment) next
     if (comment_text == "") next
 
-    # **Only @android: is exempt, and only because it is a framework resource reference**
-    # (`@android:color/...`, `@android:id/...`) rather than a mention of a lane. Every other lane
-    # followed by a colon is a citation -- "as @spec: said" is the most common form there is -- so
-    # exempting the whole `@lane:` shape hid it. Each remaining mention is judged on its own.
-    gsub(/@android:[A-Za-z0-9_.:\/]*/, "<resource>", comment_text)
+    # **No exemption at all.** An earlier version exempted a lane followed by a colon or a
+    # slash, on the grounds that a framework resource looks like a citation. But the tree has no
+    # resource attribute inside a comment: every `@android:` occurrence is an XML attribute. The
+    # exemption therefore covered a collision the guard never sees, while letting through the most
+    # common citation there is, "as @lane: said". A resource attribute written in a comment IS a
+    # finding. Do not add the exemption back.
+    #
+    # The owner of each remaining mention is judged on its own, so one match cannot suppress the
+    # rest of the line.
 
     flagged = 0
     if (comment_text ~ lane_ere) flagged = 1

@@ -90,21 +90,21 @@ done
 # The second field adds Python's triple-quoted strings, which span lines.
 chat_lang_for() {
     case "$1" in
-        *.ts)                                      echo "js 0 0" ;;
-        *.go)                                      echo "go 0 0" ;;
-        *.py)                                      echo "hash 1 0" ;;
-        *.sh)                                      echo "hash 0 1" ;;
+        *.ts)                                      echo "js 0 0 0" ;;
+        *.go)                                      echo "go 0 0 0" ;;
+        *.py)                                      echo "hash 1 0 0" ;;
+        *.sh)                                      echo "hash 0 1 0" ;;
         # Kotlin, C++ and Swift all have a triple-quoted raw string that spans lines. Java does
         # not, but listing it there costs nothing: a Java file cannot contain the delimiter
         # without it being a compile error, so the row is about what the language allows.
-        *.kt|*.kts|*.cpp|*.h|*.swift|*.mm)         echo "c 1 0" ;;
-        *.java)                                    echo "c 0 0" ;;
-        *)                                         echo "c 0 0" ;;
+        *.kt|*.kts|*.cpp|*.h|*.swift|*.mm)         echo "c 1 0 1" ;;
+        *.java)                                    echo "c 0 0 0" ;;
+        *)                                         echo "c 0 0 0" ;;
     esac
 }
 
 scan_file() {
-    read -r lang triple shellmode <<< "$(chat_lang_for "$1")"
+    read -r lang triple shellmode nestmode <<< "$(chat_lang_for "$1")"
     # LC_ALL=C for BYTE semantics. The walk indexes characters with substr() and length(), and
     # in a UTF-8 locale awk aborts on a multibyte character it cannot convert ("towc: multibyte
     # conversion failure") -- one curly quote in a string literal was enough. Byte semantics are
@@ -116,6 +116,7 @@ scan_file() {
         -v lang="$lang" \
         -v triple="${triple:-0}" \
         -v shell="${shellmode:-0}" \
+        -v nest="${nestmode:-0}" \
         -f "$(dirname "$0")/chat-reference-guard.awk" "$1"
     # An awk that died mid-file prints no findings, which reads exactly like a clean file. Any
     # non-zero status other than a normal exit is surfaced so the run cannot pass on a scan that
@@ -140,8 +141,18 @@ run_selftest() {
     dirty_out=$(for f in $(find "$base/dirty" -type f); do scan_file "$f"; done)
     planted=$(grep -rh 'DENY' "$base/dirty" | wc -l | tr -d ' ')
     found_count=$(printf '%s\n' "$dirty_out" | grep -c . )
+    # A finding with no marker beside it is also a defect: either the fixture contains a
+    # reference nobody planted (so the count is hiding it), or the guard fires on something the
+    # fixture says is clean. Both were real while building this -- the markers were prose that
+    # said "DENY", and a header sentence still said an exemption applied.
+    local unmarked
+    unmarked=$(printf '%s\n' "$dirty_out" | grep -v 'DENY' | grep -c . || true)
     if [ "$planted" -eq 0 ]; then
         echo "FAIL: the dirty fixture carries no DENY markers; this control proves nothing." >&2
+        status=1
+    elif [ "$unmarked" -ne 0 ]; then
+        echo "FAIL: $unmarked finding(s) in the dirty fixture have no DENY marker beside them:" >&2
+        printf '%s\n' "$dirty_out" | grep -v 'DENY' | sed 's/^/    /' >&2
         status=1
     elif [ "$found_count" -ne "$planted" ]; then
         echo "FAIL: $planted planted references, $found_count found. Missing:" >&2

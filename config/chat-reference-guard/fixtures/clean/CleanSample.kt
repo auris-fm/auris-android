@@ -23,8 +23,8 @@ class CleanSample {
 // reader to distrust the output.
 val quoted = "see http:// example"
 
-// Real syntax that is not a citation: a framework resource and a scoped package.
-// The tint is @android:color/white and the import is @cloudflare/workers-types.
+// A framework resource attribute is real syntax only where it is CODE, not in a comment. The
+// XML fixture holds the attribute form: it is an attribute there, so it must stay silent.
 
 /**
  * A one-line doc comment with no reference in it.

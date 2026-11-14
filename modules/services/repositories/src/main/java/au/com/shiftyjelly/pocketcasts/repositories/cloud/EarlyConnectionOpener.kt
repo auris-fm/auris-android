@@ -48,13 +48,29 @@ class EarlyConnectionOpener(
             val current = held
             if (current != null && current.ownerTag == tag && !current.isSpent) {
                 // Resumption: the same utterance speaking again keeps the connection it opened.
+                Timber.i("Early connection resume tag=%s", tag)
                 return@withLock current
             }
             val nowMs = now()
             if (current != null && (current.ownerTag != tag || current.isSpent || current.isStale(nowMs, maxAgeMs))) {
                 // Replacement is the only early close. A stale handle is discarded silently.
+                // This is the one place a held connection dies before its turn can take it, so it
+                // says which tag it belonged to and why it went: otherwise the turn's later
+                // "does not match" or "none held" is the only trace, and the cause is lost.
+                Timber.i(
+                    "Early connection dial tag=%s replacing=%s reason=%s",
+                    tag,
+                    current.ownerTag,
+                    when {
+                        current.ownerTag != tag -> "other tag"
+                        current.isSpent -> "spent"
+                        else -> "stale"
+                    },
+                )
                 current.close()
                 held = null
+            } else if (current == null) {
+                Timber.i("Early connection dial tag=%s replacing=none", tag)
             }
             val opened = open(tag, nowMs)
             held = opened

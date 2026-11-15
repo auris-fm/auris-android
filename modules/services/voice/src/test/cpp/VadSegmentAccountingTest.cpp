@@ -295,7 +295,7 @@ int main() {
     // 448ms timeout (kSilenceTimeoutFrames) has elapsed, so a loop that keeps collecting audio
     // after it -- the old drain, which waited for real frames to pad the utterance to ~3.5s -- never
     // closes the segment and the wait below times out. The spec's end-of-speech wait is about
-    // 0.45s; on a device the drain made it 1.1 to 2.6s.
+    // 0.45s, which the timeout alone gives.
     {
         std::deque<bool> script = frames(3, false);
         const std::deque<bool> speech = frames(5, true);

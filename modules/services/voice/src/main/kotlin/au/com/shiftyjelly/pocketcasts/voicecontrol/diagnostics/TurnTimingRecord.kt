@@ -41,7 +41,6 @@ class TurnTimingRecord(private val requestId: String) {
         DuckFinished("duck_finished"),
         FirstWriteReturned("first_write_returned"),
 
-
         /**
          * The turn's disposition on the wire. The wire name is supplied at [mark] time by the
          * caller, because a commit and a cancel are different events: one label for both would

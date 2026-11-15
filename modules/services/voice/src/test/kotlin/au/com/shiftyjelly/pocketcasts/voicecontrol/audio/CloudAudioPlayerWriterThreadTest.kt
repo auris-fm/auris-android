@@ -196,4 +196,27 @@ class CloudAudioPlayerWriterThreadTest {
         awaitTrue { "track_released" in events }
         assertEquals(listOf("write_returned", "track_released"), events.toList())
     }
+
+    @Test
+    fun `drainAndAwaitCompletion reports the answer as cut short when the writer is stuck`() = kotlinx.coroutines.runBlocking {
+        val player = newPlayer()
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        player.writeToSink = { _, _, _, count ->
+            entered.countDown()
+            gate.await(10, TimeUnit.SECONDS)
+            count
+        }
+        player.readPlaybackHeadFrames = { Long.MAX_VALUE }
+        player.writerIdleTimeoutMs = 200
+        player.submitFrame(frame(0))
+        player.play()
+        player.submitFrame(frame(1))
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+
+        val completion = player.drainAndAwaitCompletion(timeoutMs = 5_000)
+
+        assertEquals("a stalled write truncated the answer; that is not a normal completion", CloudAudioPlayer.Completion.Unconsumed, completion)
+        gate.countDown()
+    }
 }

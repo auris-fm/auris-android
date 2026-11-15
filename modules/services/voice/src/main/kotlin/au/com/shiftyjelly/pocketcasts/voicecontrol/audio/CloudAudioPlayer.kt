@@ -174,6 +174,9 @@ class CloudAudioPlayer(
     /** Ticks the audible stamp while we are playing, so it cannot go stale mid-answer. */
     private var audibleHeartbeat: Job? = null
     private val frameBuffer = mutableListOf<ByteArray>()
+
+    /** Bytes in [frameBuffer], kept as a running total (under its monitor) so the receive path never rescans it. */
+    private var queuedBytes = 0
     private var playing = false
     private var paused = false
 
@@ -291,6 +294,9 @@ class CloudAudioPlayer(
     var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
 
     /** Test seam: called once the detached track has been released, on whichever thread released it. */
+    /** How long a caller that must see everything written waits for the writer; a test shortens it. */
+    internal var writerIdleTimeoutMs: Long = WRITER_IDLE_TIMEOUT_MS
+
     internal var onTrackReleasedForTest: (() -> Unit)? = null
 
     init {
@@ -305,17 +311,19 @@ class CloudAudioPlayer(
     fun submitFrame(bytes: ByteArray) {
         if (released) return
         synchronized(frameBuffer) {
-            if (frameBuffer.sumOf { it.size } + bytes.size > maxQueuedBytes) {
+            if (queuedBytes + bytes.size > maxQueuedBytes) {
                 // The answer is over: report it once, and queue nothing more for it.
                 if (!audioWriteFailed) {
                     Timber.w("[CloudAudio] write queue full at %d bytes; stopping answer", maxQueuedBytes)
                     audioWriteFailed = true
                     frameBuffer.clear()
+                    queuedBytes = 0
                     onWriteFailure?.invoke(submittedSamples)
                 }
                 return
             }
             frameBuffer.add(bytes)
+            queuedBytes += bytes.size
         }
         // If we're already playing, ask the writer to drain; the caller never waits on a device write.
         if (playing && !paused) {
@@ -354,17 +362,19 @@ class CloudAudioPlayer(
         }
     }
 
-    /** Suspends until every drain queued before this call has finished, so cancellation is honoured. */
-    private suspend fun awaitWriterIdle() {
+    /** Suspends until every drain queued before this call has finished; false if the writer was still busy at the cap. */
+    private suspend fun awaitWriterIdle(): Boolean {
         val idle = kotlinx.coroutines.CompletableDeferred<Unit>()
         try {
             writerExecutor.execute { idle.complete(Unit) }
         } catch (e: java.util.concurrent.RejectedExecutionException) {
-            return
+            return true
         }
-        if (kotlinx.coroutines.withTimeoutOrNull(WRITER_IDLE_TIMEOUT_MS) { idle.await() } == null) {
-            Timber.w("[CloudAudio] writer still busy after %d ms; continuing", WRITER_IDLE_TIMEOUT_MS)
+        if (kotlinx.coroutines.withTimeoutOrNull(writerIdleTimeoutMs) { idle.await() } == null) {
+            Timber.w("[CloudAudio] writer still busy after %d ms", writerIdleTimeoutMs)
+            return false
         }
+        return true
     }
 
     /** Blocks until every drain queued before this call has finished. Never call while holding [frameBuffer]. */
@@ -372,11 +382,11 @@ class CloudAudioPlayer(
         val barrier = java.util.concurrent.FutureTask<Unit> { }
         try {
             writerExecutor.execute(barrier)
-            barrier.get(WRITER_IDLE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            barrier.get(writerIdleTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
         } catch (e: java.util.concurrent.RejectedExecutionException) {
             // Shut down: nothing is pending.
         } catch (e: java.util.concurrent.TimeoutException) {
-            Timber.w("[CloudAudio] writer still busy after %d ms; continuing", WRITER_IDLE_TIMEOUT_MS)
+            Timber.w("[CloudAudio] writer still busy after %d ms; continuing", writerIdleTimeoutMs)
         }
     }
 
@@ -478,7 +488,11 @@ class CloudAudioPlayer(
     suspend fun drainAndAwaitCompletion(timeoutMs: Long = 10_000L): Completion {
         if (released) return Completion.Unknown
         scheduleDrain()
-        awaitWriterIdle()
+        if (!awaitWriterIdle()) {
+            // A stalled write: what was queued behind it is not written, so the answer is cut short.
+            stop()
+            return Completion.Unconsumed
+        }
         val submittedAtSubmitTime = synchronized(frameBuffer) { trackFrames }
         // Whether ANY observation was made while waiting: this is the distinction between Unknown
         // (the platform offered no head, so nothing was measured) and Unconsumed (the head reported
@@ -528,6 +542,7 @@ class CloudAudioPlayer(
             val admission = answerAdmission
             answerAdmission = null
             frameBuffer.clear()
+            queuedBytes = 0
             if (playing) {
                 // Sample BEFORE stop(): a stopped track's timestamp can be stale or unavailable,
                 // and this stop may be the only sample point a short answer gets.
@@ -730,7 +745,9 @@ class CloudAudioPlayer(
                 } else {
                     previous
                 }
-                frameBuffer.removeAt(0) to current
+                val next = frameBuffer.removeAt(0)
+                queuedBytes -= next.size
+                next to current
             }
 
             // Decode if needed.
@@ -1037,8 +1054,12 @@ class CloudAudioPlayer(
         /** How long a caller that must see everything written waits for the writer before moving on. */
         internal const val WRITER_IDLE_TIMEOUT_MS = 10_000L
 
-        /** About 2.7 minutes of 24 kHz mono s16le, far more than any answer; a bound, not a target. */
-        internal const val MAX_QUEUED_BYTES = 8 * 1024 * 1024
+        /**
+         * The most unwritten audio held. Receive is no longer throttled by playback, so this holds an
+         * answer's whole unplayed remainder; it exists to stop growth behind a writer that never returns,
+         * not to cap an answer. 64 MiB is about 22 minutes of 24 kHz mono s16le.
+         */
+        internal const val MAX_QUEUED_BYTES = 64 * 1024 * 1024
 
         /** How many writes at the start of each run are timed regardless of how long they took. */
         internal const val TIMED_WRITES_PER_RUN = 5

@@ -293,7 +293,7 @@ int main() {
 
     // (1b) The endpoint is the silence timeout and nothing after it. The script ends the moment the
     // 448ms timeout (kSilenceTimeoutFrames) has elapsed, so a loop that keeps collecting audio
-    // after it -- the old drain, which waited for real frames to pad the utterance to ~3.5s -- never
+    // after it -- waiting for real frames to pad the utterance to ~3.5s -- never
     // closes the segment and the wait below times out. The spec's end-of-speech wait is about
     // 0.45s, which the timeout alone gives.
     {
@@ -938,7 +938,7 @@ int main() {
         // on the way in would miss an overrun during the extraction -- the exact window that displaces the
         // position -- and the anchor would be published as though continuous.
         //
-        // The count advances on a read that falls INSIDE the segment's own drain, driven through the real
+        // The count advances on a read that falls INSIDE the segment's own delivery, driven through the real
         // processor loop. Removing the final sampleXrunContinuity() call makes this control fail, because
         // the epoch is then still marked continuous when the anchor is recorded.
         {

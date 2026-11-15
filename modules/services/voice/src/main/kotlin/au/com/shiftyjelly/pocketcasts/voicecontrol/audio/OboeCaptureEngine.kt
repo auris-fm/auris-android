@@ -279,13 +279,13 @@ internal class OboeCaptureEngine(
                                 }
                                 // The segment's own instant on the capture clock, read HERE rather
                                 // than where the frames are judged: this is the moment the stream
-                                // reports the segment as complete, and the drain loop is the thread
+                                // reports the segment as complete, and the delivery loop is the thread
                                 // the platform documents as safe for the timestamp call. Reading it
                                 // later would fold in the queueing between the two points and place
                                 // the segment at a time it was already delivered, not captured.
                                 val clock = OboeNative.nativeCaptureClock()
                                 // The segment's end as the VAD accounted it when it finalized the
-                                // segment: absolute consumed-stream samples, immune to the drain
+                                // segment: absolute consumed-stream samples, immune to the delivery
                                 // delay between that moment and this timestamp read. This is the
                                 // anchor the onset time is derived from; the clock only supplies
                                 // the instant it is converted against.

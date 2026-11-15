@@ -440,8 +440,8 @@ void NativeVadProcessor::runLoop() {
                 // The end of the last frame classified as speech, in the segment's own coordinates:
                 // the buffer after this append is retained pre-roll plus every speech frame, which is the
                 // same timeline speechOnsetSample and the detector's completionSample use. Taken AFTER
-                // the append, or it lands one frame early. Only speech frames write it, so the drain
-                // cannot move it.
+                // the append, or it lands one frame early. Only speech frames write it, so trailing
+                // silence cannot move it.
                 mSpeechEndSample = static_cast<int32_t>(mSpeechBuffer.size());
 
                 // The early-wake cutoff: once per utterance, when the in-progress utterance passes

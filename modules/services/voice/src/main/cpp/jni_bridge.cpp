@@ -495,7 +495,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
 
 // The absolute consumed-stream sample position of the last completed segment's end, recorded by the
 // VAD thread when it finalized the segment. The onset anchor must come from this accounting rather
-// than a later clock read: the audio callback and ring advance while the drain loop delivers the
+// than a later clock read: the audio callback and ring advance while the delivery loop delivers the
 // segment, and folding that lag into the anchor misplaces every delayed segment.
 extern "C" JNIEXPORT jlong JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechEndStreamPosition(

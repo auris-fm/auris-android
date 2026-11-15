@@ -35,7 +35,7 @@ sealed interface VoiceSegmenterResult {
         val frames: List<PcmAudioFrame>,
         val speechOnsetSample: Int = 0,
         /**
-         * The last sample the VAD classified as speech, drain excluded — not the sample at which
+         * The last sample the VAD classified as speech, trailing silence excluded — not the sample at which
          * the segment closed. Defaults to 0 for segmenters that do not report it, which the engine
          * reads as "unknown" rather than "no speech".
          */
@@ -104,7 +104,7 @@ fun captureTimeNsForPosition(captureClock: LongArray?, streamPositionInSegment: 
  * and the correlator's window math would compound that displacement. The anchor is SAMPLE-ACCOUNTED,
  * not read from the clock: the native VAD records the absolute position of the segment's end (in the
  * ring's consumed-stream samples) when it finalizes the segment, so delivery lag -- the callback and
- * ring advancing between the segment's last sample and the drain loop's timestamp read -- cannot
+ * ring advancing between the segment's last sample and the delivery loop's timestamp read -- cannot
  * move it. Sample 0's stream position is `segmentEndStreamPosition - segmentSamples`, and the clock
  * observation only supplies the instant that position is converted against.
  *
@@ -122,7 +122,7 @@ fun VoiceSegmenterResult.SpeechEnded.captureTimeOfSegmentStartMs(): Long? {
 /**
  * The monotonic instant (ms) the segment's LAST SPEECH SAMPLE was CAPTURED — the acoustic end the
  * timing table starts from. Anchored at the SPEECH end, not the end of the retained buffer: the
- * buffer includes trailing silence and the drain, so anchoring there places the acoustic end AFTER
+ * buffer includes the trailing silence, so anchoring there places the acoustic end AFTER
  * the user stopped speaking and hides exactly the latency the table measures. The speech-end
  * sample's stream position is `segmentEndStreamPosition - totalRetainedSamples + speechEndSample`,
  * and the clock observation only supplies the instant that position is converted against.

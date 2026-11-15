@@ -265,7 +265,7 @@ int main() {
         check(shortOnset == 1, "short utterance: onset is reported");
         const int shortTrail = processor.waitForEvent(10000, &gen);
         check(shortTrail == 3, "short utterance: trailing silence fires without a cutoff first");
-        // The short script runs out before the ~55-frame endpoint: the loop ends with the stop
+        // The short script runs out before the 7-frame silence timeout: the loop ends with the stop
         // sentinel rather than a segment close. Either way no cutoff fired before trailing silence.
         const int shortEnd = processor.waitForEvent(15000, &gen);
         std::printf("      short utterance final event=%d\n", shortEnd);

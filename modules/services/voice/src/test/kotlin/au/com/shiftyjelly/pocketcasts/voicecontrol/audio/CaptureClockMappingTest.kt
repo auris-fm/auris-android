@@ -144,8 +144,8 @@ class CaptureClockMappingTest {
 
     @Test
     fun `the acoustic end is the SPEECH end, not the end of the retained buffer`() {
-        // REVIEWER (round 4, acoustic-end math): the retained buffer includes trailing silence and
-        // the drain. A 2 s buffer whose speech stopped at 1 s (drain silence filled the rest) was
+        // REVIEWER (round 4, acoustic-end math): the retained buffer includes the trailing silence.
+        // A 2 s buffer whose speech stopped at 1 s (silence filled the rest) was
         // anchored at the buffer's end -- placing the acoustic end 1 s AFTER the user stopped
         // speaking, hiding exactly the latency the table exists to measure. The acoustic end is
         // `segmentEndStreamPosition - totalRetainedSamples + speechEndSample`.
@@ -157,7 +157,7 @@ class CaptureClockMappingTest {
         val acousticEndMs = VoiceSegmenterResult.SpeechEnded(
             frames = frames,
             speechOnsetSample = 100,
-            speechEndSample = 16_000, // speech stopped halfway; the rest is drain silence
+            speechEndSample = 16_000, // speech stopped halfway; the rest is trailing silence
             captureClock = observation,
             segmentEndStreamPosition = 32_000L,
         ).captureTimeOfSegmentEndMs()

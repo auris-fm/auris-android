@@ -3558,6 +3558,7 @@ class CloudRouteSinkTest {
         val player = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         ).apply {
             var accepted = 0
             writeToSink = { _, _, _, count -> if (accepted++ < 1) count else -1 }

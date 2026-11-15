@@ -45,6 +45,7 @@ class CloudAudioPlayerTest {
         player = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
     }
 
@@ -468,6 +469,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // Foreign producer audio in the ring: stop() must leave it untouched.
         recorder.write(
@@ -508,6 +510,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // An episode contributes BEFORE and AFTER the answer: both must survive the answer's stop.
         val episodeEarly = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 111.0 * it / 16_000)).toFloat() }
@@ -590,6 +593,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // Exercise the production path: play() starts the audible heartbeat, which is what publishes
         // this stream's routed output. The player claims the slot on construction.
@@ -619,6 +623,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
         wired.play()
@@ -652,6 +657,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@48k")
 
@@ -702,6 +708,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@24k")
 
@@ -743,6 +750,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@48k")
 
@@ -791,6 +799,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         val chunk = byteArrayOf(0x00, 0x01, 0x02, 0x03)
 
@@ -823,6 +832,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         val chunk = byteArrayOf(0x00, 0x01, 0x02, 0x03)
 
@@ -853,6 +863,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.onWriteFailure = { failures.incrementAndGet() }
         val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
@@ -897,6 +908,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.onWriteFailure = { failures.incrementAndGet() }
         val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
@@ -994,6 +1006,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // 100 samples submitted; the converter's length bound is what limits what is recorded.
         val bytes = ByteArray(200) { 0x10 }
@@ -1014,6 +1027,7 @@ class CloudAudioPlayerTest {
         val player = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         var reported = -1L
         player.onWriteFailure = { frames -> reported = frames }
@@ -1034,6 +1048,7 @@ class CloudAudioPlayerTest {
         val player = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         ).apply {
             onWriteFailure = { frames -> reported.set(frames) }
             var accepted = 0
@@ -1064,6 +1079,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         ).apply {
             // Deliberately irregular, and in WHOLE samples: a real sink returns a byte count that
             // pairs up, so an odd take would test a stimulus the production path cannot produce.
@@ -1127,6 +1143,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // Claimed when the stream actually begins sounding, not when the object is built: the claim
         // belongs to a playback run, and a player that has never played is not producing a route for
@@ -1154,11 +1171,13 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         val second = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         try {
             // Both are playing, so both hold claims; the first then retires. The successor keeps the
@@ -1194,6 +1213,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
 
         try {
@@ -1249,6 +1269,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // A 48 kHz codec, as the existing recorder cases use: it drives the resampler, which is the
         // path that reaches the recorder in this harness. The translation under test is independent of
@@ -1315,6 +1336,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@48k")
         // Drive the sink from the test so the byte count the track reports is deterministic. Without
@@ -1377,6 +1399,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@16k")
         // The head tracks what was submitted: it reads the player's own submitted-frame count, so
@@ -1404,6 +1427,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@16k")
         wired.readPlaybackHeadFrames = { _ -> 0L }
@@ -1429,6 +1453,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@16k")
         wired.readPlaybackHeadFrames = { _ -> null }

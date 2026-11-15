@@ -52,6 +52,12 @@ class CloudAudioPlayer(
     // Publishes this player's observed output routing, so route-dependent decisions read where the audio
     // actually goes rather than what is merely available. Null in contexts with no route consumer.
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
+    // Where frames are written to the track. The default is a dedicated thread, so reading the connection
+    // never waits on a device write; a test passes [CALLER_THREAD] for deterministic, synchronous writes.
+    private val writerExecutor: java.util.concurrent.Executor = dedicatedWriter(),
+    // The most audio that may wait to be written. Reaching it fails the answer explicitly rather than
+    // dropping frames silently or blocking the receive path.
+    private val maxQueuedBytes: Int = MAX_QUEUED_BYTES,
 ) {
     /**
      * This stream's claim on the routed observation, taken when playback starts.
@@ -300,11 +306,43 @@ class CloudAudioPlayer(
     fun submitFrame(bytes: ByteArray) {
         if (released) return
         synchronized(frameBuffer) {
+            if (frameBuffer.sumOf { it.size } + bytes.size > maxQueuedBytes) {
+                // The answer is over: report it once, and queue nothing more for it.
+                if (!audioWriteFailed) {
+                    Timber.w("[CloudAudio] write queue full at %d bytes; stopping answer", maxQueuedBytes)
+                    audioWriteFailed = true
+                    frameBuffer.clear()
+                    onWriteFailure?.invoke(submittedSamples)
+                }
+                return
+            }
             frameBuffer.add(bytes)
         }
-        // If we're already playing, try to drain immediately.
+        // If we're already playing, ask the writer to drain; the caller never waits on a device write.
         if (playing && !paused) {
-            drainFrames()
+            scheduleDrain()
+        }
+    }
+
+    /** Queues a drain on the writer. Drains are idempotent: one that finds nothing queued returns at once. */
+    private fun scheduleDrain() {
+        try {
+            writerExecutor.execute { drainFrames() }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // The writer was shut down by release(); there is nothing left to write to.
+        }
+    }
+
+    /** Blocks until every drain queued before this call has finished. Never call while holding [frameBuffer]. */
+    private fun awaitWriterIdle() {
+        val barrier = java.util.concurrent.FutureTask<Unit> { }
+        try {
+            writerExecutor.execute(barrier)
+            barrier.get(WRITER_IDLE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Shut down: nothing is pending.
+        } catch (e: java.util.concurrent.TimeoutException) {
+            Timber.w("[CloudAudio] writer still busy after %d ms; continuing", WRITER_IDLE_TIMEOUT_MS)
         }
     }
 
@@ -341,14 +379,14 @@ class CloudAudioPlayer(
             if (paused) {
                 audioTrack?.play()
                 paused = false
-                drainFrames()
+                scheduleDrain()
                 Timber.i("[CloudAudio] resumed")
                 startAudibleHeartbeat()
             } else if (!playing) {
                 startPlaybackRun()
                 audioTrack?.play()
                 playing = true
-                drainFrames()
+                scheduleDrain()
                 Timber.i("[CloudAudio] started")
                 startAudibleHeartbeat()
             }
@@ -375,9 +413,8 @@ class CloudAudioPlayer(
      */
     fun drainAndStop() {
         if (released) return
-        synchronized(frameBuffer) {
-            drainFrames()
-        }
+        scheduleDrain()
+        awaitWriterIdle()
         stop()
     }
 
@@ -406,10 +443,9 @@ class CloudAudioPlayer(
      */
     suspend fun drainAndAwaitCompletion(timeoutMs: Long = 10_000L): Completion {
         if (released) return Completion.Unknown
-        val submittedAtSubmitTime = synchronized(frameBuffer) {
-            drainFrames()
-            trackFrames
-        }
+        scheduleDrain()
+        awaitWriterIdle()
+        val submittedAtSubmitTime = synchronized(frameBuffer) { trackFrames }
         // Whether ANY observation was made while waiting: this is the distinction between Unknown
         // (the platform offered no head, so nothing was measured) and Unconsumed (the head reported
         // but never arrived). It must be taken DURING the wait -- after stop() the track reports a
@@ -575,6 +611,7 @@ class CloudAudioPlayer(
         stop()
         released = true
         heartbeatScope.cancel()
+        (writerExecutor as? java.util.concurrent.ExecutorService)?.shutdown()
         decodeCodec?.stop()
         decodeCodec?.release()
         decodeCodec = null
@@ -958,6 +995,20 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /** Runs each task on the thread that submitted it: synchronous writes, for deterministic tests. */
+        val CALLER_THREAD: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
+
+        /** A single daemon thread, so frames are written in order and never on the receive path. */
+        internal fun dedicatedWriter(): java.util.concurrent.Executor = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+            Thread(task, "cloud-audio-writer").apply { isDaemon = true }
+        }
+
+        /** How long a caller that must see everything written waits for the writer before moving on. */
+        internal const val WRITER_IDLE_TIMEOUT_MS = 10_000L
+
+        /** About 2.7 minutes of 24 kHz mono s16le, far more than any answer; a bound, not a target. */
+        internal const val MAX_QUEUED_BYTES = 8 * 1024 * 1024
 
         /** How many writes at the start of each run are timed regardless of how long they took. */
         internal const val TIMED_WRITES_PER_RUN = 5

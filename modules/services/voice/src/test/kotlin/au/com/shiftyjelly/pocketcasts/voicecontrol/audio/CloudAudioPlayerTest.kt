@@ -192,6 +192,47 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `the first writes of a run are timed with their size, and later fast writes are not`() {
+        // A blocking write that sits on a track the platform stopped mixing holds the receive path
+        // and no log line says so. The first few writes of each run are reported with their byte
+        // count and how long the call took, so the first frame's size and a stall both show.
+        val samples = mutableListOf<CloudAudioPlayer.WriteSample>()
+        player.writeToSink = { _, _, _, count -> count }
+        player.writeSampleListener = { samples += it }
+
+        player.submitFrame(ByteArray(480))
+        player.play()
+        repeat(9) { player.submitFrame(ByteArray(480)) }
+
+        assertEquals(
+            "only the first writes are sampled, in order, 1-based",
+            (1..CloudAudioPlayer.TIMED_WRITES_PER_RUN).toList(),
+            samples.map { it.index },
+        )
+        assertEquals("the first write carries the first frame's byte count", 480, samples.first().bytes)
+        assertTrue("a returned write has a non-negative duration", samples.all { it.durationMs >= 0 })
+    }
+
+    @Test
+    fun `a slow write is reported even after the first few`() {
+        val samples = mutableListOf<CloudAudioPlayer.WriteSample>()
+        var calls = 0
+        player.writeToSink = { _, _, _, count ->
+            if (++calls == CloudAudioPlayer.TIMED_WRITES_PER_RUN + 2) Thread.sleep(CloudAudioPlayer.SLOW_WRITE_MS + 50)
+            count
+        }
+        player.writeSampleListener = { samples += it }
+
+        player.submitFrame(ByteArray(480))
+        player.play()
+        repeat(CloudAudioPlayer.TIMED_WRITES_PER_RUN + 3) { player.submitFrame(ByteArray(480)) }
+
+        val slow = samples.filter { it.index > CloudAudioPlayer.TIMED_WRITES_PER_RUN }
+        assertEquals("exactly the one slow write past the first few is reported", 1, slow.size)
+        assertTrue("with a duration at or above the threshold", slow.single().durationMs >= CloudAudioPlayer.SLOW_WRITE_MS)
+    }
+
+    @Test
     fun `a refused write is not reported as the first write`() {
         val fired = mutableListOf<Long>()
         player.writeToSink = { _, _, _, _ -> 0 }

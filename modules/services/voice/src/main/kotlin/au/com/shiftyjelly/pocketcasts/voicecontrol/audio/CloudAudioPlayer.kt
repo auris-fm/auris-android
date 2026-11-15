@@ -128,6 +128,14 @@ class CloudAudioPlayer(
         synchronized(firstAudibleListeners) { firstAudibleListeners += listener }
     }
 
+    private val writesInRun = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** One timed [AudioTrack.write]: its 1-based index within the run, bytes offered and call duration. */
+    data class WriteSample(val index: Int, val bytes: Int, val durationMs: Long)
+
+    /** Receives each sampled write; production also logs it. Null by default. */
+    var writeSampleListener: ((WriteSample) -> Unit)? = null
+
     private val firstWriteListeners = mutableListOf<(Long) -> Unit>()
 
     /**
@@ -313,6 +321,7 @@ class CloudAudioPlayer(
         // exactly one frame -- playback resumed past the gap and the sink still appended the error
         // earcon after nearly the whole answer. Reset it here, where the run begins.
         audioWriteFailed = false
+        writesInRun.set(0)
         resampler = ChunkResampler()
         answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
     }
@@ -603,6 +612,30 @@ class CloudAudioPlayer(
 
         audioTrack = track
         trackFrames = 0L
+        // The buffer bounds how far ahead the receive path can run, and the start threshold is how
+        // much must be written before the platform starts mixing, so both explain an early frame.
+        val startThreshold = if (android.os.Build.VERSION.SDK_INT >= 31) track.startThresholdInFrames.toString() else "n/a"
+        Timber.i(
+            "[CloudAudio] track buffer_frames=%d start_threshold_frames=%s min_buf_bytes=%d rate=%d",
+            track.bufferSizeInFrames,
+            startThreshold,
+            minBufSize,
+            currentSampleRate,
+        )
+    }
+
+    /**
+     * Report how long a write took. A blocking write that sits on a track the platform stopped mixing
+     * holds the whole receive path and leaves no other trace, so the first writes of every run are
+     * reported with their size (the first one is the first frame's), and any write that is slow
+     * wherever it falls. Logging only.
+     */
+    private fun reportWriteTiming(bytes: Int, durationMs: Long) {
+        val index = writesInRun.incrementAndGet()
+        if (index > TIMED_WRITES_PER_RUN && durationMs < SLOW_WRITE_MS) return
+        val sample = WriteSample(index, bytes, durationMs)
+        Timber.i("[CloudAudio] write index=%d bytes=%d took_ms=%d", sample.index, sample.bytes, sample.durationMs)
+        writeSampleListener?.invoke(sample)
     }
 
     private fun drainFrames() {
@@ -645,6 +678,7 @@ class CloudAudioPlayer(
                 var offset = 0
                 while (offset < pcmBytes.size) {
                     val writer = writeToSink
+                    val writeStartedNanos = System.nanoTime()
                     val written = if (writer != null) {
                         writer(track, pcmBytes, offset, pcmBytes.size - offset)
                     } else {
@@ -656,6 +690,7 @@ class CloudAudioPlayer(
                         )
                     }
                     val writeReturnedNanos = System.nanoTime()
+                    reportWriteTiming(pcmBytes.size - offset, (writeReturnedNanos - writeStartedNanos) / 1_000_000L)
                     if (written > 0 && firstWriteReported.compareAndSet(false, true)) {
                         notifyFirstWrite(writeReturnedNanos)
                     }
@@ -922,6 +957,12 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /** How many writes at the start of each run are timed regardless of how long they took. */
+        internal const val TIMED_WRITES_PER_RUN = 5
+
+        /** A write at or above this is reported wherever it falls in the run. */
+        internal const val SLOW_WRITE_MS = 250L
 
         /**
          * Resamples a stream of chunks while preserving phase and audio continuity across them.

@@ -588,6 +588,9 @@ class CloudRouteSink internal constructor(
                 routeHint = hint,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+            // Which conversation the turn asks the worker to create or resume: a resume of an id the
+            // worker no longer has is refused, and without this line the phone cannot say which id it sent.
+            Timber.i("[CloudRoute] turn conversation=%.8s mode=%s request=%.8s", turn.conversationId, turn.conversationMode.wireValue, turn.requestId)
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(turn.requestId, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.TurnStarted, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos())
             // From here until the turn ends, FIRST AUDIBLE belongs to this request.
             myTimingRequestId = turn.requestId

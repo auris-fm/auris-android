@@ -4984,6 +4984,31 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a turn logs which conversation it asks the worker to create or resume`() = runTest {
+        // A resume of a conversation the worker no longer has is refused, and until now the phone
+        // could not say which id and mode it had sent. The first eight characters identify it in a
+        // log without printing the whole handle.
+        val lines = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                lines += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(0, 0)))
+            val sink = deps.sink()
+            sink.routeToCloud("question", playbackContext, admitted = testWireId)
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+        val line = lines.singleOrNull { it.startsWith("[CloudRoute] turn conversation=") }
+        assertNotNull("the turn must log its conversation, got: $lines", line)
+        assertTrue("a first turn creates: $line", line!!.contains(" mode=create "))
+        assertTrue("the id is eight characters: $line", Regex("conversation=[0-9a-f]{8} ").containsMatchIn(line))
+    }
+
+    @Test
     fun `the record lives until the cloud turn actually ends - published once, not at handoff`() = kotlinx.coroutines.test.runTest {
         // REVIEWER (task81): the engine published the table the moment it dispatched the intent,
         // and publish() unregisters the id — so the sink's CloudRequestSent, the player's

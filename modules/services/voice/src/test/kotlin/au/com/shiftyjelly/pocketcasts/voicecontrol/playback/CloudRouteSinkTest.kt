@@ -2721,6 +2721,58 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an expired conversation is refused once and the next request starts a new one`() = runTest {
+        // The worker keeps a conversation ten minutes from its last turn and refuses a resume of one it
+        // no longer holds. Nothing cleared the client's handle, so every later turn in the window
+        // resumed the same dead id and failed the same way until a wake began a new conversation.
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.conversationMode == CloudConversationMode.Resume) {
+                    flowOf(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                } else {
+                    flowOf(CloudRouteEvent.Done(0, 0))
+                }
+            },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        sink.routeToCloud("first", playbackContext, admitted = testWireId, capturedOrigin = 1, isWakeOriginated = true)
+        val created = deps.routeTurns.last()
+        assertEquals(CloudConversationMode.Create, created.conversationMode)
+
+        val refused = sink.routeToCloud("second", playbackContext, admitted = testWireId, isLiveGraceTurn = true, capturedOrigin = 1)
+        assertEquals(CloudConversationMode.Resume, deps.routeTurns.last().conversationMode)
+        assertEquals(created.conversationId, deps.routeTurns.last().conversationId)
+        assertEquals(
+            "the refusal is spoken with the code's own line, not the generic one",
+            VoiceResponse.Spoken("That conversation has ended."),
+            refused.feedback,
+        )
+        assertEquals("the refused request is never resubmitted", 2, deps.routeTurns.size)
+
+        sink.routeToCloud("third", playbackContext, admitted = testWireId, isLiveGraceTurn = true, capturedOrigin = 1)
+        val next = deps.routeTurns.last()
+        assertEquals("the next request begins a new conversation", CloudConversationMode.Create, next.conversationMode)
+        assertTrue("under a new id", next.conversationId != created.conversationId)
+    }
+
+    @Test
+    fun `a late refusal for an old conversation does not clear a newer one`() {
+        // Forgetting is keyed by the id that was refused: a refusal that arrives after a wake has begun a
+        // new conversation is about the old one and must leave the new handle alone.
+        val admission = CloudConversationAdmission()
+        admission.beginOrigin(1)
+        val old = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = false)!!
+        val replacement = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = true)!!
+
+        admission.forgetConversation(old.conversationId)
+
+        val next = admission.prepare(origin = 1, isLiveGraceTurn = true, isWakeOriginated = false)!!
+        assertEquals(CloudConversationMode.Resume, next.mode)
+        assertEquals(replacement.conversationId, next.conversationId)
+    }
+
+    @Test
     fun `a server-supplied message is never spoken, only a template or the generic line`() = runTest {
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Error(code = "limit_exceeded", message = "You've used 10/10 free requests today.")),
@@ -3276,6 +3328,7 @@ class CloudRouteSinkTest {
                 "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
                 "cloud_error_" + CloudRouteErrorCodes.PROVIDER_ERROR to "The assistant couldn't finish that request.",
                 "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
+                "cloud_error_conversation_expired" to "That conversation has ended.",
                 "cloud_error_budget_exceeded" to "The assistant has reached its limit right now.",
                 "cloud_error_" + CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE to "I can't reach the podcast evidence right now.",
             ),

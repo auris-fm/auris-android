@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Daily-limit refusal: the ONLY key in this file. Overriding one key of the spoken-templates
-     array would drop every other line in this locale, so the limit line is a dedicated string the
+<!-- Dedicated refusal lines (daily limit, ended conversation): the ONLY keys in this file. Overriding one key of the spoken-templates
+     array would drop every other line in this locale, so each is a dedicated string the
      SpokenTemplateResolver overlays onto the resolved map. -->
 <resources>
     <string name="voice_cloud_error_limit_exceeded">Has alcanzado tu límite diario gratuito de Auris. Inténtalo de nuevo mañana.</string>
+    <string name="voice_cloud_error_conversation_expired">Esa conversación ha terminado.</string>
 </resources>

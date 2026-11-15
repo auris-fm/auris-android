@@ -75,4 +75,38 @@ class SpokenTemplateResolverLocaleTest {
         val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
         assertTrue(resolver.resolveLocalized("cloud_error_limit_exceeded", "zh").text.isNotBlank())
     }
+
+    // The refusal for a conversation the worker no longer holds is spoken in the language the user
+    // spoke, like the daily limit: an English-only line would tell a Japanese speaker nothing.
+    private fun assertEndedLine(language: String, expected: String) {
+        Locale.setDefault(Locale.ENGLISH)
+        RuntimeEnvironment.setQualifiers("en")
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        assertEquals("That conversation has ended.", resolver.resolve("cloud_error_conversation_expired"))
+        assertEquals(expected, resolver.resolveLocalized("cloud_error_conversation_expired", language).text)
+    }
+
+    @Test
+    fun `an ended conversation is spoken in english`() = assertEndedLine("en", "That conversation has ended.")
+
+    @Test
+    fun `an ended conversation is spoken in german`() = assertEndedLine("de", "Dieses Gespräch ist beendet.")
+
+    @Test
+    fun `an ended conversation is spoken in spanish`() = assertEndedLine("es", "Esa conversación ha terminado.")
+
+    @Test
+    fun `an ended conversation is spoken in french`() = assertEndedLine("fr", "Cette conversation est terminée.")
+
+    @Test
+    fun `an ended conversation is spoken in japanese`() = assertEndedLine("ja", "その会話は終了しました。")
+
+    @Test
+    fun `an ended conversation is spoken in korean`() = assertEndedLine("ko", "그 대화는 종료되었습니다.")
+
+    @Test
+    fun `an ended conversation is spoken in simplified chinese`() = assertEndedLine("zh", "该对话已结束。")
+
+    @Test
+    fun `an ended conversation is spoken in cantonese`() = assertEndedLine("yue", "嗰個對話已經結束咗。")
 }

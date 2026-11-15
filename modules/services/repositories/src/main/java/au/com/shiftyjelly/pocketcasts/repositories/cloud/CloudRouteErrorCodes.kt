@@ -19,6 +19,12 @@ object CloudRouteErrorCodes {
     const val PROVIDER_ERROR = "provider_error"
     const val INVALID_REQUEST = "invalid_request"
 
+    /**
+     * A resume named a conversation the worker no longer holds (it keeps one for a limited time after
+     * its last turn). The refused request is never resubmitted; the client says so and starts afresh.
+     */
+    const val CONVERSATION_EXPIRED = "conversation_expired"
+
     /** A turn that produced nothing: adopted from the service, which ends a blank turn this way. */
     const val NO_ANSWER = "no_answer"
 
@@ -41,6 +47,7 @@ object CloudRouteErrorCodes {
         PROVIDER_ERROR,
         INVALID_REQUEST,
         NO_ANSWER,
+        CONVERSATION_EXPIRED,
     )
 
     /** `http_<3-digit status>`, recognised for log normalization (not minted by this client). */

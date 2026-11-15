@@ -37,4 +37,7 @@
          whole template array; SpokenTemplateResolver overlays it onto the resolved map. A missing
          locale entry is a client gap, not a silent fallback to the generic line. -->
     <string name="voice_cloud_error_limit_exceeded" translatable="true">You have reached your Auris free daily limit. Please try again tomorrow.</string>
+    <!-- A resume of a conversation the worker no longer holds. Dedicated string for the same reason as
+         the daily limit: each values-* locale overrides this one key without redefining the array. -->
+    <string name="voice_cloud_error_conversation_expired" translatable="true">That conversation has ended.</string>
 </resources>

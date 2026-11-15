@@ -99,10 +99,12 @@ class SpokenTemplateResolver(
             // overlay wins over any array entry: a locale's translation must be spoken, and a
             // missing locale entry falls through to the default values/ line, never to generic.
             templates[KEY_DAILY_LIMIT] = resources.getString(R.string.voice_cloud_error_limit_exceeded)
+            templates[KEY_CONVERSATION_EXPIRED] = resources.getString(R.string.voice_cloud_error_conversation_expired)
             return templates
         }
 
         /** Mirrors the sink's `cloud_error_<code>` construction for the one overlaid key. */
         private const val KEY_DAILY_LIMIT = "cloud_error_limit_exceeded"
+        private const val KEY_CONVERSATION_EXPIRED = "cloud_error_conversation_expired"
     }
 }

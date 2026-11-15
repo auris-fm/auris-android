@@ -858,6 +858,11 @@ class CloudRouteSink internal constructor(
                             CloudRouteErrorCodes.normalizeForLog(event.code),
                         )
                         analytics.recordTurn(outcome = "error")
+                        // The worker no longer holds this conversation. Forget it so the next request creates
+                        // a new one; the refused request itself is never resubmitted.
+                        if (event.code == CloudRouteErrorCodes.CONVERSATION_EXPIRED) {
+                            conversationAdmission.forgetConversation(turn.conversationId)
+                        }
                         // The client speaks its own words for every failure and never the server's
                         // `message`. That field is user-facing on the edge and upstream detail on the
                         // assistant ("catalog provider: status 401 for

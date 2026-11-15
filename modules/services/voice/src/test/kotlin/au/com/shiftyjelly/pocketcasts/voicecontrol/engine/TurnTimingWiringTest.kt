@@ -91,7 +91,7 @@ class TurnTimingWiringTest {
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
                     speechOnsetSample = 0,
-                    // Speech fills the whole retained buffer (no drain silence), so the acoustic
+                    // Speech fills the whole retained buffer (no trailing silence), so the acoustic
                     // end IS the segment end: 1600 - 1600 + 1600 = stream position 1600.
                     speechEndSample = 1_600,
                     // Capture accounting: 1600 samples at 16k, segment end observed at stream
@@ -151,7 +151,8 @@ class TurnTimingWiringTest {
         )
         // THE ZERO POINT IS THE CAPTURE CLOCK, NOT THE DELIVERY INSTANT. The acoustic end comes
         // from the sample accounting (1000ms); the delivery lands later on the wall clock, so the
-        // endpoint decision's elapsed against the capture-derived zero is the real drain delay.
+        // endpoint decision's elapsed against the capture-derived zero is the real endpoint delay:
+        // the trailing-silence wait plus delivery.
         // If the engine stamped the acoustic end "now" at delivery, this elapsed would collapse
         // to ~0 and this assertion fails — the substitution the spec forbids.
         val endpointElapsed = Regex("stage=endpoint_decision elapsed_ms=(\\d+)").find(text)

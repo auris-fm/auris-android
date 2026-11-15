@@ -233,6 +233,28 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `every run on a reused player reports its own first write, including a one-frame answer`() {
+        // The player is a singleton reused across turns. The latch must be cleared when a run
+        // BEGINS, before any write: clearing it later (after play() has already drained the first
+        // frame) left it set from the previous run, so the real first write went unreported.
+        val fired = mutableListOf<Long>()
+        player.writeToSink = { _, _, _, count -> count }
+        player.addFirstWriteListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        // A later frame of the same run: with the latch re-armed after play() drained the first
+        // frame, this second write was reported as if it were the run's first.
+        player.submitFrame(byteArrayOf(0x04, 0x05))
+        assertEquals("the first run reports its first write once", 1, fired.size)
+        player.stop()
+
+        player.submitFrame(byteArrayOf(0x02, 0x03))
+        player.play()
+        assertEquals("a second, one-frame run on the same player reports its own", 2, fired.size)
+    }
+
+    @Test
     fun `a refused write is not reported as the first write`() {
         val fired = mutableListOf<Long>()
         player.writeToSink = { _, _, _, _ -> 0 }

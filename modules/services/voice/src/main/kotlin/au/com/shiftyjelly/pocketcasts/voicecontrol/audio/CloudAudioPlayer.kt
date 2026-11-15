@@ -139,8 +139,9 @@ class CloudAudioPlayer(
     private val firstWriteListeners = mutableListOf<(Long) -> Unit>()
 
     /**
-     * Latch for the run's first accepted write, reset with [firstAudibleFired] when a run starts so
-     * each answer reports its own. Separate from first audible on purpose: this is the SUBMIT-side
+     * Latch for the run's first accepted write, reset in [startPlaybackRun] BEFORE any write of the
+     * run (play() drains the first frame before the heartbeat starts, so a reset there is too late),
+     * so each answer reports its own. Separate from first audible on purpose: this is the SUBMIT-side
      * instant (the write returned, so the track holds the bytes), and the gap from it to first
      * audible is the platform's own start-up.
      */
@@ -322,6 +323,7 @@ class CloudAudioPlayer(
         // earcon after nearly the whole answer. Reset it here, where the run begins.
         audioWriteFailed = false
         writesInRun.set(0)
+        firstWriteReported.set(false)
         resampler = ChunkResampler()
         answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
     }
@@ -519,7 +521,6 @@ class CloudAudioPlayer(
         // A new run presents again: clear the previous run's latch so the next answer gets its
         // own first-audible instant.
         firstAudibleFired.set(false)
-        firstWriteReported.set(false)
         audibleHeartbeat = heartbeatScope.launch {
             // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
             // can finish and stop the heartbeat before the first delay elapses, and would then

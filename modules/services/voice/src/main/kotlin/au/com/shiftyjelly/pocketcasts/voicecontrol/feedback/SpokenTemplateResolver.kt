@@ -103,7 +103,7 @@ class SpokenTemplateResolver(
             return templates
         }
 
-        /** Mirrors the sink's `cloud_error_<code>` construction for the one overlaid key. */
+        /** Mirrors the sink's `cloud_error_<code>` construction for the overlaid keys. */
         private const val KEY_DAILY_LIMIT = "cloud_error_limit_exceeded"
         private const val KEY_CONVERSATION_EXPIRED = "cloud_error_conversation_expired"
     }

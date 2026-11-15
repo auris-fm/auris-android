@@ -4844,6 +4844,39 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `the persisted terminal diagnostic records conversation_expired instead of unknown`() = kotlinx.coroutines.runBlocking {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(
+                    mapOf(
+                        "cloud_error_conversation_expired" to "That conversation has ended.",
+                        "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                        "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                        "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                    ),
+                ),
+                transportFactory = { _, _, observer ->
+                    object : CloudTurnTransport {
+                        override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                            val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                            observer?.onTerminalReceived(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR, "conversation_expired")
+                            emit(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                        }
+                    }
+                },
+            )
+            deps.sink().routeToCloud("question", playbackContext, admitted = testWireId)
+
+            val line = awaitCaptureLine(capture, "reason=TurnTerminalReceived", testWireId)
+            assertTrue("the diagnostic must carry the code, got: $line", line.contains("conversation_expired"))
+            assertFalse("the code must not be bucketed as unknown, got: $line", line.contains("unknown"))
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
     fun `server refusal before render carries limit_exceeded terminal and localized feedback`() = runTest {
         val recording = RecordingObserver()
         val deps = TestDeps(

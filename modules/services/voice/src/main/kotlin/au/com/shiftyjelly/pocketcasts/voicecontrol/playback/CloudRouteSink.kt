@@ -1638,6 +1638,7 @@ class CloudRouteSink internal constructor(
             CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE,
             CloudRouteErrorCodes.INVALID_RESPONSE,
             CloudRouteErrorCodes.LIMIT_EXCEEDED,
+            CloudRouteErrorCodes.CONVERSATION_EXPIRED,
             CloudRouteErrorCodes.BUDGET_EXCEEDED,
             "done",
             "interrupted",

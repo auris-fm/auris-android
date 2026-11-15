@@ -4924,6 +4924,66 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `the turn's timing table splits start, auth, duck and first write between request and audible`() = runTest {
+        // The 1.4 s between a first audio frame arriving and sound has parts the table could not
+        // tell apart, and the 4.5 s auth step on one turn was invisible. Four stages make them
+        // readable: the turn starting, its auth resolving, the duck finishing and the player's
+        // first write returning. Each is observed where it happens and marked by turn id.
+        val admittedId = testWireId
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        val firstWriteListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstWriteListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstWriteListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
+                        observer?.onSendAttempted(rid)
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)))
+                        // The player reports its first write while the turn is live.
+                        firstWriteListeners.forEach { it(7_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        assertTrue("sink must register a first-write listener", firstWriteListeners.isNotEmpty())
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        val stages = record.lines().map { line -> line.substringAfter("stage=").substringBefore(" ") }
+        for (stage in listOf("turn_started", "auth_resolved", "cloud_request_sent", "duck_finished", "first_write_returned")) {
+            assertTrue("stage $stage must be in the table, got $stages", stage in stages)
+        }
+        assertEquals(
+            "the first write carries the player's own instant (7 s on the timing clock, 6 s after acoustic end)",
+            6_000L,
+            record.elapsedMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstWriteReturned),
+        )
+        assertTrue(
+            "the stages are in the order they happen: started, auth, request, duck",
+            stages.indexOf("turn_started") < stages.indexOf("auth_resolved") &&
+                stages.indexOf("auth_resolved") < stages.indexOf("cloud_request_sent") &&
+                stages.indexOf("cloud_request_sent") < stages.indexOf("duck_finished"),
+        )
+    }
+
+    @Test
     fun `the record lives until the cloud turn actually ends - published once, not at handoff`() = kotlinx.coroutines.test.runTest {
         // REVIEWER (task81): the engine published the table the moment it dispatched the intent,
         // and publish() unregisters the id — so the sink's CloudRequestSent, the player's

@@ -45,6 +45,28 @@ class TurnTimingRecordTest {
     }
 
     @Test
+    fun `the auth step and the hand-off to the player are readable from the table`() {
+        // Turn start to auth resolved is the auth step's duration; first audio submitted to first
+        // write returned to first audible is the hand-off. Each pair is two lines whose
+        // elapsed_ms difference is the step, so no stage has to carry a duration of its own.
+        val record = TurnTimingRecord(requestId = "turn-split")
+        record.mark(TurnTimingRecord.Stage.AcousticEnd, atNanos = 0L)
+        record.mark(TurnTimingRecord.Stage.TurnStarted, atNanos = 800 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.AuthResolved, atNanos = 5_300 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.CloudRequestSent, atNanos = 5_900 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.DuckFinished, atNanos = 9_300 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.FirstWriteReturned, atNanos = 9_400 * 1_000_000L)
+        record.mark(TurnTimingRecord.Stage.FirstAudible, atNanos = 10_700 * 1_000_000L)
+
+        val text = record.render()
+        assertTrue(text.contains("stage=turn_started elapsed_ms=800"))
+        assertTrue("the auth step is 5300 - 800 = 4500", text.contains("stage=auth_resolved elapsed_ms=5300"))
+        assertTrue(text.contains("stage=duck_finished elapsed_ms=9300"))
+        assertTrue(text.contains("stage=first_write_returned elapsed_ms=9400"))
+        assertEquals("write returned to audible is the platform's own start-up", 1_300L, record.elapsedMs(TurnTimingRecord.Stage.FirstAudible)!! - record.elapsedMs(TurnTimingRecord.Stage.FirstWriteReturned)!!)
+    }
+
+    @Test
     fun `a stage that never happened is absent, not zero`() {
         // A committed turn never cancels, and a turn that was gated never executes a local
         // action. Writing either as 0 would read as "instantaneous", which is wrong.

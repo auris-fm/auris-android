@@ -128,6 +128,25 @@ class CloudAudioPlayer(
         synchronized(firstAudibleListeners) { firstAudibleListeners += listener }
     }
 
+    private val firstWriteListeners = mutableListOf<(Long) -> Unit>()
+
+    /**
+     * Latch for the run's first accepted write, reset with [firstAudibleFired] when a run starts so
+     * each answer reports its own. Separate from first audible on purpose: this is the SUBMIT-side
+     * instant (the write returned, so the track holds the bytes), and the gap from it to first
+     * audible is the platform's own start-up.
+     */
+    private val firstWriteReported = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** [listener] receives the System.nanoTime at which the run's first accepted write returned. */
+    fun addFirstWriteListener(listener: (Long) -> Unit) {
+        synchronized(firstWriteListeners) { firstWriteListeners += listener }
+    }
+
+    private fun notifyFirstWrite(nanoTime: Long) {
+        synchronized(firstWriteListeners) { firstWriteListeners.toList() }.forEach { it(nanoTime) }
+    }
+
     private fun notifyFirstAudible(nanoTime: Long) {
         synchronized(firstAudibleListeners) { firstAudibleListeners.toList() }.forEach { it(nanoTime) }
     }
@@ -491,6 +510,7 @@ class CloudAudioPlayer(
         // A new run presents again: clear the previous run's latch so the next answer gets its
         // own first-audible instant.
         firstAudibleFired.set(false)
+        firstWriteReported.set(false)
         audibleHeartbeat = heartbeatScope.launch {
             // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
             // can finish and stop the heartbeat before the first delay elapses, and would then
@@ -634,6 +654,10 @@ class CloudAudioPlayer(
                             pcmBytes.size - offset,
                             AudioTrack.WRITE_BLOCKING,
                         )
+                    }
+                    val writeReturnedNanos = System.nanoTime()
+                    if (written > 0 && firstWriteReported.compareAndSet(false, true)) {
+                        notifyFirstWrite(writeReturnedNanos)
                     }
                     if (written <= 0) {
                         // An explicit failure rather than a silent drop: stop this answer and report

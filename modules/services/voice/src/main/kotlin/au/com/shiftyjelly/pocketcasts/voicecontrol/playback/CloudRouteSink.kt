@@ -99,6 +99,11 @@ class CloudRouteSink internal constructor(
         // in the track's monotonic nanoTime base (the timing clock's own base) — not the
         // submission-side stamp, which can be seconds early on an underrun. The audible listener
         // stays for the ducking/gate consumers; it no longer speaks for this stage.
+        audioPlayer?.addFirstWriteListener { returnedNanos ->
+            activeTimingRequestId.get()?.let { id ->
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(id, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstWriteReturned, returnedNanos)
+            }
+        }
         audioPlayer?.addFirstAudibleListener { presentationNanos ->
             activeTimingRequestId.get()?.let { id ->
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(
@@ -583,6 +588,7 @@ class CloudRouteSink internal constructor(
                 routeHint = hint,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(turn.requestId, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.TurnStarted, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos())
             // From here until the turn ends, FIRST AUDIBLE belongs to this request.
             myTimingRequestId = turn.requestId
             activeTimingRequestId.set(turn.requestId)
@@ -725,6 +731,7 @@ class CloudRouteSink internal constructor(
                                 ducked = true
                                 // The obligation outlives this invocation: a successor inherits it.
                                 duckReserved = true
+                                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(turn.requestId, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.DuckFinished, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos())
                             }
                             audioPlayer?.submitFrame(event.bytes)
                             audioPlayer?.play()
@@ -1034,6 +1041,7 @@ class CloudRouteSink internal constructor(
                 outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome,
             ) {
                 Trace.record(Event(Kind.Turn, Reason.TurnAuthResolved, Source.Cloud, requestId = requestId, errorCode = outcome.name))
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.markFor(requestId, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AuthResolved, au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.clockNanos())
             }
             override fun onSocketOpened(requestId: String) {
                 Trace.record(Event(Kind.Turn, Reason.TurnSocketOpened, Source.Cloud, requestId = requestId))

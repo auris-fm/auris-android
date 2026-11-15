@@ -29,6 +29,20 @@ class TurnTimingRecord(private val requestId: String) {
         CloudRequestSent("cloud_request_sent"),
 
         /**
+         * The next four split the gaps the stages above cannot see. Each is a plain instant; the
+         * step is the difference between two lines' elapsed_ms: turn_started to auth_resolved is
+         * the auth step, cloud audio arriving to duck_finished is the duck, duck_finished to
+         * first_write_returned is the hand-off to the track, and first_write_returned to
+         * first_audible is the platform's own start-up. They are diagnostics only and change no
+         * behaviour.
+         */
+        TurnStarted("turn_started"),
+        AuthResolved("auth_resolved"),
+        DuckFinished("duck_finished"),
+        FirstWriteReturned("first_write_returned"),
+
+
+        /**
          * The turn's disposition on the wire. The wire name is supplied at [mark] time by the
          * caller, because a commit and a cancel are different events: one label for both would
          * make the table unable to say what the turn did.

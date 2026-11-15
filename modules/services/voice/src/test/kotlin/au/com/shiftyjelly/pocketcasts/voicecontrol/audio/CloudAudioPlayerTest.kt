@@ -169,6 +169,41 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `the first accepted write reports its return instant once per playback run`() {
+        // The gap between the first frame arriving and sound has three parts the timing table must
+        // be able to tell apart; the one the player owns is when the first AudioTrack.write RETURNED.
+        // A blocking write returns only once the track has taken the bytes, so this instant is the
+        // submit-side end of the hand-off, strictly before the presentation clock reports sound.
+        val fired = mutableListOf<Long>()
+        player.writeToSink = { _, _, _, count -> count }
+        player.addFirstWriteListener { nanoTime -> fired += nanoTime }
+        val before = System.nanoTime()
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.submitFrame(byteArrayOf(0x02, 0x03))
+        player.play()
+        val after = System.nanoTime()
+
+        assertEquals("exactly one first-write per playback run, not one per frame", 1, fired.size)
+        assertTrue(
+            "the instant is on the System.nanoTime base the timing table uses, taken when the write returned",
+            fired.single() in before..after,
+        )
+    }
+
+    @Test
+    fun `a refused write is not reported as the first write`() {
+        val fired = mutableListOf<Long>()
+        player.writeToSink = { _, _, _, _ -> 0 }
+        player.addFirstWriteListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+
+        assertTrue("a write the sink refused delivered nothing, so it marks nothing", fired.isEmpty())
+    }
+
+    @Test
     @Config(shadows = [TimestampedAudioTrackShadow::class])
     fun `without any test seam the platform getTimestamp fallback reports first audible`() {
         // Production never sets any test seam: first audible must come from the track's own

@@ -244,11 +244,7 @@ class CloudAudioPlayer(
     /** Re-create the [AudioTrack] and [MediaCodec] decoder to match the negotiated codec. */
     private fun rebuildTrackAndDecoder() {
         stop()
-        decodeCodec?.stop()
-        decodeCodec?.release()
-        decodeCodec = null
-        audioTrack?.release()
-        audioTrack = null
+        releaseTrackAndDecoder()
         ensureAudioTrack()
     }
 
@@ -294,6 +290,9 @@ class CloudAudioPlayer(
      */
     var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
 
+    /** Test seam: called once the detached track has been released, on whichever thread released it. */
+    internal var onTrackReleasedForTest: (() -> Unit)? = null
+
     init {
         ensureAudioTrack()
     }
@@ -333,8 +332,43 @@ class CloudAudioPlayer(
         }
     }
 
+    /**
+     * Detaches the track and decoder and releases them on the writer, so the release runs after any write
+     * already in flight: releasing an AudioTrack or MediaCodec another thread is still inside is unsafe.
+     */
+    private fun releaseTrackAndDecoder() {
+        val track = audioTrack
+        val codec = decodeCodec
+        audioTrack = null
+        decodeCodec = null
+        val release = Runnable {
+            codec?.stop()
+            codec?.release()
+            track?.release()
+            onTrackReleasedForTest?.invoke()
+        }
+        try {
+            writerExecutor.execute(release)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            release.run()
+        }
+    }
+
+    /** Suspends until every drain queued before this call has finished, so cancellation is honoured. */
+    private suspend fun awaitWriterIdle() {
+        val idle = kotlinx.coroutines.CompletableDeferred<Unit>()
+        try {
+            writerExecutor.execute { idle.complete(Unit) }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            return
+        }
+        if (kotlinx.coroutines.withTimeoutOrNull(WRITER_IDLE_TIMEOUT_MS) { idle.await() } == null) {
+            Timber.w("[CloudAudio] writer still busy after %d ms; continuing", WRITER_IDLE_TIMEOUT_MS)
+        }
+    }
+
     /** Blocks until every drain queued before this call has finished. Never call while holding [frameBuffer]. */
-    private fun awaitWriterIdle() {
+    private fun awaitWriterIdleBlocking() {
         val barrier = java.util.concurrent.FutureTask<Unit> { }
         try {
             writerExecutor.execute(barrier)
@@ -414,7 +448,7 @@ class CloudAudioPlayer(
     fun drainAndStop() {
         if (released) return
         scheduleDrain()
-        awaitWriterIdle()
+        awaitWriterIdleBlocking()
         stop()
     }
 
@@ -611,12 +645,8 @@ class CloudAudioPlayer(
         stop()
         released = true
         heartbeatScope.cancel()
+        releaseTrackAndDecoder()
         (writerExecutor as? java.util.concurrent.ExecutorService)?.shutdown()
-        decodeCodec?.stop()
-        decodeCodec?.release()
-        decodeCodec = null
-        audioTrack?.release()
-        audioTrack = null
         Timber.i("[CloudAudio] released")
     }
 

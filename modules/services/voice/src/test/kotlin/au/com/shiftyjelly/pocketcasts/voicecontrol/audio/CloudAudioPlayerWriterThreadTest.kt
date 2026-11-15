@@ -145,4 +145,55 @@ class CloudAudioPlayerWriterThreadTest {
         assertEquals("the overflow is reported exactly once, as a write failure", 1, failures.size)
         gate.countDown()
     }
+
+    @Test
+    fun `drainAndAwaitCompletion waits for frames queued behind a blocked write`() = kotlinx.coroutines.runBlocking {
+        val player = newPlayer()
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        val written = CopyOnWriteArrayList<Int>()
+        player.writeToSink = { _, bytes, _, count ->
+            entered.countDown()
+            gate.await(10, TimeUnit.SECONDS)
+            written += bytes[0].toInt()
+            count
+        }
+        player.readPlaybackHeadFrames = { Long.MAX_VALUE }
+        player.submitFrame(frame(0))
+        player.play()
+        (1..3).forEach { player.submitFrame(frame(it)) }
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+        Thread { Thread.sleep(200); gate.countDown() }.start()
+
+        val completion = player.drainAndAwaitCompletion(timeoutMs = 5_000)
+
+        assertEquals(CloudAudioPlayer.Completion.Consumed, completion)
+        assertEquals("every frame queued behind the blocked write was written before completion", (0..3).toList(), written.toList())
+    }
+
+    @Test
+    fun `release does not release the track until the write in flight returns`() {
+        val player = newPlayer()
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        val events = CopyOnWriteArrayList<String>()
+        player.writeToSink = { _, _, _, count ->
+            entered.countDown()
+            gate.await(10, TimeUnit.SECONDS)
+            events += "write_returned"
+            count
+        }
+        player.onTrackReleasedForTest = { events += "track_released" }
+        player.submitFrame(frame(0))
+        player.play()
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+
+        player.release()
+        Thread.sleep(100)
+        assertTrue("the track was released while a write was still inside it: $events", "track_released" !in events)
+
+        gate.countDown()
+        awaitTrue { "track_released" in events }
+        assertEquals(listOf("write_returned", "track_released"), events.toList())
+    }
 }

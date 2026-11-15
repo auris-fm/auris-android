@@ -120,7 +120,6 @@ public:
         int32_t speechFrames = 0;      // frames accepted into the current utterance
         bool speechActive = false;     // whether an utterance is open
         int32_t silentFrames = 0;      // consecutive silent frames, for the endpoint
-        int32_t drainRemaining = 0;    // endpoint drain countdown
     };
     VadDiagnostics getDiagnostics();
 
@@ -139,14 +138,13 @@ private:
     // Parameters (matching spec thresholds)
     static constexpr int32_t kVadFrameSize = 1024;        // 64ms @ 16kHz
     static constexpr int32_t kSilenceTimeoutFrames = 7;    // ~448ms
-    static constexpr int32_t kMinPostSpeechFrames = 10;    // ~640ms drain floor
-    static constexpr int32_t kTargetTotalFrames = 55;      // ~3.5s target
     static constexpr int32_t kMaxContextFrames = 20;       // ~1.28s pre-speech
     // No forced speech-duration endpoint: framing retains and joins until the natural end. This
     // ceiling only exists to surface a detector STUCK active as an explicit fault; it must be far
     // above any plausible utterance so ordinary long speech is never affected.
     static constexpr int32_t kStuckDetectorFrameLimit = 3750;  // ~240s @ 64ms frames
   public:
+    static constexpr int32_t silenceTimeoutFramesForTest() { return kSilenceTimeoutFrames; }
     static constexpr int32_t stuckFrameLimitForTest() { return kStuckDetectorFrameLimit; }
     // TEST BOUNDARY (U1 barrier): blocks until the runLoop thread has EXITED on its own (the exit
     // block ran), WITHOUT calling stop() and without touching the pending event. Returns false if
@@ -185,7 +183,6 @@ private:
     std::atomic<int32_t> mDiagSpeechFrames{0};
     std::atomic<bool> mDiagSpeechActive{false};
     std::atomic<int32_t> mDiagSilentFrames{0};
-    std::atomic<int32_t> mDiagDrainRemaining{0};
 
     // Circular pre-speech context buffer: stores up to kMaxContextFrames of
     // silent audio frames before speech onset.
@@ -222,7 +219,6 @@ private:
     std::mutex mSpeechMutex;
 
     int32_t mConsecutiveSilentFrames = 0;
-    int32_t mDrainRemaining = 0;
 
     std::mutex mEventMutex;
     std::condition_variable mEventCv;

@@ -71,7 +71,6 @@ void NativeVadProcessor::stop() {
     mFaultLatched = false; // a new session starts with no terminal cause latched
     mLoopExited.store(false, std::memory_order_release); // and no stale completion flag
     mConsecutiveSilentFrames = 0;
-    mDrainRemaining = 0;
 
     {
         std::lock_guard<std::mutex> lock(mSpeechMutex);
@@ -139,7 +138,6 @@ NativeVadProcessor::VadDiagnostics NativeVadProcessor::getDiagnostics() {
     d.speechFrames = mDiagSpeechFrames.load(std::memory_order_relaxed);
     d.speechActive = mDiagSpeechActive.load(std::memory_order_relaxed);
     d.silentFrames = mDiagSilentFrames.load(std::memory_order_relaxed);
-    d.drainRemaining = mDiagDrainRemaining.load(std::memory_order_relaxed);
     return d;
 }
 
@@ -355,7 +353,6 @@ void NativeVadProcessor::runLoop() {
                 mSpeechActive = false;
             }
             mConsecutiveSilentFrames = 0;
-            mDrainRemaining = 0;
             mContextCount = 0;
             mContextHead = 0;
 
@@ -392,13 +389,11 @@ void NativeVadProcessor::runLoop() {
             mDiagSpeechFrames.store(mSpeechFrames, std::memory_order_relaxed);
             mDiagSpeechActive.store(mSpeechActive, std::memory_order_relaxed);
             mDiagSilentFrames.store(mConsecutiveSilentFrames, std::memory_order_relaxed);
-            mDiagDrainRemaining.store(mDrainRemaining, std::memory_order_relaxed);
         }
 
         // 5. Speech detected.
         if (isSpeech) {
             mConsecutiveSilentFrames = 0;
-            mDrainRemaining = 0;
 
             if (!mSpeechActive) {
                 // Onset, context flush, the active flag and this frame's append all happen under
@@ -509,30 +504,17 @@ void NativeVadProcessor::runLoop() {
                     mSpeechFrames++;
                 }
             } else {
-                // Silence timeout reached — enter drain phase.
-                if (mDrainRemaining <= 0) {
-                    // Compute how many more frames to drain to reach the target
-                    // utterance length (~3.5s) for reliable language detection.
-                    int32_t totalSoFar = mSpeechFrames;
-                    int32_t needed = kTargetTotalFrames - totalSoFar;
-                    if (needed < kMinPostSpeechFrames) {
-                        needed = kMinPostSpeechFrames;
-                    }
-                    if (needed > 40) {
-                        needed = 40;
-                    }
-                    mDrainRemaining = needed;
-                }
-
-                mDrainRemaining--;
+                // Silence timeout reached: the utterance ends here. The timeout is the ONE pause
+                // tolerance -- a pause shorter than it was bridged above, a longer one ends the
+                // utterance -- so every utterance waits the same time, whatever its length.
                 {
                     std::lock_guard<std::mutex> lock(mSpeechMutex);
                     mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
                     mSpeechFrames++;
                 }
 
-                if (mDrainRemaining <= 0) {
-                    // Drain complete — finalize the utterance.
+                {
+                    // Finalize the utterance.
                     int32_t endedGeneration = -1;
 
                     // The finalize point IS the sample-accounting anchor: this thread just
@@ -575,7 +557,6 @@ void NativeVadProcessor::runLoop() {
                     }
 
                     mConsecutiveSilentFrames = 0;
-                    mDrainRemaining = 0;
                     mContextCount = 0;
                     mContextHead = 0;
                     // THIS utterance's completed segment, captured under the same lock as the

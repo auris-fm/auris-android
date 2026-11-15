@@ -435,7 +435,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetFrame
 // Aggregate detector diagnosis for capture debugging, as a long array so ONE call carries the whole
 // snapshot. NOTE: the fields are read INDEPENDENTLY -- there is no atomicity guarantee across them;
 // the array shape is about call economy, not a consistent view. Order: rms, score, speechFrames,
-// silentFrames, drainRemaining, then the three
+// silentFrames, then the three
 // booleans as 0/1 (gatePassed, isSpeech, speechActive). Aggregates only — no audio is exported.
 // Collection is off unless nativeSetVadDiagnosticsEnabled(true) was called, which release builds do
 // not do.
@@ -445,7 +445,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetVadDi
     jclass /*clazz*/)
 {
     auto* processor = gVadProcessor.acquire();
-    jlong values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    jlong values[7] = {0, 0, 0, 0, 0, 0, 0};
     if (processor != nullptr) {
         NativeVadProcessor::VadDiagnostics d = processor->getDiagnostics();
         // The RMS and score are scaled to integers: a level and a probability do not need float
@@ -454,15 +454,14 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetVadDi
         values[1] = static_cast<jlong>(d.lastScore * 1000.0f);
         values[2] = d.speechFrames;
         values[3] = d.silentFrames;
-        values[4] = d.drainRemaining;
-        values[5] = d.lastGatePassed ? 1 : 0;
-        values[6] = d.lastIsSpeech ? 1 : 0;
-        values[7] = d.speechActive ? 1 : 0;
+        values[4] = d.lastGatePassed ? 1 : 0;
+        values[5] = d.lastIsSpeech ? 1 : 0;
+        values[6] = d.speechActive ? 1 : 0;
     }
     gVadProcessor.release();
-    jlongArray out = env->NewLongArray(8);
+    jlongArray out = env->NewLongArray(7);
     if (out != nullptr) {
-        env->SetLongArrayRegion(out, 0, 8, values);
+        env->SetLongArrayRegion(out, 0, 7, values);
     }
     return out;
 }

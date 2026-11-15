@@ -276,7 +276,7 @@ int main() {
         std::deque<bool> script = frames(3, false);   // pre-roll, retained
         const std::deque<bool> speech = frames(5, true);
         script.insert(script.end(), speech.begin(), speech.end());
-        const std::deque<bool> trailing = frames(80, false);  // > kTargetTotalFrames (55) to drain and close
+        const std::deque<bool> trailing = frames(80, false);  // well past the silence timeout
         script.insert(script.end(), trailing.begin(), trailing.end());
 
         const std::vector<Segment> segs = run(script);
@@ -289,6 +289,30 @@ int main() {
             check(s.end <= s.pcmSize, "end sample is inside the emitted segment");
             check(s.end == s.onset + 5 * 1024, "end sample is exactly the last speech frame's end");
         }
+    }
+
+    // (1b) The endpoint is the silence timeout and nothing after it. The script ends the moment the
+    // 448ms timeout (kSilenceTimeoutFrames) has elapsed, so a loop that keeps collecting audio
+    // after it -- the old drain, which waited for real frames to pad the utterance to ~3.5s -- never
+    // closes the segment and the wait below times out. The spec's end-of-speech wait is about
+    // 0.45s; on a device the drain made it 1.1 to 2.6s.
+    {
+        std::deque<bool> script = frames(3, false);
+        const std::deque<bool> speech = frames(5, true);
+        script.insert(script.end(), speech.begin(), speech.end());
+        const std::deque<bool> timeout = frames(NativeVadProcessor::silenceTimeoutFramesForTest(), false);
+        script.insert(script.end(), timeout.begin(), timeout.end());
+
+        FakeCapture capture;
+        capture.script = script;
+        NativeVadProcessor processor(&capture);
+        int32_t gen = -1;
+        check(processor.start(), "the processor starts");
+        int event = 0;
+        // 1 = speech started, 3 = trailing silence began, 2 = speech ended.
+        do { event = processor.waitForEvent(2000, &gen); } while (event == 1 || event == 3);
+        check(event == 2, "the utterance ends at the silence timeout, with no further audio needed");
+        processor.stop();
     }
 
     // (2) The case that breaks an absolute cursor: a completed segment, a long silent gap, then
@@ -326,7 +350,7 @@ int main() {
         std::deque<bool> script = frames(3, false);            // small pre-roll
         const std::deque<bool> speech = frames(150, true);     // 150 * 64ms = 9.6s, far past 5s
         script.insert(script.end(), speech.begin(), speech.end());
-        const std::deque<bool> trailing = frames(80, false);   // drain + close
+        const std::deque<bool> trailing = frames(80, false);   // close
         script.insert(script.end(), trailing.begin(), trailing.end());
 
         const std::vector<Segment> segs = run(script);
@@ -336,7 +360,7 @@ int main() {
             std::printf("      long: onset=%d end=%d pcmSize=%d frames=%d\n",
                         s.onset, s.end, s.pcmSize, s.pcmSize / kFrame);
             // Every one of the 150 speech frames must survive inside the emitted PCM: 3 pre-roll
-            // + 150 speech + drain, and nothing may be dropped at the 5s mark.
+            // + 150 speech + the close, and nothing may be dropped at the 5s mark.
             check(s.pcmSize >= 153 * kFrame,
                   "all speech frames are retained (no truncation at the ~5s bound)");
             check(s.end == s.onset + 150 * kFrame,
@@ -344,34 +368,53 @@ int main() {
         }
     }
 
-    // (4) RETENTION: speech that resumes during the drain window is part of the SAME utterance.
-    // The old path accumulated drain silence but a resumed utterance must join, not become a
-    // second segment or be lost to the cooldown.
+    // (4) RETENTION: speech that resumes within the pause tolerance is part of the SAME utterance.
+    // The tolerance is the silence timeout (kSilenceTimeoutFrames, 7 frames) and nothing else: a
+    // pause of 6 silent frames is bridged, so the resumed run joins instead of becoming a second
+    // segment or being lost.
     {
         std::deque<bool> script;
         const std::deque<bool> first = frames(5, true);
         script.insert(script.end(), first.begin(), first.end());
-        const std::deque<bool> pause = frames(8, false);       // < full drain, a mid-utterance pause
+        const std::deque<bool> pause = frames(NativeVadProcessor::silenceTimeoutFramesForTest() - 1, false);
         script.insert(script.end(), pause.begin(), pause.end());
         const std::deque<bool> resumed = frames(5, true);
         script.insert(script.end(), resumed.begin(), resumed.end());
-        const std::deque<bool> trailing = frames(80, false);   // now drain and close for real
+        const std::deque<bool> trailing = frames(80, false);
         script.insert(script.end(), trailing.begin(), trailing.end());
 
         const std::vector<Segment> segs = run(script);
-        check(segs.size() == 1, "a pause then resumed speech is one utterance, not two");
+        check(segs.size() == 1, "a pause within the tolerance then resumed speech is one utterance, not two");
         if (!segs.empty()) {
             const Segment& s = segs[0];
             std::printf("      resumed: onset=%d end=%d pcmSize=%d frames=%d\n",
                         s.onset, s.end, s.pcmSize, s.pcmSize / kFrame);
             // The resumed run joins the same utterance. Its end sample is the position of the
-            // last speech frame in the retained buffer — the 8 bridged pause frames sit between
-            // the two runs, so the end is past the first run's 5 frames, not equal to it.
-            check(s.pcmSize >= 18 * kFrame,
+            // last speech frame in the retained buffer, so it is past the first run's 5 frames.
+            check(s.pcmSize >= 16 * kFrame,
                   "resumed speech is retained in the same segment");
             check(s.end >= s.onset + 5 * kFrame,
                   "end sample advances past the first speech run into the resumed one");
         }
+    }
+
+    // (4b) A pause LONGER than the tolerance ends the utterance: the same speech, but the pause is
+    // one frame past the silence timeout, so the resumed run is a second segment. This is the
+    // trade the single tolerance makes -- every utterance waits the same short time, so a long
+    // mid-sentence pause splits it.
+    {
+        std::deque<bool> script;
+        const std::deque<bool> first = frames(5, true);
+        script.insert(script.end(), first.begin(), first.end());
+        const std::deque<bool> pause = frames(NativeVadProcessor::silenceTimeoutFramesForTest() + 1, false);
+        script.insert(script.end(), pause.begin(), pause.end());
+        const std::deque<bool> resumed = frames(5, true);
+        script.insert(script.end(), resumed.begin(), resumed.end());
+        const std::deque<bool> trailing = frames(80, false);
+        script.insert(script.end(), trailing.begin(), trailing.end());
+
+        const std::vector<Segment> segs = run(script);
+        check(segs.size() == 2, "a pause longer than the tolerance splits the speech into two utterances");
     }
 
     // (6) `onErrorAfterClose` is the REAL compiled callback, not a stub: its late-callback guard and
@@ -464,9 +507,9 @@ int main() {
         NativeVadProcessor processor(&capture);
         check(processor.start(), "ring-path capture starts");
         bool closed = false;
-        // Feed the drain silence frame by frame, polling for the close, so the consumer stays
+        // Feed the silence frame by frame, polling for the close, so the consumer stays
         // behind the writer -- exactly the delivery lag the binding must be immune to. The script
-        // must reach kTargetTotalFrames (55) for the endpoint to close.
+        // must reach the silence timeout for the endpoint to close.
         for (int i = 0; i < 60 && !closed; i++) {
             push(quiet);
             if (processor.waitForEvent(5, &gen) == 2) closed = true;
@@ -617,7 +660,7 @@ int main() {
         check(processor.start(), "the post-drop capture starts");
         bool closed = false;
         // The ring already holds 32 frames (8 + the 24 the partial write kept); feed enough
-        // additional silence for the endpoint (kTargetTotalFrames 55) while polling for the close.
+        // additional silence for the endpoint (the silence timeout) while polling for the close.
         for (int i = 0; i < 30 && !closed; i++) {
             push(quiet, kFrame);
             if (processor.waitForEvent(5, &gen) == 2) closed = true;

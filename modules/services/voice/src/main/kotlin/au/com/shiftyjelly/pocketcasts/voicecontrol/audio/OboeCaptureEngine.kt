@@ -78,7 +78,7 @@ internal object OboeNative {
 
     /**
      * Aggregate detector diagnosis, or null when diagnostics are off. Order matches the native
-     * contract: rms x1000, score x1000, speechFrames, silentFrames, drainRemaining, then gatePassed,
+     * contract: rms x1000, score x1000, speechFrames, silentFrames, then gatePassed,
      * isSpeech and speechActive as 0/1. Aggregates only; no audio crosses this boundary.
      */
     external fun nativeGetVadDiagnostics(): LongArray

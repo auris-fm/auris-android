@@ -185,11 +185,10 @@ int main() {
         // Two utterances finalize while the consumer sleeps: when it finally pops, each end event
         // must serve the PCM/onset/end of ITS utterance -- not the one that finished most
         // recently -- and every event must name the utterance it belongs to. (Silence runs are
-        // long enough that the drain floor and the 7-frame silence timeout both fit, so A really
-        // closes before B starts.)
+        // long enough for the 7-frame silence timeout, so A really closes before B starts.)
         std::deque<bool> script;
         appendFrames(script, 3, true);     // utterance A: short speech
-        appendFrames(script, 60, false);   // silence closing A (drain floor + timeout fit)
+        appendFrames(script, 60, false);   // silence closing A (past the timeout)
         appendFrames(script, 20, true);    // utterance B
         appendFrames(script, 60, false);   // silence closing B
 

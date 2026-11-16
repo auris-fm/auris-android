@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
  *   observer ← sink.onRetentionEnded wiring            (provider, VoiceObservationModule)
  *   watcher.start() → accounts listener, enrollment hook, policy flow, exact lease deadline
  *
- * NO ALLOWANCE COMPOSITION (spec §"Actual upload usage"). This class used to own the
+ * NO ALLOWANCE COMPOSITION (see "Actual upload usage" in cloud-assistant.md). This class used to own the
  * capture-allowance lifecycle, its retirement watcher and the provisioner entry point. Those are
  * removed: capture no longer reserves daily capacity before it starts, and the daily limit is
  * metered server-side at acceptance of actual audio bytes. Legacy `no_backup/voice_allowance/`

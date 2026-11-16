@@ -17,7 +17,7 @@ class PlaybackCrossCorrelatorPositionTest {
     private val rate = 16_000
     private fun tone(n: Int, freq: Double, phase: Double = 0.0) = FloatArray(n) { i -> (0.6 * sin(2 * PI * freq * i / rate + phase)).toFloat() }
 
-    // 4235652583 BOUNDARIES (unpositioned path, END-anchored window): with a FULL ring the window is
+    // BOUNDARIES (unpositioned path, END-anchored window): with a FULL ring the window is
     // [maxOffset-8000, maxOffset-800]; a match at exactly the 50 ms and 500 ms delay edges must be
     // found, and a fresh (partial) reference must still admit its in-window offsets.
     @Test
@@ -348,7 +348,7 @@ class PlaybackCrossCorrelatorPositionTest {
         fun `a minimum-length VAD segment is still checked for bleed against a full 2 s reference`() {
             // DISTINCTIVE, NONPERIODIC echo INSIDE the searched offsets, and placed entirely in the
             // segment's LAST 6 000 samples so the PREFIX window (first 24 000) contains NONE of it
-            // (Claude 4366645238): a pure tone self-correlates (~0.72) at any aligned offset, and an
+            // A pure tone self-correlates (~0.72) at any aligned offset, and an
             // echo overlapping the prefix window lets a prefix-revert mutant still find it. The
             // unpositioned bounded search covers offsets 0..7 200 (24 000-sample analysis tail in a
             // 32 000 reference); the matching analysis window starts at search offset 0 (the 500 ms
@@ -383,7 +383,7 @@ class PlaybackCrossCorrelatorPositionTest {
         }
     }
 
-// REVIEW 6381507658 BLOCKING: a real VAD segment is LONGER than the 2 s reference, and the
+// BLOCKING: a real VAD segment is LONGER than the 2 s reference, and the
 // recorder's reference holds the NEWEST 2 s. The bounded window must therefore be the segment's
 // TAIL with the position anchor SHIFTED to the tail's first sample - the old prefix analysis
 // correlated the segment's OLDEST samples, whose position window lies BEFORE the reference
@@ -401,7 +401,7 @@ class PlaybackCrossCorrelatorPositionTest {
         val refLen = 32_000 // 2 s
         // A DISTINCTIVE waveform, not a pure tone: a pure tone self-correlates at any aligned
         // offset, so the control would pass even if the tail search missed the burst entirely
-        // (Claude review 40080514049). PRBS-like noise only correlates when sample-aligned.
+        // PRBS-like noise only correlates when sample-aligned.
         val burst = FloatArray(24_000) { i ->
             var x = (i * 2_654_435_761L + 1_234_567_891L) % 4_294_967_296L
             x = x xor (x shr 13)

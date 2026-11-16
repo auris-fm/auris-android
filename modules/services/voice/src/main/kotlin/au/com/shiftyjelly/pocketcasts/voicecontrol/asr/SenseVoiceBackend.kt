@@ -163,7 +163,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
 
     companion object {
         // PINNED REVISION: resolve/main is mutable, so the base URL names the
-        // exact repo commit the artifacts were verified at (2365baeacb507f821a0c8120fcee3d484dba7a07).
+        // exact repo commit the artifacts were verified at.
         private const val SENSEVOICE_BASE_URL =
             "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07"
 

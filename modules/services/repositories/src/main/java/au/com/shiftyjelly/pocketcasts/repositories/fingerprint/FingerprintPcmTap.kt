@@ -59,7 +59,7 @@ class FingerprintPcmTap @Inject constructor() {
      * background ([handlePlaybackState]). A subscriber retires its held admission AT THE EVENT; the
      * epoch bump alone only ever superseded admission when a SUCCESSOR later emitted, which left a
      * paused-then-idle episode holding live admission with no owner event closing it
-     * thread 4235702596).
+     * thread named above).
      */
     private val streamClosedCallbacks = mutableListOf<() -> Unit>()
 

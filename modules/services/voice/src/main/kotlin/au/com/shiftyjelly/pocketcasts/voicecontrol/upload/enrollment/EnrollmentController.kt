@@ -78,8 +78,8 @@ sealed interface EnrollmentOutcome {
 class EnrollmentController(
     /**
      * Both operations take the [applyUnderGuard] fence: the effects they apply are handed THROUGH
-     * it, so the currency decision and the effects run as ONE fence critical section (Reviewer on
-     * `561d3c5b6e`: a bare check released the fence lock before publish/persist, leaving a
+     * it, so the currency decision and the effects run as ONE fence critical section. A bare
+     * check released the fence lock before publish/persist, leaving a
      * check-then-write gap against `supersedeAndIssue`). The withdrawal still does not queue behind
      * an in-flight enrollment (deliberate), so two PUTs can be in flight; the enrollment's answer
      * consults the fence at its effects, not trusting its issue.
@@ -125,7 +125,7 @@ class EnrollmentController(
         }
         mutableState.value = EnrollmentState.Pending
         val attempt = fence.issue(ownerSession())
-        // THE GUARD IS THE CRITICAL SECTION (Reviewer on `561d3c5b6e`): the operations hand their
+        // THE GUARD IS THE CRITICAL SECTION: the operations hand their
         // publish+persist THROUGH this function, and applyIfCurrent runs the decision AND the
         // effects under the fence's own lock. A supersession issued between validation and
         // publication cannot interleave — it waits for the section, and the newer intent wins from
@@ -172,7 +172,7 @@ class EnrollmentController(
      * Applies a durable side effect for [outcome], or applies NOTHING.
      *
      * Use this instead of [stillApplies] followed by an effect. The two-step form has a gap the
-     * reviewer named: `issue`/`supersede`/account change do not hold any caller-side lock, so between
+     * `issue`/`supersede`/account change do not hold any caller-side lock, so between
      * the check and the effect the world can move, and the effect then lands on state the decision no
      * longer describes. Here the decision and the effect run inside the fence's own critical section,
      * the same one its mutations take.

@@ -63,17 +63,17 @@ class EchoRejectionDeviceTest {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         val capture = MicrophoneCapture(ctx, OboeCaptureHardware(), au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        // 4236613848: EVERYTHING after resource acquisition is wrapped -- an assertion failure must
+        // EVERYTHING after resource acquisition is wrapped -- an assertion failure must
         // not leave the microphone open or the collector draining in the shared process. Each
         // cleanup step is protected so one failure cannot skip the others.
-        // The REAL acquisition lifecycle (e878d156): open -> start -> confirmed attach. Without it
+        // The REAL acquisition lifecycle: open -> start -> confirmed attach. Without it
         // startCapture() is an emptyFlow and a zero-segment run says nothing. Frame deltas are taken
         // around THIS run, not read once: the counter is process-global, so another test's audio
         // could satisfy a bare "> 0".
         var engine: AndroidPlatformTtsEngine? = null
         var job: kotlinx.coroutines.Job? = null
         try {
-            // Acquisition INSIDE the protected body (99c2d869): an Assume after opening the stream
+            // Acquisition INSIDE the protected body: an Assume after opening the stream
             // but before the finally would skip cleanup and leak the acquired stream. Frame deltas
             // are scoped to THIS run; the counter is process-global.
             val runStartFrames = MicrophoneCapture.framesConsumed()
@@ -81,7 +81,7 @@ class EchoRejectionDeviceTest {
             // An open failure is not evidence of a missing environment: a native or configuration
             // regression returns the same negative. Unexplained open failure is a FAILURE.
             assertTrue("openStreamForAcquisition failed (deviceId=$deviceId)", deviceId >= 0)
-            // All three acquisition steps are hard assertions (339f7f63): an unexplained failure is
+            // All three acquisition steps are hard assertions: an unexplained failure is
             // a failure, not a skip -- a native/configuration regression must not present as a
             // missing environment. The selected input device is NOT verified here -- attach is
             // "attached", not "confirmed to the chosen route".
@@ -193,7 +193,7 @@ class EchoRejectionDeviceTest {
     fun theDetectionPathAcceptsGenuineSpeechLevelAudio() = runBlocking<Unit> {
         // The positive control, and the reason it is not optional: with no control, zero
         // segments cannot distinguish correct echo rejection from a scenario that would never have
-        // produced a segment whatever the input. 4236631774: the control now drives the PRODUCTION
+        // produced a segment whatever the input. The control now drives the PRODUCTION
         // detector -- the same native Silero path via MicrophoneCapture.startCapture() the echo run
         // uses -- with a guaranteed speech source: the app's own platform TTS played audibly. (The
         // previous control drove EnergyVoiceAudioSegmenter, a different detector, so its pass proved
@@ -204,7 +204,7 @@ class EchoRejectionDeviceTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         // Same REAL acquisition lifecycle as the echo run. Acquisition is INSIDE the protected body
-        // (99c2d869): a skip after opening must not leak the acquired stream.
+        // a skip after opening must not leak the acquired stream.
         var job: kotlinx.coroutines.Job? = null
         var engine: AndroidPlatformTtsEngine? = null
         try {
@@ -213,7 +213,7 @@ class EchoRejectionDeviceTest {
             // An open failure is not evidence of a missing environment: a native or configuration
             // regression returns the same negative. Unexplained open failure is a FAILURE.
             assertTrue("openStreamForAcquisition failed (deviceId=$deviceId)", deviceId >= 0)
-            // All three acquisition steps are hard assertions (339f7f63): an unexplained failure is
+            // All three acquisition steps are hard assertions: an unexplained failure is
             // a failure, not a skip -- a native/configuration regression must not present as a
             // missing environment. The selected input device is NOT verified here -- attach is
             // "attached", not "confirmed to the chosen route".
@@ -244,7 +244,7 @@ class EchoRejectionDeviceTest {
             val runDelta = nativeTotal - runStartFrames
             Log.i(tag, "positive control: runDelta=$runDelta segments=${segments.size}")
             // After VERIFIED acquisition/attach and an audible TTS delivery, zero delivered frames
-            // is a FAILURE, not an inconclusive (99c2d869): capture is proven live by the
+            // is a FAILURE, not an inconclusive: capture is proven live by the
             // open/start/attach results above, and the speech source is the app's own audible output.
             assertTrue(
                 "verified capture delivered no frames to the native VAD during audible speech " +

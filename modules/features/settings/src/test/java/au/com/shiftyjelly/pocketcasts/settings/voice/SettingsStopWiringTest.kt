@@ -6,8 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * PINS THE PRODUCTION WIRING AXIS THE REVIEWER FOUND MISSING (0546969a), updated for the one
- * PINS THE PRODUCTION WIRING AXIS THE REVIEWER FOUND MISSING (0546969a), updated for the one
+ * PINS THE PRODUCTION WIRING AXIS, updated for the one
+ * PINS THE PRODUCTION WIRING AXIS, updated for the one
  * sharing surface: the reachable Settings section now delegates to `VoiceSharingSettingsViewModel`,
  * which owns the durable stop ordering, the fenced outcome effects and the presentation rules.
  *

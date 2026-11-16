@@ -30,7 +30,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
      * The [PlaybackManager] already responds to AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
      * by lowering its volume (VOLUME_DUCK) when configured for duck-over-notification.
      */
-    // THE LISTENER IS THE FOCUS OWNER'S IDENTITY (4236727145): Android keys the focus grant to the
+    // THE LISTENER IS THE FOCUS OWNER'S IDENTITY: Android keys the focus grant to the
     // listener instance it was handed, so abandon must pass THAT SAME instance. A fresh lambda in
     // restore() releases nothing and the host player stays ducked for the rest of the episode.
     private val duckFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->

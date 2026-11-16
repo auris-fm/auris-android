@@ -197,7 +197,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // The ownership claim made at synthesis, carried into playback: playback must never
             // re-read the global generation, or an utterance whose successor claimed during synthesis
             // would adopt the successor's generation and believe itself the owner.
-            // The utterance id is UNIQUE PER SYNTHESIS (finding 4236364898): a millisecond-clock id can
+            // The utterance id is UNIQUE PER SYNTHESIS: a millisecond-clock id can
             // collide, and every callback below must be attributable to exactly one utterance on this
             // shared engine.
             val utteranceId = "voice-tts-" + UTTERANCE_ID_SEQ.incrementAndGet()
@@ -209,7 +209,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             val synthesized = try {
                 kotlinx.coroutines.withTimeout(synthesisWaitMs) {
                     suspendCancellableCoroutine { continuation ->
-                        // ONE-SHOT, ID-MATCHED completion (finding 4236364898). This listener is SHARED: the
+                        // ONE-SHOT, ID-MATCHED completion. This listener is SHARED: the
                         // next speak() replaces it, so any LATE callback from THIS utterance is delivered into
                         // the SUCCESSOR's listener instance. Two guards follow.
                         // (1) The id check: a late callback carrying this utterance's id is ignored by the
@@ -690,7 +690,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
         // Producer-id namespace for TTS utterances, disjoint from cloud answers and earcons.
         private const val TTS_PRODUCER_BASE: Long = Long.MIN_VALUE / 8
 
-        /** Source of unique per-synthesis utterance ids (finding 4236364898). */
+        /** Source of unique per-synthesis utterance ids. */
         private val UTTERANCE_ID_SEQ = java.util.concurrent.atomic.AtomicLong(0)
 
         /** The rate the shared echo reference and the correlator work at. */

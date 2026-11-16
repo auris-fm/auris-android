@@ -37,4 +37,11 @@
          whole template array; SpokenTemplateResolver overlays it onto the resolved map. A missing
          locale entry is a client gap, not a silent fallback to the generic line. -->
     <string name="voice_cloud_error_limit_exceeded" translatable="true">You have reached your Auris free daily limit. Please try again tomorrow.</string>
+    <!-- Synthesis failed, or the service failed internally: one shared line for both codes, so the
+         user hears the same apology whichever it was. Dedicated strings, NOT array entries — an array
+         entry cannot be overridden per locale without redefining the whole array, which is how these
+         two came to be English-only for every non-English speaker. -->
+    <string name="voice_cloud_error_answer_unavailable" translatable="true">Sorry, I couldn\'t answer that just now. Please try again.</string>
+    <!-- The catch-all for a code with no line of its own. Same reason as above. -->
+    <string name="voice_cloud_error_generic" translatable="true">Sorry, I couldn\'t complete that request.</string>
 </resources>

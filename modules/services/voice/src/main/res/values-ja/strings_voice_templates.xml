@@ -4,4 +4,6 @@
      SpokenTemplateResolver overlays onto the resolved map. -->
 <resources>
     <string name="voice_cloud_error_limit_exceeded">Aurisの無料の1日の上限に達しました。明日もう一度お試しください。</string>
+    <string name="voice_cloud_error_answer_unavailable">申し訳ありません。今はお答えできませんでした。もう一度お試しください。</string>
+    <string name="voice_cloud_error_generic">申し訳ありません。そのリクエストを完了できませんでした。</string>
 </resources>

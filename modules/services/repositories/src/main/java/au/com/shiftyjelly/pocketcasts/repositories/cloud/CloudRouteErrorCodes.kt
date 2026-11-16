@@ -23,6 +23,13 @@ object CloudRouteErrorCodes {
     const val NO_ANSWER = "no_answer"
 
     /**
+     * The service could not synthesise speech for an otherwise successful turn. Recognised so the
+     * log names the cause: collapsing it to `unrecognized` cost a diagnosis that needed the
+     * server's own logs to recover.
+     */
+    const val SPEECH_UNAVAILABLE = "speech_unavailable"
+
+    /**
      * Every code this client recognises — those adopted from the server, those it mints itself,
      * and those recognised for log normalization only. Internal rather than private so the
      * contract check can re-derive it from code instead of restating it: a code added here
@@ -41,6 +48,7 @@ object CloudRouteErrorCodes {
         PROVIDER_ERROR,
         INVALID_REQUEST,
         NO_ANSWER,
+        SPEECH_UNAVAILABLE,
     )
 
     /** `http_<3-digit status>`, recognised for log normalization (not minted by this client). */

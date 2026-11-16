@@ -35,6 +35,17 @@ class CloudRouteErrorCodesTest {
     }
 
     @Test
+    fun `a speech failure keeps its own name in the log`() {
+        // The service ends a turn with this when synthesis fails. Collapsing it to `unrecognized`
+        // hid the cause: a device run logged `turn error code=unrecognized` for what was actually
+        // a speech outage, and the diagnosis needed the server's logs to recover it.
+        assertEquals(
+            CloudRouteErrorCodes.SPEECH_UNAVAILABLE,
+            CloudRouteErrorCodes.normalizeForLog(CloudRouteErrorCodes.SPEECH_UNAVAILABLE),
+        )
+    }
+
+    @Test
     fun `unknown and null codes collapse to constants`() {
         assertEquals("unrecognized", CloudRouteErrorCodes.normalizeForLog("user_email@example.com in error text"))
         assertEquals("none", CloudRouteErrorCodes.normalizeForLog(null))

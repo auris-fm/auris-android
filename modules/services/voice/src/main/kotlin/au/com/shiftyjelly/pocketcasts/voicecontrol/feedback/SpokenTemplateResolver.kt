@@ -99,10 +99,21 @@ class SpokenTemplateResolver(
             // overlay wins over any array entry: a locale's translation must be spoken, and a
             // missing locale entry falls through to the default values/ line, never to generic.
             templates[KEY_DAILY_LIMIT] = resources.getString(R.string.voice_cloud_error_limit_exceeded)
+            // Synthesis failure and internal failure share one apology: the user cannot act on the
+            // difference, and two wordings for one experience would only sound inconsistent.
+            val answerUnavailable = resources.getString(R.string.voice_cloud_error_answer_unavailable)
+            templates[KEY_SPEECH_UNAVAILABLE] = answerUnavailable
+            templates[KEY_INTERNAL_ERROR] = answerUnavailable
+            // The catch-all is overlaid too. Left in the array alone it resolved to English for
+            // every locale, because no values-* redefines the array.
+            templates[KEY_GENERIC] = resources.getString(R.string.voice_cloud_error_generic)
             return templates
         }
 
-        /** Mirrors the sink's `cloud_error_<code>` construction for the one overlaid key. */
+        /** Mirrors the sink's `cloud_error_<code>` construction for the overlaid keys. */
         private const val KEY_DAILY_LIMIT = "cloud_error_limit_exceeded"
+        private const val KEY_SPEECH_UNAVAILABLE = "cloud_error_speech_unavailable"
+        private const val KEY_INTERNAL_ERROR = "cloud_error_internal_error"
+        private const val KEY_GENERIC = "cloud_error_generic"
     }
 }

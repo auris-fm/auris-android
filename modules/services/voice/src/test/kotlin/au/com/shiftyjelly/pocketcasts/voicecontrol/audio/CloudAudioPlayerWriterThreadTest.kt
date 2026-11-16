@@ -209,11 +209,11 @@ class CloudAudioPlayerWriterThreadTest {
 
     @Test
     fun `an answer already fully written when the turn ends is reported consumed at once`() = kotlinx.coroutines.runBlocking {
-        // The automated review's blocker, and what a short answer hits first: by Done the queue is
-        // EMPTY, so the writer has nothing left to write and the completion barrier runs with no
-        // progress behind it. A wait that only exits on a new write sits out its whole stall window,
-        // reports the answer as cut short, and the user hears the error tone over an answer that was
-        // delivered perfectly. Completion has to be checked on every poll, not only between windows.
+        // What a short answer hits first: by Done the queue is EMPTY, so the writer has nothing left
+        // to write and the completion barrier runs with no progress behind it. A wait that only exits
+        // on a new write sits out its whole stall window, reports the answer as cut short, and the
+        // user hears the error tone over an answer that was delivered perfectly. Completion has to be
+        // checked on every poll, not only between windows.
         val player = newPlayer()
         val written = CopyOnWriteArrayList<Int>()
         player.writeToSink = { _, bytes, _, count ->

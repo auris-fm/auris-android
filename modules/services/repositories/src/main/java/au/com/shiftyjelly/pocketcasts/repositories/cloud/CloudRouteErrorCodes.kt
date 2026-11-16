@@ -51,6 +51,17 @@ object CloudRouteErrorCodes {
         SPEECH_UNAVAILABLE,
     )
 
+    /**
+     * Whether a server-supplied code may be persisted verbatim in the lifecycle trace. The SAME
+     * vocabulary [normalizeForLog] uses, so a code recognised for one log cannot be silently
+     * bounded to "unknown" in the other — which is how a speech outage came to be unnamed in the
+     * artifact support reads while the Timber line named it.
+     *
+     * A function rather than the set itself: [KNOWN] stays internal to this module, and widening
+     * its visibility to share a mutable collection would invite exactly the drift this closes.
+     */
+    fun isRecognised(code: String): Boolean = code in KNOWN
+
     /** `http_<3-digit status>`, recognised for log normalization (not minted by this client). */
     // Internal rather than private so the contract check can assert the declaration against the
     // shapes this object recognises, instead of against the declaration's own copy of it.

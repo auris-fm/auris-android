@@ -4143,6 +4143,66 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a speech outage is named in the persisted terminal trace, not bounded to unknown`() = kotlinx.coroutines.runBlocking {
+        // The persisted lifecycle log is what support reads. A second allowlist bounds the terminal's
+        // error code, and a code missing from it lands as "unknown" — so recognising the code for the
+        // Timber line alone still left the artifact that matters unable to name a speech outage.
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val wireClient = CapturingWebSocketClient()
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+            graceSignal.onWakeWordDetected()
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+                gracePeriodSignal = graceSignal,
+                transportFactory = { _, _, observer ->
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                        "https://example.invalid",
+                        wireClient,
+                        observer,
+                    )
+                },
+            )
+            val driver = Thread {
+                try {
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                    wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                    while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    wireClient.listener!!.onMessage(
+                        wireClient.socket,
+                        """{"type":"error","code":"speech_unavailable","message":""}""",
+                    )
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+            val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+            val turn = turnScope.launch {
+                runCatching {
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        deps.sink().routeToCloud("question", playbackContext, admitted = testWireId)
+                    }
+                }
+            }
+            driver.start()
+            turn.join()
+            turnScope.cancel()
+            driver.join()
+
+            val line = awaitCaptureLine(capture, "reason=TurnTerminalReceived", testWireId)
+            assertTrue(
+                "the persisted terminal must name the speech outage, got: $line",
+                line.contains("speech_unavailable"),
+            )
+            assertFalse("bounded to unknown hides the cause: $line", line.contains("error_code=unknown"))
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
     fun `a TTS failure mid-render releases the transferred hold exactly once`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {

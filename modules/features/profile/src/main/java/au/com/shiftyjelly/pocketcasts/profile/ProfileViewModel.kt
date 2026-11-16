@@ -10,10 +10,10 @@ import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
 import au.com.shiftyjelly.pocketcasts.repositories.user.StatsManager
 import au.com.shiftyjelly.pocketcasts.repositories.user.UserManager
+import au.com.shiftyjelly.pocketcasts.repositories.whatsnew.WhatsNewManager
 import au.com.shiftyjelly.pocketcasts.utils.Gravatar
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.Feature
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
-import au.com.shiftyjelly.pocketcasts.utils.toDurationFromNow
 import com.automattic.eventhorizon.BlogsShownEvent
 import com.automattic.eventhorizon.DownloadsShownEvent
 import com.automattic.eventhorizon.EndOfYearProfileCardShownEvent
@@ -54,6 +54,7 @@ class ProfileViewModel @Inject constructor(
     private val userManager: UserManager,
     private val endOfYearManager: EndOfYearManager,
     private val eventHorizon: EventHorizon,
+    whatsNewManager: WhatsNewManager,
 ) : ViewModel() {
     private val refreshStatsTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
@@ -66,6 +67,9 @@ class ProfileViewModel @Inject constructor(
 
     internal val isSignedIn get() = signInState.value.isSignedIn
 
+    internal val hasWhatsNewDot = whatsNewManager.hasUnlistedMessages
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     internal val profileHeaderState = combine(
         signInState,
         sharingFeatureFlag,
@@ -75,7 +79,7 @@ class ProfileViewModel @Inject constructor(
                 imageUrl = Gravatar.getUrl(state.email),
                 subscriptionTier = state.subscription?.tier,
                 email = state.email,
-                expiresIn = state.subscription?.expiryDate?.toDurationFromNow(),
+                expiresIn = state.subscription?.expiresIn,
                 isShareVisible = isProfileSharingEnabled,
             )
 

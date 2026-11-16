@@ -1,25 +1,136 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-Translation-Revision-Date: 2026-09-10 14:58:41+0000
+Translation-Revision-Date: 2026-11-04 14:55:45+0000
 Plural-Forms: nplurals=2; plural=n != 1;
 Generator: GlotPress/2.4.0-alpha
 Language: it
 -->
 <resources>
+    <string name="settings_generated_chapters_summary">Quando un episodio non ha capitoli propri, Pocket Casts li genererà automaticamente per te.</string>
+    <string name="podcasts_played_podcasts_show">Mostra</string>
+    <string name="podcasts_played_podcasts_hide">Nascondi</string>
+    <string name="podcasts_played_podcasts_description">Nasconde i podcast che hai ascoltato per intero. Ricompaiono quando arriva un nuovo episodio.</string>
+    <string name="podcasts_menu_played_podcasts">Podcast ascoltati</string>
+    <string name="chapters_generated_upsell_button">Ottieni capitoli generati</string>
+    <string name="chapters_generated_upsell_message">Con Pocket Casts Plus, non dovrai più scorrere avanti e indietro. Salta direttamente alla parte che ti interessa.</string>
+    <string name="chapters_generated_upsell_title">Capitoli generati automaticamente</string>
+    <string name="chapters_generated_turn_on">Attiva</string>
+    <string name="chapters_generated_off_message">Riattivali per saltare dritto alla parte che cercavi.</string>
+    <string name="chapters_generated_off_title">I capitoli generati sono disattivati</string>
+    <string name="chapters_generated_undo">Annulla</string>
+    <string name="chapters_generated_turned_off">Capitoli generati disattivati</string>
+    <string name="chapters_generated_turn_off">Disattiva i capitoli generati</string>
+    <string name="chat_loading_still_working">Ci stiamo ancora lavorando…</string>
+    <string name="chat_loading_writing_answer">Scrittura della risposta</string>
+    <string name="chat_loading_finding_moments">Trovando i momenti giusti</string>
+    <string name="chat_loading_reading_transcript">Lettura della trascrizione</string>
+    <string name="automotive_nothing_playing_title">Scegli un episodio da riprodurre</string>
+    <string name="chat_quote_finding_moment">Ricerca del momento…</string>
+    <string name="chat_quote_play_failed">Impossibile riprodurre questa parte dell\'episodio</string>
+    <string name="chat_history_empty_body">Fai una domanda su un episodio e la chat apparirà qui.</string>
+    <string name="chat_history_empty_title">Ancora nessuna chat</string>
+    <string name="chat_about_episode">Parla di %1$s</string>
+    <string name="chat_now_playing_episode">Riproduzione in corso di %1$s</string>
+    <string name="chat_undo">Annulla</string>
+    <string name="chat_history_older">Più vecchi</string>
+    <string name="chat_history_previous_7_days">Precedenti 7 giorni</string>
+    <string name="chat_history">Cronologia della conversazione</string>
+    <string name="chat_deleted">Conversazione eliminata</string>
+    <string name="chat_cleared">Conversazione cancellata</string>
+    <string name="chat_offline_note">Sei offline. Connettiti per fare una domanda.</string>
+    <string name="chat_answering">Risposta</string>
+    <string name="chat_error_server_on_our_end">Si è verificato un problema da parte nostra.</string>
+    <string name="chat_not_sent_tap_to_retry">Non inviato. Tocca per provare di nuovo.</string>
+    <string name="chat_feedback_what_went_wrong">Cosa è andato storto</string>
+    <string name="chat_beta_sheet_sign_in">Accedi per provarlo</string>
+    <string name="episode_chat_needs_transcript_message">Chiedi informazioni su questo episodio richiede una trascrizione. Questo episodio non ne ha una.</string>
+    <string name="onboarding_episode_chat_question_2">Riassumere i punti principali?</string>
+    <string name="onboarding_episode_chat_answer">Questo episodio riguarda IA, salute e produttività.</string>
+    <string name="onboarding_episode_chat_question_1">Quali sono gli argomenti chiave?</string>
+    <string name="onboarding_episode_chat_title">Chiedi informazioni su questo episodio:</string>
+    <string name="chat_feedback_learn_more">Scopri di più</string>
+    <string name="chat_feedback_legal">L\'invio condivide questa conversazione con noi per migliorare l\'esperienza.</string>
+    <string name="chat_feedback_submit">Invia feedback</string>
+    <string name="chat_feedback_details_hint">Condividi i dettagli (facoltativo)</string>
+    <string name="chat_feedback_reason_other">Altro</string>
+    <string name="chat_feedback_reason_offensive">È offensivo</string>
+    <string name="chat_feedback_reason_out_of_date">Non è aggiornato</string>
+    <string name="chat_feedback_reason_wrong_facts">Ha sbagliato i fatti</string>
+    <string name="chat_feedback_reason_not_interesting">Non era interessante</string>
+    <string name="chat_rate_answer_bad">Risposta non soddisfacente</string>
+    <string name="chat_rate_answer_good">Risposta soddisfacente</string>
+    <string name="chat_feedback_thank_you">Grazie per il feedback</string>
+    <string name="chat_survey_yes">Sì!</string>
+    <string name="chat_survey_not_really">Non proprio</string>
+    <string name="chat_survey_title">Ti piace Chiedi informazioni su questo episodio?</string>
+    <string name="chat_ai_disclaimer">L\'IA può commettere errori, quindi ricontrolla.</string>
+    <string name="chat_suggestion_summarize">Riassumi questo episodio</string>
+    <string name="chat_welcome">Fai una domanda qualsiasi su questo episodio. Oppure, inizia qui.</string>
+    <string name="chat_input_question_hint">Fai una domanda…</string>
+    <string name="chat_beta_note">Chiedi informazioni su questo episodio è in versione beta</string>
+    <string name="chat_beta_sheet_body">Gratuito per tutti mentre lo testiamo. Diventerà una funzionalità Plus in un secondo momento.</string>
+    <string name="chat_beta_sheet_title">Chiedi informazioni su questo episodio è in versione beta</string>
+    <string name="episode_chat_tooltip_body">Chiedigli qualsiasi cosa. Stava anche ascoltando.</string>
+    <string name="episode_chat_beta_badge">Beta</string>
+    <string name="episode_chat_shelf_title">Chiedi informazioni su questo episodio</string>
+    <string name="manual_playlist_no_content_body">Trova un podcast che ti piace, quindi scorri verso sinistra su qualsiasi episodio per aggiungerlo.</string>
+    <string name="manual_playlist_no_content_body_alternative">Scegli gli episodi dai podcast che segui. Oppure scorri verso sinistra su qualsiasi episodio per aggiungerlo man mano.</string>
+    <string name="settings_general_whats_new_unread_dot_summary">Mostra un puntino \"non letto\" su Profilo quando ci sono nuovi messaggi in Novità.</string>
+    <string name="settings_general_whats_new_unread_dot">Mostra puntino \"non letto\"</string>
+    <string name="up_next_as_playlist_replace_body">Riprodurre questo episodio sostituirà l\'elenco Successivo attuale. Salvalo come playlist per conservarlo.</string>
+    <string name="whats_new_message_page_progress">Pagina %1$d di %2$d</string>
+    <string name="whats_new_poll_answered">Grazie per la risposta.</string>
+    <string name="whats_new_research_title">Ricerca degli utenti</string>
+    <string name="whats_new_feed_unable_to_load">Impossibile caricare le novità</string>
+    <string name="whats_new_feed_all_read">Tutti i messaggi contrassegnati come letti</string>
+    <string name="whats_new_feed_unread">Non letti</string>
+    <string name="whats_new_feed_read_all">Leggi tutto</string>
+    <string name="whats_new_feed_empty_description">Nuove funzionalità, suggerimenti e annunci apparirannou00A0qui.</string>
+    <string name="whats_new_feed_empty_title">Ancora nessun messaggio</string>
+    <string name="whats_new_category_announcement">Annuncio</string>
+    <string name="whats_new_category_new_feature">Nuova funzionalità</string>
+    <string name="whats_new_category_research">Ricerca degli utenti</string>
+    <string name="whats_new_category_known_issue">Problema noto</string>
+    <string name="whats_new_category_tip">Trucchi e suggerimenti</string>
+    <string name="bookmark_title_label">Titolo</string>
+    <string name="bookmarks_deleted_undo">Annulla</string>
+    <string name="device_approve_switch_account_confirm">Cambia account</string>
+    <string name="device_approve_switch_account">Non sei tu? Cambia account</string>
+    <string name="device_approve_switch_account_message">Questa operazione effettua la disconnessione e rimuove i podcast, i filtri e la cronologia di ascolto su questo dispositivo.</string>
+    <string name="device_approve_switch_account_title">Cambiare account?</string>
+    <string name="bookmark_edit_transcript_selection">Passaggio selezionato: %1$s</string>
+    <string name="removed_from_playlist_feedback">Rimosso dalla playlist</string>
+    <string name="bookmark_adding_transcript">Aggiunta della trascrizione…</string>
+    <string name="settings_app_icon_updated_message_v2">La nuova icona potrebbe richiedere alcuni minuti per comparire. Se il collegamento nella schermata Home scompare, aggiungi nuovamente Pocket Casts dalla schermata di tutte le app.</string>
+    <string name="go_to_episode">Vai all\'episodio</string>
+    <string name="smart_bookmarks_upsell_message">Basta un tocco. Ha già un titolo e include il testo corrispondente.</string>
+    <string name="smart_bookmarks_upsell_title">Salva i passaggi che vale la pena conservare</string>
+    <string name="bookmarks_upgrade_example_passage">Scegli la persona, non il curriculum.</string>
+    <string name="bookmark_edit_transcript_title">Modifica trascrizione</string>
+    <string name="bookmarks_upgrade_example_title">Sala delle audizioni</string>
+    <string name="bookmark_suggestion_prefix">Suggerimento:</string>
+    <string name="bookmark_suggesting_title">Suggerimento di un titolo…</string>
+    <string name="bookmark_new_badge">Nuovo</string>
+    <string name="bookmark_player_tip_message">Conserva la parte che desideri</string>
+    <string name="bookmark_edit_transcript_subtitle">Seleziona un passaggio della trascrizione per questo segnalibro</string>
+    <string name="bookmark_create_failed">Impossibile aggiungere il segnalibro</string>
+    <string name="device_approve_title">Connetti il tuo dispositivo</string>
+    <string name="log_in_with_code_error">Impossibile recuperare il codice di accesso</string>
+    <string name="log_in_with_code_instructions">Scansiona il codice QR con il telefono oppure vai su %1$s e inserisci questo codice</string>
+    <string name="log_in_with_code">Accedi con un codice</string>
     <string name="search_filters_networks">Reti</string>
     <string name="discover_networks">Reti</string>
     <string name="discover_network">Rete</string>
     <string name="device_approve_login_required">Per connettere il dispositivo, devi avere un account. Accedi o crea un account e riprova.</string>
     <string name="device_approve_error_message">Riprova più tardi.</string>
     <string name="device_approve_error_title">Approvazione del dispositivo non riuscita</string>
-    <string name="device_approve_expired_message">Torna alla TV per generarne una nuova.</string>
     <string name="device_approve_expired_title">Il codice QR è scaduto</string>
-    <string name="device_approve_success_message">La TV è ora connessa al tuo account.</string>
-    <string name="device_approve_success_title">TV connessa</string>
     <string name="device_approve_connect">Connetti</string>
     <string name="device_approve_signing_in_as">Accesso come…</string>
+    <string name="device_approve_success_title">Dispositivo connesso</string>
+    <string name="device_approve_expired_message">Torna sul dispositivo per generarne uno nuovo.</string>
+    <string name="device_approve_success_message">Il tuo dispositivo è ora collegato al tuo account.</string>
     <string name="device_approve_description">L\'ascolto verrà sincronizzato automaticamente.\nPuoi disconnetterti in qualsiasi momento da Impostazioni.</string>
-    <string name="device_approve_title">Connettiti alla TV</string>
     <string name="tv_settings_subscription_plan">Piano</string>
     <string name="tv_settings_subscription_next_renewal">Prossimo rinnovo</string>
     <string name="tv_settings_subscription_lifetime">A vita</string>
@@ -123,8 +234,7 @@ Language: it
     <string name="settings_audio_only_summary">Se attivato, gli episodi con video verranno riprodotti solo come audio, risparmiando così dati.</string>
     <string name="settings_audio_only">Solo audio</string>
     <string name="profile_try_duration_for_free">Prova %1$s gratis</string>
-    <string name="settings_generated_chapters_summary">Mostra i capitoli generati automaticamente quando disponibili.</string>
-    <string name="settings_generated_chapters">Capitoli generati</string>
+    <string name="settings_generated_chapters">Genera automaticamente i capitoli</string>
     <string name="profile_stats_listening_activity_info_summary">Una stima dei tempi di ascolto, basata sulla cronologia di riproduzione. Se completi un episodio in pochi giorni, verrà mostrato l\'ultimo giorno.</string>
     <string name="profile_stats_listening_activity_info_title">Attività di ascolto</string>
     <string name="profile_stats_listening_activity_info_help">Informazioni</string>
@@ -136,8 +246,6 @@ Language: it
     <string name="up_next_sort_duration_tooltip_title">Ordina per durata</string>
     <string name="transcript_tap_to_seek_streaming_unavailable">Scarica l\'episodio per abilitare lo scorrimento tramite tocco</string>
     <string name="bookmark_play_from">Riproduci da %s</string>
-    <string name="summary_upsell_description">Abbonati a Plus per accedere a questa funzionalità e ad altre funzionalità Premium come segnalibri e cartelle.</string>
-    <string name="summary_upsell_title">Riassunti basati sull\'IA</string>
     <string name="tv_create_account_title">Crea un account gratuito</string>
     <string name="tv_onboarding_sign_in_instructions">Apri la fotocamera e punta l\'obiettivo verso questo codice QR</string>
     <string name="tv_onboarding_sign_in_title">Accedi con il tuo telefono</string>
@@ -168,29 +276,9 @@ Language: it
     <string name="blogs_found_headline">Lettura del blog ad alta voce</string>
     <string name="blogs_found_followed_badge">PODCAST SEGUITO</string>
     <string name="blogs_found_feed_detected">Feed trovato</string>
-    <string name="chapters_generated_disclaimer">Questi capitoli sono generati automaticamente e potrebbero non essere perfettamente accurati.</string>
-    <string name="description">Descrizione</string>
-    <string name="player_tab_summary">Riepilogo</string>
-    <string name="summary">Riepilogo</string>
-    <string name="episode_summary">Riassunto dell\'episodio</string>
-    <string name="chat_stop_quote">Interrompi citazione</string>
     <string name="chat_play_quote">Riproduci citazione</string>
-    <string name="chat_tap_to_retry">Tocca per riprovare</string>
-    <string name="chat_error_network">Impossibile raggiungere il server. Controlla la tua connessione.</string>
-    <string name="chat_error_server">Si è verificato un problema. Riprova.</string>
     <string name="chat_clear">Cancella chat</string>
     <string name="chat_send">Invia</string>
-    <string name="chat_input_hint">Chiedi informazioni su questo episodio…</string>
-    <string name="chat_preview_user_2">Sono stati menzionati alcuni suggerimenti pratici?</string>
-    <string name="chat_preview_ai_2">Questo episodio approfondisce gli aspetti scientifici della formazione delle abitudini, spiegando come le piccole routine quotidiane possano portare a grandi cambiamenti nel corso del tempo.</string>
-    <string name="chat_preview_user_1">Qual è stato l\'argomento principale di questo episodio?</string>
-    <string name="chat_preview_ai_1">Ciao! Sono qui per aiutarti a scoprire questo episodio. Chiedimi qualcosa sugli argomenti discussi, sui passaggi chiave o su momenti specifici.</string>
-    <string name="chat_thinking">ASSISTENTE</string>
-    <string name="chat_episode_assistant">EPISODI PENSANTE</string>
-    <string name="chat_context_label_with_duration">Chattare con questo episodio · %1$s</string>
-    <string name="chat_context_label">Chattare con questo episodio</string>
-    <string name="chat_paywall_title">Chatta con questo episodio</string>
-    <string name="episode_chat">Chatta con l\'episodio</string>
     <string name="blogs_experiment_banner_body">I blog sono una novità che stiamo sperimentando. Potrebbe restare, essere rielaborato o scomparire senza fare troppo rumore.</string>
     <string name="blogs_experiment_banner_lead">È un esperimento.</string>
     <string name="onboarding_blogs_upsell_sample_label">Blog · 24 apr</string>
@@ -288,7 +376,6 @@ Language: it
     <string name="end_of_year_next_story">Storia successiva</string>
     <string name="end_of_year_story_listened_to_numbers">Hai ascoltato %1$d podcast e %2$d episodi</string>
     <string name="up_next_as_playlist_replace_switch_description">Salva la tua coda Successivo attuale come playlist.</string>
-    <string name="up_next_as_playlist_replace_body">Riproducendo questo brano, sostituirai la tua attuale coda Successivo.</string>
     <string name="added_to_playlist_single">Aggiunto a %1$s</string>
     <string name="end_of_year_failed_to_load_message">Siamo spiacenti, non è stato possibile caricare la riproduzione</string>
     <string name="end_of_year_stories_already_subscribed_to_plus">I tuoi vantaggi Plus sbloccano statistiche extra e funzionalità avanzate</string>
@@ -379,7 +466,6 @@ Language: it
     <string name="manual_playlist_no_available_episode_body">Sembra che tu abbia aggiunto tutti gli episodi di questo show.</string>
     <string name="manual_playlist_no_content_title_alternative">Comincia a creare la playlist</string>
     <string name="manual_playlist_no_content_title">Aggiungi episodi alla playlist</string>
-    <string name="manual_playlist_no_content_body">Scorri verso sinistra su un episodio per aggiungerlo alla playlist.</string>
     <string name="unavailable">Non disponibile</string>
     <string name="add_to_playlist_failure_message">Questa playlist è piena. Rimuovi alcuni episodi o creane una nuova.</string>
     <string name="added_to_playlist">%1$s aggiunto a \"%2$s\"</string>
@@ -790,7 +876,6 @@ Language: it
     <string name="referrals_activate_my_pass">Attiva il mio pass</string>
     <string name="referrals_claim_guest_pass_title">Riscatta il tuo pass per ospiti %1$s</string>
     <string name="referrals_claim_guess_pass_banner_card_subtitle">Sblocca l\'esperienza di ascolto completa</string>
-    <string name="referrals_tooltip_message">Regala %1$s di Pocket Casts Plus!</string>
     <string name="referrals_claim_guess_pass_banner_card_title">Riscatta il tuo pass per ospiti %1$s per Plus</string>
     <string name="referrals_share_guest_pass">Condividi pass per ospiti</string>
     <string name="referrals_send_guest_pass_title">Regala %1$s di Pocket Casts Plus</string>
@@ -984,7 +1069,6 @@ Language: it
     <string name="notification_channel_description_playback_error">Errori durante la riproduzione</string>
     <string name="notification_channel_description_episode">Mostra quando esce un nuovo episodio</string>
     <string name="notification_channel_description_download">Mostra quando Pocket Casts scarica episodi</string>
-    <string name="change_bookmark_title_hint">Modifica il titolo che identifica questo segnalibro</string>
     <string name="bookmark">Segnalibro</string>
     <string name="details">Dettagli</string>
     <string name="episode">Episodio</string>
@@ -997,7 +1081,6 @@ Language: it
     <string name="skipping_to">Passaggio a %s</string>
     <string name="playing_bookmark">Riproduzione di \"%s\"</string>
     <string name="save_bookmark">Salva il segnalibro</string>
-    <string name="add_bookmark_title_hint">Aggiungi un titolo opzionale per identificare questo segnalibro</string>
     <string name="change_title">Modifica il titolo</string>
     <string name="bookmark_added">Segnalibro \"%s\" aggiunto</string>
     <string name="add_bookmark_title">Aggiungi segnalibro</string>
@@ -1690,7 +1773,6 @@ Language: it
     <string name="settings_notification_actions">Azioni</string>
     <string name="settings_notifications_new_episodes">Nuovi episodi</string>
     <string name="settings_lock_image">immagine del blocco</string>
-    <string name="settings_licenses">Licenze</string>
     <string name="settings_learn_more">Scopri di più</string>
     <string name="settings_keep_screen_awake">Tieni lo schermo attivo</string>
     <string name="settings_instagram">link instagram</string>
@@ -1734,7 +1816,6 @@ Language: it
     <string name="settings_apply_group_by">Vuoi modificare tutti i tuoi podcast esistenti in modo che vengano raggruppati per %s?</string>
     <string name="settings_apply_archived_show">Vuoi modificare tutti i tuoi podcast esistenti in modo che vengano visualizzati gli archiviati?</string>
     <string name="settings_apply_archived_hide">Vuoi modificare tutti i tuoi podcast esistenti in modo che vengano nascosti gli archiviati?</string>
-    <string name="settings_app_icon_updated_message">Questa nuova icona potrebbe richiedere alcuni minuti per essere visualizzata e vedrai due icone nella schermata di tutte le app. Questo è normale. Trascina la nuova sulla schermata iniziale e dovrebbe essere tutto in ordine.</string>
     <string name="settings_app_icon_updated">Icona aggiornata</string>
     <string name="settings_app_icon_title">Titolo</string>
     <string name="settings_app_icon_image">immagine dell\'icona</string>
@@ -1938,6 +2019,7 @@ Language: it
     <string name="profile_next_payment">Prossimo pagamento: %s</string>
     <string name="profile_new_password">Nuova password</string>
     <string name="profile_new_email_address">Nuovo indirizzo e-mail</string>
+    <string name="profile_license_agreement">Pocket Casts tiene alla tua privacy. Questa Politica sulla privacy spiega quali informazioni raccogliamo su di te e quali sono le motivazioni per cui lo facciamo, cosa possiamo fare con tali informazioni e come le gestiamo. Quanto detto si applica alle app Pocket Casts per iOS e Android e al servizio web di Pocket Casts con le app per macOS e Windows associate (obbligato in solido, il Servizio) Usando il Servizio, accetti la presente Politica sulla privacy. Se attivi le notifiche push nell\'app, archiviamo il token push che Apple ci fornisce per inviare tali notifiche push al tuo dispositivo. Se acquisti l\'app web, archiviamo un ID transazione per il tuo acquisto. Se scegli di non creare un account e non usi le notifiche push, non viene archiviato alcun dato su di te sui nostri server. Anche il servizio web di Pocket Casts usa cookie e tecnologie simili per mantenere l\'accesso. Se scegli di generare una richiesta di supporto dall\'interno del Servizio, possiamo generare un allegato contenente dati aggiuntivi per assisterti durante l\'indirizzamento della tua richiesta di supporto, che sei libero di visualizzare prima dell\'invio.</string>
     <string name="profile_last_refresh">Ultimo aggiornamento: %s fa</string>
     <string name="profile_joined">Stai partecipando:</string>
     <string name="profile_get_plus">Ottieni Pocket Casts Plus per sbloccare questa funzionalità e molto altro.</string>
@@ -1951,7 +2033,6 @@ Language: it
     <string name="profile_ended">Terminato il %s</string>
     <string name="profile_end_tour">FINE TOUR</string>
     <string name="profile_email">E-mail</string>
-    <string name="profile_license_agreement">Pocket Casts tiene alla tua privacy. Questa Politica sulla privacy spiega quali informazioni raccogliamo su di te e quali sono le motivazioni per cui lo facciamo, cosa possiamo fare con tali informazioni e come le gestiamo. Quanto detto si applica alle app Pocket Casts per iOS e Android e al servizio web di Pocket Casts con le app per macOS e Windows associate (obbligato in solido, il Servizio) Usando il Servizio, accetti la presente Politica sulla privacy. Se attivi le notifiche push nell\'app, archiviamo il token push che Apple ci fornisce per inviare tali notifiche push al tuo dispositivo. Se acquisti l\'app web, archiviamo un ID transazione per il tuo acquisto. Se scegli di non creare un account e non usi le notifiche push, non viene archiviato alcun dato su di te sui nostri server. Anche il servizio web di Pocket Casts usa cookie e tecnologie simili per mantenere l\'accesso. Se scegli di generare una richiesta di supporto dall\'interno del Servizio, possiamo generare un allegato contenente dati aggiuntivi per assisterti durante l\'indirizzamento della tua richiesta di supporto, che sei libero di visualizzare prima dell\'invio.</string>
     <string name="profile_deleting_account">Eliminazione dell\'account in corso…</string>
     <string name="profile_delete_from_device_title">Elimina dal dispositivo</string>
     <string name="profile_delete_from_device_only">Elimina solo dal dispositivo</string>
@@ -2169,7 +2250,6 @@ Language: it
     <string name="podcasts_share_missing_title">Inserisci un titolo per il tuo elenco.</string>
     <string name="podcasts_share_create_error">Ops, impossibile effettuare la condivisione</string>
     <string name="podcasts_share_title">Titolo</string>
-    <string name="podcasts_share_selected_podcasts">Condividi i podcast selezionati</string>
     <string name="podcasts_share_select_all">Seleziona tutto</string>
     <string name="podcasts_share_list">Elenco condiviso</string>
     <string name="podcasts_share_description">Descrizione (opzionale)</string>
@@ -2199,17 +2279,14 @@ Language: it
     <string name="player_sleep_60_minutes">60 minuti</string>
     <string name="player_sleep_30_minutes">30 minuti</string>
     <string name="player_sleep_15_minutes">15 minuti</string>
-    <string name="player_pip">Inserisci l\'immagine nell\'immagine</string>
     <string name="player_notification_skip_forward">Avanti di %d secondi</string>
     <string name="player_notification_skip_back">Indietro di %d secondi</string>
-    <string name="player_full_screen">Schermo intero</string>
     <string name="player_effects_speed_up">Velocizza</string>
     <string name="player_effects_speed_down">Riduci la velocità</string>
     <string name="player_effects_speed">Velocità</string>
     <string name="player_effects">Effetti del lettore</string>
     <string name="player_close">Chiudi lettore</string>
     <string name="player_chapter_url">URL del capitolo</string>
-    <string name="player_actions">Azioni dell\'episodio</string>
     <string name="player_action_previous_chapter">Capitolo precedente</string>
     <string name="time_short_seconds">%d s</string>
     <string name="time_short_minutes">%d m</string>
@@ -2411,9 +2488,21 @@ Language: it
         <item quantity="one">Aggiunto a %d playlist</item>
         <item quantity="other">Aggiunto a %d playlist</item>
     </plurals>
+    <plurals name="changed_playlists">
+        <item quantity="one">%d playlist modificata</item>
+        <item quantity="other">%d playlist modificate</item>
+    </plurals>
     <plurals name="chapter">
         <item quantity="one">capitolo</item>
         <item quantity="other">capitoli</item>
+    </plurals>
+    <plurals name="chapters_generated_count">
+        <item quantity="one">%d capitolo generato</item>
+        <item quantity="other">%d capitoli generati</item>
+    </plurals>
+    <plurals name="chapters_generated_count_with_hidden">
+        <item quantity="one">%1$d capitolo generato • %2$d nascosto</item>
+        <item quantity="other">%1$d capitoli generati • %2$d nascosto</item>
     </plurals>
     <plurals name="day">
         <item quantity="one">giorno</item>
@@ -2526,6 +2615,10 @@ Language: it
     <plurals name="profile_stats_second_saved">
         <item quantity="one">Secondo risparmiato</item>
         <item quantity="other">Secondi risparmiati</item>
+    </plurals>
+    <plurals name="removed_from_playlists">
+        <item quantity="one">Rimosso da %d playlist</item>
+        <item quantity="other">Rimosso da %d playlist</item>
     </plurals>
     <plurals name="second">
         <item quantity="one">secondo</item>

@@ -37,6 +37,7 @@ class FirebaseRemoteFeatureProvider @Inject constructor(
                 .mapCatching { firebaseRemoteConfig.activateSuspending().getOrThrow() }
                 .onSuccess {
                     Timber.i("Firebase feature flag refreshed")
+                    FeatureFlag.updateFeatureFlowValues()
                     initialFetchComplete.complete(true)
                 }
                 .onFailure {

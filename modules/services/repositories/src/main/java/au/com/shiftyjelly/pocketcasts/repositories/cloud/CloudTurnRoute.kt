@@ -65,6 +65,7 @@ class CloudTurnRoute(
             requestId = turn.requestId,
             request = turn.request,
             sourceLanguage = turn.sourceLanguage,
+            uiLanguage = turn.uiLanguage,
             context = turn.context,
             capabilities = turn.capabilities,
             codecs = CloudRouteCodecs.advertised,

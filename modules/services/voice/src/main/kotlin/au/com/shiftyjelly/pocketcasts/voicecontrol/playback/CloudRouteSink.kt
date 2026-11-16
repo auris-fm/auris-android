@@ -293,6 +293,16 @@ class CloudRouteSink internal constructor(
         /** True when the caller is RETRYING, so a lookup miss is a refusal rather than a first attempt. */
         isRetry: Boolean,
         sourceLanguage: String?,
+        /**
+         * The UI language the ORIGINAL dispatch of this request was prepared with, on a retry.
+         *
+         * Null on a first attempt, where it is taken from [currentLocale]. It is carried rather than
+         * re-read for the same reason the conversation handle is: a retry is a second dispatch of ONE
+         * request, and a user switching the app's language between the two must not make them answer
+         * in different languages. (No default: an overriding function may not declare one, and
+         * the interface carries it for every caller.)
+         */
+        uiLanguage: String?,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
             // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
@@ -311,6 +321,10 @@ class CloudRouteSink internal constructor(
             CloudRouteTurn(
                 request = request,
                 sourceLanguage = sourceLanguage,
+                // A RETRY of a turn prepared before this change carries none, so the value is read
+                // at the sink on a first attempt only. Falling back on a retry too would let a locale
+                // switched mid-request answer in a language the request was never captured under.
+                uiLanguage = if (isRetry) uiLanguage else (uiLanguage ?: uiLanguageForWire()),
                 context = buildRouteContext(context),
                 requestId = admitted,
                 // No structured-results surface is rendered client-side, so no
@@ -1101,6 +1115,18 @@ class CloudRouteSink internal constructor(
             earlyConnections = earlyConnectionOpener,
         ).route(turn)
     }
+
+    /**
+     * The app's UI language as the server's rule expects it: the primary subtag, or null when the
+     * locale cannot supply one.
+     *
+     * Only the subtag, because that is what the server decides on -- it lowercases and matches the
+     * primary subtag against its supported set, so a region (`zh-CN`) would be a claim this client
+     * cannot support. Null rather than an empty or invented tag when the locale has none: absence is
+     * a fact the server handles (it falls through to English), while a made-up tag is a wrong claim.
+     */
+    private fun uiLanguageForWire(): String? =
+        currentLocale().language.lowercase().takeIf { it.isNotBlank() }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         // The saved positions are requested FOR THIS EPISODE: a position recorded while another

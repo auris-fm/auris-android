@@ -12,7 +12,7 @@ import org.mockito.kotlin.mock
 abstract class ObservingCloudRouteTestAdapter : VoiceCloudRouteSink by mock<VoiceCloudRouteSink>() {
     abstract suspend fun reportRoute(request: String, context: PlaybackContext, onDuck: ((VoiceActionOutcome) -> Unit)?): VoiceResponse
 
-    override suspend fun prepareTurn(request: String, context: PlaybackContext, isLiveGraceTurn: Boolean, capturedOrigin: Long?, isWakeOriginated: Boolean, hint: CloudRouteHint?, logicalRequestId: String?, isRetry: Boolean, sourceLanguage: String?): CloudRouteTurn = CloudRouteTurn(
+    override suspend fun prepareTurn(request: String, context: PlaybackContext, isLiveGraceTurn: Boolean, capturedOrigin: Long?, isWakeOriginated: Boolean, hint: CloudRouteHint?, logicalRequestId: String?, isRetry: Boolean, sourceLanguage: String?, uiLanguage: String?): CloudRouteTurn = CloudRouteTurn(
         request = request,
         context = CloudRouteContext(),
         requestId = logicalRequestId ?: java.util.UUID.randomUUID().toString(),
@@ -20,6 +20,7 @@ abstract class ObservingCloudRouteTestAdapter : VoiceCloudRouteSink by mock<Voic
         conversationMode = CloudConversationMode.Create,
         capturedOrigin = capturedOrigin,
         sourceLanguage = sourceLanguage,
+        uiLanguage = uiLanguage,
     )
 
     override suspend fun dispatchPreparedReporting(prepared: CloudRouteTurn, isRetry: Boolean, onDuck: ((VoiceActionOutcome) -> Unit)?): CloudTurnResult = CloudTurnResult(

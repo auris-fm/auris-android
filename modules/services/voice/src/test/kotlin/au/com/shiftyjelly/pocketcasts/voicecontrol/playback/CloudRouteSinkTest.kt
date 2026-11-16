@@ -59,6 +59,55 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `a prepared turn carries the UI locale's primary subtag, so the server can answer in it`() = runTest {
+        // M6: the server picks the reply language before inference and the app's UI locale is its
+        // fall-through when the spoken language is absent or unsupported. The subtag is what the
+        // server's rule decides on, so a regional locale (`zh-CN` -- what a device actually reports)
+        // travels as `zh`, not as a region the server would have to parse back off.
+        val deps = TestDeps()
+        val sink = deps.sink(locale = java.util.Locale.forLanguageTag("zh-CN"))
+        deps.conversationAdmission.beginOrigin(1)
+
+        val prepared = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            capturedOrigin = 1,
+            logicalRequestId = "ui-language-turn",
+        )!!
+
+        assertEquals("the screen's language, primary subtag only", "zh", prepared.uiLanguage)
+    }
+
+    @Test
+    fun `a retry does not re-read the app's language`() = runTest {
+        // The language is a fact of the REQUEST: the user is being answered about an utterance made
+        // when the app was in one language. Re-reading it here would let a locale switched between
+        // the two dispatches have the retry answer in the new one, so one request would be answered
+        // in two languages -- the same class of bug as re-reading the conversation handle.
+        val deps = TestDeps()
+        deps.conversationAdmission.beginOrigin(1)
+        val sink = deps.sink(locale = java.util.Locale.forLanguageTag("de-DE"))
+
+        val first = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            capturedOrigin = 1,
+            logicalRequestId = "retry-ui-language",
+        )!!
+        val retryPrepared = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            capturedOrigin = 1,
+            logicalRequestId = "retry-ui-language",
+            isRetry = true,
+            uiLanguage = first.uiLanguage,
+        )!!
+
+        assertEquals("de", first.uiLanguage)
+        assertEquals("the retry keeps the language the request was captured under", "de", retryPrepared.uiLanguage)
+    }
+
+    @Test
     fun `a dispatch the sink refuses before routing leaves no live timing entry`() = runTest {
         // A turn whose retained identity was retired (forgetRetained) is refused at claimDispatch,
         // BEFORE any route opens — so routeTurn's end-of-turn finish never runs. The sink must
@@ -3370,7 +3419,8 @@ class CloudRouteSinkTest {
         /** The admission component the sink uses, so a case can declare its live window. */
         val conversationAdmission = CloudConversationAdmission()
 
-        fun sink(): CloudRouteSink = CloudRouteSink(
+        /** @param locale the app's UI locale AT PREPARE TIME; a case that cares overrides it. */
+        fun sink(locale: java.util.Locale = this.locale): CloudRouteSink = CloudRouteSink(
             resolveBaseUrl = { baseUrl },
             tokenProvider = object : CloudTokenProviding {
                 // Mirrors what the legacy identity path returned, so the suite keeps asserting the
@@ -3406,6 +3456,7 @@ class CloudRouteSinkTest {
                                 CloudRouteTurn(
                                     request = it.request,
                                     sourceLanguage = it.sourceLanguage,
+                                    uiLanguage = it.uiLanguage,
                                     context = it.context,
                                     requestId = it.requestId,
                                     capabilities = it.capabilities,

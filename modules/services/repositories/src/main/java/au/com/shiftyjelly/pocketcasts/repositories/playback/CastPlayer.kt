@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.models.entity.UserEpisode
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.models.type.UserEpisodeServerStatus
 import au.com.shiftyjelly.pocketcasts.repositories.extensions.getArtworkUrl
+import au.com.shiftyjelly.pocketcasts.repositories.podcast.UserEpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.stats.PlaybackStatsCollector
 import com.google.android.gms.cast.MediaInfo
 import com.google.android.gms.cast.MediaLoadOptions
@@ -23,6 +24,7 @@ import com.google.android.gms.cast.framework.CastSession
 import com.google.android.gms.cast.framework.SessionManager
 import com.google.android.gms.cast.framework.media.RemoteMediaClient
 import com.google.android.gms.common.images.WebImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONException
@@ -31,6 +33,7 @@ import timber.log.Timber
 
 class CastPlayer(
     private val playbackStatsCollector: PlaybackStatsCollector,
+    private val userEpisodeManager: UserEpisodeManager,
     override val onPlayerEvent: (Player, PlayerEvent) -> Unit,
 ) : Player {
 
@@ -40,13 +43,12 @@ class CastPlayer(
     private var podcast: Podcast? = null
     private var state: CastPlaybackState = CastPlaybackState.NONE
     private var remoteListenerAdded: Boolean = false
+    private var registeredClient: RemoteMediaClient? = null
     private var localEpisodeUuid: String? = null
     private var remoteEpisodeUuid: String? = null
     private var playbackEffects: PlaybackEffects? = null
     private val remoteMediaClientListener = RemoteMediaClientListener()
     private val playPauseCallback = PlayPauseCallback(playbackStatsCollector, currentClient = { remoteMediaClient })
-
-    override var isPip: Boolean = false
 
     private val sessionManager: SessionManager?
         get() = CastContext.getSharedInstance()?.sessionManager
@@ -56,6 +58,8 @@ class CastPlayer(
 
     private val remoteMediaClient: RemoteMediaClient?
         get() = castSession?.remoteMediaClient
+
+    private val boundSession: CastSession? = castSession
 
     private val isMediaLoaded: Boolean
         get() = isConnected &&
@@ -99,6 +103,12 @@ class CastPlayer(
         if (remoteMediaClient != null) {
             addRemoteMediaListener()
             setMetadataFromRemote()
+        }
+    }
+
+    suspend fun isBoundToCurrentSession(): Boolean {
+        return withContext(Dispatchers.Main) {
+            boundSession != null && boundSession === castSession
         }
     }
 
@@ -170,8 +180,10 @@ class CastPlayer(
         withContext(Dispatchers.Main) {
             state = CastPlaybackState.STOPPED
             remoteListenerAdded = false
-            remoteMediaClient?.unregisterCallback(remoteMediaClientListener)
-            remoteMediaClient?.unregisterCallback(playPauseCallback)
+            val client = registeredClient ?: remoteMediaClient
+            client?.unregisterCallback(remoteMediaClientListener)
+            client?.unregisterCallback(playPauseCallback)
+            registeredClient = null
             playbackStatsCollector.onStop()
         }
     }
@@ -232,32 +244,50 @@ class CastPlayer(
                     Issued.Pending(pending = pending, positionMs = before)
                 } else {
                     val local = localEpisodeUuid ?: return@synchronized Issued.Refused
-                    // THE LOAD IS ISSUED UNDER THIS BOUNDARY; its PendingResult is carried out so the
-                    // check and the issue stay one step while the WAIT happens after release. A null
-                    // PendingResult means no receiver took the request -- a refusal, not silent success.
-                    loadEpisode(local, positionMs, true)
-                        ?.let { Issued.Pending(pending = it, positionMs = before) }
-                        ?: Issued.Refused
+                    // THE LOAD CANNOT BE ISSUED HERE: signing a user episode's URL suspends, and a monitor
+                    // cannot span a suspension. The episode validated above is handed out so the load is
+                    // issued for it, not for whatever is selected once the lock is released.
+                    Issued.NeedsLoad(episodeUuid = local, positionMs = before)
                 }
             }
         }
         return when (issued) {
             Issued.Refused -> Player.EpisodeSeekOutcome.Refused
 
+            is Issued.NeedsLoad -> {
+                // ISSUED AFTER RELEASE, against the episode that was validated. The load starts at the
+                // requested position, which is where the seek was asked to go. A load that cannot be
+                // issued at all is a refusal, not a silent success.
+                loadEpisode(issued.episodeUuid, positionMs, true)
+                    ?.let { awaitEpisodeSeekOutcome(it, issued.positionMs) }
+                    ?: Player.EpisodeSeekOutcome.Refused
+            }
+
             is Issued.Pending -> {
                 // ISSUED IS NOT COMPLETED. Only the receiver's callback says whether it performed the
                 // request, so the outcome comes from there rather than from the send.
-                val outcome = awaitCastResult(issued.pending)
-                if (outcome == CastRemoteOutcome.Accepted) addRemoteMediaListener()
-                // ACCEPTED ONLY WHEN THE RECEIVER SAID SO. A timeout or lost outcome is UNKNOWN, and it
-                // must not read as either success or a refusal a caller could retry into a repeat.
-                Player.EpisodeSeekOutcome(
-                    accepted = outcome == CastRemoteOutcome.Accepted,
-                    positionMs = issued.positionMs,
-                    unknown = outcome == CastRemoteOutcome.Unknown,
-                )
+                awaitEpisodeSeekOutcome(issued.pending, issued.positionMs)
             }
         }
+    }
+
+    /**
+     * Turns a request the receiver was given into the seek's outcome.
+     *
+     * ACCEPTED ONLY WHEN THE RECEIVER SAID SO. A timeout or lost outcome is UNKNOWN, and it must not
+     * read as either success or a refusal a caller could retry into a repeat.
+     */
+    private suspend fun awaitEpisodeSeekOutcome(
+        pending: com.google.android.gms.common.api.PendingResult<com.google.android.gms.cast.framework.media.RemoteMediaClient.MediaChannelResult>,
+        positionMs: Long?,
+    ): Player.EpisodeSeekOutcome {
+        val outcome = awaitCastResult(pending)
+        if (outcome == CastRemoteOutcome.Accepted) addRemoteMediaListener()
+        return Player.EpisodeSeekOutcome(
+            accepted = outcome == CastRemoteOutcome.Accepted,
+            positionMs = positionMs,
+            unknown = outcome == CastRemoteOutcome.Unknown,
+        )
     }
 
     /** What a cast request under the exclusion boundary produced. */
@@ -268,6 +298,15 @@ class CastPlayer(
         /** A load was issued, with its pending result and the pre-action position it was issued with. */
         data class Pending(
             val pending: com.google.android.gms.common.api.PendingResult<com.google.android.gms.cast.framework.media.RemoteMediaClient.MediaChannelResult>,
+            val positionMs: Long?,
+        ) : Issued
+
+        /**
+         * A load still to be issued, for the episode validated under the lock. Resolving a user episode's
+         * URL suspends, so the issue has to happen after the boundary is released.
+         */
+        data class NeedsLoad(
+            val episodeUuid: String,
             val positionMs: Long?,
         ) : Issued
     }
@@ -353,8 +392,9 @@ class CastPlayer(
             return
         }
         remoteListenerAdded = true
-        remoteMediaClient?.registerCallback(remoteMediaClientListener)
-        remoteMediaClient?.registerCallback(playPauseCallback)
+        registeredClient = remoteMediaClient
+        registeredClient?.registerCallback(remoteMediaClientListener)
+        registeredClient?.registerCallback(playPauseCallback)
     }
 
     // Waits for a cast request's RESULT, reporting whether the receiver ACCEPTED it.
@@ -394,7 +434,7 @@ class CastPlayer(
     // refusal -- no episode, no podcast, no URL, an unsupported local file, no receiver -- and a caller
     // that treats "returned" as "loaded" reports a load that never happened. That is the same
     // "counting a non-event as delivered" defect as the unawaited seek.
-    private fun loadEpisode(
+    private suspend fun loadEpisode(
         episodeUuid: String,
         currentPositionMs: Int,
         autoPlay: Boolean,
@@ -406,12 +446,41 @@ class CastPlayer(
             client.play()
             return null
         }
-        synchronized(episodeLock) {
+        // RESOLVED BEFORE THE MONITOR, because a cast device fetches the file itself and cannot send our
+        // auth header, so it needs a signed URL -- and fetching one suspends. A monitor cannot span that
+        // suspension, so the URL is resolved first and the check-and-issue below stays one step.
+        val castUrl = resolveCastUrl(episodeUuid) ?: return null
+        return synchronized(episodeLock) {
+            // RE-VALIDATED UNDER THE LOCK: resolving the URL above suspended, so the selection may have
+            // moved. A load issued for an episode this player no longer addresses is a refusal.
+            val episode = episode
+            if (episode == null || episodeUuid != episode.uuid) return@synchronized
+            val podcast = podcast ?: return@synchronized
             localEpisodeUuid = episodeUuid
+            val mediaInfo = buildMediaInfo(castUrl, episode, podcast)
+            val loadOptions = MediaLoadOptions.Builder()
+                .setAutoplay(autoPlay)
+                .setPlaybackRate(calcPlaybackSpeed())
+                .setPlayPosition(currentPositionMs.toLong())
+                .setCustomData(customData)
+                .build()
+            // ISSUED, NOT AWAITED, because this runs INSIDE the caller's exclusion boundary and waiting there
+            // would be a suspension inside a monitor. The PendingResult is returned so the caller awaits it
+            // AFTER releasing the lock: the check and the ISSUE stay one step, and the wait happens outside.
+            // A null here means no receiver accepted the request -- a refusal, not a silent success.
+            remoteMediaClient?.load(mediaInfo, loadOptions)
         }
+    }
+
+    /**
+     * The URL the RECEIVER should fetch for [episodeUuid], or null when this client must not issue a load.
+     *
+     * Suspends: a user episode's URL is signed by the server because a cast device cannot send our
+     * authorization header. Every null is a refusal and is reported as one.
+     */
+    private suspend fun resolveCastUrl(episodeUuid: String): String? {
         val episode = episode
-        val podcast = podcast
-        if (episode == null || podcast == null || episodeUuid != episode.uuid) {
+        if (episode == null || episodeUuid != episode.uuid) {
             return null
         }
         val url = episodeLocation?.uri ?: return null
@@ -419,18 +488,17 @@ class CastPlayer(
             onPlayerEvent(this, PlayerEvent.PlayerError("Unable to cast local file"))
             return null
         }
-        val mediaInfo = buildMediaInfo(url, episode, podcast)
-        val loadOptions = MediaLoadOptions.Builder()
-            .setAutoplay(autoPlay)
-            .setPlaybackRate(calcPlaybackSpeed())
-            .setPlayPosition(currentPositionMs.toLong())
-            .setCustomData(customData)
-            .build()
-        // ISSUED, NOT AWAITED, because this runs INSIDE the caller's exclusion boundary and waiting there
-        // would be a suspension inside a monitor. The PendingResult is returned so the caller awaits it
-        // AFTER releasing the lock: the check and the ISSUE stay one step, and the wait happens outside.
-        // A null here means no receiver accepted the request -- a refusal, not a silent success.
-        return remoteMediaClient?.load(mediaInfo, loadOptions)
+        if (episode !is UserEpisode) {
+            return url
+        }
+        return try {
+            withContext(Dispatchers.IO) { userEpisodeManager.getSignedPlaybackUrl(episode) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onPlayerEvent(this, PlayerEvent.PlayerError("Could not load cloud file ${e.message}"))
+            null
+        }
     }
 
     private fun buildMediaInfo(url: String, episode: BaseEpisode, podcast: Podcast): MediaInfo {

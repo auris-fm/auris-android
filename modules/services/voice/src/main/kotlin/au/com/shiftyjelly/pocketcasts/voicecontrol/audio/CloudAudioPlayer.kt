@@ -1175,7 +1175,7 @@ class CloudAudioPlayer(
         internal const val WRITER_STALL_TIMEOUT_MS = 10_000L
 
         /**
-         * The most unwritten audio held. Receive is no longer throttled by playback, so this holds an
+         * The most unwritten audio held. Receive is not throttled by playback, so this holds an
          * answer's whole unplayed remainder; it exists to stop growth behind a writer that never returns,
          * not to cap an answer. 64 MiB is about 22 minutes of 24 kHz mono s16le.
          */

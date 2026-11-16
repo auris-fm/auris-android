@@ -14,7 +14,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
- * Task: localized daily-limit refusal. Per cloud-assistant.md the client speaks its OWN
+ * Localized daily-limit refusal. Per cloud-assistant.md the client speaks its OWN
  * localized template for `limit_exceeded`, naming Auris and the daily allowance exactly once — and
  * an English strings entry alone does not establish localized feedback. This pins the resolver to
  * the actual per-locale resource for every supported response language.

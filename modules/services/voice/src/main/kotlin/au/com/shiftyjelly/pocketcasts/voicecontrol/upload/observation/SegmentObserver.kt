@@ -60,7 +60,7 @@ class SegmentObserver(
     var maxRetainedBytes: Long = DEFAULT_MAX_RETAINED_BYTES
 
     /**
-     * P1: the sink owns retained state; the INVOKED backend/router identity
+     * the sink owns retained state; the INVOKED backend/router identity
      * is stored beside the candidate (never on the issued context). A backend replaced between
      * the SpeechStarted selection and the actual invocation cannot misattribute: the invocation
      * note is what the record claims.
@@ -72,7 +72,7 @@ class SegmentObserver(
         (sink as? ContributionRetentionSink)?.noteAsrInvocation(context.captureId, ref)
     }
 
-    /** P1: identity of the router ACTUALLY invoked — loading a model is not routing. */
+    /** identity of the router ACTUALLY invoked — loading a model is not routing. */
     fun noteRouterInvocation(
         context: CaptureContext,
         ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef,
@@ -259,7 +259,7 @@ class SegmentObserver(
         return admitted.context
     }
 
-    // --- Reserve-before-copy delta protocol (blocker b3): reservation is a budget admit that
+    // --- Reserve-before-copy delta protocol: reservation is a budget admit that
     // allocates NOTHING; commit transfers the caller's drained array (already reserved) into the
     // owned prefix; release returns bytes when the copy failed or was refused. All three take the
     // observer monitor only. ---
@@ -353,7 +353,7 @@ class SegmentObserver(
         wakeMeasurement: SegmentObservation.WakeMeasurement? = null,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
     ): Unit {
-        // [framesProvider] is wrapped SINGLE-SHOT (blocker b3): the first call drains and hands the
+        // [framesProvider] is wrapped SINGLE-SHOT: the first call drains and hands the
         // native buffer back; every later call returns EMPTY — no second copy-out can double-run.
         var drained = false
         val oneShot: () -> Pair<List<ShortArray>, Int> = {
@@ -388,14 +388,14 @@ class SegmentObserver(
         if (context != null && current.captureId != context.captureId) return false // late: refuse join
         if (context == null) {
             // No frozen context at all: the handoff cannot be authorized — terminate the OPEN
-            // capture with exactly one terminal and release its prefix (blocker b2), never a
+            // capture with exactly one terminal and release its prefix, never a
             // silent return that leaves live uncharged audio.
             sink.cancelled(SegmentObservation.Cancelled(current, "handoff-without-context"))
             closeLocked()
             return false
         }
         if (!admit) {
-            // ORIGINAL-authority validation failed: FULL release (blocker b2) —
+            // ORIGINAL-authority validation failed: FULL release —
             // purge every collection byte (prefix AND ready candidates), close the capture, zero
             // retention; provider never runs. A refused handoff is a loss event, not a deferral.
             (sink as? RevocationAware)?.purgeAllForRevocation("handoff-authority-refused")
@@ -405,14 +405,14 @@ class SegmentObserver(
             return false
         }
         if (!liveGateAllowed) {
-            // LIVE-gate refusal is ALSO a terminated handoff (blocker b2): provider never runs,
+            // LIVE-gate refusal is ALSO a terminated handoff: provider never runs,
             // exactly one terminal closes the capture, prefix PCM + charge released via cancel.
             sink.cancelled(SegmentObservation.Cancelled(current, "handoff-gate-refused"))
             closeLocked()
             return false
         }
         val (frames, rate) = framesProvider()
-        // FROZEN CLIP BOUND AT COMPLETION (#1): a refused growth/final-tail
+        // FROZEN CLIP BOUND AT COMPLETION: a refused growth/final-tail
         // reserveDelta leaves the capture open, and the completion drain can hand back the FULL
         // native segment. Enforce the frozen encoded-WAV bound HERE, before any flatten or
         // allocation, with Long totals (2 bytes/sample + the 44-byte header). Refusal terminates

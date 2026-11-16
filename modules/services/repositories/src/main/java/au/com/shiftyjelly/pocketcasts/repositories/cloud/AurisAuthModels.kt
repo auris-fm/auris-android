@@ -5,7 +5,7 @@ import com.squareup.moshi.JsonClass
 
 /**
  * Token contracts for `POST /api/v1/auth/token` and `/api/v1/auth/refresh`
- * (final contract: task #33). The exchanged credential is the account session
+ * The exchanged credential is the account session
  * the app already holds at login — the client never invents a subject.
  */
 /**

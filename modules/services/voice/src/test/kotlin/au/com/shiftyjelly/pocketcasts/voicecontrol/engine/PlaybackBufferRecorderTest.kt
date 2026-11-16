@@ -403,7 +403,7 @@ class PlaybackBufferRecorderTest {
         assertEquals("expired tail must be gone from reference() too", 0, recorder.reference().samples.count { it == 0.9f })
     }
 
-    // HELD OBSERVATION ACROSS RETIREMENT AND A SUCCESSOR. the admission case in its observation
+    // HELD OBSERVATION ACROSS RETIREMENT AND A SUCCESSOR. The admission case in its observation
     // form: an observation captured before the stop, delivered after it, must neither re-anchor the
     // correlator to the retired incarnation nor disturb a successor's own observation.
     @Test
@@ -1119,7 +1119,7 @@ class PlaybackBufferRecorderTest {
         recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1027L))
 
         // REVERSED, and the reversal is the point: this case originally asserted that the window
-        // STILL anchors, which encoded the behaviour corrected. An untimed contribution is not
+        // still anchors. An untimed contribution is not
         // merely neutral -- it invalidates any anchor, because the untimed samples are now part of the
         // span whose start would be reported. An untimed chunk still must not SET an axis (it is not a
         // media position), but the consequence of its presence is no anchor at all, not a retained one.
@@ -1135,7 +1135,7 @@ class PlaybackBufferRecorderTest {
     @Test
     fun `an untimed contribution after a timed one removes the anchor`() {
         // REVERSED like the case above, and for the same reason: the earlier version asserted the
-        // anchor survived, which is the reading corrected. The samples are still retained -- the
+        // anchor survived. The samples are still retained -- the
         // reference must remain complete for WHAT it holds -- but the window can no longer be placed.
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
@@ -1679,7 +1679,7 @@ class PlaybackBufferRecorderTest {
         job.cancel()
     }
 
-    // CONTROLthe capture-session boundary must retire, not merely cancel the
+    // CONTROL: the capture-session boundary must retire, not merely cancel the
     // tap. Before this, stop() left up to the whole retained window in the ring and a later start()
     // subscribed on top of it -- so the FIRST utterance of a NEW session could correlate against PCM
     // the PREVIOUS session submitted. stop() is the recorder's own session boundary (its only
@@ -1762,7 +1762,7 @@ class PlaybackBufferRecorderTest {
         )
     }
 
-    // CONTROL(episode renderer stop/pause hook): the media3 sink forwards BOTH
+    // CONTROL (episode renderer stop/pause hook): the media3 sink forwards BOTH
     // flush() and reset() to tap.onSinkFlush(), which bumps the stream epoch. The stamper must treat
     // that as supersession: retire the paused/seeked-away producer (its samples get an expiry, a held
     // old callback cannot re-enter) and admit the successor under a fresh ticket -- the same stale-

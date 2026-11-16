@@ -185,7 +185,7 @@ class FlushRetirementNoSuccessorTest {
         jobB.cancel()
     }
 
-    // MEDIA3 PAUSE TRACE + PAUSE ACOUSTIC CONTRACT ( confirmed; media3 1.10.1
+    // MEDIA3 PAUSE TRACE + PAUSE ACOUSTIC CONTRACT, confirmed on media3 1.10.1
     // DecoderAudioRenderer.onStopped calls audioSink.pause() ONLY -- flush()=onPositionReset/seek,
     // reset()=onDisabled/stop). Pause is a real sink event and ends the episode's current
     // audible-reference admission: only the bounded delay tail survives, it expires without another

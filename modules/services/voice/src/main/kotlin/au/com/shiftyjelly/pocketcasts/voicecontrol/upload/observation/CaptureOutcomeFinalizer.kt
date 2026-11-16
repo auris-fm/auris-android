@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 
 /**
- * BOUNDED OUTCOME FINALIZATION (Batch B, point 1): every
+ * BOUNDED OUTCOME FINALIZATION: every
  * retained capture carries a FINITE outcome wait whose ABSOLUTE deadline is frozen at REAL
  * completion time — the SINK captures the monotonic completion timestamp under its lock and
  * carries it in the retained callback, so a delayed callback or dispatcher can never extend
@@ -53,7 +53,7 @@ import timber.log.Timber
 class CaptureOutcomeFinalizer(
     private val sink: ContributionRetentionSink,
     /** THE production outcome wait. There is no inactive mode: a retained capture ALWAYS has
-     *  this finite deadline (fix 3). */
+     *  this finite deadline. */
     private val waitLimitsMs: Long,
     private val scope: CoroutineScope,
     /** Injectable pause; production uses the coroutine delay. Tests drive a virtual clock. */
@@ -85,7 +85,7 @@ class CaptureOutcomeFinalizer(
 
     /** Attaches this finalizer's hooks to the sink and arms the owning-scope teardown. */
     fun start() {
-        // STARTUP/ATTACHMENT OBSERVATION (#4).
+        // STARTUP/ATTACHMENT OBSERVATION.
         Timber.i("voice-capture finalizer: started")
         lock.withLock {
             if (disposed || installedRetainedHook != null) return

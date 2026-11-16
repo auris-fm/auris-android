@@ -5,7 +5,7 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * Supplies an Auris access token acquired from the account credential the app
- * already holds (task #33 client half).
+ * already holds.
  *
  * Postures, all pinned by tests:
  * - **Single-flight for [currentToken]:** concurrent callers share one refresh,

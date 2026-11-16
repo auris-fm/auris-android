@@ -113,7 +113,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     private var loadVerified = false
 
     /**
-     * P1: load evidence = THIS loader's successful creation from the
+     * load evidence = THIS loader's successful creation from the
      * content-verified bytes of the pinned manifest identity ([SENSEVOICE_MANIFEST_ID]).
      */
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
@@ -156,7 +156,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         recognizer?.release()
         recognizer = null
         loadedDir = null
-        // P1: released load state can NEVER claim the artifact for a
+        // released load state can NEVER claim the artifact for a
         // later invocation.
         loadVerified = false
     }

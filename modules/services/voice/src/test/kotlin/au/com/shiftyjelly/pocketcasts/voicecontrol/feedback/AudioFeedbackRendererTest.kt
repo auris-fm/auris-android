@@ -1429,7 +1429,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a successor's frontier mutation that lands before its admission marker must not steal the current observer's verdict`() {
-        ///-- THE WRITER-INTERNAL WINDOW the first control cannot
+        // THE WRITER-INTERNAL WINDOW the first control cannot
         // reach. The callback-gap control waits for play() to RETURN, so B's marker has already moved
         // and A correctly bails. But B's publication is TWO steps -- frontier fields, then the
         // admission marker -- and marker-last ordering alone does not exclude a reader landing
@@ -1578,7 +1578,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a rate-change track replacement leaves the old cue's verdict on ITS OWN track, refused successor or not`() {
-        //window: ensureTrack replaces the track on a rate change WITHOUT retiring
+        // The window case: ensureTrack replaces the track on a rate change WITHOUT retiring
         // the current admission's snapshot. A then reads the NEW track's playback head against A's
         // OLD bounds. The sharpest form is the REFUSED successor: the replacement happens during
         // ensureTrack, BEFORE the write, so a refused B leaves the track replaced and the stale

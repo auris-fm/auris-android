@@ -6,8 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * PINS THE PRODUCTION WIRING AXIS, updated for the one
- * PINS THE PRODUCTION WIRING AXIS, updated for the one
+ * PINS THE PRODUCTION WIRING AXIS for the one
  * sharing surface: the reachable Settings section now delegates to `VoiceSharingSettingsViewModel`,
  * which owns the durable stop ordering, the fenced outcome effects and the presentation rules.
  *

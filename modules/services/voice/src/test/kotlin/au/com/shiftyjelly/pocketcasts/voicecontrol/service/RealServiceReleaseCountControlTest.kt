@@ -173,7 +173,7 @@ class RealServiceReleaseCountControlTest {
     /**
      * THROW-AFTER-EFFECT on the real path. The first stop's recognizer release records its effect
      * (the counter increments, and the router has already cleared its loaded state) and THEN
-     * throws, so the teardown reports AmbiguousRelease. Round 40's policy says an ambiguous release
+     * throws, so the teardown reports AmbiguousRelease. The policy says an ambiguous release
      * is NEVER replayed -- no recheck can prove the throw did not take effect. The counter proves
      * the policy on the real service: every later stop leaves the release count exactly 1.
      */

@@ -3028,7 +3028,7 @@ open class PlaybackManager @Inject constructor(
     ) {
         val episode = getCurrentEpisode()?.let {
             if (posUpdatedOnPlayerReset) {
-                // Retrieves latest episode instance to address potential audio skip back issue (PR#1510)
+                // Retrieves latest episode instance to address potential audio skip back issue
                 episodeManager.findEpisodeByUuid(it.uuid) ?: it
             } else {
                 it

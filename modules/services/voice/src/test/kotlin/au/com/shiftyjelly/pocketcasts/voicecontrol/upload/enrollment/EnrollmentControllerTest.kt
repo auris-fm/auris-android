@@ -336,7 +336,7 @@ class EnrollmentControllerTest {
     @Test
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun `two queued enrolls in one session leave only the newest one applying`() = runTest {
-        //asked for this at the CONTROLLER, not just the fence helper: two enroll
+        // Asked for at the CONTROLLER, not just the fence helper: two enroll
         // taps in the same session must not both settle, or the older response decides the screen.
         val gates = List(2) { CompletableDeferred<Unit>() }
         var issued = 0

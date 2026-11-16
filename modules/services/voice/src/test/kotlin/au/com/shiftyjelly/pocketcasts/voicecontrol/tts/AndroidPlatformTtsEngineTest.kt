@@ -815,7 +815,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `a superseded reply stops at the next write instead of continuing under the successor`() {
-        // the focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
+        // The focused blocked-write regression. The seam blocks INSIDE the first
         // write -- the state a slow or contended output actually produces. While it is blocked, a
         // successor claims the engine; when the write unblocks, the old reply must perform NO
         // further writes. The job-completion hook cannot provide this: a blocked write never

@@ -1058,7 +1058,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `a no_match from a wake-detected segment speaks the unclear-command line`() = runTest {
-        // The other side of the the rule: the user was addressing us and we could not route it,
+        // The other side of that rule: the user was addressing us and we could not route it,
         // so they hear the line rather than a tone. Without a resolver holding the key the engine
         // falls back to that same earcon, which is what made this path untestable before.
         val resolver = SpokenTemplateResolver(

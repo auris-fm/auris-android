@@ -274,9 +274,9 @@ class VoiceControlService : Service() {
         // THE UTTERANCE'S LANGUAGE drives TTS: the reply — including a localized
         // refusal — is spoken in the language the user spoke, not the device locale. Falls back
         // to English when the ASR detected nothing this build understands.
-        // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
-        // the sink reports the resolved language for cloud turns; anything unspoken or
-        // local defaults to English, never the raw detected language nor the device locale.
+        // The language the feedback was ACTUALLY RESOLVED in, so text and voice stay coherent.
+        // The sink reports the resolved language for cloud turns; anything unspoken or local
+        // defaults to English, never the raw detected language nor the device locale.
         val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
         // ACKNOWLEDGED HANDOFF: the renderer accepts ownership of the hold by
         // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
@@ -361,7 +361,7 @@ class VoiceControlService : Service() {
         // coroutine is cancelled BEFORE its body first runs (a launch finally does not), and the
         // try/catch below covers a launch that fails before the Job exists. Settlement is one-shot
         // in the engine, so every exit path converges on exactly one publication.
-        // ADMIT THE START TO THE SHUTDOWN BARRIER (round 35). Until now this barrier was only ever
+        // ADMIT THE START TO THE SHUTDOWN BARRIER. Until now this barrier was only ever
         // CLOSED, never admitted to: `beginStart` had no production caller, so `close()` always
         // returned an empty set and the owned-job join below looped over nothing. A start is the one
         // place the pipeline takes ownership of work, so that is where admission must happen.
@@ -429,7 +429,7 @@ class VoiceControlService : Service() {
                     // candidate still present, or has it become the selected external microphone", which
                     // is what a pending acquisition needs. `route` is the OBSERVATION and stays Unknown
                     // without one; reading it here would either abort a succeeding acquisition or force
-                    // the observation to carry availability, which is the inference PR #56 removed.
+                    // the observation to carry availability, which is the inference the rule removed.
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
@@ -637,7 +637,7 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * P1: wiring hands each backend WHAT IT NEEDS TO RUN, plus — where the
+     * wiring hands each backend WHAT IT NEEDS TO RUN, plus — where the
      * bytes were verified — the manifest identity that verification already produced. The lookup
      * reuses ModelManager's cache predicate and MAY hash a cached artifact, which is why its only
      * caller is [ensureModelsReady] — reached from the start job launched on `Dispatchers.IO`
@@ -1069,7 +1069,7 @@ class VoiceControlService : Service() {
 
     /**
      * Stops the pipeline and returns a job that completes when teardown has REALLY finished
-     *. The previous version returned an already-completed job, which told an
+     * The previous version returned an already-completed job, which told an
      * awaiting caller that children had settled when they had not. This awaits the cancelled
      * children — `modeJob`, the acquisition job and the in-flight start — under `NonCancellable`, so
      * the returned job is a truthful completion signal. `serviceScope` is cancelled first so nothing

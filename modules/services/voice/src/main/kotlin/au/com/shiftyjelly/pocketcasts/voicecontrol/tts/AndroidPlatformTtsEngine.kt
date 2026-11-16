@@ -450,7 +450,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 waited += 10
             }
             framesWritten = offset
-            // Read FIRST, then consult the flag (review): checking positionBroken
+            // Read FIRST, then consult the flag: checking positionBroken
             // before this final read lets a THROWING final read return headPosition()'s fallback and
             // be mistaken for a fully drained utterance. Every failed read -- including this one --
             // must produce the explicit incomplete outcome below.
@@ -616,7 +616,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     }
 
     /**
-     * Optional track-construction override for controls (review): a test can
+     * Optional track-construction override for controls: a test can
      * supply an AudioTrack subclass that records release() and refuses position reads afterwards,
      * making premature engine-level release observable at the instance boundary. Null uses the real
      * platform construction below. This is a construction seam only -- production behavior is the
@@ -625,7 +625,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     internal var trackFactoryForTest: ((Int) -> AudioTrack?)? = null
 
     // An installed factory OVERRIDES track creation outright: a null it returns IS the failure
-    //, never a reason to fall through to the real constructor.
+    // That is never a reason to fall through to the real constructor.
     private fun buildTrack(sampleRateHz: Int): AudioTrack? {
         val factory = trackFactoryForTest
         // The null-check is on the FACTORY's presence, not its result: an installed factory's null

@@ -196,7 +196,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         // stream reports what it is routed to, that overrides enumeration: enumeration says what COULD
         // be, the observation says what IS. When no stream reports -- the paired-but-inactive case --
         // the route is Unknown, because substituting availability for an observation would impose
-        // headset setup on a session that may be using the speaker. the rule, and it is what makes
+        // headset setup on a session that may be using the speaker. That is the rule, and it is what makes
         // "paired" different from "routed".
         routedOutputObserver?.current()?.let { routed ->
             val devices = enumerated()
@@ -250,7 +250,8 @@ class AndroidAudioRouteMonitor @Inject constructor(
         }
         // NO OBSERVATION, NO ANSWER. With no live routed stream, no selected communication device and no
         // open SCO link there is no routing the platform has established, and substituting ENUMERATION
-        // for that missing answer is exactly the availability-as-acquisition inference PR #56 removed.
+        // for that missing answer is exactly the availability-as-acquisition inference the route
+        // acquisition rule removed.
         // The route stays Unknown; `availability` is the separate enumeration-based surface the setup
         // decision reads, so an acquisition that still needs to proceed reads THAT.
         return AudioRoute.Unknown
@@ -290,7 +291,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
          * stream, a selected communication device, or an open SCO link), so the first matching observed
          * output names the route; whether its microphone is usable is answered by the OBSERVED capture
          * input alone -- an enumerated wired input must not promote an observed speaker or A2DP route to
-         * a headset, which is the availability-as-acquisition inference PR #56 removed.
+         * a headset, which is the availability-as-acquisition inference the rule removed.
          */
         private fun classifyObservedRoute(
             outputDeviceTypes: List<Int>,

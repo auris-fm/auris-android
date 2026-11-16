@@ -171,9 +171,9 @@ class EnrollmentController(
     /**
      * Applies a durable side effect for [outcome], or applies NOTHING.
      *
-     * Use this instead of [stillApplies] followed by an effect. The two-step form has a gap the
-     * `issue`/`supersede`/account change do not hold any caller-side lock, so between
-     * the check and the effect the world can move, and the effect then lands on state the decision no
+     * Use this instead of [stillApplies] followed by an effect. The two-step form has a gap:
+     * `issue`, `supersede` and an account change hold no caller-side lock, so between the check
+     * and the effect the world can move, and the effect then lands on state the decision no
      * longer describes. Here the decision and the effect run inside the fence's own critical section,
      * the same one its mutations take.
      *

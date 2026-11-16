@@ -753,7 +753,7 @@ class EarconPlayer(
     /**
      * THE ACTUAL CUE WRITER the accepted-submission path uses, extracted so a control can drive it
      * directly (queued and partial acceptances included) without clip assets. POSITION ATTRIBUTION
-     * (conservatively): cue timing is explicitly UNAVAILABLE --
+     * (conservatively): cue timing is explicitly UNAVAILABLE, so
      * recordAccepted observes accepted/submitted samples, not render instants, and a write-instant
      * timestamp would be submission time relabeled as sounding time. The UNTIMED write invalidates
      * any window anchor the cue's unknown sounding time cannot cover. OWNED like every other

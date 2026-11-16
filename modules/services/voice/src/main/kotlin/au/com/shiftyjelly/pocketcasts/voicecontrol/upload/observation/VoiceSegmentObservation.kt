@@ -22,9 +22,6 @@ data class CaptureContext(
      * THE ASR backend actually selected for THIS capture, frozen at issuance: per-capture
      * backend provenance is record truth. [ModelRef.None] is the honest absence — a capture
      * with no observed ASR model is not publishable.
-     * THE ASR backend actually selected for THIS capture, frozen at issuance: per-capture
-     * backend provenance is record truth. [ModelRef.None] is the honest absence — a capture
-     * with no observed ASR model is not publishable.
      */
     val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef =
         au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
@@ -51,14 +48,14 @@ data class TranslationProvenance(
     /** The target language the result is in (observed), when a result exists. */
     val targetLanguage: String?,
     /**
-     * P1: a KNOWN skip of the separate translation stage, in the existing
+     * a KNOWN skip of the separate translation stage, in the existing
      * owning vocabulary (backend_handles_translation / source_language_unavailable /
      * translator_unavailable / source_language_target_language). A skip is a known fact, not
      * honest-unknown; capability alone never asserts a produced result.
      */
     val skipReason: String? = null,
     /**
-     * P1: the stage RAN and failed / returned invalid output — a known
+     * the stage RAN and failed / returned invalid output — a known
      * FAILURE fact (state failed), never laundered into a skip or unknown.
      */
     val failedWith: String? = null,

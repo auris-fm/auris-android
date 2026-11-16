@@ -14,7 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Token provider postures (task #33 client half): single-flight refresh, an
+ * Token provider postures: single-flight refresh, an
  * expiry skew, re-acquire on a 401, and fail-closed in every other case.
  */
 class AurisTokenProviderTest {

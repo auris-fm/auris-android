@@ -27,7 +27,7 @@ internal fun projectionJson(
 }
 
 /**
- * Task 2 contract controls: exact JSON types/values with NO coercion, an
+ * Contract controls: exact JSON types/values with NO coercion, an
  * explicitly duplicate-detecting strict parser, lifecycle generation issued SYNCHRONOUSLY at
  * request issuance (not account ID, not async flow observation — a conflating flow must not be
  * the invalidation mechanism), token-scoped authority applies (only the originally issued

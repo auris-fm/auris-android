@@ -116,7 +116,7 @@ class CaptureClockMappingTest {
 
     @Test
     fun `the anchor is the segment sample zero the filter receives, not the clock-read instant`() {
-        // PRODUCTION WIRING (capture-anchor part, round 3): the segment's
+        // PRODUCTION WIRING (capture-anchor part): the segment's
         // position comes from RING SAMPLE ACCOUNTING (the read cursor at the moment the final chunk
         // was consumed), not from the hardware observation -- the observation is read at drain time
         // and can lag the segment's true end. The anchor is the segment's FIRST SAMPLE (sample 0,

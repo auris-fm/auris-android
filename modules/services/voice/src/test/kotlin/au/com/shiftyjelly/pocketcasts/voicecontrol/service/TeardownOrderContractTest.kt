@@ -19,7 +19,7 @@ import org.junit.Test
 /**
  * TEARDOWN ORDER AND COMPLETION CONTROL.
  *
- *caught a real regression I introduced: rewriting `stopVoiceControl` dropped
+ * A real regression: rewriting `stopVoiceControl` dropped
  * `stopEngine()`, so the engine was never stopped and capture state never cleared before routing and
  * resources were released. This control pins the ORDER that regression violated, and pins the
  * completion property (the returned job must not complete while a dispatch body's `finally` is still
@@ -36,7 +36,6 @@ class TeardownOrderContractTest {
     private val requiredOrder = listOf(
         "cancel-mode",
         "stop-engine", // engine teardown is SYNCHRONOUS; nothing engine-owned outlives it
-        // CANCEL BEFORE RELEASE: a cancellation REQUEST is not
         // CANCEL BEFORE RELEASE: a cancellation REQUEST is not
         // "users have finished" — dispatcher children still call render()/onCommandRecognized. So
         // the releases must follow the JOIN, not merely the cancellation.
@@ -470,7 +469,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the start path actually ADMITS its job to the shutdown barrier`() {
-        //, confirmed by grep: `beginStart` had no production caller at all. The
+        // `beginStart` had no production caller at all. The
         // barrier only ever CLOSED, so `close()` always returned an empty set and the owned-job join
         // below looped over nothing. Every control on the barrier itself still passed, because they
         // construct it directly — a class whose admission half nothing calls is not evidence.
@@ -561,7 +560,7 @@ class TeardownOrderContractTest {
             productionFileSource().contains("private fun stopVoiceControl(): Deferred<TeardownResult>"),
         )
         // A THROWING RELEASE IS REPORTED AS AN AMBIGUOUS RELEASE, not a resumable Residual
-        //. The verdict kind is load-bearing: a Residual is clearable by a
+        // The verdict kind is load-bearing: a Residual is clearable by a
         // quiescence recheck, and replaying a release that may already have taken effect would
         // perform destructive cleanup twice.
         assertTrue(

@@ -19,7 +19,7 @@ import org.junit.Test
 /**
  * CONTRACT CONTROL for the lifecycle seam, against the PRODUCTION adapter class.
  *
- *found the previous version proved nothing: it used a fake with an unchecked
+ * The previous version proved nothing: it used a fake with an unchecked
  * counter and never modelled the readiness window or a real teardown. The harness here models the
  * TWO properties the service actually has and the seam must report:
  *

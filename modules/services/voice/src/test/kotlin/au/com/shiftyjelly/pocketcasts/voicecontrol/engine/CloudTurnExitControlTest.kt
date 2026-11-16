@@ -28,7 +28,7 @@ import org.mockito.kotlin.whenever
  * auxiliary grant and then the stream throws or is cancelled. In both cases the turn's own result
  * is unobserved, so the aggregate must be the explicit unknown — never the auxiliary success.
  *
- * EVIDENCE SCOPE (corrected after): this drives the real
+ * EVIDENCE SCOPE: this drives the real
  * [VoicePlaybackIntentExecutor] and the real [PlaybackManagerPlaybackSink] over a MOCKED
  * AudioManager/PlaybackManager, with a TEST cloud-route adapter standing at that boundary. It then
  * applies the dispatcher's mapping and the static aggregation directly. It does NOT cover

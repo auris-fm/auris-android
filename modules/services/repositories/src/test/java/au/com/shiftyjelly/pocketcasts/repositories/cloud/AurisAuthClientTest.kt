@@ -8,7 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Auth endpoint contracts (task #33): JSON exchange and refresh, with 401
+ * Auth endpoint contracts: JSON exchange and refresh, with 401
  * classified as definitive and everything else as inconclusive-but-fail-closed.
  */
 class AurisAuthClientTest {

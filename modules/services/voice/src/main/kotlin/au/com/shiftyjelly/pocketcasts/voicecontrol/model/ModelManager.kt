@@ -192,7 +192,7 @@ class ModelManager @Inject constructor(
     suspend fun isModelReadyVerified(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean = withContext(Dispatchers.IO) { isModelReady(spec) }
 
     /**
-     * P1: the manifest identity this manager verifies for the configured
+     * the manifest identity this manager verifies for the configured
      * bytes — or null when the cache does not currently match. It adds NO hashing implementation
      * of its own, but it does reuse the single acceptance predicate, so it MAY hash a cached
      * artifact and must never be called on the main/audio thread. Callers pair the identity with

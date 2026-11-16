@@ -139,7 +139,7 @@ class CanaryFlashBackend @Inject constructor(
     private var loadVerified = false
 
     /**
-     * P1: load evidence = THIS loader's successful preparation from the
+     * load evidence = THIS loader's successful preparation from the
      * content-verified bytes of the pinned manifest identity ([CANARY_MANIFEST_ID]).
      */
     override fun loadedModelRef(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? {
@@ -188,7 +188,7 @@ class CanaryFlashBackend @Inject constructor(
         recognizer = null
         loadedSrcLang = null
         loadedDir = null
-        // P1: released load state can NEVER claim the artifact for a later invocation.
+        // released load state can NEVER claim the artifact for a later invocation.
         loadVerified = false
     }
 

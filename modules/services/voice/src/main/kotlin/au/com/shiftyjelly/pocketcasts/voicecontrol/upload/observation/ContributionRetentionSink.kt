@@ -46,21 +46,21 @@ sealed interface CollectionOutcome {
     ) : CollectionOutcome
 
     /**
-     * P1: the ASR PROVIDER FAILED for this capture — a known failure,
+     * the ASR PROVIDER FAILED for this capture — a known failure,
      * joined at the actual transcribe call. Cancellation is NEVER joined here (it is rethrown,
      * not laundered into a provider fact). Publishable terminal: nothing further can arrive.
      */
     data class AsrFailed(override val captureId: UUID) : CollectionOutcome
 
     /**
-     * P1: ASR invocation was CANCELLED — the known cancelled fact is
+     * ASR invocation was CANCELLED — the known cancelled fact is
      * recorded BEFORE rethrowing, WITHOUT early publication. NONTERMINAL: the observation
      * stream stays open; the bounded wait still owns finalization.
      */
     data class AsrCancelled(override val captureId: UUID) : CollectionOutcome
 
     /**
-     * P1: the router RAN and reported NO usable intent — the recognizer's
+     * the router RAN and reported NO usable intent — the recognizer's
      * OWN reported decision (e.g. no_candidates / low_confidence / validation_failed) travels,
      * never a blanket mapping of every null intent. NONTERMINAL: a later cloud escalation can
      * still supply its normal outcome; the stream is not closed.
@@ -125,7 +125,7 @@ class RetainedCandidate internal constructor(
     var outcome: CollectionOutcome? = null
 
     /**
-     * P1: model identity of the backend ACTUALLY INVOKED for ASR — frozen
+     * model identity of the backend ACTUALLY INVOKED for ASR — frozen
      * at the transcribe call from that backend's verified loaded identity, INDEPENDENT of the
      * call's result (a failed/empty invocation still carries it). Null = ASR was never invoked
      * for this capture; the record then claims NO asr model. Never read from the SpeechStarted
@@ -134,7 +134,7 @@ class RetainedCandidate internal constructor(
     var asrInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? = null
 
     /**
-     * P1: identity of the router ACTUALLY INVOKED for this capture, frozen when routing runs.
+     * identity of the router ACTUALLY INVOKED for this capture, frozen when routing runs.
      * Null = routing never ran; the record claims NO router model (loading alone is not routing).
      */
     var routerInvocationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef? = null
@@ -156,7 +156,7 @@ class RetainedCandidate internal constructor(
     var executionOutcome: ExecutionOutcome? = null
 
     /**
-     * BATCH B SEAL STATE, independent of any single observation (#2): set
+     * SEAL STATE, independent of any single observation: set
      * EXACTLY ONCE under the sink lock, by the outcome-wait deadline ([sealExpiredOutcome]).
      * Recognized/Routed joins and wake-only/empty terminals do NOT seal and do NOT cancel the
      * bounded wait; only actual sealing (this flag) or retention end does.
@@ -177,7 +177,7 @@ class RetainedCandidate internal constructor(
  */
 open class ContributionRetentionSink(
     private val maxBytesPerClip: Long = SegmentObserver.DEFAULT_MAX_RETAINED_BYTES,
-    /** Injectable monotonic clock (Batch B): the outcome-wait deadline is frozen at REAL
+    /** Injectable monotonic clock: the outcome-wait deadline is frozen at REAL
      *  completion time in THIS clock domain, so delayed registration cannot extend the wait. */
     private val nowMs: () -> Long = { System.nanoTime() / 1_000_000L },
     /** Observes each content-free loss decision (cause name only). Production wires a
@@ -191,7 +191,7 @@ open class ContributionRetentionSink(
     var onRetentionEnded: ((CaptureContext) -> Unit)? = null
 
     /**
-     * BATCH B hooks for the bounded outcome finalizer. Each fires OUTSIDE the sink lock, exactly
+     * Hooks for the bounded outcome finalizer. Each fires OUTSIDE the sink lock, exactly
      * once per event, ONLY while attached (null otherwise — behavior unchanged).
      *  - [onCandidateRetained]: (captureId, purgeGeneration at retain) — the finalizer arms the
      *    capture's finite deadline and re-validates liveness against that generation, so a
@@ -200,8 +200,7 @@ open class ContributionRetentionSink(
      *    ONLY non-purge timer cancellation.
      *  - [onPurged]: full revocation cancelled everything — all timers drop.
      * NONTERMINAL joins (Recognized/Routed) and non-publishable terminal joins (wake-only,
-     * empty) fire NO hook: the bounded wait continues for unresolved required observations
-     * (#2).
+     * empty) fire NO hook: the bounded wait continues for unresolved required observations.
      */
     var onCandidateRetained: ((UUID, Long, Long) -> Unit)? = null
     var onCaptureReleased: ((UUID) -> Unit)? = null
@@ -219,18 +218,18 @@ open class ContributionRetentionSink(
 
     private val lock = Any()
 
-    /** BATCH B: increments on every full revocation; deadline registration is generation-checked. */
+    /** Increments on every full revocation; deadline registration is generation-checked. */
     private var purgeGeneration: Long = 0L
     private var openPrefix: OpenPrefix? = null
     private val candidates = ArrayDeque<RetainedCandidate>()
 
     private class OpenPrefix(val context: CaptureContext, val buffer: MutableList<ShortArray>) {
-        /** Frozen at admission; travels with THIS capture only (#2). */
+        /** Frozen at admission; travels with THIS capture only. */
         var allowanceMetadataCap: Int? = null
         var chargedBytes: Long = 0L
 
         /** Valid length per ADOPTED array (arrays may carry unused reserved capacity at the tail;
-         * readers must slice to this length —b1/b3: one array, FULL-CAPACITY
+         * readers must slice to this length. One array is FULL-CAPACITY
          * charge until dropped, valid range separate from size). */
         val validLengths = java.util.IdentityHashMap<ShortArray, Int>()
 
@@ -289,9 +288,9 @@ open class ContributionRetentionSink(
     override fun adopted(observation: SegmentObservation.Started, token: ReservationToken?): Boolean {
         if (token == null) return false
         val capacityBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
-        //b1: the sink adopts the WHOLE ARRAY, so its full CAPACITY stays
+        // The sink adopts the WHOLE ARRAY, so its full CAPACITY stays
         // charged while it is live — releasing "unused" bytes here would under-account memory the
-        // prefix still pins. Valid audio = observation.validSamples (b3), stored separately.
+        // prefix still pins. Valid audio = observation.validSamples, stored separately.
         // Growth beyond the admitted reservation must be charged to close the gap; refusal ends
         // retention explicitly rather than exceed the cap.
         if (capacityBytes > maxBytesPerClip) {
@@ -311,7 +310,7 @@ open class ContributionRetentionSink(
                 validLengths[observation.firstChunk] = observation.validSamples
                 // Capture-OWNED: copied from this capture's own admission token inside the SAME
                 // synchronized block that transfers prefix ownership - no shared scalar, no
-                // cross-capture read (#2).
+                // cross-capture read.
                 allowanceMetadataCap = token.allowanceMetadataCapBytes
             }
             // The drained-valid shortfall vs capacity remains charged WITH the array; when the
@@ -359,13 +358,13 @@ open class ContributionRetentionSink(
         if (ended) endPrefixWithTerminal(prefix, "retention-cap")
     }
 
-    // --- Reserve-before-copy delta protocol (blocker b3): reservation charges the budget but
+    // --- Reserve-before-copy delta protocol: reservation charges the budget but
     // allocates NOTHING; commit transfers the caller's drained array under the SAME charge;
     // release returns the charge when the copy-out failed. Growth beyond the per-clip cap ends
     // THIS capture with exactly one terminal and releases everything it owned. ---
 
     /**
-     * Outstanding reservation leases (b4): each lease is the budget charge for
+     * Outstanding reservation leases: each lease is the budget charge for
      * an array the PRODUCER currently holds between reserve and commit/release. A revocation may
      * MARK a lease cancelled, but MUST NOT release its charge while the producer still holds the
      * allocated array — inflight live bytes stay charged until the producer's finally-path calls
@@ -378,7 +377,7 @@ open class ContributionRetentionSink(
 
     private class ReservationLease(val tokenId: Long, val bytes: Long, var cancelled: Boolean = false)
 
-    /** Live reservation tokens by id (per-allocation;b3). */
+    /** Live reservation tokens by id, one per allocation. */
     private val tokens = mutableMapOf<Long, ReservationToken>()
     private var reservationSeq = 0L
     private fun nextReservationId(): Long = synchronized(lock) { ++reservationSeq }
@@ -405,10 +404,10 @@ open class ContributionRetentionSink(
             val live = tokens[token.id] ?: return@synchronized false
             // Stale-commit guard: a lease marked cancelled by revocation may NOT transfer into
             // retained ownership. The producer still holds the array; its charge leaves ONLY via
-            // releaseDelta when the producer drops it (b4).
+            // releaseDelta when the producer drops it.
             val cancelled = leases[context.captureId]?.any { it.tokenId == token.id && it.cancelled } == true
             val prefix = openPrefix?.takeIf { it.context == context && !cancelled } ?: return@synchronized false
-            // VALIDATE FIRST (b2): the valid range must fit the array, and the
+            // VALIDATE FIRST: the valid range must fit the array, and the
             // WHOLE capacity charge (token's own + any growth gap) must be secured BEFORE the
             // prefix is mutated. On refusal NOTHING is appended — the producer still owns the
             // array and its token charge leaves only via releaseDelta.
@@ -422,9 +421,9 @@ open class ContributionRetentionSink(
                 return@synchronized false
             }
             // ADOPT the ORIGINAL array and its valid range — no second array, ONE charge for the
-            // WHOLE capacity (b1): the array stays fully charged while live;
+            // WHOLE capacity: the array stays fully charged while live;
             // "unused" tail bytes are pinned memory, not free budget. Valid audio length is
-            // stored separately so readers never see zero padding (b3).
+            // stored separately so readers never see zero padding.
             prefix.buffer.add(drained)
             prefix.validLengths[drained] = copied
             live.bytes = capacityBytes
@@ -464,7 +463,7 @@ open class ContributionRetentionSink(
     /** Bytes still charged to producer-held arrays (inflight live audio, not yet dropped). */
     fun outstandingLeaseBytesForTest(): Long = synchronized(lock) { leases.values.sumOf { l -> l.sumOf { it.bytes } } }
 
-    // Completion handoff with PEAK accounting (b1): the FULL flattened output
+    // Completion handoff with PEAK accounting: the FULL flattened output
     // is reserved while every prefix array is still live, so the budget carries both allocations
     // during flattening; the retired prefix charge releases exactly once after transfer. A
     // refused completion CANCELS the capture — the retained prefix releases completely and a
@@ -500,7 +499,7 @@ open class ContributionRetentionSink(
                     prefix.chargedBytes = fullBytes
                     openPrefix = null
                     // Copy THIS capture's frozen cap inside the SAME lock that ends prefix
-                    // ownership (#2).
+                    // ownership.
                     completionCap = prefix.allowanceMetadataCap
                     true
                 } else {
@@ -524,7 +523,7 @@ open class ContributionRetentionSink(
             val gen: Long
             synchronized(lock) {
                 // Copied from THIS capture's own prefix inside the SAME lock that ends prefix
-                // ownership - capture-owned, no shared scalar (#2).
+                // ownership - capture-owned, no shared scalar.
                 candidates.addLast(candidate)
                 gen = purgeGeneration
             }
@@ -566,7 +565,7 @@ open class ContributionRetentionSink(
         val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }
         if (prefix != null) {
             // Producer-held lease bytes stay charged until the producer drops them; everything
-            // else in the prefix releases now (b4). Lease charges live in
+            // else in the prefix releases now. Lease charges live in
             // pendingDeltaBytes, NOT in prefix.chargedBytes (commit transfers them), so the whole
             // finished-prefix charge is releasable immediately.
             releasePrefix(prefix)
@@ -586,7 +585,7 @@ open class ContributionRetentionSink(
                 openPrefix = null
             }
             // Finished/retained buffers purge immediately; OUTSTANDING leases stay charged until
-            // the producer's finally path releases them (b4). Mark them so any
+            // the producer's finally path releases them. Mark them so any
             // later commit is refused as cancelled.
             leases.values.flatten().forEach { it.cancelled = true }
             while (candidates.isNotEmpty()) {
@@ -601,7 +600,7 @@ open class ContributionRetentionSink(
         // sink lock while a file write runs (a nested release inside an outer synchronized does
         // not release the outer lock, so this must not route through logLoss).
         lossEventObserver?.invoke("purge-all:$reason", synchronized(lock) { lossReasonCountsInternal["purge-all:$reason"] ?: 1 })
-        // BATCH B: every deadline is moot after a purge (outside the lock).
+        // Every deadline is moot after a purge (outside the lock).
         onPurged?.invoke()
     }
 
@@ -629,13 +628,13 @@ open class ContributionRetentionSink(
             // correlator made a real decision. Other NotCollected reasons stay unpublished: the
             // bounded wait continues (no seal, no hook). Publication still passes every trigger
             // guard (frozen identity, consent, eligibility) unchanged.
-            // P1: a joined ASR provider failure is a KNOWN terminal fact —
+            // a joined ASR provider failure is a KNOWN terminal fact —
             // publishable like bleed, never left to dry into a wait-expiry unknown.
             val publishable = outcome is CollectionOutcome.Executed ||
                 outcome is CollectionOutcome.AsrFailed ||
                 (outcome as? CollectionOutcome.NotCollected)?.reason == "bleed"
             if (publishable) {
-                // ONE SEAL OPERATION for BOTH completion paths (#1): early
+                // ONE SEAL OPERATION for BOTH completion paths: early
                 // completion seals and snapshots under THIS sink lock BEFORE dispatch, with
                 // cause terminal — the deadline later finds sealed and refuses; no async reader
                 // can observe the mutable candidate mid-publication.
@@ -648,7 +647,7 @@ open class ContributionRetentionSink(
         // ACCEPTANCE is independent of publication/sealing: every accepted
         // join (nonterminal AND sealing) returns true; only the refusal branches above are false.
         if (fired != null) {
-            // BATCH B (#2): actual sealing cancels the capture's timer too.
+            // Sealing also cancels the capture's timer.
             onCaptureSealed?.invoke(outcome.captureId)
             if (onReadyForPublication == null) {
                 // A seal with NO attached publish trigger means the audio is retained forever with
@@ -693,13 +692,13 @@ open class ContributionRetentionSink(
     )
 
     /**
-     * BATCH B EXACTLY-ONCE SEALING, ATOMIC WITH VALIDATION (#3): the
+     * EXACTLY-ONCE SEALING, ATOMIC WITH VALIDATION: the
      * deadline's firing validates generation + presence + not-already-sealed and seals under
      * THIS ONE sink-lock boundary — there is no check-then-fire window for a purge, an early
      * completion, or a racing deadline to slip into. Returns the immutable publication
      * snapshot (cause [SealedCapture.CAUSE_OUTCOME_WAIT_EXPIRED]) which the caller dispatches,
      * or null when: the generation is stale (the capture was revoked between registration and
-     * firing —#3), the id is unknown/evicted, already sealed (exactly-once:
+     * firing), the id is unknown or evicted, already sealed (exactly-once:
      * whichever of timer/terminal sealed first wins), or already carried a publishable
      * terminal (Executed/bleed — its publication already ran at the join).
      *
@@ -739,11 +738,11 @@ open class ContributionRetentionSink(
         return fired
     }
 
-    /** BATCH B: the current purge generation, for timer ownership decisions. */
+    /** The current purge generation, for timer ownership decisions. */
     fun currentPurgeGeneration(): Long = synchronized(lock) { purgeGeneration }
 
     /**
-     * BATCH B REGISTRATION VALIDATION (#2): a retained callback delivered
+     * REGISTRATION VALIDATION: a retained callback delivered
      * AFTER an early seal/release in the SAME generation must not arm a timer. True only when
      * the generation still matches AND the capture is present AND unsealed AND did not carry a
      * publishable terminal. The atomic firing check in [sealExpiredOutcome] is unaffected.
@@ -765,7 +764,7 @@ open class ContributionRetentionSink(
             removed.bytesCharged = 0L
             removed.pcm = null
         }
-        // BATCH B: retention ended — the finalizer cancels this capture's deadline.
+        // Retention ended — the finalizer cancels this capture's deadline.
         onCaptureReleased?.invoke(captureId)
         return true
     }
@@ -785,7 +784,7 @@ open class ContributionRetentionSink(
     }
 
     /**
-     * P1: freezes the INVOKED backend's verified loaded identity at the
+     * freezes the INVOKED backend's verified loaded identity at the
      * actual ASR invocation, independently of the invocation's result. Same ownership rule as
      * [noteTranslation]; refused after sealing. A backend replaced between the SpeechStarted
      * selection and this call cannot misattribute: THIS value is what the record claims.
@@ -798,7 +797,7 @@ open class ContributionRetentionSink(
     }
 
     /**
-     * P1: freezes the router identity AT the actual routing invocation. Loading a model is not
+     * freezes the router identity AT the actual routing invocation. Loading a model is not
      * routing; a record claims the router model only when routing ran with it.
      */
     open fun noteRouterInvocation(captureId: UUID, ref: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef): Boolean = synchronized(lock) {

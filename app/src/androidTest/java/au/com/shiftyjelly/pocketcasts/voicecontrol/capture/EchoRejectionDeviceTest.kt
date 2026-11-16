@@ -203,8 +203,8 @@ class EchoRejectionDeviceTest {
         val capture = MicrophoneCapture(ctx, OboeCaptureHardware(), EpisodeReferenceEligibility())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-        // Same REAL acquisition lifecycle as the echo run. Acquisition is INSIDE the protected body
-        // a skip after opening must not leak the acquired stream.
+        // Same REAL acquisition lifecycle as the echo run. Acquisition is INSIDE the protected
+        // body: a skip after opening must not leak the acquired stream.
         var job: kotlinx.coroutines.Job? = null
         var engine: AndroidPlatformTtsEngine? = null
         try {

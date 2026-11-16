@@ -1053,7 +1053,6 @@ class CloudRouteSink internal constructor(
 
     /**
      * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
-     * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
      * language or missing resources yield the default line with "en" — never one language's text
      * paired with another's voice.
      */
@@ -1176,7 +1175,7 @@ class CloudRouteSink internal constructor(
                             }
 
                             is EpisodeOperationResult.Unknown -> {
-                                // UNKNOWN RECORDS NOTHING AS PERFORMED. the measured defect was
+                                // UNKNOWN RECORDS NOTHING AS PERFORMED. The measured defect was
                                 // the opposite of what I described: Unknown became ACCEPTED and wrote
                                 // history, claiming a target the client never observed being reached.
                                 //
@@ -1436,7 +1435,7 @@ class CloudRouteSink internal constructor(
         // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. An UNKNOWN outcome keeps the PRE-ACTION
         // provenance -- what the client knew before the attempt -- but records no target, because
         // nothing established that the player reached it. Recording it would claim an observation
-        // nobody made, which is the measured e201 defect.
+        // nobody made, which is the measured defect.
         // The caller passes null when the TARGET was not observed -- but that suppresses only the
         // TARGET, not the PRE-ACTION provenance. Returning here would ALSO skip `preQuotePositionMs`,
         // discarding a value the owner had already captured: the same "unknown concerns execution, not

@@ -11,7 +11,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import timber.log.Timber
 
 /**
- * Auth endpoints for the edge identity contract (task #33): exchange the
+ * Auth endpoints for the edge identity contract: exchange the
  * account credential the app already holds for an Auris access token, and
  * rotate the refresh token.
  *

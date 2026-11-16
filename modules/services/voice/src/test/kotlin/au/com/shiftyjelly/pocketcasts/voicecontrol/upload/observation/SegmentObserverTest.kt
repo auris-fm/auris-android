@@ -164,7 +164,7 @@ class SegmentObserverTest {
 
     @Test
     fun `handoff refuses when the ORIGINAL issued authority fails owner-transaction validation`() {
-        //blocker 2: a fresh Boolean/new projection must NOT reauthorize an old
+        // A fresh Boolean or a new projection must NOT reauthorize an old
         // capture. Gate stays LIVE; only the OWNER-side validation of the frozen value fails.
         val losses = mutableListOf<String>()
         val sink = ContributionRetentionSink(lossEventObserver = { event, _ -> losses += event })
@@ -370,7 +370,7 @@ class SegmentObserverTest {
             CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement -> scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement) },
         )
         val a = observer.speechStarted(10L, "Headset", ShortArray(0))!!
-        // Admission is single-occupancy (blocker b1): a second start while A is open is REFUSED —
+        // Admission is single-occupancy: a second start while A is open is REFUSED —
         // no context, no charge, and A stays the one open capture. Stale-context deltas are refused.
         assertNull(observer.speechStartedAdmitting(11L, "Speaker", 0))
         observer.speechIncremental(a, ShortArray(100)) // reserved? no: sink default reserveDelta refuses -> ignored

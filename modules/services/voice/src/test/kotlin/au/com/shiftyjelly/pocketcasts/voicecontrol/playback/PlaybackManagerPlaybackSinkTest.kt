@@ -706,7 +706,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `the episode is re-decided AT the mutation, so a change across the suspension is refused`() = runTest {
-        // @reviewer's finding: `seekToTimeMsInternal` reads the episode, then SUSPENDS in
+        // `seekToTimeMsInternal` reads the episode, then SUSPENDS in
         // `withContext(Dispatchers.Main)` before the player mutation -- and a replacement can land in
         // that suspension. A read taken before the suspensions therefore does not exclude a change
         // ACROSS them.

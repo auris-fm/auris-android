@@ -186,7 +186,7 @@ class CloudAudioPlayerWriterThreadTest {
             gate.await(10, TimeUnit.SECONDS)
             count
         }
-        player.writerIdleTimeoutMs = 200
+        player.writerStallTimeoutMs = 200
         player.submitFrame(frame(0))
         player.play()
         player.submitFrame(frame(1))
@@ -205,6 +205,31 @@ class CloudAudioPlayerWriterThreadTest {
         player.submitFrame(frame(1))
 
         assertTrue("every queued frame was written before drainAndStop returned", player.drainAndStop())
+    }
+
+    @Test
+    fun `a long backlog written steadily is drained, not called a stalled writer`() {
+        // The wait at the end of a turn exists to notice a writer that has STOPPED, not to cap how
+        // long an answer takes to finish on the device. Playback paces the writer: a 30 s answer
+        // received in 3 s still has more than the timeout's worth of audio queued at done, and every
+        // frame of it is written steadily. Judging that backlog by total elapsed time timed out,
+        // stop() discarded the tail, and the user heard an error tone instead of the end of the
+        // answer. Progress is the only thing that distinguishes the two.
+        val player = newPlayer()
+        val written = CopyOnWriteArrayList<Int>()
+        player.writeToSink = { _, bytes, _, count ->
+            // Well under the stall window per frame, but the whole backlog takes longer than it.
+            Thread.sleep(15)
+            written += bytes[0].toInt()
+            count
+        }
+        player.writerStallTimeoutMs = 250
+        player.submitFrame(frame(0))
+        player.play()
+        (1..30).forEach { player.submitFrame(frame(it)) }
+
+        assertTrue("a steadily written backlog is a drain, not a stall", player.drainAndStop())
+        assertEquals("the whole answer was written, in order", (0..30).toList(), written.toList())
     }
 
     @Test
@@ -244,7 +269,7 @@ class CloudAudioPlayerWriterThreadTest {
             count
         }
         player.readPlaybackHeadFrames = { Long.MAX_VALUE }
-        player.writerIdleTimeoutMs = 200
+        player.writerStallTimeoutMs = 200
         player.submitFrame(frame(0))
         player.play()
         player.submitFrame(frame(1))

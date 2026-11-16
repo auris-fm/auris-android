@@ -293,8 +293,11 @@ class CloudAudioPlayer(
      */
     var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
 
-    /** How long a caller that must see everything written waits for the writer; a test shortens it. */
-    internal var writerIdleTimeoutMs: Long = WRITER_IDLE_TIMEOUT_MS
+    /**
+     * How long the writer may go WITHOUT WRITING before a caller waiting on it calls it stalled; a
+     * test shortens it. A stall window, not a cap on the drain -- see [awaitWriterIdle].
+     */
+    internal var writerStallTimeoutMs: Long = WRITER_STALL_TIMEOUT_MS
 
     /** Test seam: called once the detached track has been released, on whichever thread released it. */
     internal var onTrackReleasedForTest: (() -> Unit)? = null
@@ -369,7 +372,55 @@ class CloudAudioPlayer(
         }
     }
 
-    /** Suspends until every drain queued before this call has finished; false if the writer was still busy at the cap. */
+    /** What the writer has finished consuming: frames written to the sink (under [frameBuffer]). */
+    @Volatile
+    private var framesWrittenInRun = 0L
+
+    /**
+     * Waits up to [stallMs] for the writer to make progress; true when it wrote something, false when
+     * it wrote nothing for the whole window.
+     *
+     * Progress is [framesWrittenInRun], advanced once per accepted write in [drainFrames] and reset
+     * with the run, so the same read works for both wait paths: the suspending one polls it here, and
+     * the blocking one polls this on the calling thread. A writer that is merely slow to the end of a
+     * backlog keeps advancing it; a writer inside a write that never returns does not.
+     */
+    private fun awaitProgressBlocking(stallMs: Long): Boolean {
+        val before = framesWrittenInRun
+        val deadline = System.nanoTime() + stallMs * 1_000_000L
+        while (framesWrittenInRun == before) {
+            if (System.nanoTime() >= deadline) {
+                Timber.w("[CloudAudio] writer made no progress in %d ms", stallMs)
+                return false
+            }
+            Thread.sleep(5L)
+        }
+        return true
+    }
+
+    private suspend fun awaitProgress(stallMs: Long): Boolean {
+        val before = framesWrittenInRun
+        val deadline = System.nanoTime() + stallMs * 1_000_000L
+        while (framesWrittenInRun == before) {
+            if (System.nanoTime() >= deadline) {
+                Timber.w("[CloudAudio] writer made no progress in %d ms", stallMs)
+                return false
+            }
+            kotlinx.coroutines.delay(5L)
+        }
+        return true
+    }
+
+    /**
+     * Suspends until every drain queued before this call has finished; false if the writer stalled.
+     *
+     * The timeout is a STALL window, not a cap on the drain: it is how long the writer may go WITHOUT
+     * WRITING anything before it is considered stuck. Timing the whole wait instead makes the answer's
+     * own length the failure condition -- a 30-second answer received in 3 seconds still has more than
+     * the window's worth of audio queued when the turn ends, is written perfectly steadily, and would
+     * be cut off with its tail discarded. Playback pac[e]s the writer, so only progress separates
+     * "still working" from "never coming back".
+     */
     private suspend fun awaitWriterIdle(): Boolean {
         val idle = kotlinx.coroutines.CompletableDeferred<Unit>()
         try {
@@ -377,29 +428,32 @@ class CloudAudioPlayer(
         } catch (e: java.util.concurrent.RejectedExecutionException) {
             return true
         }
-        if (kotlinx.coroutines.withTimeoutOrNull(writerIdleTimeoutMs) { idle.await() } == null) {
-            Timber.w("[CloudAudio] writer still busy after %d ms", writerIdleTimeoutMs)
-            return false
+        while (!idle.isCompleted) {
+            if (!awaitProgress(writerStallTimeoutMs)) return false
         }
         return true
     }
 
-    /** Blocks until every drain queued before this call has finished. False when it had not. Never call while holding [frameBuffer]. */
+    /**
+     * Blocks until every drain queued before this call has finished. False when the writer STALLED
+     * first. Never call while holding [frameBuffer].
+     *
+     * Waits on a barrier, but the barrier is not the thing being timed: the writer is PLAYBACK-PACED,
+     * so a long answer legitimately takes a long time to write, and timing the whole wait would call
+     * a steady backlog a stall and drop its tail. See [awaitProgress].
+     */
     private fun awaitWriterIdleBlocking(): Boolean {
         val barrier = java.util.concurrent.FutureTask<Unit> { }
-        return try {
+        try {
             writerExecutor.execute(barrier)
-            barrier.get(writerIdleTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
-            true
         } catch (e: java.util.concurrent.RejectedExecutionException) {
             // Shut down: nothing is pending, so nothing was left undrained.
-            true
-        } catch (e: java.util.concurrent.TimeoutException) {
-            // The writer is still inside a write that has not returned; what was queued behind it is
-            // not written. Saying so is the caller's only way to tell this from a clean drain.
-            Timber.w("[CloudAudio] writer still busy after %d ms", writerIdleTimeoutMs)
-            false
+            return true
         }
+        while (!barrier.isDone) {
+            if (!awaitProgressBlocking(writerStallTimeoutMs)) return false
+        }
+        return true
     }
 
     // Owned by one playback run, not by the lifetime of the reusable AudioTrack.
@@ -417,6 +471,7 @@ class CloudAudioPlayer(
         // earcon after nearly the whole answer. Reset it here, where the run begins.
         audioWriteFailed = false
         writesInRun.set(0)
+        framesWrittenInRun = 0L
         firstWriteReported.set(false)
         resampler = ChunkResampler()
         answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
@@ -796,6 +851,7 @@ class CloudAudioPlayer(
                     }
                     val writeReturnedNanos = System.nanoTime()
                     reportWriteTiming(pcmBytes.size - offset, (writeReturnedNanos - writeStartedNanos) / 1_000_000L)
+                    if (written > 0) framesWrittenInRun += 1
                     if (written > 0 && firstWriteReported.compareAndSet(false, true)) {
                         notifyFirstWrite(writeReturnedNanos)
                     }
@@ -1071,8 +1127,14 @@ class CloudAudioPlayer(
             Thread(task, "cloud-audio-writer").apply { isDaemon = true }
         }
 
-        /** How long a caller that must see everything written waits for the writer before moving on. */
-        internal const val WRITER_IDLE_TIMEOUT_MS = 10_000L
+        /**
+         * How long the writer may go without writing before it is treated as stalled.
+         *
+         * Ten seconds of NO PROGRESS is a stuck device write: a healthy track consumes the backlog at
+         * the rate the answer plays, well faster than that per frame. Elapsed time cannot serve here,
+         * because a long answer legitimately takes a long time to finish writing.
+         */
+        internal const val WRITER_STALL_TIMEOUT_MS = 10_000L
 
         /**
          * The most unwritten audio held. Receive is no longer throttled by playback, so this holds an

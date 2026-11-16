@@ -293,10 +293,10 @@ class CloudAudioPlayer(
      */
     var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
 
-    /** Test seam: called once the detached track has been released, on whichever thread released it. */
     /** How long a caller that must see everything written waits for the writer; a test shortens it. */
     internal var writerIdleTimeoutMs: Long = WRITER_IDLE_TIMEOUT_MS
 
+    /** Test seam: called once the detached track has been released, on whichever thread released it. */
     internal var onTrackReleasedForTest: (() -> Unit)? = null
 
     init {

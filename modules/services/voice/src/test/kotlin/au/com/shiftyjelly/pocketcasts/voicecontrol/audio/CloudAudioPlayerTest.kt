@@ -943,10 +943,17 @@ class CloudAudioPlayerTest {
         // refused silently, under the one failure this answer already reported: a second report
         // would attribute the same dead answer to the queue cap.
         val failures = java.util.concurrent.atomic.AtomicInteger(0)
+        // Counts what reaches the writer. Synchronous, so everything it is asked to do has happened
+        // by the time submitFrame returns. The count is read as a DELTA from after the failure: the
+        // runs before it legitimately submit drains, and only what the failed answer adds is at issue.
+        val submissions = java.util.concurrent.atomic.AtomicInteger(0)
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
-            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
+            writerExecutor = java.util.concurrent.Executor { task ->
+                submissions.incrementAndGet()
+                task.run()
+            },
             maxQueuedBytes = 8,
         )
         wired.onWriteFailure = { failures.incrementAndGet() }
@@ -958,19 +965,16 @@ class CloudAudioPlayerTest {
         wired.submitFrame(frame)
         wired.play()
         assertEquals("the failed write reported once", 1, failures.get())
+        val submissionsAtFailure = submissions.get()
 
-        // The sink keeps submitting frames for the failed answer; each exceeds the tiny cap on its
-        // own, so buffering any of them would trip the overflow path. Counting writer entries too:
-        // the refusal must be made at submission, not by queueing the frame and declining to drain.
-        // (The writer only requests a drain when the queue grows while playing, so a frame accepted
-        // and left behind would not be written either -- only the queue tells the two apart.)
-        val drainsRequested = java.util.concurrent.atomic.AtomicInteger(0)
-        wired.writerExecutor = java.util.concurrent.Executor { task ->
-            drainsRequested.incrementAndGet()
-            task.run()
-        }
+        // The sink keeps submitting frames for the failed answer. The refusal must be made at
+        // SUBMISSION, not by queueing the frame and declining to drain: the writer only requests a
+        // drain when the queue grows while playing, so an accepted frame left behind would never be
+        // written either, and only the queue (or the absence of a submission) tells the two apart.
+        // The cap alone would not: one 4-byte frame is under it, but the queue only overflows on the
+        // third, so a buffering implementation would have accepted the first two.
         repeat(4) { wired.submitFrame(frame) }
-        assertEquals("no frame was queued, so no drain was asked for", 0, drainsRequested.get())
+        assertEquals("no frame was queued, so the writer was asked to do nothing", 0, submissions.get() - submissionsAtFailure)
         assertEquals(
             "post-failure frames are refused silently: no second failure report from buffering them",
             1,

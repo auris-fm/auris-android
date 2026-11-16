@@ -54,9 +54,7 @@ class CloudAudioPlayer(
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
     // Where frames are written to the track. The default is a dedicated thread, so reading the connection
     // never waits on a device write; a test passes [CALLER_THREAD] for deterministic, synchronous writes.
-    // Not read-only: a test that has to tell "the frame was refused" from "it was queued and not drained"
-    // substitutes a counting executor, and that distinction is invisible from the sink alone.
-    internal var writerExecutor: java.util.concurrent.Executor = dedicatedWriter(),
+    private val writerExecutor: java.util.concurrent.Executor = dedicatedWriter(),
     // The most audio that may wait to be written. Reaching it fails the answer explicitly rather than
     // dropping frames silently or blocking the receive path.
     private val maxQueuedBytes: Int = MAX_QUEUED_BYTES,

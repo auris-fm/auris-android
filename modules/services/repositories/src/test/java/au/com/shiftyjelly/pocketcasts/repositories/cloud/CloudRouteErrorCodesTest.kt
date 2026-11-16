@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Server-supplied codes must never reach device logs verbatim. */
@@ -48,12 +47,10 @@ class CloudRouteErrorCodesTest {
     }
 
     @Test
-    fun `the persisted trace and the log recognise the same vocabulary`() {
-        // Two allowlists drifted once: a speech outage was named in the Timber line and bounded to
-        // "unknown" in the lifecycle trace. One question, asked of one place, cannot drift.
-        for (code in CloudRouteErrorCodes.KNOWN) {
-            assertTrue("$code must be persistable", CloudRouteErrorCodes.isRecognised(code))
-        }
+    fun `only a recognised code may be persisted verbatim`() {
+        // What the predicate must REFUSE. Asserting it accepts every member of KNOWN would only
+        // restate its own implementation; the sink's speech-outage trace test is what proves a
+        // recognised code actually reaches the persisted line.
         assertFalse("an unseen code stays out", CloudRouteErrorCodes.isRecognised("user_email@example.com"))
         assertFalse("a status shape is not a code", CloudRouteErrorCodes.isRecognised("http_503"))
     }

@@ -27,8 +27,8 @@ class SpokenTemplateResolverLocaleTest {
         Locale.setDefault(Locale.forLanguageTag(qualifiers))
         RuntimeEnvironment.setQualifiers(qualifiers)
         val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
-        // The UI locale no longer decides the line (spec ruling 7c7575f6): the default table is
-        // ENGLISH BY CONTRACT, and a locale's wording is selected by the UTTERANCE's language.
+        // The UI locale does not decide the line: the default table is ENGLISH BY CONTRACT, and a
+        // locale's wording is selected by the UTTERANCE's language.
         assertEquals(
             "default line is English on any UI locale",
             "You have reached your Auris free daily limit. Please try again tomorrow.",

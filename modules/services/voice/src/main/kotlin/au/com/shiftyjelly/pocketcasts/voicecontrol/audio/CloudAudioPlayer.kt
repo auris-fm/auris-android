@@ -54,7 +54,9 @@ class CloudAudioPlayer(
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
     // Where frames are written to the track. The default is a dedicated thread, so reading the connection
     // never waits on a device write; a test passes [CALLER_THREAD] for deterministic, synchronous writes.
-    private val writerExecutor: java.util.concurrent.Executor = dedicatedWriter(),
+    // Not read-only: a test that has to tell "the frame was refused" from "it was queued and not drained"
+    // substitutes a counting executor, and that distinction is invisible from the sink alone.
+    internal var writerExecutor: java.util.concurrent.Executor = dedicatedWriter(),
     // The most audio that may wait to be written. Reaching it fails the answer explicitly rather than
     // dropping frames silently or blocking the receive path.
     private val maxQueuedBytes: Int = MAX_QUEUED_BYTES,
@@ -311,6 +313,13 @@ class CloudAudioPlayer(
     fun submitFrame(bytes: ByteArray) {
         if (released) return
         synchronized(frameBuffer) {
+            // Refuse frames for an answer whose writer already failed: the drain returns on that flag,
+            // so there is nothing left to write them -- EXCEPT while the answer is still playable,
+            // because the flag is owned by the playback run and is not cleared until the next one
+            // starts: refusing then would swallow the next answer's frames before its first play().
+            // Silently, because the failure was reported when it happened and a second report would
+            // blame the queue cap for it.
+            if (audioWriteFailed && playing) return
             if (queuedBytes + bytes.size > maxQueuedBytes) {
                 // The answer is over: report it once, and queue nothing more for it.
                 if (!audioWriteFailed) {
@@ -377,16 +386,21 @@ class CloudAudioPlayer(
         return true
     }
 
-    /** Blocks until every drain queued before this call has finished. Never call while holding [frameBuffer]. */
-    private fun awaitWriterIdleBlocking() {
+    /** Blocks until every drain queued before this call has finished. False when it had not. Never call while holding [frameBuffer]. */
+    private fun awaitWriterIdleBlocking(): Boolean {
         val barrier = java.util.concurrent.FutureTask<Unit> { }
-        try {
+        return try {
             writerExecutor.execute(barrier)
             barrier.get(writerIdleTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+            true
         } catch (e: java.util.concurrent.RejectedExecutionException) {
-            // Shut down: nothing is pending.
+            // Shut down: nothing is pending, so nothing was left undrained.
+            true
         } catch (e: java.util.concurrent.TimeoutException) {
-            Timber.w("[CloudAudio] writer still busy after %d ms; continuing", writerIdleTimeoutMs)
+            // The writer is still inside a write that has not returned; what was queued behind it is
+            // not written. Saying so is the caller's only way to tell this from a clean drain.
+            Timber.w("[CloudAudio] writer still busy after %d ms", writerIdleTimeoutMs)
+            false
         }
     }
 
@@ -454,12 +468,20 @@ class CloudAudioPlayer(
      *
      * Use this on turn completion so the last audio frames land before the player
      * resets. Call [stop] when a turn is superseded and stale frames must not play.
+     *
+     * @return true when every frame queued before this call was written; false when the writer was
+     * still busy at the cap, so the queued tail was dropped and the answer was cut short. A timeout
+     * is never reported as a clean drain: the whole point of waiting is to know whether the tail
+     * landed, and a caller that cannot tell would record a truncated answer as a complete one.
      */
-    fun drainAndStop() {
-        if (released) return
+    fun drainAndStop(): Boolean {
+        // stop() below discards the buffer, so the stall is evaluated before it, exactly as the
+        // suspending path does.
+        if (released) return true
         scheduleDrain()
-        awaitWriterIdleBlocking()
+        val drained = awaitWriterIdleBlocking()
         stop()
+        return drained
     }
 
     /** Whether the output is observed to have consumed everything submitted to it. */

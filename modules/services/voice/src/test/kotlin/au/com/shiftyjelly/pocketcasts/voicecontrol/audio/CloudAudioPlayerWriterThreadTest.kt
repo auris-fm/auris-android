@@ -5,6 +5,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -169,6 +170,41 @@ class CloudAudioPlayerWriterThreadTest {
 
         assertEquals(CloudAudioPlayer.Completion.Consumed, completion)
         assertEquals("every frame queued behind the blocked write was written before completion", (0..3).toList(), written.toList())
+    }
+
+    @Test
+    fun `drainAndStop reports a stalled writer as not drained instead of dropping the tail silently`() {
+        // The suspending path already treats a writer that never goes idle as an unconsumed answer.
+        // The blocking path must say the same thing: its caller asked for everything queued to be
+        // written, and a timeout means the queued tail was dropped -- logging and returning void
+        // would let that read as a clean drain.
+        val player = newPlayer()
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        player.writeToSink = { _, _, _, count ->
+            entered.countDown()
+            gate.await(10, TimeUnit.SECONDS)
+            count
+        }
+        player.writerIdleTimeoutMs = 200
+        player.submitFrame(frame(0))
+        player.play()
+        player.submitFrame(frame(1))
+        assertTrue(entered.await(2, TimeUnit.SECONDS))
+
+        assertFalse("a stalled writer means the queued tail was not drained", player.drainAndStop())
+        gate.countDown()
+    }
+
+    @Test
+    fun `drainAndStop reports a completed drain`() {
+        val player = newPlayer()
+        player.writeToSink = { _, _, _, count -> count }
+        player.submitFrame(frame(0))
+        player.play()
+        player.submitFrame(frame(1))
+
+        assertTrue("every queued frame was written before drainAndStop returned", player.drainAndStop())
     }
 
     @Test

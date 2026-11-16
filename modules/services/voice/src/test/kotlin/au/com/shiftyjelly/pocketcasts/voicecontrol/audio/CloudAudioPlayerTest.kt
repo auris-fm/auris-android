@@ -936,6 +936,63 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `frames arriving after a write failure are refused, not buffered for an answer that is over`() {
+        // The failed answer can never be written again -- the drain returns on the flag -- so frames
+        // submitted after the failure must not accumulate behind it. Buffering them would hold up to
+        // another full queue of audio that has no writer. Refuse at submission instead. They are
+        // refused silently, under the one failure this answer already reported: a second report
+        // would attribute the same dead answer to the queue cap.
+        val failures = java.util.concurrent.atomic.AtomicInteger(0)
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
+            maxQueuedBytes = 8,
+        )
+        wired.onWriteFailure = { failures.incrementAndGet() }
+        val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
+
+        var writes = 0
+        wired.writeToSink = { _, _, _, count -> if (writes++ == 0) count else -1 }
+        wired.submitFrame(frame)
+        wired.submitFrame(frame)
+        wired.play()
+        assertEquals("the failed write reported once", 1, failures.get())
+
+        // The sink keeps submitting frames for the failed answer; each exceeds the tiny cap on its
+        // own, so buffering any of them would trip the overflow path. Counting writer entries too:
+        // the refusal must be made at submission, not by queueing the frame and declining to drain.
+        // (The writer only requests a drain when the queue grows while playing, so a frame accepted
+        // and left behind would not be written either -- only the queue tells the two apart.)
+        val drainsRequested = java.util.concurrent.atomic.AtomicInteger(0)
+        wired.writerExecutor = java.util.concurrent.Executor { task ->
+            drainsRequested.incrementAndGet()
+            task.run()
+        }
+        repeat(4) { wired.submitFrame(frame) }
+        assertEquals("no frame was queued, so no drain was asked for", 0, drainsRequested.get())
+        assertEquals(
+            "post-failure frames are refused silently: no second failure report from buffering them",
+            1,
+            failures.get(),
+        )
+        wired.stop()
+
+        // The refusal belongs to the failed run only: the next answer queues and plays normally.
+        var acceptedBytes = 0
+        wired.writeToSink = { _, _, _, count ->
+            acceptedBytes += count
+            count
+        }
+        wired.submitFrame(frame)
+        wired.submitFrame(frame)
+        wired.play()
+        assertEquals("the next answer still receives its frames", 2 * frame.size, acceptedBytes)
+        assertEquals("and reports no failure of its own", 1, failures.get())
+        wired.release()
+    }
+
+    @Test
     fun `chunked resampling produces the same samples as resampling the whole stream`() {
         // Counting samples proves no audio is LOST; it does not prove the samples are the RIGHT ones.
         // A chunked conversion that carried the count but dropped the interpolation state would keep

@@ -372,83 +372,47 @@ class CloudAudioPlayer(
         }
     }
 
-    /** What the writer has finished consuming: frames written to the sink (under [frameBuffer]). */
-    @Volatile
-    private var framesWrittenInRun = 0L
-
     /**
-     * Which drain the writer is in, and how much of this run it has written: a write advances
-     * [units] AND leaves [drain] at the drain that made it, in one operation, so a waiter can never
-     * combine a progress count from one drain with the emptiness of another.
+     * How many frames the writer has accepted into the sink. Its monitor is the ONE lock under which
+     * a waiter reads progress and completion together, and under which the writer records a write,
+     * so the two can never be read from either side of a write.
      *
-     * It is also what makes "in the middle of a delivery" visible as progress, because a drain that
-     * has finished is never in that state. Two things the writer legitimately does between two
-     * frames count as delivery, and neither writes to the sink, so a frames-only progress signal
-     * calls a perfectly healthy writer stalled:
-     *
-     * - the tail of a paced frame, which is most of the time it spends writing anything; and
-     * - any pause between two frames, which is what playback does at the end of every answer.
+     * Progress means a frame reached the sink. A writer paused inside a single frame for longer than
+     * the stall window is reported as stalled: at the production window that is a genuine stall, not
+     * a healthy writer being misjudged.
      */
     private class WriterProgress {
-        var drain: Any? = null
         var units: Int = 0
-        var deliveryStartedAtMs: Long = 0L
     }
 
     private val writerProgress = WriterProgress()
-
-    /** Stands for "some drain, and not the one the waiter is watching", since a drain has no identity. */
-    private object ANY_DRAIN
-
-    /**
-     * True while the writer that most recently wrote something is still inside that same drain --
-     * writing one of the chunks of a frame, or between two of the drain's frames. False the instant
-     * it finishes that drain, so this never covers a writer that has genuinely stopped.
-     */
-    private fun isInDelivery(nowMs: Long): Boolean {
-        val progress = writerProgress
-        synchronized(progress) {
-            val inDelivery = progress.drain != null && progress.deliveryStartedAtMs > 0L
-            // Give up on a delivery that has overrun the whole stall window: past that the writer is
-            // stuck whatever it is doing, which is exactly what the window exists to catch.
-            return inDelivery && nowMs - progress.deliveryStartedAtMs < writerStallTimeoutMs
-        }
-    }
 
     /**
      * Waits up to [stallMs] for the writer to make progress OR for the wait to be over; true when
      * either happened, false only when neither did for the whole window.
      *
-     * Neither [acknowledge] nor [done] can be left out:
+     * [done] cannot be left out, and cannot be checked only between windows: a queue that is already
+     * empty at Done completes the barrier with NO further write, so a progress-only wait sits out its
+     * whole window and reports a finished short answer as cut short. That is every short answer, not
+     * a rare race. So it is checked ON EVERY POLL.
      *
-     * - Without [done], a queue that is already empty at Done completes the barrier with NO further
-     *   write, so a progress-only wait sits out its whole window and reports a finished short answer
-     *   as cut short. That is every short answer, not a rare race. So it is checked ON EVERY POLL,
-     *   not only between windows.
-     * - Without [acknowledge], the barrier can only be seen by polling it, and the poll that sees it
-     *   is a different read from the one that sees progress: the last write advances the counter,
-     *   the waiter loops, reads the barrier in the gap before the writer reaches it -- and the
-     *   writer then has to take a lock, so it can lose that race indefinitely -- and starts a window
-     *   whose starting count is already final. No write will ever come again. Reading both under one
-     *   lock turns that gap into a decision instead of a guess: the writer either finished the drain,
-     *   or it is still in it and holds the lock until it releases it as unfinished.
+     * It is read under the SAME lock as the progress count, which the writer also takes to record a
+     * write. Polling the barrier outside that lock would let the waiter read it in the gap after the
+     * last write advanced the counter but before the writer reached the barrier, and start a window
+     * whose starting count is already final -- no write will ever come again. One lock turns that gap
+     * into a decision instead of a guess.
      */
-    private fun awaitProgressBlocking(stallMs: Long, acknowledge: () -> Boolean, done: () -> Boolean): Boolean {
+    private fun awaitProgressBlocking(stallMs: Long, done: () -> Boolean): Boolean {
         val progress = writerProgress
         val before: Int
         synchronized(progress) { before = progress.units }
         val deadline = System.nanoTime() + stallMs * 1_000_000L
         while (true) {
-            // One decision, one lock: completion, or the writer still being in the drain that wrote.
+            // One decision, one lock: the wait is over, or the writer has accepted another frame.
             synchronized(progress) {
                 if (done() || progress.units != before) return true
-                if (acknowledge()) return true
             }
             if (System.nanoTime() >= deadline) {
-                if (isInDelivery(System.currentTimeMillis())) {
-                    // Still delivering: that IS progress. Re-measure and give it a fresh window.
-                    synchronized(progress) { return true }
-                }
                 Timber.w("[CloudAudio] writer made no progress in %d ms", stallMs)
                 return false
             }
@@ -456,7 +420,7 @@ class CloudAudioPlayer(
         }
     }
 
-    private suspend fun awaitProgress(stallMs: Long, acknowledge: () -> Boolean, done: () -> Boolean): Boolean {
+    private suspend fun awaitProgress(stallMs: Long, done: () -> Boolean): Boolean {
         val progress = writerProgress
         val before: Int
         synchronized(progress) { before = progress.units }
@@ -464,12 +428,8 @@ class CloudAudioPlayer(
         while (true) {
             synchronized(progress) {
                 if (done() || progress.units != before) return true
-                if (acknowledge()) return true
             }
             if (System.nanoTime() >= deadline) {
-                if (isInDelivery(System.currentTimeMillis())) {
-                    synchronized(progress) { return true }
-                }
                 Timber.w("[CloudAudio] writer made no progress in %d ms", stallMs)
                 return false
             }
@@ -496,7 +456,7 @@ class CloudAudioPlayer(
             return true
         }
         while (!idle.isCompleted) {
-            if (!awaitProgress(writerStallTimeoutMs, acknowledge = { idle.isCompleted }, done = { idle.isCompleted })) {
+            if (!awaitProgress(writerStallTimeoutMs, done = { idle.isCompleted })) {
                 return false
             }
         }
@@ -521,31 +481,12 @@ class CloudAudioPlayer(
             // Shut down: nothing is pending, so nothing was left undrained.
             return true
         }
-        val acknowledge = {
-            val finished = barrier.isDone
-            // Claim a completed drain we have not counted yet: from here on, an in-delivery writer
-            // belongs to a LATER drain, whose progress must not excuse this one not having finished.
-            if (finished) rememberAcknowledgedDrain()
-            finished
-        }
         while (!barrier.isDone) {
-            if (!awaitProgressBlocking(writerStallTimeoutMs, acknowledge = acknowledge, done = { barrier.isDone })) {
+            if (!awaitProgressBlocking(writerStallTimeoutMs, done = { barrier.isDone })) {
                 return false
             }
         }
         return true
-    }
-
-    /**
-     * Records that the drain most recently seen finishing is accounted for. Called under
-     * [writerProgress]'s monitor: the writer holds it while finishing a drain, so a drain that has
-     * already run cannot also be in delivery when this returns.
-     */
-    private fun rememberAcknowledgedDrain() {
-        val progress = writerProgress
-        synchronized(progress) {
-            if (progress.drain != null && progress.deliveryStartedAtMs == 0L) progress.drain = null
-        }
     }
 
     // Owned by one playback run, not by the lifetime of the reusable AudioTrack.
@@ -563,7 +504,6 @@ class CloudAudioPlayer(
         // earcon after nearly the whole answer. Reset it here, where the run begins.
         audioWriteFailed = false
         writesInRun.set(0)
-        framesWrittenInRun = 0L
         firstWriteReported.set(false)
         resampler = ChunkResampler()
         answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
@@ -888,27 +828,9 @@ class CloudAudioPlayer(
         writeSampleListener?.invoke(sample)
     }
 
+    /** The write loop, on the writer thread. */
     private fun drainFrames() {
-        // Claim the progress slot for this drain, and give it back on EVERY exit -- the early ones
-        // and an exception alike. Leaving it claimed would report a writer that has stopped as
-        // still delivering, which is exactly the stall this state exists to distinguish from.
         val progress = writerProgress
-        synchronized(progress) {
-            progress.drain = ANY_DRAIN
-            progress.deliveryStartedAtMs = 0L
-        }
-        try {
-            drainFramesUntilEmpty(progress)
-        } finally {
-            synchronized(progress) {
-                progress.drain = null
-                progress.deliveryStartedAtMs = 0L
-            }
-        }
-    }
-
-    /** The write loop. Every exit path leaves the drain, so the caller releases the progress claim. */
-    private fun drainFramesUntilEmpty(progress: WriterProgress) {
         val track = audioTrack ?: return
         if (!playing || paused) return
         val generation = trackGeneration
@@ -966,16 +888,10 @@ class CloudAudioPlayer(
                     if (written > 0 && firstWriteReported.compareAndSet(false, true)) {
                         notifyFirstWrite(writeReturnedNanos)
                     }
-                    synchronized(progress) {
-                        if (written > 0) {
-                            framesWrittenInRun += 1
-                            progress.units += 1
-                            // Between two written chunks: still delivering, keep that visible.
-                            progress.deliveryStartedAtMs = System.currentTimeMillis()
-                        } else {
-                            // Nothing accepted and nothing to follow in this drain: it ends here.
-                            progress.deliveryStartedAtMs = 0L
-                        }
+                    if (written > 0) {
+                        // Under the lock the waiters read, so progress and completion are never seen
+                        // from either side of this write.
+                        synchronized(progress) { progress.units += 1 }
                     }
                     if (written <= 0) {
                         // An explicit failure rather than a silent drop: stop this answer and report

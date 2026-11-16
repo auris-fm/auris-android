@@ -5139,7 +5139,14 @@ class CloudRouteSinkTest {
         }
         val text = published.joinToString("\n")
         assertTrue("the table must be published at the turn's real end: '$text'", text.isNotEmpty())
-        assertTrue("the published table carries first_audible: '$text'", text.contains("stage=first_audible"))
+        // The VALUE, not the label: a substring check passes while the number is wrong or absent.
+        // AcousticEnd is 1 s and first audible 5 s, so the stage must read 4000 ms.
+        val audibleLine = text.lines().firstOrNull { it.contains("stage=first_audible") }
+        assertNotNull("the published table carries first_audible: '$text'", audibleLine)
+        assertTrue(
+            "first_audible must be measured from acoustic end, got: '$audibleLine'",
+            audibleLine!!.contains("elapsed_ms=4000"),
+        )
         assertTrue("the published table carries the committed outcome: '$text'", text.contains("outcome=committed"))
     }
 }

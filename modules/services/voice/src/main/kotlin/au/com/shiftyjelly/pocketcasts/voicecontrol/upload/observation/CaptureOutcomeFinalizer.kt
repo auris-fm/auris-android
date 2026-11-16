@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 
 /**
- * BOUNDED OUTCOME FINALIZATION (Batch B,#1 / be6bb62e / 62023896): every
+ * BOUNDED OUTCOME FINALIZATION (Batch B, point 1): every
  * retained capture carries a FINITE outcome wait whose ABSOLUTE deadline is frozen at REAL
  * completion time — the SINK captures the monotonic completion timestamp under its lock and
  * carries it in the retained callback, so a delayed callback or dispatcher can never extend
@@ -22,24 +22,24 @@ import timber.log.Timber
  * Timer lifecycle, owned per capture:
  *  - ONE [Registration] per capture; entry inserted BEFORE the coroutine launches; removal is
  *    identity-safe (`remove(id, reg)`) and [runDeadline] cleans up in `finally` on any
- *    exception/cancellation path (62023896 #2/#3);
+ *    exception/cancellation path;
  *  - REGISTRATION is validated against the sink ([canAcceptOutcomeWaitRegistration]:
  *    generation + presence + unsealed + no publishable terminal) and promptly dropped when a
  *    callback arrives for an already-sealed/released/purged capture; ACTUAL SEALING cancels
  *    the timer through the sink's [onCaptureSealed] hook, alongside release, revocation, and
- *    disposal (62023896 #2);
+ *    disposal;
  *  - the FIRING decision is atomic: [ContributionRetentionSink.sealExpiredOutcome]`(id, gen)`
  *    validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
  *  - a purge notification cancels only registrations from BEFORE that purge (generation
  *    filter), so a capture registered after the purge keeps its valid timer.
  *  - ONE [Registration] per capture; entry inserted BEFORE the coroutine launches; removal is
  *    identity-safe (`remove(id, reg)`) and [runDeadline] cleans up in `finally` on any
- *    exception/cancellation path (62023896 #2/#3);
+ *    exception/cancellation path;
  *  - REGISTRATION is validated against the sink ([canAcceptOutcomeWaitRegistration]:
  *    generation + presence + unsealed + no publishable terminal) and promptly dropped when a
  *    callback arrives for an already-sealed/released/purged capture; ACTUAL SEALING cancels
  *    the timer through the sink's [onCaptureSealed] hook, alongside release, revocation, and
- *    disposal (62023896 #2);
+ *    disposal;
  *  - the FIRING decision is atomic: [ContributionRetentionSink.sealExpiredOutcome]`(id, gen)`
  *    validates generation + presence + not-sealed and seals under ONE sink-lock boundary;
  *  - a purge notification cancels only registrations from BEFORE that purge (generation

@@ -157,7 +157,7 @@ class EnrollmentControllerTest {
 
     @Test
     fun `an action issued in the gap between the check and the effect cannot be overtaken`() = runTest {
-        // THE EXACT GAP the reviewer asked to see controlled. stillApplies followed by an effect in
+        // THE EXACT GAP THIS CONTROLS. stillApplies followed by an effect in
         // the caller is two steps, and issue()/supersede()/account changes take no caller-side lock, so
         // the world can move between them. The effect must run inside the fence's own critical section,
         // so a competing action cannot slip through that gap.
@@ -227,7 +227,7 @@ class EnrollmentControllerTest {
 
     @Test
     fun `an account transition cannot interleave with the currency decision and its effect`() = runTest {
-        // The second half ofownerSession() snapshots the authority under a
+        // The second half of ownerSession() snapshots the authority under a
         // DIFFERENT lock than the fence holds, so a session change can land after the snapshot but
         // before the effect - the effect then applies to an account the decision never described.
         // Holding the fence lock does not prevent this because the OWNER does not take that lock.

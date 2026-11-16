@@ -110,7 +110,7 @@ class OtherAppPlayingConditionTest {
 
     @Test
     fun `an unresolved cue observation holds our own audio open past the window`() {
-        // the 96a3831c: the renderer's typed per-cue observation must have a PRODUCTION consumer.
+        // THE REQUIREMENT: the renderer's typed per-cue observation must have a PRODUCTION consumer.
         // Beyond the bounded self-emission window, an UNKNOWN observation means we could not establish
         // that our cue stopped sounding -- so its audio is still OURS, and reading expiry as "ended"
         // would hand it to a foreign app and cut the microphone mid-cue.

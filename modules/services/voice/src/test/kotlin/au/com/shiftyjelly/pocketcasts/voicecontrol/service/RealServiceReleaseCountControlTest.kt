@@ -25,7 +25,7 @@ import org.robolectric.android.controller.ServiceController
 import org.robolectric.annotation.Config
 
 /**
- * The RELEASE-COUNT control the reviewer asked for, on the REAL service, through the REAL platform
+ * The RELEASE-COUNT control, on the REAL service, through the REAL platform
  * stop path — now reachable because the two EXTERNAL-NATIVE seams are replaced test-only:
  * `WakeWordNative` and `LfmInference`. Everything downstream of those seams is production: the
  * settlement classification, the Settled gate, the per-kind release record, the retry decision.
@@ -80,7 +80,7 @@ class RealServiceReleaseCountControlTest {
         // this class ends (see RealServiceLifecycleControlTest for the same guard).
         routeMonitor.cancelDebouncedRouteReadForTest()
         // Destroy STARTS teardown; the deferred can still be running. Leaving it running is what
-        // the reviewer flagged: an asynchronous teardown from this test could land in the next
+        // An asynchronous teardown from this test could land in the next
         // test's assertions. Await it here, pumping the Main looper (the releases run there), with
         // the bound on the COROUTINE, not the test thread.
         // BASELINE BEFORE destroy: an extra release during destroy must be

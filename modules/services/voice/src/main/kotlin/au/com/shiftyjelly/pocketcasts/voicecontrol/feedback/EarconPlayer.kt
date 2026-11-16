@@ -79,7 +79,7 @@ class EarconPlayer(
     // because the cases ran THIS copy. A test seam must route through the mechanism, not restate it.
     internal fun <T> submitForTest(block: () -> T): T = onPlayerThread(block)
 
-    /** Test seam (4d1e5946): install a real clip so submit()/play() take an actual accepted write. */
+    /** Test seam: install a real clip so submit()/play() take an actual accepted write. */
     internal fun installClipForTest(id: EarconId, samples: ShortArray, sampleRateHz: Int) {
         val ctor = EarconClip::class.java.getDeclaredConstructor(
             EarconPlayer::class.java,
@@ -96,7 +96,7 @@ class EarconPlayer(
 
     // Replaces the worker with [service], so a test controls when it is shut down.
 
-    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran (35f7e2d8). */
+    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran. */
     internal fun acceptedFrontierForTest(): Int = synchronized(executorLock) { acceptedFramesTotal }
 
     internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {
@@ -199,7 +199,7 @@ class EarconPlayer(
     }
 
     /**
-     * Fire-and-forget submission for latency-sensitive callers (4236341555): the clip write runs on
+     * Fire-and-forget submission for latency-sensitive callers: the clip write runs on
      * the player executor -- serialised with every other cue, and with the SAME admission-token
      * minting, recorder-admission ownership and completion bookkeeping as [play] -- but the CALLER
      * does not wait for the write. Acceptance is observable through the coverage heartbeat, not
@@ -285,13 +285,13 @@ class EarconPlayer(
             // above serve the legacy/inspection readers; the SCOPED reader (completionFor) reads only
             // this reference. One @Volatile reference write is atomic: there is no intermediate state
             // in which the bounds belong to one admission and the marker to another -- the defect the
-            // writer-between-fields-and-marker control (ddaf3aa7b) demonstrated for marker-last
+            // writer-between-fields-and-marker control demonstrated for marker-last
             // ordering, where B's fields could land while B's marker had not and A read the mixture
             // as its own. BOUNDS AND ADMISSION MARKER MOVE TOGETHER, IN THE SAME SNAPSHOT.
             // THE ADMISSION'S OWN TRACK IS BOUND INTO THE SNAPSHOT. The scoped reader samples the
             // head from THIS track, never from the mutable `track` field: a rate-change replacement
             // (or any recreation) produces a track this admission never wrote to, and reading its
-            // head against these bounds is exactly the 719c64c8 theft.
+            // head against these bounds is exactly the theft this prevents.
             currentFrontier = Frontier(
                 admissionRaw = admitted.raw,
                 origin = acceptedFramesTotal - offset,
@@ -457,7 +457,7 @@ class EarconPlayer(
             closeRecorderAdmission()
             // THE SNAPSHOT IS RETIRED BEFORE THE TRACK IS STOPPED, so an in-flight scoped read
             // revalidates against the retirement instead of vouching a head sampled from a track
-            // whose admission just ended (719c64c8, stop-during-sampling).
+            // whose admission just ended (stop-during-sampling).
             currentFrontier = null
             // DISCARDING A TRACK MEANS DISCARDING EVERYTHING IT OWNS, in one step. Nulling the reference
             // after `stop()` alone LEFT THE RESOURCE UNRELEASED -- nothing could release it afterwards,
@@ -550,9 +550,9 @@ class EarconPlayer(
      * a superseded cue publishes nothing and the successor's own observer, once its callback runs,
      * speaks for the cue. Covers BOTH known races:
      *
-     * - the CALLBACK GAP (63f99bed, control 2034cd5d4): A reads after B's whole publication -- B's
+     * - the CALLBACK GAP: A reads after B's whole publication -- B's
      *   snapshot is current, A bails.
-     * - the WRITER-INTERNAL WINDOW (52b786fe, control ddaf3aa7b): A reads between B's frontier
+     * - the WRITER-INTERNAL WINDOW: A reads between B's frontier
      *   mutation and B's marker. Marker-last alone let A accept B's bounds as its own; with the
      *   snapshot there are no shared bounds to half-write -- A reads either its OWN immutable bounds
      *   (its verdict, correct) or B's whole snapshot (not its admission, bails).
@@ -578,7 +578,7 @@ class EarconPlayer(
         }.getOrNull() ?: return EarconCompletion.Unknown
         // THE SNAPSHOT MUST STILL BE LIVE AFTER SAMPLING. A stop or release that lands during the
         // read retires the frontier; the sampled head then describes audio whose admission no longer
-        // exists, and publishing it would attribute a stopped cue (719c64c8, stop-during-sampling).
+        // exists, and publishing it would attribute a stopped cue (stop-during-sampling).
         if (currentFrontier !== frontier) return EarconCompletion.Unknown
         return when {
             head >= frontier.target -> EarconCompletion.Consumed
@@ -646,7 +646,7 @@ class EarconPlayer(
     }
 
     /**
-     * Test seam (4d1e5946; 35f7e2d8 correction): substitutes only the AudioTrack CONSTRUCTION.
+     * Test seam: substitutes only the AudioTrack CONSTRUCTION.
      * The returned instance goes through the SAME lifecycle as a platform track -- rate reuse,
      * discard-and-recreate, `track = created`, play(), and the acceptedFramesTotal frontier reset --
      * so completion/release bookkeeping is exercised, not bypassed. Null in production.
@@ -662,7 +662,7 @@ class EarconPlayer(
             // the wrong rate, which would change its pitch and duration.
             // RETIRE THE ADMISSION'S SNAPSHOT BEFORE THE TRACK GOES. Replacement happens BEFORE any
             // write, so a REFUSED successor still leaves the track replaced; the stale snapshot must
-            // not survive it paired with a track its admission never wrote to (719c64c8).
+            // not survive it paired with a track its admission never wrote to.
             currentFrontier = null
             // INDEPENDENT RELEASE: a single runCatching around both calls
             // skips release() when stop() throws -- the pattern this file's own release()/stopAdmissionNow
@@ -753,7 +753,7 @@ class EarconPlayer(
     /**
      * THE ACTUAL CUE WRITER the accepted-submission path uses, extracted so a control can drive it
      * directly (queued and partial acceptances included) without clip assets. POSITION ATTRIBUTION
-     * (4236341498, conservative per): cue timing is explicitly UNAVAILABLE --
+     * (conservatively): cue timing is explicitly UNAVAILABLE --
      * recordAccepted observes accepted/submitted samples, not render instants, and a write-instant
      * timestamp would be submission time relabeled as sounding time. The UNTIMED write invalidates
      * any window anchor the cue's unknown sounding time cannot cover. OWNED like every other

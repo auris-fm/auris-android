@@ -268,7 +268,7 @@ class MutationFenceTest {
     }
 
     /**
-     * THE CHECK-THEN-WRITE CONTROL (Reviewer on `561d3c5b6e`): a supersession issued BETWEEN
+     * THE CHECK-THEN-WRITE CONTROL: a supersession issued BETWEEN
      * validation and publication must not interleave. applyIfCurrent runs the decision and the
      * effect under THIS fence's lock, so a supersedeAndIssue issued while the effect runs waits for
      * the section — the in-flight apply completes — and only applies from then on refuse older

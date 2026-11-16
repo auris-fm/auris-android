@@ -174,8 +174,8 @@ class AudioFeedbackRenderer(
     /**
      * Renders one response and returns whether it ACCEPTED OWNERSHIP of any transferred output hold.
      * True means the renderer will release the hold at its own terminal; false means the caller must
-     * release (the renderer cannot or will not play this response).map insertion
-     * alone is not acknowledgement.
+     * release (the renderer cannot or will not play this response). A map insertion alone is not
+     * acknowledgement.
      */
     fun render(response: VoiceResponse, language: String = "en", requestId: String? = null): Boolean {
         if (disposed) {
@@ -276,7 +276,7 @@ class AudioFeedbackRenderer(
                         // The awaited call returns only after playback drained — this IS the
                         // output terminal, not mere acceptance. No earcon component.
                         val delivered = speakWithHeartbeat(response.text, language)
-                        // ONE SHARED SPEECH-OUTCOME RULE (+ follow-up): the
+                        // ONE SHARED SPEECH-OUTCOME RULE: the
                         // synthesis-failure fallback lives in ONE helper so the Spoken and Combined
                         // branches cannot drift -- a Combined reply with a failed synthesis used to
                         // still record spoken_submitted and release as delivered.
@@ -371,14 +371,14 @@ class AudioFeedbackRenderer(
     }
 
     /**
-     * Latency-sensitive variant (4236341555): submits the cue on the player executor and returns
+     * Latency-sensitive variant: submits the cue on the player executor and returns
      * BEFORE the clip is written, so the ASR collect path is not delayed by the cue's own drain.
      * Acceptance is not synchronously known -- observable via the coverage heartbeat, same as
      * [playEarcon]. Use [playEarcon] where the caller must gate on acceptance.
      */
     fun submitEarcon(id: EarconId) {
         if (disposed) return
-        // Coverage starts ONLY from the player task's own result (bb6f3aa9): starting it here would
+        // Coverage starts ONLY from the player task's own result: starting it here would
         // read the predecessor's emittedDurationMs/completion -- publishing its Consumed and stopping
         // before this cue is even written -- and a refused or missing clip would get an observer
         // despite no acceptance. Disposal between submission and admission is handled by the same
@@ -824,7 +824,7 @@ class AudioFeedbackRenderer(
     }
 
     /**
-     * ONE TRUTHFUL SPEECH OUTCOME (, follow-up 58d1f1b9): when the TTS engine
+     * ONE TRUTHFUL SPEECH OUTCOME: when the TTS engine
      * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
      * error earcon and the hold release as not-delivered, in BOTH the Spoken and Combined branches.
      * Shared here so the two branches cannot drift again.

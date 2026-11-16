@@ -114,7 +114,7 @@ class RetainedCandidate internal constructor(
      * The allowance metadata bound FROZEN at admission: copied from THIS capture's own admission
      * token/prefix under the same lock that transfers prefix ownership. NULL = never
      * allowance-admitted (or no-prefix completion): publication refuses fail-closed - missing
-     * metadata authority never means unconstrained (/ be120bf2).
+     * metadata authority never means unconstrained.
      */
     val allowanceMetadataCap: Int? = null,
 ) {
@@ -247,7 +247,7 @@ open class ContributionRetentionSink(
      * Opens a bounded prefix ONLY when the first-chunk reservation succeeds; a refused budget
      * means zero PCM allocated for this capture.
      */
-    // Opens the owned prefix. The reviewer requires RESERVE ACTUAL BYTES BEFORE ALLOCATION:
+    // Opens the owned prefix. Reserve ACTUAL BYTES BEFORE ALLOCATION:
     // the charge here is exactly the first chunk's bytes, and the caller hands that array over
     // to the sink (adopted, no copy) — so the reserved amount equals the allocated amount.
     override fun started(observation: SegmentObservation.Started): Boolean {
@@ -387,7 +387,7 @@ open class ContributionRetentionSink(
         val bytes = samples.toLong() * BYTES_PER_SAMPLE
         val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == context } } ?: return null
         // Per-clip cap accounts for THIS capture's outstanding allocations only (no global
-        // pendingDeltaBytes assumption —b3).
+        // pendingDeltaBytes assumption).
         if (prefix.chargedBytes + outstandingFor(context.captureId) + bytes > maxBytesPerClip) return null
         val token = ReservationToken(context.captureId, nextReservationId(), bytes)
         synchronized(lock) {
@@ -624,7 +624,7 @@ open class ContributionRetentionSink(
             }
             candidate.outcome = outcome
             candidate.stageOutcomes.add(outcome)
-            // TERMINAL BLEED DELIVERY (spec +): a bleed rejection is a publishable
+            // TERMINAL BLEED DELIVERY: a bleed rejection is a publishable
             // observation like Executed — the provenance record is the only durable witness that the
             // correlator made a real decision. Other NotCollected reasons stay unpublished: the
             // bounded wait continues (no seal, no hook). Publication still passes every trigger
@@ -653,7 +653,7 @@ open class ContributionRetentionSink(
             if (onReadyForPublication == null) {
                 // A seal with NO attached publish trigger means the audio is retained forever with
                 // no queue entry and no log — the exact device symptom of a startup path that never
-                // reached UploadTrigger.start() (every silent return gets a line).
+                // reached UploadTrigger.start(): every silent return gets a line.
                 Timber.i(
                     "voice-capture publish: refused capture=%s reason=no-publisher-attached",
                     outcome.captureId,

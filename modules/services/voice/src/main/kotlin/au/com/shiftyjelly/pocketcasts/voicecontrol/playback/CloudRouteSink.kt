@@ -257,7 +257,7 @@ class CloudRouteSink internal constructor(
         sourceLanguage: String?,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
-            // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (/f47e972): minted once
+            // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY: minted once
             // at admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
             // refusing here means no wire request exists that client logs cannot name. Never mint here.
             val admitted = logicalRequestId?.takeIf { it.isNotBlank() } ?: run {
@@ -367,7 +367,7 @@ class CloudRouteSink internal constructor(
         if (prepared == null && admittedId.isNullOrBlank()) {
             // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
             // client-owned identity would need the sink to mint one, and a wire request no client
-            // log can name is exactly the divergenceremoves.
+            // log can name is exactly the divergence the wire identity check removes.
             Timber.w("cloud turn refused: no admitted request identity (request=%.40s)", request)
             return CloudTurnResult(
                 feedback = VoiceResponse.Silent,
@@ -526,7 +526,7 @@ class CloudRouteSink internal constructor(
                 conversationId = admission.conversationId,
                 conversationMode = admission.mode,
                 capturedOrigin = origin,
-                // THE ADMITTED UTTERANCE IDENTITY, unchanged (/f47e972): stable per
+                // THE ADMITTED UTTERANCE IDENTITY, unchanged: stable per
                 // logical turn, a transport retry reuses it, and the server rejects a repeat rather
                 // than re-executing (no auto-retry is attempted by this client).
                 requestId = admittedId!!,

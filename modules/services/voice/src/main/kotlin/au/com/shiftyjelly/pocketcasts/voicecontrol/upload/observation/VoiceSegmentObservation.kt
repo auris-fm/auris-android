@@ -4,7 +4,7 @@ import java.util.UUID
 
 /**
  * Immutable capture context, FROZEN SYNCHRONOUSLY at the segment START on the pipeline thread
- * (plan Task 3,). The SAME object value is handed to the wake detector, ASR,
+ * The SAME object value is handed to the wake detector, ASR,
  * routing and execution call sites so outcomes join by issued identity, never by "whatever
  * capture is current" at outcome time.
  */
@@ -19,12 +19,12 @@ data class CaptureContext(
      */
     val issuedAuthority: IssuedAuthority? = null,
     /**
-     * THE ASR backend actually selected for THIS capture, frozen at issuance (reviewer
-     * 54635caa/spec: per-capture backend provenance is record truth). [ModelRef.None] is the
-     * honest absence — a capture with no observed ASR model is not publishable.
-     * THE ASR backend actually selected for THIS capture, frozen at issuance (reviewer
-     * 54635caa/spec: per-capture backend provenance is record truth). [ModelRef.None] is the
-     * honest absence — a capture with no observed ASR model is not publishable.
+     * THE ASR backend actually selected for THIS capture, frozen at issuance: per-capture
+     * backend provenance is record truth. [ModelRef.None] is the honest absence — a capture
+     * with no observed ASR model is not publishable.
+     * THE ASR backend actually selected for THIS capture, frozen at issuance: per-capture
+     * backend provenance is record truth. [ModelRef.None] is the honest absence — a capture
+     * with no observed ASR model is not publishable.
      */
     val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef =
         au.com.shiftyjelly.pocketcasts.voicecontrol.upload.model.ModelRef.None,
@@ -86,13 +86,13 @@ sealed interface SegmentObservation {
          * unconstrained. Positive fixtures pass an explicit bound.
          */
         val allowanceMetadataCapBytes: Int?,
-        // NOTE ON THE NAME (core c74d7e30): the allowance no longer exists, but this field still
+        // NOTE ON THE NAME: the allowance no longer exists, but this field still
         // carries a REAL constraint — the per-clip metadata ceiling (ContributionCeilings
         // .MAX_METADATA_BYTES), which the contract keeps. It is renamed nowhere because the value
         // and its null-means-refuse check are unchanged; only its source moved from a provisioned
         // batch to a compiled constant. Retained deliberately rather than silently renamed, so this
         // diff does not touch the persistence path beyond removing the allowance.
-        // NOTE ON THE NAME (core c74d7e30): the allowance no longer exists, but this field still
+        // NOTE ON THE NAME: the allowance no longer exists, but this field still
         // carries a REAL constraint — the per-clip metadata ceiling (ContributionCeilings
         // MAX_METADATA_BYTES), which the contract keeps. It is renamed nowhere because the value
         // and its null-means-refuse check are unchanged; only its source moved from a provisioned
@@ -104,7 +104,7 @@ sealed interface SegmentObservation {
         override val context: CaptureContext,
         /** The production first-chunk array; the sink ADOPTS it (no upload-side copy). Its
          * CAPACITY may exceed the drained VALID range — the whole allocation stays charged until
-         * the buffer is dropped (b1/b3); audio readers must slice to
+         * the buffer is dropped; audio readers must slice to
          * [validSamples]. */
         val firstChunk: ShortArray,
         /** Samples actually drained into [firstChunk] (distinctive-partial-copy proof). */
@@ -203,7 +203,7 @@ interface SegmentSink {
     /**
      * Pre-allocation admission: reserve EXACTLY [SegmentObservation.Admission.producerSamples]'s
      * bytes against the aggregate budget BEFORE the producer copies anything out, and register a
-     * PER-ALLOCATION reservation token carrying that capacity (b3/b4). The
+     * PER-ALLOCATION reservation token carrying that capacity. The
      * token — not any global counter — is what commit/release consume. Null = refused.
      */
     fun admit(observation: SegmentObservation.Admission): ReservationToken? = null
@@ -250,7 +250,7 @@ interface SegmentSink {
 }
 
 /**
- * Per-allocation reservation handle (b3): identifies ONE reserved capacity
+ * Per-allocation reservation handle: identifies ONE reserved capacity
  * window. Commit/release operations address THIS token; charges can never cross captures or
  * allocations through a shared counter.
  */

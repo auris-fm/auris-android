@@ -24,7 +24,7 @@ import org.mockito.kotlin.times
 import org.mockito.kotlin.verify
 
 /**
- * REAL DISPATCHER LIFECYCLE CONTROLS (,/087140b7): these drive the
+ * REAL DISPATCHER LIFECYCLE CONTROLS: these drive the
  * actual [VoiceIntentDispatcher] the service delegates to, with real coroutine cancellation, real
  * throws and a real execution path. The engine boundary is mocked because the dispatcher's
  * CONTRACT is exactly "settle exactly once, report only invocation-local facts"; the engine's

@@ -212,7 +212,7 @@ class CanaryFlashBackend @Inject constructor(
         // csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8
         // PINNED REVISION: resolve/main is mutable and the upstream export has
         // no version tags, so the base URL names the exact repo commit the artifacts were verified
-        // at (9077164e0d3dd1d5353743e89ceaa1d3a770838c) — the LFS oids below pin file content.
+        // at the commit named below — the LFS oids pin the file content.
         private const val CANARY_BASE_URL =
             "https://hf-mirror.com/csukuangfj/sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8/resolve/9077164e0d3dd1d5353743e89ceaa1d3a770838c"
         private const val CANARY_ENCODER_FILENAME = "encoder.int8.onnx"
@@ -221,7 +221,7 @@ class CanaryFlashBackend @Inject constructor(
         private const val CANARY_TARGET_DIR = "canary-flash-model"
 
         /**
-         * Manifest identity source (, 704ef15a): the upstream INT8 export has no
+         * Manifest identity source: the upstream INT8 export has no
          * version tags, so immutability comes from the PINNED REPO COMMIT (content pinned by the
          * LFS sha256s on the weight files), not from the repo name. The manifest names that commit.
          */

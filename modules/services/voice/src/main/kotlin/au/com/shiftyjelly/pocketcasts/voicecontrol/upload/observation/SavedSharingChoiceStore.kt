@@ -4,7 +4,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 /**
  * The signed-in account's ORDINARY sharing choice and real enrollment provenance, held durably.
  *
- * WHY THIS EXISTS (, reviewer evidence): admission used to read the in-memory membership
+ * WHY THIS EXISTS: admission used to read the in-memory membership
  * projection, which only a server refresh in the CURRENT process can supply. Saved consent therefore
  * could not authorize a capture, and a user who had opted in was refused every time after a restart -
  * the ordinary path the spec mandates ("sharing on -> completed speech segment -> private file ->

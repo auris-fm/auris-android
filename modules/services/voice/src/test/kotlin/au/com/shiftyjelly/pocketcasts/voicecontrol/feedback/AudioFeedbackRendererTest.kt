@@ -39,7 +39,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `submitEarcon starts coverage ONLY at that cue's admission, never before or on refusal`() {
-        // 35f7e2d8 renderer-boundary control (d58ef6c2: name the missing boundary): with a mocked
+        // Renderer-boundary control (name the missing boundary): with a mocked
         // player, submit()'s callback is the ONLY thing that may start coverage. Before admission
         // the shared completion state belongs to no cue -- starting an observer there is exactly
         // how the shipped bug published a PREDECESSOR's Consumed. A refusal (null token) must
@@ -140,7 +140,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a Combined reply whose synthesis failed falls back and releases the hold as NOT delivered`() = runTest {
-        // REVIEWER follow-up: the Combined branch used to discard speak()'s outcome -- it recorded
+        // The Combined branch used to discard speak()'s outcome -- it recorded
         // spoken_submitted and released as delivered even when synthesis never happened. The shared
         // rule must cover BOTH branches. Here the fallback ERROR cue itself is REFUSED: the hold
         // must release cancelled, and the submission must read spoken_failed.
@@ -509,7 +509,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `the renderer covers the admission the PLAY returned, not a later one`() = runTest {
-        //, the producer-to-owner handoff window: playEarcon called play() and then read
+        // The producer-to-owner handoff window: playEarcon called play() and then read
         // "the current admission" SEPARATELY. Between those two, a SUCCESSOR can take the track -- so the
         // renderer would hold the successor's token while believing it held its own, and its later stop
         // would release an admission it never made. The token now comes back FROM the play.
@@ -1114,7 +1114,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a held continuation that ARRIVED is refused, preserving its successor`() = runTest {
-        // THE CORRECTED CONTROL, per the 325d7bd4 and the instruction.
+        // THE CORRECTED CONTROL: the assertion now reads the value the production path sets.
         //
         // TWO THINGS THE EARLIER VERSIONS GOT WRONG, both of them preconditions rather than assertions:
         //  1. `coverageIsRunningForTest` reports only whether the CURRENT job is active. By the time it was
@@ -1585,7 +1585,7 @@ class AudioFeedbackRendererTest {
         // snapshot paired with it indefinitely -- no successful successor ever republishes.
         // A's REAL audio sounded on ITS track (head 50 of the old track); the new track's head stands
         // at 0. A verdict computed from the new track says Queued and attributes nothing -- the theft
-        // is observable as a lost attribution, same signature as ddaf3aa7b but from TRACK identity,
+        // is observable as a lost attribution, same signature as the writer-window case but from TRACK identity,
         // not field mixture.
         val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
         val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
@@ -1693,7 +1693,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `an ACCEPTED rate-change successor holds its write between track replacement and its own snapshot`() {
-        // Reviewer-requested variant (1ecc361b): B is ACCEPTED and its write is HELD between the
+        // Variant: B is ACCEPTED and its write is HELD between the
         // track replacement (ensureTrack, done before any write) and B's snapshot publication (end
         // of the write loop). In that window A must publish and attribute NOTHING: the retired
         // snapshot cannot vouch, and B has no snapshot yet.
@@ -1790,7 +1790,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `a RELEASE that lands DURING head sampling must not let the sampled head become a verdict`() {
-        // Reviewer-requested variant (1ecc361b): full player RELEASE inside the head sample. The
+        // Variant: full player RELEASE inside the head sample. The
         // post-sampling revalidation must see the retired snapshot; without it, the in-flight verdict
         // publishes Consumed after the whole session was torn down.
         val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()

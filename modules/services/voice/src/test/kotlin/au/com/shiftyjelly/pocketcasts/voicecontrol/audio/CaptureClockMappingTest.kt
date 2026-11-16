@@ -144,7 +144,7 @@ class CaptureClockMappingTest {
 
     @Test
     fun `a clock observation delivered after the stream advanced leaves the anchor unchanged`() {
-        // REVIEWER (round 2): reading the timestamp AFTER copying the completed segment does not
+        // Reading the timestamp AFTER copying the completed segment does not
         // mean the observation's frame position is the segment's end -- the callback and ring can
         // advance while VAD processing and drain delivery lag. Here the SAME segment is observed
         // 8 000 samples (500 ms) later than the timely control above, with the timestamp advanced
@@ -188,7 +188,7 @@ class CaptureClockMappingTest {
 
     @Test
     fun `an onset one millisecond before the segment's end lands one millisecond before the observation`() {
-        // Complement, NONZERO PRE-ROLL (reviewer round 3): a 1 s segment whose speech starts only
+        // Complement, NONZERO PRE-ROLL: a 1 s segment whose speech starts only
         // at its last millisecond. The buffer's sample 0 sits at 16 000 - 16 000 = 0, i.e. 1 s
         // before the observation; an onset-anchoring mutant would report 3 999 ms (1 ms before the
         // observation) and fail. 16 samples at 16 kHz is exactly 1 ms, so the arithmetic is

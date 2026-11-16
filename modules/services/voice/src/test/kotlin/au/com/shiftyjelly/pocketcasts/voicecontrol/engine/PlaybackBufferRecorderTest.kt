@@ -248,7 +248,7 @@ class PlaybackBufferRecorderTest {
         }
     }
 
-    // RETIREMENT IS ACOUSTIC, NOT ONLY CONVERSION STATE. Reviewer P1: dropping the continuation while
+    // RETIREMENT IS ACOUSTIC, NOT ONLY CONVERSION STATE. Dropping the continuation while
     // leaving the ring intact lets a stopped answer keep rejecting later user speech for the whole
     // buffer age. retireProducer(id) must zero that producer's samples older than the audible delay
     // tail, keep its newest tail matchable (hardware still sounds it), and leave every OTHER producer's
@@ -374,7 +374,7 @@ class PlaybackBufferRecorderTest {
         assertEquals("the successor's contribution lands whole", 3_200, retiredRun.snapshot().count { it == 0.25f })
     }
 
-    // RETIRED TAILS EXPIRE ON ELAPSED TIME, NOT LATER ACTIVITY. Reviewer: keeping the newest 8,000
+    // RETIRED TAILS EXPIRE ON ELAPSED TIME, NOT LATER ACTIVITY. Keeping the newest 8,000
     // samples with no deadline means a stopped answer stays matchable FOREVER if nothing else writes
     // -- a <=500 ms sample count is not a <=500 ms lifetime. Retirement records a monotonic deadline
     // (tail duration) and every consumer enforces it against the injected clock. Control: stop an
@@ -1739,7 +1739,7 @@ class PlaybackBufferRecorderTest {
         )
     }
 
-    // POSITION ATTRIBUTION (4236341498, conservative contract): an UNTIMED cue contribution must
+    // POSITION ATTRIBUTION (conservative contract): an UNTIMED cue contribution must
     // INVALIDATE a window anchor it is not covered by -- the anchor can never be presented as
     // covering audio whose sounding time is unknown.
     @Test

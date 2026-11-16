@@ -463,7 +463,7 @@ class VoiceAsrEngineTest {
     // ── Capture-anchor binding, through the production filter call ──
     @Test
     fun `the filter receives the segment buffer start position, not the speech onset`() = runTest {
-        // REVIEWER (round 3 slice binding): the engine hands the WHOLE segment to
+        // SLICE BINDING: the engine hands the WHOLE segment to
         // UtteranceFilter.shouldProcessReference, so the mic position it supplies must describe
         // SAMPLE 0 of that buffer -- including the pre-roll before the speech onset. This segment
         // is 2 s long with speech starting only at offset 24 000 (1.5 s); its accounted end is at
@@ -1736,7 +1736,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `asr log keeps source lang and text with english only in translate note`() = runTest {
-        // Merlin's Pixel line was confusing because post-translate fields were printed first:
+        // The device log line was confusing because post-translate fields were printed first:
         //   lang=en 'Play.' translate=yue→en '播放。'
         // Desired left-to-right story: ASR first, English result in the translate note.
         val logs = mutableListOf<String>()

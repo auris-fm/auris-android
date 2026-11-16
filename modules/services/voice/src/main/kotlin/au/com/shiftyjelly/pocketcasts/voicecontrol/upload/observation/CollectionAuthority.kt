@@ -67,7 +67,7 @@ class CollectionAuthority @Inject constructor(
         return AuthorityDecision(
             collectionPermitted = enrolled,
             fullRevocation = !enrolled,
-            // FIXED REASON at the decision site itself (, Merlin a611202c): the refusal
+            // FIXED REASON at the decision site itself: the refusal
             // must name WHICH clause failed, not a generic gate-off. The reason is a fixed token, not
             // free text, and carries no account or epoch contents.
             refusalReason = when {

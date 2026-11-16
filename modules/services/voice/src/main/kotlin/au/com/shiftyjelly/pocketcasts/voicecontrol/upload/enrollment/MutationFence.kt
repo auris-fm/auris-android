@@ -4,8 +4,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * Serializes membership mutations and fences every result against the attempt that produced it
- *.
+ * Serializes membership mutations and fences every result against the attempt that produced it.
  *
  * THE TWO DEFECTS THIS CLOSES:
  *
@@ -91,7 +90,7 @@ class MutationFence {
      */
     fun isCurrent(attempt: Attempt, liveSession: () -> Long): Boolean {
         // The session is snapshotted BEFORE the fence lock is taken (lock order owner -> fence
-        // everywhere; see applyIfCurrent,).
+        // everywhere; see applyIfCurrent).
         //
         // This check is NON-MUTATING: an old labelling check that bumped
         // generation/rebound the session from a possibly-STALE snapshot could invalidate or rebind a
@@ -120,7 +119,7 @@ class MutationFence {
 
     /**
      * Runs [effect] only if [attempt] is still authoritative, with the decision and the effect
-     * performed under THIS fence's lock (, a65eef2f).
+     * performed under THIS fence's lock.
      *
      * Why this lives here and not in the caller: a caller-side lock cannot make check-then-act
      * indivisible against THIS object's own mutations. [issue] and [supersede] do not acquire a

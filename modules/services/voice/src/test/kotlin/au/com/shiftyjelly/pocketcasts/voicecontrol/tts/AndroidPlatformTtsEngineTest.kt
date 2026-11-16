@@ -59,7 +59,7 @@ class AndroidPlatformTtsEngineTest {
         // used to leave speak() suspended forever; speakWithHeartbeat kept reporting emission, so
         // the user's next utterance was suppressed for the whole session.
         //
-        // REVIEWER (4.20 UTC round): the previous version stubbed synthesizeToFile on an engine that
+        // The previous version stubbed synthesizeToFile on an engine that
         // was never initialized, so speak could return false BEFORE synthesis entry and the bound
         // was never exercised. This version uses the production initialization callback (the fake
         // fires the same lambda the real TextToSpeech invokes), asserts the engine ACCEPTED the
@@ -70,7 +70,7 @@ class AndroidPlatformTtsEngineTest {
 
         val scope = CoroutineScope(Dispatchers.Default)
         val start = android.os.SystemClock.elapsedRealtime()
-        // The result is brought BACK to the test thread and checked HERE (reviewer, 04:43 round):
+        // The result is brought BACK to the test thread and checked HERE:
         // asserting inside the coroutine would let a failed assertion be swallowed by the Job,
         // and job.join() would still complete normally -- the timing assertions would then pass
         // without ever proving a false result.
@@ -537,7 +537,7 @@ class AndroidPlatformTtsEngineTest {
         onSynthesize: (utteranceId: String) -> Unit = {},
     ): Triple<AndroidPlatformTtsEngine, FakeSynthesizer, PlaybackBufferRecorder> {
         val fake = FakeSynthesizer(onSynthesize)
-        // ON BY DEFAULT sincespeak() now reports a synthesized-but-unplayable
+        // ON BY DEFAULT: speak() now reports a synthesized-but-unplayable
         // utterance as TtsPlaybackIncompleteException instead of a silent success, so a fake that
         // writes no WAV would turn every onDone-completing test into an uncaught failure. Tests
         // that specifically exercise the no-audio paths opt OUT (emitRealWav = false). The drain
@@ -1322,7 +1322,7 @@ class AndroidPlatformTtsEngineTest {
     @Test
     @Suppress("DEPRECATION")
     fun `engine release silences the owned track without freeing it while the owner still reads`() {
-        //review: the ownership contract must be observable at the instance
+        // The ownership contract must be observable at the instance
         // boundary, not inferred from counters that stay green when the forbidden release returns.
         // The injected track records release() and refuses position reads afterwards -- exactly the
         // native hazard shape (IllegalStateException on a freed AudioTrack) -- so premature
@@ -1424,7 +1424,7 @@ class AndroidPlatformTtsEngineTest {
     @Test
     @Suppress("DEPRECATION")
     fun `a throwing final position read cannot become successful completion`() {
-        //review: `if (positionBroken) 0 else headPosition()` consulted the flag
+        // `if (positionBroken) 0 else headPosition()` consulted the flag
         // BEFORE the final read, so a final read that threw AFTER earlier successful reads returned
         // the fallback == framesWritten and could pass the shortfall check as success. The fix reads
         // once, then checks the flag. The injected track throws only from the second position read,

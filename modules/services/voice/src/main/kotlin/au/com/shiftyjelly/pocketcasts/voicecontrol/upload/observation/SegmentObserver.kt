@@ -135,7 +135,7 @@ class SegmentObserver(
             Timber.i("voice-capture admission: declined (gate-off reason=%s)", reason)
             return null
         }
-        // NO ALLOWANCE STEP HERE (core c74d7e30). Capture used to consult a prepaid allowance token
+        // NO ALLOWANCE STEP HERE. Capture used to consult a prepaid allowance token
         // and fail closed when it was absent; that reserve-before-capture rule is removed, and the
         // daily limit is metered server-side at acceptance instead. Admission is now gated only by
         // consent/policy (above) and the compiled per-clip ceiling (below).
@@ -212,8 +212,8 @@ class SegmentObserver(
 
     // Transfers the drained first chunk into the reserved prefix using ITS admit token; a
     // refusal/throw path must call releaseInitialChunk so that token's charge leaves exactly once
-    // (b4). [validSamples] = samples actually drained; array capacity may
-    // exceed the valid range and stays fully charged while adopted (b1/b3).
+    // [validSamples] = samples actually drained; array capacity may
+    // exceed the valid range and stays fully charged while adopted.
     // Returns the SINK's actual transfer result — never hard true on refusal.
     fun adoptFirstChunk(admission: AdmissionHandle, firstChunk: ShortArray, validSamples: Int = firstChunk.size): Boolean = synchronized(lock) {
         val context = admission.context
@@ -243,7 +243,7 @@ class SegmentObserver(
 
     /** Producer drop for an initial allocation that never transferred. Addressed by the HANDLE
      * from [Admission] — valid AFTER revocation closed the capture or a successor opened: the
-     * sink releases THAT token, not "the current open capture's" (b2). */
+     * sink releases THAT token, not "the current open capture's". */
     fun releaseInitialChunk(admission: AdmissionHandle) {
         val token = admission.initialToken ?: return
         synchronized(lock) { if (admissionToken === token) admissionToken = null }
@@ -284,8 +284,8 @@ class SegmentObserver(
     }
 
     // Producer drop path: even when the capture is already closed/revoked, the sink MUST see the
-    // release so a lease-held charge leaves the budget exactly once (b4).
-    // Advances accounting ONLY when the sink actually adopted (b2).
+    // release so a lease-held charge leaves the budget exactly once.
+    // Advances accounting ONLY when the sink actually adopted.
     fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean = synchronized(lock) {
         // BOTH the engine path and the compatibility path commit through HERE, so the capacity
         // accounting has exactly one definition.

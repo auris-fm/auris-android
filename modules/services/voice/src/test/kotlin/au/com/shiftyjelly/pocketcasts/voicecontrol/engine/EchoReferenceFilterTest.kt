@@ -187,7 +187,7 @@ class EchoReferenceFilterTest {
         )
     }
 
-    // THE ACTUAL CUE WRITER -> CONSUMER (4236341498,/1026f360): the production
+    // THE ACTUAL CUE WRITER -> CONSUMER: the production
     // EarconPlayer.writeCueReference path -- with a QUEUED and a PARTIAL acceptance -- feeds the
     // reference, and the anchor behaves per the conservative contract: the previously established
     // position is invalidated by the untimed cue contributions, and episode echo is still suppressed

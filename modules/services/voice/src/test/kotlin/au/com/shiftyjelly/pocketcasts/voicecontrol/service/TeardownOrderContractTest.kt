@@ -36,8 +36,8 @@ class TeardownOrderContractTest {
     private val requiredOrder = listOf(
         "cancel-mode",
         "stop-engine", // engine teardown is SYNCHRONOUS; nothing engine-owned outlives it
-        // CANCEL BEFORE RELEASE (reviewers 0bba7db5 + dbde4427): a cancellation REQUEST is not
-        // CANCEL BEFORE RELEASE (reviewers 0bba7db5 + dbde4427): a cancellation REQUEST is not
+        // CANCEL BEFORE RELEASE: a cancellation REQUEST is not
+        // CANCEL BEFORE RELEASE: a cancellation REQUEST is not
         // "users have finished" — dispatcher children still call render()/onCommandRecognized. So
         // the releases must follow the JOIN, not merely the cancellation.
         "cancel-scope",
@@ -494,7 +494,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `the teardown closes the barrier before cancelling and joins what it owned`() {
-        // Reviewers 902e0c1a1/cce1f100/9045dd43: a snapshot-then-cancel leaves a start that lands in
+        // A snapshot-then-cancel leaves a start that lands in
         // between owned by nobody. The barrier must be CLOSED (not sampled) and its returned set
         // joined before any release. Source-order because the barrier's behaviour is controlled
         // separately in ShutdownBarrierControlTest.
@@ -547,7 +547,7 @@ class TeardownOrderContractTest {
 
     @Test
     fun `a teardown that holds resources reports a Held result and never throws`() {
-        // Reviewers 6ce4ad78 + 3104ba44: a resources-held teardown must not look like a clean one,
+        // A resources-held teardown must not look like a clean one,
         // but throwing from this unrouted launch would be an UNCAUGHT exception and could take the
         // process down. The outcome must be RETURNED, and a throwing release must be reported too.
         val source = productionStopVoiceControlSource()

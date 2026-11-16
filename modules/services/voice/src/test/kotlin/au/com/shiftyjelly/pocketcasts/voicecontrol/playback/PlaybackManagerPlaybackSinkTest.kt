@@ -35,7 +35,7 @@ class PlaybackManagerPlaybackSinkTest {
         ApplicationProvider.getApplicationContext(),
     )
 
-    // FOCUS-LISTENER IDENTITY (4236727145,): the AudioManager boundary, collected.
+    // FOCUS-LISTENER IDENTITY: the AudioManager boundary, collected.
     // Android keys a focus grant to the listener instance it was handed; restore() must abandon THAT
     // instance, not a fresh lambda. A mocked AudioManager records both calls, so an identity mismatch
     // (the shipped defect: restore abandoned `[:]`) fails on the instance comparison.
@@ -129,7 +129,7 @@ class PlaybackManagerPlaybackSinkTest {
         expectRefused: Boolean = false,
     ) = runTest {
         // the remaining item: the ACTUAL owner's skip, through its PUBLIC entry point. The decision
-        // was verified in isolation (172e220ff); this drives the real method and its callers.
+        // was verified in isolation; this drives the real method and its callers.
         val manager = org.mockito.Mockito.mock(
             PlaybackManager::class.java,
             org.mockito.Mockito.CALLS_REAL_METHODS,

@@ -79,7 +79,8 @@ class SpokenTemplateResolverLocaleTest {
         for (key in listOf("cloud_error_speech_unavailable", "cloud_error_internal_error")) {
             val spoken = resolver.resolveLocalized(key, lang)
             assertEquals("$key in $lang", expected, spoken.text)
-            // Text and voice must agree: an untranslated line reports English (spec 7c7575f6).
+            // Text and voice must agree: an untranslated line reports English, so a fallback can
+            // never pair one language's words with another language's voice.
             assertEquals("$key voice matches its text in $lang", lang, spoken.languageTag)
         }
     }

@@ -146,6 +146,32 @@ class SpokenTemplateResolverLocaleTest {
     @Test
     fun `the generic fallback is cantonese`() = assertGenericLine("yue", expected = "唔好意思，我完成唔到呢個請求。")
 
+    /**
+     * An overlaid key must have ONE source. While the generic line sat in both the array and the
+     * dedicated string, the array entry was dead: the overlay always won, so editing it changed
+     * nothing a listener heard. This reads the array itself, not the resolver, so a re-added entry
+     * fails here rather than silently becoming the copy nobody maintains.
+     */
+    @Test
+    fun `the spoken-templates array carries no copy of an overlaid key`() {
+        val array = getApplicationContext<Context>().resources.getStringArray(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.R.array.voice_spoken_templates,
+        )
+        val overlaid = setOf(
+            "cloud_error_generic",
+            "cloud_error_speech_unavailable",
+            "cloud_error_internal_error",
+            "cloud_error_limit_exceeded",
+            "cloud_error_conversation_expired",
+        )
+        val duplicated = array.map { it.substringBefore('|') }.filter { it in overlaid }
+        assertEquals(
+            "these keys are overlaid from dedicated strings; an array entry would be dead: $duplicated",
+            emptyList<String>(),
+            duplicated,
+        )
+    }
+
     @Test
     fun `traditional chinese resolves rather than falling back to english`() {
         // A zh-Hant speaker must not get the English line: values-zh covers both scripts in this

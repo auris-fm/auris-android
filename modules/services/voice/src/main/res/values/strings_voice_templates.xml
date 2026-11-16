@@ -15,13 +15,12 @@
         <item>bookmark.add|Bookmarked at {position}</item>
         <item>playback.next_episode|Playing {episode title}</item>
         <!-- Cloud diagnostics. A code with a user-facing meaning gets its own line
-             here; anything else gets cloud_error_generic below, and the error earcon
+             here; anything else gets the dedicated cloud_error_generic string below, and the error earcon
              only if even that is missing. -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
         <item>general.cloud_incomplete_turn|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_no_answer|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_unauthorized|Service is unavailable at the moment.</item>
-        <item>cloud_error_generic|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_retrieval_unavailable|I can\'t reach the podcast evidence right now.</item>
         <item>cloud_error_provider_error|The assistant couldn\'t finish that request.</item>
         <item>cloud_error_connection_lost|Connection lost. Please try again.</item>

@@ -79,6 +79,25 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a turn routed through the entry point carries the UI language too`() = runTest {
+        // The entry points BUILD their own turn instead of dispatching a prepared one, so they are a
+        // separate place the field has to be set. Missing it there would not fail any other test:
+        // every existing caller goes through prepareTurn, so the gap would only appear the first
+        // time something used routeToCloud directly -- and the answer would silently be English.
+        val deps = TestDeps()
+        val sink = deps.sink(locale = java.util.Locale.forLanguageTag("zh-CN"))
+        deps.conversationAdmission.beginOrigin(1)
+
+        sink.routeToCloud("question", playbackContext, admitted = testWireId)
+
+        assertEquals(
+            "the screen's language, primary subtag only",
+            "zh",
+            deps.routeTurns.single().uiLanguage,
+        )
+    }
+
+    @Test
     fun `a retry keeps the language the request was captured under`() = runTest {
         // The language is a fact of the REQUEST: the user is being answered about an utterance made
         // while the app was in one language. A retry must not re-read the locale, or switching the

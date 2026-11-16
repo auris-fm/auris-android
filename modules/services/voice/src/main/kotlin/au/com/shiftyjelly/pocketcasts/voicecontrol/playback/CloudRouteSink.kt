@@ -250,6 +250,9 @@ class CloudRouteSink internal constructor(
         isWakeOriginated = isWakeOriginated,
         hint = null,
         admittedId = admitted,
+        // Read HERE, at the entry point: a caller that builds a turn through this route must not
+        // silently get English because it did not know about the field.
+        uiLanguage = uiLanguageForWire(),
     )
 
     override suspend fun routeToCloudWithHint(
@@ -268,6 +271,7 @@ class CloudRouteSink internal constructor(
         isWakeOriginated = isWakeOriginated,
         hint = hint,
         admittedId = admitted,
+        uiLanguage = uiLanguageForWire(),
     )
 
     /**
@@ -416,6 +420,8 @@ class CloudRouteSink internal constructor(
         prepared: CloudRouteTurn? = null,
         /** The admitted client-minted UUID when the caller did not prepare a turn; refused when absent with none prepared. */
         admittedId: String? = null,
+        /** The app's UI language, carried on the turn this call builds. Unused when [prepared] is supplied. */
+        uiLanguage: String? = null,
     ): CloudTurnResult {
         if (prepared == null && admittedId.isNullOrBlank()) {
             // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
@@ -591,6 +597,7 @@ class CloudRouteSink internal constructor(
                 // result capability is advertised.
                 capabilities = emptyList(),
                 routeHint = hint,
+                uiLanguage = uiLanguage,
             )
             Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
             // Which conversation the turn asks the worker to create or resume: a resume of an id the

@@ -795,12 +795,6 @@ interface VoiceCloudRouteSink {
         isRetry: Boolean = false,
         /** ASR source language retained with the prepared request, including retries. */
         sourceLanguage: String? = null,
-        /**
-         * The UI language the request was captured under, on a retry. Null on a first attempt, where
-         * the sink reads the app's current locale; a retry that re-read it could answer in a language
-         * the request was never captured under.
-         */
-        uiLanguage: String? = null,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**

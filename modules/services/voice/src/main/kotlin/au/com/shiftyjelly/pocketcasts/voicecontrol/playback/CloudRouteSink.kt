@@ -293,16 +293,6 @@ class CloudRouteSink internal constructor(
         /** True when the caller is RETRYING, so a lookup miss is a refusal rather than a first attempt. */
         isRetry: Boolean,
         sourceLanguage: String?,
-        /**
-         * The UI language the ORIGINAL dispatch of this request was prepared with, on a retry.
-         *
-         * Null on a first attempt, where it is taken from [currentLocale]. It is carried rather than
-         * re-read for the same reason the conversation handle is: a retry is a second dispatch of ONE
-         * request, and a user switching the app's language between the two must not make them answer
-         * in different languages. (No default: an overriding function may not declare one, and
-         * the interface carries it for every caller.)
-         */
-        uiLanguage: String?,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
             // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
@@ -321,10 +311,11 @@ class CloudRouteSink internal constructor(
             CloudRouteTurn(
                 request = request,
                 sourceLanguage = sourceLanguage,
-                // A RETRY of a turn prepared before this change carries none, so the value is read
-                // at the sink on a first attempt only. Falling back on a retry too would let a locale
-                // switched mid-request answer in a language the request was never captured under.
-                uiLanguage = if (isRetry) uiLanguage else (uiLanguage ?: uiLanguageForWire()),
+                // READ ONCE, AT PREPARE. RETENTION is what keeps a retry's language: a retry reuses
+                // the retained turn (which already holds this value) rather than reaching here, in
+                // the same way it keeps the conversation handle. So a locale switched between the
+                // two dispatches cannot make one request answer in two languages.
+                uiLanguage = uiLanguageForWire(),
                 context = buildRouteContext(context),
                 requestId = admitted,
                 // No structured-results surface is rendered client-side, so no

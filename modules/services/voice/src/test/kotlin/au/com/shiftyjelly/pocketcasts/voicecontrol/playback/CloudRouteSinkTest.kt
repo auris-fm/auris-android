@@ -79,14 +79,16 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a retry does not re-read the app's language`() = runTest {
+    fun `a retry keeps the language the request was captured under`() = runTest {
         // The language is a fact of the REQUEST: the user is being answered about an utterance made
-        // when the app was in one language. Re-reading it here would let a locale switched between
-        // the two dispatches have the retry answer in the new one, so one request would be answered
-        // in two languages -- the same class of bug as re-reading the conversation handle.
+        // while the app was in one language. A retry must not re-read the locale, or switching the
+        // app's language between the two dispatches would have one request answered in two
+        // languages. Retention is what carries it, so THE LOCALE HAS TO CHANGE HERE for the test to
+        // be able to fail: with one fixed locale, re-reading produces the same answer either way.
         val deps = TestDeps()
         deps.conversationAdmission.beginOrigin(1)
-        val sink = deps.sink(locale = java.util.Locale.forLanguageTag("de-DE"))
+        var locale = java.util.Locale.forLanguageTag("de-DE")
+        val sink = deps.sink(localeProvider = { locale })
 
         val first = sink.prepareTurn(
             request = "question",
@@ -94,17 +96,18 @@ class CloudRouteSinkTest {
             capturedOrigin = 1,
             logicalRequestId = "retry-ui-language",
         )!!
+        locale = java.util.Locale.forLanguageTag("fr-FR")
         val retryPrepared = sink.prepareTurn(
             request = "question",
             context = playbackContext,
             capturedOrigin = 1,
             logicalRequestId = "retry-ui-language",
             isRetry = true,
-            uiLanguage = first.uiLanguage,
         )!!
 
         assertEquals("de", first.uiLanguage)
-        assertEquals("the retry keeps the language the request was captured under", "de", retryPrepared.uiLanguage)
+        assertEquals("the retry answers in the language the request was captured under", "de", retryPrepared.uiLanguage)
+        org.junit.Assert.assertSame("the retry reuses the retained turn rather than preparing a new one", first, retryPrepared)
     }
 
     @Test
@@ -3420,7 +3423,10 @@ class CloudRouteSinkTest {
         val conversationAdmission = CloudConversationAdmission()
 
         /** @param locale the app's UI locale AT PREPARE TIME; a case that cares overrides it. */
-        fun sink(locale: java.util.Locale = this.locale): CloudRouteSink = CloudRouteSink(
+        fun sink(locale: java.util.Locale = this.locale): CloudRouteSink = sink(localeProvider = { locale })
+
+        /** For a case whose locale must CHANGE between two prepares. */
+        fun sink(localeProvider: () -> java.util.Locale): CloudRouteSink = CloudRouteSink(
             resolveBaseUrl = { baseUrl },
             tokenProvider = object : CloudTokenProviding {
                 // Mirrors what the legacy identity path returned, so the suite keeps asserting the
@@ -3434,7 +3440,7 @@ class CloudRouteSinkTest {
             cloudPlaybackContextState = cloudPlaybackContextState,
             analytics = analytics,
             templateResolver = templateResolver,
-            currentLocale = { locale },
+            currentLocale = localeProvider,
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },

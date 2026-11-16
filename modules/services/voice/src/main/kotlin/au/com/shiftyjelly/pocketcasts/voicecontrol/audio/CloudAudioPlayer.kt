@@ -302,18 +302,6 @@ class CloudAudioPlayer(
     /** Test seam: called once the detached track has been released, on whichever thread released it. */
     internal var onTrackReleasedForTest: (() -> Unit)? = null
 
-    /**
-     * Runs on the writer when a drain finds the queue empty and returns -- AFTER the last write
-     * counted its progress, BEFORE any completion barrier queued behind that drain runs. Test seam
-     * for exactly that gap, which is where a progress-only wait stranded itself at the end of an
-     * answer. It must sit here rather than inside the write: a hold before the drain is queued is a
-     * writer that really has not finished, and giving up on it is correct.
-     */
-    internal var afterDrainReturnedForTest: (() -> Unit)? = null
-
-    /** Runs on the writer just after an accepted write advances the progress counter. Test seam. */
-    internal var afterLastWriteForTest: (() -> Unit)? = null
-
     init {
         ensureAudioTrack()
     }
@@ -901,18 +889,29 @@ class CloudAudioPlayer(
     }
 
     private fun drainFrames() {
-        // This drain is not finished until it returns, so from here on a short gap inside it is
-        // delivery, not a stall. See [WriterProgress].
+        // Claim the progress slot for this drain, and give it back on EVERY exit -- the early ones
+        // and an exception alike. Leaving it claimed would report a writer that has stopped as
+        // still delivering, which is exactly the stall this state exists to distinguish from.
         val progress = writerProgress
         synchronized(progress) {
             progress.drain = ANY_DRAIN
             progress.deliveryStartedAtMs = 0L
         }
+        try {
+            drainFramesUntilEmpty(progress)
+        } finally {
+            synchronized(progress) {
+                progress.drain = null
+                progress.deliveryStartedAtMs = 0L
+            }
+        }
+    }
+
+    /** The write loop. Every exit path leaves the drain, so the caller releases the progress claim. */
+    private fun drainFramesUntilEmpty(progress: WriterProgress) {
         val track = audioTrack ?: return
         if (!playing || paused) return
         val generation = trackGeneration
-        // Whether THIS drain delivered audio: only then does it have delivery progress to withdraw.
-        var drainedSomething = false
 
         while (true) {
             val (frame, admission) = synchronized(frameBuffer) {
@@ -921,10 +920,7 @@ class CloudAudioPlayer(
                 // later play() calls, so the drain must not keep consuming frames past the gap
                 // either -- an answer that failed is over, not resumable frame by frame.
                 if (audioWriteFailed) return
-                if (frameBuffer.isEmpty()) {
-                    afterDrainReturnedForTest?.invoke()
-                    return
-                }
+                if (frameBuffer.isEmpty()) return
                 // Only the active owner renews after a route reset, before handing off this frame.
                 // A write already held at the sink keeps its old ticket and cannot renew on return.
                 val recorder = playbackBufferRecorder
@@ -972,7 +968,6 @@ class CloudAudioPlayer(
                     }
                     synchronized(progress) {
                         if (written > 0) {
-                            drainedSomething = true
                             framesWrittenInRun += 1
                             progress.units += 1
                             // Between two written chunks: still delivering, keep that visible.
@@ -981,9 +976,6 @@ class CloudAudioPlayer(
                             // Nothing accepted and nothing to follow in this drain: it ends here.
                             progress.deliveryStartedAtMs = 0L
                         }
-                    }
-                    if (written > 0) {
-                        afterLastWriteForTest?.invoke()
                     }
                     if (written <= 0) {
                         // An explicit failure rather than a silent drop: stop this answer and report
@@ -1093,12 +1085,6 @@ class CloudAudioPlayer(
                 }
                 if (audioWriteFailed) break
             }
-        }
-
-        if (drainedSomething) {
-            // Declared FINISHED, under the same lock the waiter reads: nothing this drain did can be
-            // mistaken for progress from here on.
-            synchronized(progress) { progress.deliveryStartedAtMs = 0L }
         }
     }
 

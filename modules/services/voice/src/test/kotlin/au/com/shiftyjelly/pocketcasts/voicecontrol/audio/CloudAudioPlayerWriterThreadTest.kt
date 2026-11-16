@@ -208,6 +208,56 @@ class CloudAudioPlayerWriterThreadTest {
     }
 
     @Test
+    fun `an answer already fully written when the turn ends is reported consumed at once`() = kotlinx.coroutines.runBlocking {
+        // The automated review's blocker, and what a short answer hits first: by Done the queue is
+        // EMPTY, so the writer has nothing left to write and the completion barrier runs with no
+        // progress behind it. A wait that only exits on a new write sits out its whole stall window,
+        // reports the answer as cut short, and the user hears the error tone over an answer that was
+        // delivered perfectly. Completion has to be checked on every poll, not only between windows.
+        val player = newPlayer()
+        val written = CopyOnWriteArrayList<Int>()
+        player.writeToSink = { _, bytes, _, count ->
+            written += bytes[0].toInt()
+            count
+        }
+        player.readPlaybackHeadFrames = { Long.MAX_VALUE }
+        player.writerStallTimeoutMs = 2_000
+        player.submitFrame(frame(0))
+        player.play()
+        awaitTrue { written.size == 1 }
+
+        val startedAt = System.nanoTime()
+        val completion = player.drainAndAwaitCompletion(timeoutMs = 5_000)
+        val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertEquals(CloudAudioPlayer.Completion.Consumed, completion)
+        assertTrue("the empty queue ended the wait instead of sitting out the window (took ${waitedMs}ms)", waitedMs < 1_000)
+    }
+
+    @Test
+    fun `an answer already fully written when the turn ends drains at once`() {
+        // Same case on the blocking path, which reports false -- and false is what makes the caller
+        // treat a finished answer as cut short.
+        val player = newPlayer()
+        val written = CopyOnWriteArrayList<Int>()
+        player.writeToSink = { _, bytes, _, count ->
+            written += bytes[0].toInt()
+            count
+        }
+        player.writerStallTimeoutMs = 2_000
+        player.submitFrame(frame(0))
+        player.play()
+        awaitTrue { written.size == 1 }
+
+        val startedAt = System.nanoTime()
+        val drained = player.drainAndStop()
+        val waitedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+        assertTrue("nothing was queued, so everything submitted was written", drained)
+        assertTrue("the empty queue ended the wait instead of sitting out the window (took ${waitedMs}ms)", waitedMs < 1_000)
+    }
+
+    @Test
     fun `a long backlog written steadily is drained, not called a stalled writer`() {
         // The wait at the end of a turn exists to notice a writer that has STOPPED, not to cap how
         // long an answer takes to finish on the device. Playback paces the writer: a 30 s answer

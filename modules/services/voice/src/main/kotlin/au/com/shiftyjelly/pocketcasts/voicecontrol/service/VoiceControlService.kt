@@ -99,6 +99,14 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var voiceAsrEngine: dagger.Lazy<VoiceAsrEngine>
 
+    /**
+     * One voice session at a time over the process-wide voice resources. The engine, the ASR
+     * backends and the intent router are singletons, while every guard in this class belongs to one
+     * instance, so a second instance would otherwise start over resources this one is still
+     * releasing.
+     */
+    @Inject lateinit var voiceSessionGate: VoiceSessionGate
+
     @Inject lateinit var asrBackendSelector: AsrBackendSelector
 
     @Inject lateinit var playbackBufferRecorder: PlaybackBufferRecorder
@@ -131,6 +139,10 @@ class VoiceControlService : Service() {
 
     /** The teardown currently running, so a stop can return a job that really completes. */
     private var stopInFlightJob: Deferred<TeardownResult>? = null
+
+    /** The process-wide session this instance holds, once its start was admitted. */
+    @Volatile
+    private var voiceSession: VoiceSessionGate.Session? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
@@ -224,6 +236,13 @@ class VoiceControlService : Service() {
         // A barrier-owned job that never finishes must not hang the teardown; the engine quiescence
         // check below still decides whether resources may be released.
         private const val BARRIER_JOIN_TIMEOUT_MS = 5_000L
+
+        /**
+         * How long a start waits for a previous session's release. Longer than the teardown's own
+         * join bound so a normal teardown is waited out rather than refused, and finite so a stuck
+         * one cannot make voice permanently unavailable.
+         */
+        private const val SESSION_ACQUIRE_TIMEOUT_MS = 10_000L
 
         // Every kind of resource this service releases, in release order. Shared by the initial
         // teardown and the retry so both track progress identically (reviewer a9271b39).
@@ -411,6 +430,24 @@ class VoiceControlService : Service() {
         val startJob = serviceScope.launch(Dispatchers.IO) {
             // Nothing below runs until admission has been decided.
             startGate.await()
+            // TAKE THE PROCESS-WIDE SESSION BEFORE TOUCHING ANY SHARED RESOURCE. A previous
+            // instance's teardown may still be releasing the engine or the backend this start is
+            // about to use, and its guards are invisible here because they belong to that instance.
+            // A refusal is logged distinctly from ordinary busy: the release never finished, so
+            // starting would run over half-released resources. Voice stays off, as it does for every
+            // other refused start.
+            when (val admission = voiceSessionGate.acquire(SESSION_ACQUIRE_TIMEOUT_MS)) {
+                is VoiceSessionGate.Admission.TimedOut -> {
+                    Timber.w(
+                        "Voice control not started: a previous session's release did not finish within %dms",
+                        SESSION_ACQUIRE_TIMEOUT_MS,
+                    )
+                    stopSelf()
+                    return@launch
+                }
+
+                is VoiceSessionGate.Admission.Acquired -> voiceSession = admission.session
+            }
             ensureModelsReady()
             launch(Dispatchers.Main) {
                 modeJob = kotlinx.coroutines.flow.combine(
@@ -640,6 +677,16 @@ class VoiceControlService : Service() {
             startJob.invokeOnCompletion { shutdownBarrier.release(listOf(startJob)) }
         }
         startInFlightJob = startJob
+        // A START THAT ENDS ABNORMALLY GIVES BACK ANY SESSION IT CLAIMED. The teardown reads the
+        // session before it cancels the scope, while this job runs on IO: a start still waiting for
+        // another holder's release can claim the session AFTER that read, so the teardown sees null
+        // and neither begins nor finishes a release for it. Nothing would ever free it, and every
+        // later start in the process would wait the full bound and be refused. Re-reading the field
+        // here, on the job's own exit, covers that ordering. `release` is a no-op once a teardown has
+        // begun releasing the session, so this cannot undo a real teardown.
+        startJob.invokeOnCompletion { cause ->
+            if (cause != null) voiceSession?.let { voiceSessionGate.release(it) }
+        }
         startGate.complete(Unit)
 
         Timber.i("Voice control service started, observing listening mode")
@@ -1292,6 +1339,13 @@ class VoiceControlService : Service() {
         // Render()/onCommandRecognized and can still be inside them. Releasing the renderer,
         // Recognizer, session or backend before those children have actually finished is
         // Use-after-release, so the releases happen only AFTER the join below.
+        // THE SESSION STAYS HELD WHILE THE RELEASES RUN. Marking it before anything is cancelled
+        // means a start from another instance waits rather than using resources this teardown is
+        // about to free. It is given up only when the completion job below has finished.
+        val session = voiceSession
+        if (session != null) {
+            voiceSessionGate.beginRelease(session)
+        }
         modeJob?.cancel()
         playbackBufferRecorder.stop()
         // Engine + capture teardown runs after the cancellation request. It stops the engine's
@@ -1391,10 +1445,25 @@ class VoiceControlService : Service() {
             }
         }.also { teardown ->
             stopInFlightJob = teardown
+            // GIVE UP THE SESSION ONLY WHEN EVERY RELEASE HAS REALLY HAPPENED. A Held verdict means
+            // the shared objects may still be in use, so freeing the gate there would admit a new
+            // start over them -- the overlap this gate exists to prevent. The session therefore stays
+            // held across a hold, and the retry that finally reaches Released is what frees it. A
+            // start arriving in that window is refused and logged, which is the safe outcome: voice
+            // being unavailable is recoverable, a use-after-release is not.
             // Record the observed outcome (reviewers 6ce4ad78 + 3104ba44). A resources-held result
             // Keeps the failure visible to status and health surfaces, so a hold is never mistaken
             // For a clean teardown just because nothing threw.
             recordTeardownOutcome(teardown)
+            // REGISTERED AFTER THE OUTCOME RECORD, so the settled verdict is already published when
+            // this runs: completion callbacks fire in registration order.
+            if (session != null) {
+                teardown.invokeOnCompletion {
+                    if (teardownOutcome?.Released == true) {
+                        voiceSessionGate.finishRelease(session)
+                    }
+                }
+            }
         }
     }
 
@@ -1457,6 +1526,15 @@ class VoiceControlService : Service() {
                     )
                 ) {
                     is TeardownRetry.Decision.Quiescent -> {
+                        // THE RETRY RELEASES ONLY WHILE THE SESSION IS STILL ITS OWN. A held teardown
+                        // keeps the session, so this is normally true; if it is not, another session
+                        // owns the shared objects and releasing them here would free resources that
+                        // owner is using. Nothing is released in that case.
+                        val session = voiceSession
+                        if (session != null && !voiceSessionGate.holds(session)) {
+                            Timber.w("[VoicePipeline] retry skipped: the voice session is no longer held")
+                            return@async TeardownResult.Held(previous)
+                        }
                         val all = ALL_RELEASES
                         val pending = TeardownRetry.pendingReleases(all, releasedResources)
                         val released = runCatching {
@@ -1473,6 +1551,9 @@ class VoiceControlService : Service() {
                         // NO BATCH ADD: releaseResources records each kind as it confirms, so
                         // re-adding would claim kinds whose release threw (reviewer 9f873b94).
                         if (TeardownRetry.fullyReleased(all, releasedResources)) {
+                            // Every release has now really happened, so the session may be given up.
+                            // This is the only path that frees a session after a hold.
+                            if (session != null) voiceSessionGate.finishRelease(session)
                             TeardownResult.Released
                         } else {
                             TeardownResult.Held(previous)

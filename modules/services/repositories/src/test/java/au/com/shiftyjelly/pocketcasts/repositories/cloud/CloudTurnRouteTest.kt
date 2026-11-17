@@ -127,6 +127,52 @@ class CloudTurnRouteTest {
     }
 
     @Test
+    fun `the turn carries its UI language to the wire`() = runTest {
+        // M6 (recognition-pipeline, Android): the server decides the reply language, and the app's UI
+        // locale is its fall-through when the spoken language is absent or unsupported. The tag is the
+        // primary subtag only -- `zh-CN` on the device is sent as `zh`, because the server's rule
+        // decides on the primary subtag and a region would be a claim this client cannot support.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val turn = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+            request = "what podcasts are trending",
+            context = CloudRouteContext(),
+            requestId = "req-ui-language",
+            uiLanguage = "zh",
+        )
+
+        route(transport).route(turn).toList()
+
+        val frame = transport.frames.single() as CloudTurnFrame.Authenticate
+        assertEquals("the typed field carries the UI language", "zh", frame.uiLanguage)
+        val json = CloudRouteJson.authenticateAdapter.toJson(frame)
+        assertTrue("and it reaches the wire (json=$json)", json.contains("\"ui_language\":\"zh\""))
+    }
+
+    @Test
+    fun `an unknown UI locale is omitted rather than sent as an empty or invented tag`() = runTest {
+        // `ui_language` is a hint and may be omitted. Sending "" or a made-up tag would BE a claim
+        // (that the app's UI is in that language), and the server would have no way to tell it from a
+        // real one -- so absence travels as absence, exactly like the playback context above.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val turn = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+            request = "what podcasts are trending",
+            context = CloudRouteContext(),
+            requestId = "req-no-ui-language",
+            uiLanguage = null,
+        )
+
+        route(transport).route(turn).toList()
+
+        val frame = transport.frames.single() as CloudTurnFrame.Authenticate
+        val json = CloudRouteJson.authenticateAdapter.toJson(frame)
+        assertFalse("an unknown locale is not sent at all (json=$json)", json.contains("ui_language"))
+    }
+
+    @Test
     fun `the required admission pair is encoded together`() = runTest {
         val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
         val firstTurn = CloudRouteTurn(

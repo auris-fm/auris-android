@@ -12,6 +12,28 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
+/**
+ * Per-test shadow for the REAL AudioTrack the player builds: answers getTimestamp with an armed
+ * presentation instant, which the stock shadow cannot do. Only the test that exercises the
+ * production fallback arms it; everything else sees the stock behaviour.
+ */
+@org.robolectric.annotation.Implements(android.media.AudioTrack::class)
+class TimestampedAudioTrackShadow : org.robolectric.shadows.ShadowAudioTrack() {
+    @org.robolectric.annotation.Implementation
+    fun getTimestamp(timestamp: android.media.AudioTimestamp): Boolean {
+        if (!armed) return false
+        timestamp.nanoTime = nanoTime
+        timestamp.framePosition = framePosition
+        return true
+    }
+
+    companion object {
+        @JvmStatic var armed = false
+        @JvmStatic var nanoTime = 0L
+        @JvmStatic var framePosition = 0L
+    }
+}
+
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class CloudAudioPlayerTest {
@@ -23,12 +45,14 @@ class CloudAudioPlayerTest {
         player = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
     }
 
     @After
     fun tearDown() {
         player.release()
+        TimestampedAudioTrackShadow.armed = false
     }
 
     @Test
@@ -120,6 +144,215 @@ class CloudAudioPlayerTest {
         player.play()
 
         assertTrue("play must be reported as us making sound", states.firstOrNull() == true)
+    }
+
+    @Test
+    fun `first audible is PRESENTATION evidence, not submission`() {
+        // REVIEWER (task81): the timing table's FirstAudible came from the submission-side
+        // audible stamp (frames handed to the track), which can be seconds before the listener
+        // actually hears anything. The real instant is the track's presentation clock: the first
+        // AudioTimestamp with framePosition > 0. Its nanoTime is the monotonic instant the timing
+        // table wants.
+        var ts = android.media.AudioTimestamp().apply {
+            this.nanoTime = 99_000_000L
+            this.framePosition = 512L
+        }
+        player.readAudioTimestamp = { ts }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        Thread.sleep(2_500)
+
+        assertEquals("exactly one first-audible per playback run", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
+    fun `the first accepted write reports its return instant once per playback run`() {
+        // The gap between the first frame arriving and sound has three parts the timing table must
+        // be able to tell apart; the one the player owns is when the first AudioTrack.write RETURNED.
+        // A blocking write returns only once the track has taken the bytes, so this instant is the
+        // submit-side end of the hand-off, strictly before the presentation clock reports sound.
+        val fired = mutableListOf<Long>()
+        player.writeToSink = { _, _, _, count -> count }
+        player.addFirstWriteListener { nanoTime -> fired += nanoTime }
+        val before = System.nanoTime()
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.submitFrame(byteArrayOf(0x02, 0x03))
+        player.play()
+        val after = System.nanoTime()
+
+        assertEquals("exactly one first-write per playback run, not one per frame", 1, fired.size)
+        assertTrue(
+            "the instant is on the System.nanoTime base the timing table uses, taken when the write returned",
+            fired.single() in before..after,
+        )
+    }
+
+    @Test
+    fun `the first writes of a run are timed with their size, and later fast writes are not`() {
+        // A blocking write that sits on a track the platform stopped mixing holds the receive path
+        // and no log line says so. The first few writes of each run are reported with their byte
+        // count and how long the call took, so the first frame's size and a stall both show.
+        val samples = mutableListOf<CloudAudioPlayer.WriteSample>()
+        player.writeToSink = { _, _, _, count -> count }
+        player.writeSampleListener = { samples += it }
+
+        player.submitFrame(ByteArray(480))
+        player.play()
+        repeat(9) { player.submitFrame(ByteArray(480)) }
+
+        assertEquals(
+            "only the first writes are sampled, in order, 1-based",
+            (1..CloudAudioPlayer.TIMED_WRITES_PER_RUN).toList(),
+            samples.map { it.index },
+        )
+        assertEquals("the first write carries the first frame's byte count", 480, samples.first().bytes)
+        assertTrue("a returned write has a non-negative duration", samples.all { it.durationMs >= 0 })
+    }
+
+    @Test
+    fun `a slow write is reported even after the first few`() {
+        val samples = mutableListOf<CloudAudioPlayer.WriteSample>()
+        var calls = 0
+        player.writeToSink = { _, _, _, count ->
+            if (++calls == CloudAudioPlayer.TIMED_WRITES_PER_RUN + 2) Thread.sleep(CloudAudioPlayer.SLOW_WRITE_MS + 50)
+            count
+        }
+        player.writeSampleListener = { samples += it }
+
+        player.submitFrame(ByteArray(480))
+        player.play()
+        repeat(CloudAudioPlayer.TIMED_WRITES_PER_RUN + 3) { player.submitFrame(ByteArray(480)) }
+
+        val slow = samples.filter { it.index > CloudAudioPlayer.TIMED_WRITES_PER_RUN }
+        assertEquals("exactly the one slow write past the first few is reported", 1, slow.size)
+        assertTrue("with a duration at or above the threshold", slow.single().durationMs >= CloudAudioPlayer.SLOW_WRITE_MS)
+    }
+
+    @Test
+    fun `every run on a reused player reports its own first write, including a one-frame answer`() {
+        // The player is a singleton reused across turns. The latch must be cleared when a run
+        // BEGINS, before any write: clearing it later (after play() has already drained the first
+        // frame) left it set from the previous run, so the real first write went unreported.
+        val fired = mutableListOf<Long>()
+        player.writeToSink = { _, _, _, count -> count }
+        player.addFirstWriteListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        // A later frame of the same run: with the latch re-armed after play() drained the first
+        // frame, this second write was reported as if it were the run's first.
+        player.submitFrame(byteArrayOf(0x04, 0x05))
+        assertEquals("the first run reports its first write once", 1, fired.size)
+        player.stop()
+
+        player.submitFrame(byteArrayOf(0x02, 0x03))
+        player.play()
+        assertEquals("a second, one-frame run on the same player reports its own", 2, fired.size)
+    }
+
+    @Test
+    fun `a refused write is not reported as the first write`() {
+        val fired = mutableListOf<Long>()
+        player.writeToSink = { _, _, _, _ -> 0 }
+        player.addFirstWriteListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+
+        assertTrue("a write the sink refused delivered nothing, so it marks nothing", fired.isEmpty())
+    }
+
+    @Test
+    @Config(shadows = [TimestampedAudioTrackShadow::class])
+    fun `without any test seam the platform getTimestamp fallback reports first audible`() {
+        // Production never sets any test seam: first audible must come from the track's own
+        // getTimestamp, exactly as renderedFrame reads it. Robolectric's stock ShadowAudioTrack
+        // cannot report a timestamp, so a per-test shadow arms one on the REAL track the player
+        // builds — no app-code test hook involved.
+        TimestampedAudioTrackShadow.armed = true
+        TimestampedAudioTrackShadow.nanoTime = 99_000_000L
+        TimestampedAudioTrackShadow.framePosition = 512L
+
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        player.stop()
+
+        assertEquals("first audible fires via the platform fallback", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
+    fun `an answer that stops inside the first heartbeat interval still reports first audible, exactly once`() {
+        // The heartbeat's first tick lands a full interval after play(); an answer that finishes
+        // before it cancels the heartbeat without a tick. Sampling must happen on the way out
+        // (and at heartbeat start), or a sub-second answer never reports first audible at all.
+        player.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                this.nanoTime = 99_000_000L
+                this.framePosition = 512L
+            }
+        }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        // Stop BEFORE the first heartbeat tick could run: the answer ended sub-second.
+        player.stop()
+
+        assertEquals("exactly one first-audible for a sub-second answer", 1, fired.size)
+        assertEquals("the reported instant is the track's presentation nanoTime", 99_000_000L, fired.single())
+    }
+
+    @Test
+    fun `a framePosition of zero is not presentation - first audible stays unfired`() {
+        // An underrun or a track that has not yet presented anything reports framePosition 0.
+        // That is SUBMISSION with no evidence, exactly the instant this fix refuses to claim.
+        var ts = android.media.AudioTimestamp().apply {
+            this.nanoTime = 99_000_000L
+            this.framePosition = 0L
+        }
+        player.readAudioTimestamp = { ts }
+        val fired = mutableListOf<Long>()
+        player.addFirstAudibleListener { nanoTime -> fired += nanoTime }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        Thread.sleep(2_500)
+
+        assertTrue("no presentation evidence means no first-audible claim", fired.isEmpty())
+    }
+
+    @Test
+    fun `first audible resets per playback run`() {
+        // A reused player must be able to report first audible again for the NEXT answer: the
+        // once-only latch is per run, not per player lifetime.
+        var framePosition = 512L
+        player.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                this.nanoTime = 1_000L
+                this.framePosition = framePosition
+            }
+        }
+        var firings = 0
+        player.addFirstAudibleListener { _ -> firings += 1 }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        Thread.sleep(2_500)
+        player.stop()
+        player.play()
+        Thread.sleep(2_500)
+
+        assertEquals("the second run presents again, so the latch must have reset", 2, firings)
     }
 
     @Test
@@ -236,6 +469,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // Foreign producer audio in the ring: stop() must leave it untouched.
         recorder.write(
@@ -276,6 +510,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // An episode contributes BEFORE and AFTER the answer: both must survive the answer's stop.
         val episodeEarly = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 111.0 * it / 16_000)).toFloat() }
@@ -358,6 +593,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // Exercise the production path: play() starts the audible heartbeat, which is what publishes
         // this stream's routed output. The player claims the slot on construction.
@@ -387,6 +623,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
         wired.play()
@@ -420,6 +657,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@48k")
 
@@ -470,6 +708,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@24k")
 
@@ -511,6 +750,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@48k")
 
@@ -559,6 +799,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         val chunk = byteArrayOf(0x00, 0x01, 0x02, 0x03)
 
@@ -591,6 +832,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         val chunk = byteArrayOf(0x00, 0x01, 0x02, 0x03)
 
@@ -621,6 +863,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.onWriteFailure = { failures.incrementAndGet() }
         val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
@@ -665,6 +908,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.onWriteFailure = { failures.incrementAndGet() }
         val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
@@ -688,6 +932,67 @@ class CloudAudioPlayerTest {
             acceptedAfterFailure,
         )
         assertEquals("and the failure is still the single reported one", 1, failures.get())
+        wired.release()
+    }
+
+    @Test
+    fun `frames arriving after a write failure are refused, not buffered for an answer that is over`() {
+        // The failed answer can never be written again -- the drain returns on the flag -- so frames
+        // submitted after the failure must not accumulate behind it. Buffering them would hold up to
+        // another full queue of audio that has no writer. Refuse at submission instead. They are
+        // refused silently, under the one failure this answer already reported: a second report
+        // would attribute the same dead answer to the queue cap.
+        val failures = java.util.concurrent.atomic.AtomicInteger(0)
+        // Counts what reaches the writer. Synchronous, so everything it is asked to do has happened
+        // by the time submitFrame returns. The count is read as a DELTA from after the failure: the
+        // runs before it legitimately submit drains, and only what the failed answer adds is at issue.
+        val submissions = java.util.concurrent.atomic.AtomicInteger(0)
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            writerExecutor = java.util.concurrent.Executor { task ->
+                submissions.incrementAndGet()
+                task.run()
+            },
+            maxQueuedBytes = 8,
+        )
+        wired.onWriteFailure = { failures.incrementAndGet() }
+        val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
+
+        var writes = 0
+        wired.writeToSink = { _, _, _, count -> if (writes++ == 0) count else -1 }
+        wired.submitFrame(frame)
+        wired.submitFrame(frame)
+        wired.play()
+        assertEquals("the failed write reported once", 1, failures.get())
+        val submissionsAtFailure = submissions.get()
+
+        // The sink keeps submitting frames for the failed answer. The refusal must be made at
+        // SUBMISSION, not by queueing the frame and declining to drain: the writer only requests a
+        // drain when the queue grows while playing, so an accepted frame left behind would never be
+        // written either, and only the queue (or the absence of a submission) tells the two apart.
+        // The cap alone would not: one 4-byte frame is under it, but the queue only overflows on the
+        // third, so a buffering implementation would have accepted the first two.
+        repeat(4) { wired.submitFrame(frame) }
+        assertEquals("no frame was queued, so the writer was asked to do nothing", 0, submissions.get() - submissionsAtFailure)
+        assertEquals(
+            "post-failure frames are refused silently: no second failure report from buffering them",
+            1,
+            failures.get(),
+        )
+        wired.stop()
+
+        // The refusal belongs to the failed run only: the next answer queues and plays normally.
+        var acceptedBytes = 0
+        wired.writeToSink = { _, _, _, count ->
+            acceptedBytes += count
+            count
+        }
+        wired.submitFrame(frame)
+        wired.submitFrame(frame)
+        wired.play()
+        assertEquals("the next answer still receives its frames", 2 * frame.size, acceptedBytes)
+        assertEquals("and reports no failure of its own", 1, failures.get())
         wired.release()
     }
 
@@ -762,6 +1067,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // 100 samples submitted; the converter's length bound is what limits what is recorded.
         val bytes = ByteArray(200) { 0x10 }
@@ -782,6 +1088,7 @@ class CloudAudioPlayerTest {
         val player = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         var reported = -1L
         player.onWriteFailure = { frames -> reported = frames }
@@ -802,6 +1109,7 @@ class CloudAudioPlayerTest {
         val player = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         ).apply {
             onWriteFailure = { frames -> reported.set(frames) }
             var accepted = 0
@@ -832,6 +1140,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         ).apply {
             // Deliberately irregular, and in WHOLE samples: a real sink returns a byte count that
             // pairs up, so an odd take would test a stimulus the production path cannot produce.
@@ -895,6 +1204,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // Claimed when the stream actually begins sounding, not when the object is built: the claim
         // belongs to a playback run, and a player that has never played is not producing a route for
@@ -922,11 +1232,13 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         val second = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16000,
             routedOutputObserver = observer,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         try {
             // Both are playing, so both hold claims; the first then retires. The successor keeps the
@@ -962,6 +1274,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
 
         try {
@@ -1017,6 +1330,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         // A 48 kHz codec, as the existing recorder cases use: it drives the resampler, which is the
         // path that reaches the recorder in this harness. The translation under test is independent of
@@ -1083,6 +1397,7 @@ class CloudAudioPlayerTest {
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
             playbackBufferRecorder = recorder,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@48k")
         // Drive the sink from the test so the byte count the track reports is deterministic. Without
@@ -1145,6 +1460,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@16k")
         // The head tracks what was submitted: it reads the player's own submitted-frame count, so
@@ -1172,6 +1488,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@16k")
         wired.readPlaybackHeadFrames = { _ -> 0L }
@@ -1197,6 +1514,7 @@ class CloudAudioPlayerTest {
         val wired = CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         )
         wired.setCodec("pcm@16k")
         wired.readPlaybackHeadFrames = { _ -> null }

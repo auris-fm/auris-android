@@ -31,6 +31,9 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         writer.name("request_id").value(value.requestId)
         writer.name("request").value(value.request)
         value.sourceLanguage?.let { writer.name("source_language").value(it) }
+        // Omitted when unknown, like the hint above: an empty tag would claim a language the app does
+        // not have, and the server accepts the frame without it.
+        value.uiLanguage?.let { writer.name("ui_language").value(it) }
         // Write context as a raw nested JSON object (not an escaped string).
         // Serialize context with its own adapter and emit the resulting JSON
         // object verbatim. The context adapter uses snake_case field names

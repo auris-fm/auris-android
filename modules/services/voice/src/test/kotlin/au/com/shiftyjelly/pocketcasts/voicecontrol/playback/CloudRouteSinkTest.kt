@@ -26,6 +26,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -56,6 +57,102 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `a prepared turn carries the UI locale's primary subtag, so the server can answer in it`() = runTest {
+        // M6: the server picks the reply language before inference and the app's UI locale is its
+        // fall-through when the spoken language is absent or unsupported. The subtag is what the
+        // server's rule decides on, so a regional locale (`zh-CN` -- what a device actually reports)
+        // travels as `zh`, not as a region the server would have to parse back off.
+        val deps = TestDeps()
+        val sink = deps.sink(locale = java.util.Locale.forLanguageTag("zh-CN"))
+        deps.conversationAdmission.beginOrigin(1)
+
+        val prepared = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            capturedOrigin = 1,
+            logicalRequestId = "ui-language-turn",
+        )!!
+
+        assertEquals("the screen's language, primary subtag only", "zh", prepared.uiLanguage)
+    }
+
+    @Test
+    fun `a turn routed through the entry point carries the UI language too`() = runTest {
+        // The entry points BUILD their own turn instead of dispatching a prepared one, so they are a
+        // separate place the field has to be set. Missing it there would not fail any other test:
+        // every existing caller goes through prepareTurn, so the gap would only appear the first
+        // time something used routeToCloud directly -- and the answer would silently be English.
+        val deps = TestDeps()
+        val sink = deps.sink(locale = java.util.Locale.forLanguageTag("zh-CN"))
+        deps.conversationAdmission.beginOrigin(1)
+
+        sink.routeToCloud("question", playbackContext, admitted = testWireId)
+
+        assertEquals(
+            "the screen's language, primary subtag only",
+            "zh",
+            deps.routeTurns.single().uiLanguage,
+        )
+    }
+
+    @Test
+    fun `a retry keeps the language the request was captured under`() = runTest {
+        // The language is a fact of the REQUEST: the user is being answered about an utterance made
+        // while the app was in one language. A retry must not re-read the locale, or switching the
+        // app's language between the two dispatches would have one request answered in two
+        // languages. Retention is what carries it, so THE LOCALE HAS TO CHANGE HERE for the test to
+        // be able to fail: with one fixed locale, re-reading produces the same answer either way.
+        val deps = TestDeps()
+        deps.conversationAdmission.beginOrigin(1)
+        var locale = java.util.Locale.forLanguageTag("de-DE")
+        val sink = deps.sink(localeProvider = { locale })
+
+        val first = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            capturedOrigin = 1,
+            logicalRequestId = "retry-ui-language",
+        )!!
+        locale = java.util.Locale.forLanguageTag("fr-FR")
+        val retryPrepared = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            capturedOrigin = 1,
+            logicalRequestId = "retry-ui-language",
+            isRetry = true,
+        )!!
+
+        assertEquals("de", first.uiLanguage)
+        assertEquals("the retry answers in the language the request was captured under", "de", retryPrepared.uiLanguage)
+        org.junit.Assert.assertSame("the retry reuses the retained turn rather than preparing a new one", first, retryPrepared)
+    }
+
+    @Test
+    fun `a dispatch the sink refuses before routing leaves no live timing entry`() = runTest {
+        // A turn whose retained identity was retired (forgetRetained) is refused at claimDispatch,
+        // BEFORE any route opens — so routeTurn's end-of-turn finish never runs. The sink must
+        // finish the record itself, or the registry keeps one live entry per refused turn.
+        val deps = TestDeps()
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        val prepared = sink.prepareTurn("question", playbackContext, capturedOrigin = 1, logicalRequestId = "one-utterance")!!
+        val requestId = prepared.requestId
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
+            requestId,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        )
+        deps.conversationAdmission.forgetRetained("one-utterance")
+
+        val result = sink.dispatchPrepared(prepared)
+
+        assertEquals(VoiceResponse.Silent, result.feedback)
+        assertFalse(
+            "a turn refused before routing must not keep a live timing entry",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
+        )
+    }
 
     @Test
     fun `concurrent callbacks prepare exactly one retained wire identity`() = runTest {
@@ -696,18 +793,25 @@ class CloudRouteSinkTest {
                 "(calls=${deps.playback.calls} recorded=${state.snapshot("B").recentReferencePositions})",
             !deps.playback.calls.any { it.startsWith("seekTo:") },
         )
+        // THE HISTORY IS THE OBSERVATION, not the call list: a refusal that reached no player must
+        // leave both episodes' stored positions exactly as they were.
+        assertTrue(
+            "and it must not record history against any episode " +
+                "(A=${state.snapshot("A").recentReferencePositions} " +
+                "B=${state.snapshot("B").recentReferencePositions})",
+            state.snapshot("A").recentReferencePositions.isEmpty() &&
+                state.snapshot("B").recentReferencePositions.isEmpty(),
+        )
     }
 
     @Test
-    fun `a REFUSED reference seek does not record history, and a refused quote does not either`() = runTest {
-        // The reference branch is where measured this, and it is a different branch from
-        // `position_seconds`: that one routes to the plain seek, this one through the fingerprint
-        // mapping. A case for one cannot see a defect in the other -- which is how my first version of
-        // this control passed while the reference branch still recorded history on a refusal.
+    fun `a REFUSED reference seek does not record history`() = runTest {
+        // The reference branch is a different branch from `position_seconds`: that one routes to the
+        // plain seek, this one through the fingerprint mapping. A case for one cannot see a defect in
+        // the other, so each branch needs its own refusal control.
         //
-        // Both reference verbs are covered because both recorded first: `seek_to` with
-        // `reference_position_ms`, and `play_quote`.
-        listOf("seek_to" to "reference_position_ms", "play_quote" to "reference_position_ms").forEach { (action, field) ->
+        // `seek_to` is the only reference verb.
+        listOf("seek_to" to "reference_position_ms").forEach { (action, field) ->
             val state = CloudPlaybackContextState()
             val deps = TestDeps(
                 cloudPlaybackContextState = state,
@@ -733,8 +837,7 @@ class CloudRouteSinkTest {
 
             // THE HISTORY IS THE OBSERVATION, not the call list. A refused operation records nothing,
             // so the episode's saved positions must be exactly what they were -- an assertion about
-            // `calls` alone passes whether or not history was corrupted, which is how my first version
-            // of this control survived its mutation.
+            // `calls` alone passes whether or not history was corrupted.
             assertTrue(
                 "$action: a refused reference seek must not reach the player " +
                     "(calls=${deps.playback.calls})",
@@ -783,31 +886,35 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a quote resume does not resume a replacement episode`() = runTest {
-        // The quote's own resume is bound to the recording the quote came from.
+    fun `a resume does not resume a replacement episode`() = runTest {
+        // A resume is a player-state mutation, so it carries the turn's episode binding: resuming a
+        // recording the user moved away from would start audio under a turn about something else.
         val deps = TestDeps(
             episodeId = "A",
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 45_000_000L),
+                    action = "resume",
+                    params = emptyMap(),
                 ),
                 CloudRouteEvent.Done(1, 0),
             ),
         )
+        // The user changes episode MID-TURN: the provider reports B while the turn is about A. The
+        // fake's resume accepts whatever it is handed, so the sink's own binding is what must refuse.
+        deps.selectEpisodeForTest("B")
         deps.playback.currentEpisodeIdForTest = "B"
         val sink = deps.sink()
 
         sink.routeToCloud(
-            "play the quote",
+            "about episode A",
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
 
         assertTrue(
-            "a quote whose episode was replaced must not seek or resume (calls=${deps.playback.calls})",
-            !deps.playback.calls.any { it.startsWith("seekTo:") || it == "resume" },
+            "a resume whose episode was replaced must not reach the player (calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it == "resume" },
         )
     }
 
@@ -923,11 +1030,11 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `an UNKNOWN outcome keeps the pre-action provenance while recording NO target`() = runTest {
-        // "Preserve the owner's known value; Unknown concerns execution, not whether its
-        // pre-action snapshot existed." The TARGET is suppressed because nothing established the player
-        // reached it; the PRE-ACTION position is kept because the owner captured it before the attempt.
-        // An early return on a null target would discard BOTH, which is the defect this pins.
+    fun `an UNKNOWN outcome records no history`() = runTest {
+        // An UNKNOWN outcome records nothing: nothing established that the player reached the target,
+        // and a previous position with no destination describes a seek that has no history. The
+        // observation is the stored positions, so this fails if any record is written -- including one
+        // carrying only the pre-action provenance.
         val state = CloudPlaybackContextState()
         val deps = TestDeps(
             cloudPlaybackContextState = state,
@@ -935,7 +1042,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -946,7 +1053,7 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
 
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -956,6 +1063,49 @@ class CloudRouteSinkTest {
             "an unknown outcome must record NO target, because nothing observed it being reached " +
                 "(recorded=${recorded.recentReferencePositions})",
             recorded.recentReferencePositions.isEmpty(),
+        )
+        assertNull(
+            "and no pre-action provenance either (previous=${recorded.previousReferencePositionMs})",
+            recorded.previousReferencePositionMs,
+        )
+    }
+
+    @Test
+    fun `an UNKNOWN plain seek records no history either`() = runTest {
+        // The plain branch decides its own history, separately from the reference branch: a target in
+        // seconds is converted here rather than mapped through the fingerprint. An unobserved attempt
+        // records nothing on this path too, including the pre-action provenance alone.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            episodeId = "episode-id",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 100),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // UNKNOWN, carrying a KNOWN pre-action position.
+        deps.playback.seekOutcomeForTest = EpisodeOperationResult.Unknown("episode-id", 60_000L)
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "go to 100 seconds",
+            PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+            admitted = testWireId,
+        ).feedback
+
+        val recorded = state.snapshot("episode-id")
+        assertTrue(
+            "an unknown plain seek must record NO target (recorded=${recorded.recentReferencePositions})",
+            recorded.recentReferencePositions.isEmpty(),
+        )
+        assertNull(
+            "and no pre-action provenance either (previous=${recorded.previousReferencePositionMs})",
+            recorded.previousReferencePositionMs,
         )
     }
 
@@ -1016,7 +1166,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1026,7 +1176,7 @@ class CloudRouteSinkTest {
 
         // A turn with NO episode: an episode-specific reference action has nothing to act on.
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = null, clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -1642,7 +1792,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1652,7 +1802,7 @@ class CloudRouteSinkTest {
         deps.playback.preActionPositionMsForTest = 60_000L
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         val recorded = state.snapshot("episode-id")
         // 60_000 playback maps to 45_000 reference. The provider's 999_000 would map far away, so a live
@@ -1665,47 +1815,9 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `composite steps stay unknown when one step was not established`() {
-        // THE THREE INPUTS THAT DECIDE IT are enumerated, so the case cannot pass on a rule that only
-        // happens to agree for one of them. A confirmed-later-step rule would report the first two as
-        // Confirmed.
-        assertEquals(
-            "an unknown step leaves the composite unknown however well the later step went",
-            CloudRouteSink.Companion.ActionOutcome.Unknown,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Unknown,
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            ),
-        )
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.Unknown,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.Unknown,
-            ),
-        )
-        // The composite is confirmed only when EVERY required step was.
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            ),
-        )
-        // A step that did nothing cannot make the composite confirmed.
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.None,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.None,
-            ),
-        )
-    }
-
-    @Test
     fun `turn aggregation still promotes a confirmed action past an unknown sibling`() {
-        // THE OTHER CONTRACT, asserted here so the two rules cannot silently become one. Independent
-        // actions do not depend on each other, so an unknown sibling must not erase a confirmed one.
+        // Independent actions do not depend on each other, so an unknown sibling must not erase a
+        // confirmed one.
         assertEquals(
             CloudRouteSink.Companion.ActionOutcome.Confirmed,
             CloudRouteSink.mergeActionOutcome(
@@ -1716,7 +1828,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `play_quote records previous position on the reference timeline`() = runTest {
+    fun `a reference seek records the previous position on the reference timeline`() = runTest {
         val fingerprint = mock<FingerprintTimingManager>()
         whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
         whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
@@ -1728,7 +1840,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1736,9 +1848,9 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
-        // preQuote is playback-timeline; the context state must carry the
+        // The previous position is playback-timeline; the context state must carry the
         // reference-timeline conversion (45s reference == 60s playback here).
         assertEquals(
             "episode-id",
@@ -1749,9 +1861,7 @@ class CloudRouteSinkTest {
             45_000L,
             state.snapshot(playbackContext.episodeId).previousReferencePositionMs,
         )
-        // stop_quote recovery still uses the playback-timeline position.
         assertTrue(deps.playback.calls.contains("seekTo:45"))
-        assertTrue(deps.playback.calls.contains("resume"))
     }
 
     @Test
@@ -1774,7 +1884,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1782,7 +1892,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         // Turn 2+ regression guard: null must clear, not retain turn 1's value.
         assertEquals(null, state.snapshot("episode-id").previousReferencePositionMs)
@@ -2055,14 +2165,14 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `play_quote captures position seeks and resumes`() = runTest {
+    fun `a reference seek maps the reference timeline onto the sink timeline`() = runTest {
         val deps = TestDeps(
             clientPositionMs = 60_000L,
             routeInvoker = withHold(
                 flowOf(
                     CloudRouteEvent.Action(
                         tool = "playback",
-                        action = "play_quote",
+                        action = "seek_to",
                         params = mapOf("reference_position_ms" to 900_000L),
                     ),
                     CloudRouteEvent.Done(1, 0),
@@ -2071,35 +2181,16 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play the reference", playbackContext, admitted = testWireId).feedback
 
-        assertEquals(
-            // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
-            // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
-            listOf("pause", "seekTo:945", "resume"),
-            deps.playback.calls,
+        // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
+        // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
+        // Asserted by containment rather than the whole list, so the test pins the mapping it is
+        // about (the seekTo argument) and not the surrounding call sequence.
+        assertTrue(
+            "expected a mapped seek of 945s, got ${deps.playback.calls}",
+            deps.playback.calls.contains("seekTo:945"),
         )
-    }
-
-    @Test
-    fun `stop_quote restores pre-quote playback position`() = runTest {
-        val deps = TestDeps(
-            clientPositionMs = 60_000L,
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 900_000L),
-                ),
-                CloudRouteEvent.Action("playback", "stop_quote", emptyMap()),
-                CloudRouteEvent.Done(1, 0),
-            ),
-        )
-        val sink = deps.sink()
-
-        sink.routeToCloud("quote", playbackContext, admitted = testWireId).feedback
-
-        assertTrue(deps.playback.calls.contains("seekTo:60"))
     }
 
     @Test
@@ -2313,6 +2404,69 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a superseded turn publishes its own timing table and leaves the successor's alone`() = runTest(UnconfinedTestDispatcher()) {
+        // THE BLOCKER THE BOT FOUND: the finish path read the shared activeTimingRequestId, so a
+        // turn superseded mid-flight finished and published its SUCCESSOR's record under the
+        // successor's id, losing both tables. Each turn must publish its own table under its own
+        // request id, whatever a successor did to the shared field meanwhile.
+        val aOnWire = CompletableDeferred<Unit>()
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        val idA = "wire-superseded"
+        val idB = "wire-successor"
+        for (id in listOf(idA, idB)) {
+            val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
+            record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
+        }
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    // A is live on the wire when B arrives, and is superseded mid-flight — the
+                    // interleaving that made the finish path read the successor's state off the
+                    // shared field instead of the turn's own id.
+                    flow {
+                        aOnWire.complete(Unit)
+                        awaitCancellation()
+                    }
+                } else {
+                    flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(0, 0))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { sink.routeToCloud("first", playbackContext, admitted = idA).feedback }
+        aOnWire.await()
+        sink.routeToCloud("second", playbackContext, admitted = idB).feedback
+        // A's publish runs in its non-cancellable cleanup; wait for the job, but never hang the
+        // suite on it — a timeout fails the assertions below with what did publish.
+        withTimeoutOrNull(5_000) { first.join() }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = previousSink
+        for (id in listOf(idA, idB)) {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(id)
+        }
+
+        // EACH TURN PUBLISHES EXACTLY ITS OWN TABLE, under its own request id: the old
+        // finish path published the superseded turn's marks under the successor's id (or
+        // lost them to a null), so either A's block is missing or B's is duplicated.
+        assertEquals(
+            "one published table per turn",
+            setOf(idA, idB),
+            published.mapNotNull { Regex("request_id=(\\S+)").find(it)?.groupValues?.get(1) }.toSet(),
+        )
+        assertTrue(
+            "the superseded turn's table names its own cancellation",
+            published.any { it.contains("request_id=$idA") && it.contains("outcome=cancelled") },
+        )
+        assertTrue(
+            "the successor's table names its own commit",
+            published.any { it.contains("request_id=$idB") && it.contains("outcome=committed") },
+        )
+    }
+
+    @Test
     fun `failed mixed stream keeps executed actions and reports the client error`() = runTest {
         val deps = TestDeps(
             routeInvoker = withHold(
@@ -2401,8 +2555,8 @@ class CloudRouteSinkTest {
                 flowOf(
                     CloudRouteEvent.Action(
                         tool = "playback",
-                        action = "play_quote",
-                        params = mapOf("reference_position_ms" to 45_000_000L),
+                        action = "resume",
+                        params = emptyMap(),
                     ),
                     CloudRouteEvent.Done(1, 0),
                 ),
@@ -2411,7 +2565,7 @@ class CloudRouteSinkTest {
         deps.playback.resumeGate = gate
         val sink = deps.sink()
 
-        // Turn A: auto-pause, then its play_quote action resumes — suspending
+        // Turn A: auto-pause, then its resume action resumes — suspending
         // inside the player while A still owns it.
         val first = launch { sink.routeToCloud("first", playbackContext, admitted = testWireId).feedback }
         deps.playback.resumeStarted.await()
@@ -2629,6 +2783,58 @@ class CloudRouteSinkTest {
         // Deliberately changed: this is the fallback the owner asked for — the client's own
         // words for a code it doesn't know, rather than a tone the user has to interpret.
         assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+    }
+
+    @Test
+    fun `an expired conversation is refused once and the next request starts a new one`() = runTest {
+        // The worker keeps a conversation ten minutes from its last turn and refuses a resume of one it
+        // no longer holds. Nothing cleared the client's handle, so every later turn in the window
+        // resumed the same dead id and failed the same way until a wake began a new conversation.
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.conversationMode == CloudConversationMode.Resume) {
+                    flowOf(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                } else {
+                    flowOf(CloudRouteEvent.Done(0, 0))
+                }
+            },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        sink.routeToCloud("first", playbackContext, admitted = testWireId, capturedOrigin = 1, isWakeOriginated = true)
+        val created = deps.routeTurns.last()
+        assertEquals(CloudConversationMode.Create, created.conversationMode)
+
+        val refused = sink.routeToCloud("second", playbackContext, admitted = testWireId, isLiveGraceTurn = true, capturedOrigin = 1)
+        assertEquals(CloudConversationMode.Resume, deps.routeTurns.last().conversationMode)
+        assertEquals(created.conversationId, deps.routeTurns.last().conversationId)
+        assertEquals(
+            "the refusal is spoken with the code's own line, not the generic one",
+            VoiceResponse.Spoken("That conversation has ended."),
+            refused.feedback,
+        )
+        assertEquals("the refused request is never resubmitted", 2, deps.routeTurns.size)
+
+        sink.routeToCloud("third", playbackContext, admitted = testWireId, isLiveGraceTurn = true, capturedOrigin = 1)
+        val next = deps.routeTurns.last()
+        assertEquals("the next request begins a new conversation", CloudConversationMode.Create, next.conversationMode)
+        assertTrue("under a new id", next.conversationId != created.conversationId)
+    }
+
+    @Test
+    fun `a late refusal for an old conversation does not clear a newer one`() {
+        // Forgetting is keyed by the id that was refused: a refusal that arrives after a wake has begun a
+        // new conversation is about the old one and must leave the new handle alone.
+        val admission = CloudConversationAdmission()
+        admission.beginOrigin(1)
+        val old = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = false)!!
+        val replacement = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = true)!!
+
+        admission.forgetConversation(old.conversationId)
+
+        val next = admission.prepare(origin = 1, isLiveGraceTurn = true, isWakeOriginated = false)!!
+        assertEquals(CloudConversationMode.Resume, next.mode)
+        assertEquals(replacement.conversationId, next.conversationId)
     }
 
     @Test
@@ -3187,6 +3393,7 @@ class CloudRouteSinkTest {
                 "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
                 "cloud_error_" + CloudRouteErrorCodes.PROVIDER_ERROR to "The assistant couldn't finish that request.",
                 "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
+                "cloud_error_conversation_expired" to "That conversation has ended.",
                 "cloud_error_budget_exceeded" to "The assistant has reached its limit right now.",
                 "cloud_error_" + CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE to "I can't reach the podcast evidence right now.",
             ),
@@ -3228,7 +3435,11 @@ class CloudRouteSinkTest {
         /** The admission component the sink uses, so a case can declare its live window. */
         val conversationAdmission = CloudConversationAdmission()
 
-        fun sink(): CloudRouteSink = CloudRouteSink(
+        /** @param locale the app's UI locale AT PREPARE TIME; a case that cares overrides it. */
+        fun sink(locale: java.util.Locale = this.locale): CloudRouteSink = sink(localeProvider = { locale })
+
+        /** For a case whose locale must CHANGE between two prepares. */
+        fun sink(localeProvider: () -> java.util.Locale): CloudRouteSink = CloudRouteSink(
             resolveBaseUrl = { baseUrl },
             tokenProvider = object : CloudTokenProviding {
                 // Mirrors what the legacy identity path returned, so the suite keeps asserting the
@@ -3242,7 +3453,7 @@ class CloudRouteSinkTest {
             cloudPlaybackContextState = cloudPlaybackContextState,
             analytics = analytics,
             templateResolver = templateResolver,
-            currentLocale = { locale },
+            currentLocale = localeProvider,
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
@@ -3264,6 +3475,7 @@ class CloudRouteSinkTest {
                                 CloudRouteTurn(
                                     request = it.request,
                                     sourceLanguage = it.sourceLanguage,
+                                    uiLanguage = it.uiLanguage,
                                     context = it.context,
                                     requestId = it.requestId,
                                     capabilities = it.capabilities,
@@ -3416,6 +3628,7 @@ class CloudRouteSinkTest {
         val player = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             sampleRateHz = 16_000,
+            writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
         ).apply {
             var accepted = 0
             writeToSink = { _, _, _, count -> if (accepted++ < 1) count else -1 }
@@ -4143,6 +4356,66 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a speech outage is named in the persisted terminal trace, not bounded to unknown`() = kotlinx.coroutines.runBlocking {
+        // The persisted lifecycle log is what support reads. A second allowlist bounds the terminal's
+        // error code, and a code missing from it lands as "unknown" — so recognising the code for the
+        // Timber line alone still left the artifact that matters unable to name a speech outage.
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val wireClient = CapturingWebSocketClient()
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+            graceSignal.onWakeWordDetected()
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+                gracePeriodSignal = graceSignal,
+                transportFactory = { _, _, observer ->
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                        "https://example.invalid",
+                        wireClient,
+                        observer,
+                    )
+                },
+            )
+            val driver = Thread {
+                try {
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                    wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                    while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    wireClient.listener!!.onMessage(
+                        wireClient.socket,
+                        """{"type":"error","code":"speech_unavailable","message":""}""",
+                    )
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+            val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+            val turn = turnScope.launch {
+                runCatching {
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        deps.sink().routeToCloud("question", playbackContext, admitted = testWireId)
+                    }
+                }
+            }
+            driver.start()
+            turn.join()
+            turnScope.cancel()
+            driver.join()
+
+            val line = awaitCaptureLine(capture, "reason=TurnTerminalReceived", testWireId)
+            assertTrue(
+                "the persisted terminal must name the speech outage, got: $line",
+                line.contains("speech_unavailable"),
+            )
+            assertFalse("bounded to unknown hides the cause: $line", line.contains("error_code=unknown"))
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
     fun `a TTS failure mid-render releases the transferred hold exactly once`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {
@@ -4624,7 +4897,7 @@ class CloudRouteSinkTest {
         override fun onTerminalReceived(requestId: String, origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin, errorCode: String?) {
             events += "terminal:${origin.name}:$errorCode"
         }
-        override fun onConnectionFailed(requestId: String) {
+        override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
             events += "connection_failed"
         }
     }
@@ -4648,9 +4921,9 @@ class CloudRouteSinkTest {
                         assertEquals(testWireId, rid)
                         // Auth resolved, then the handshake fails — never Connected.
                         observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
-                        observer?.onConnectionFailed(rid)
+                        observer?.onConnectionFailed(rid, stillNeeded = true)
                         recording.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
-                        recording.onConnectionFailed(rid)
+                        recording.onConnectionFailed(rid, stillNeeded = true)
                         emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
                     }
                 }
@@ -4702,6 +4975,39 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `the persisted terminal diagnostic records conversation_expired instead of unknown`() = kotlinx.coroutines.runBlocking {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(
+                    mapOf(
+                        "cloud_error_conversation_expired" to "That conversation has ended.",
+                        "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                        "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                        "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                    ),
+                ),
+                transportFactory = { _, _, observer ->
+                    object : CloudTurnTransport {
+                        override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                            val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                            observer?.onTerminalReceived(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR, "conversation_expired")
+                            emit(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                        }
+                    }
+                },
+            )
+            deps.sink().routeToCloud("question", playbackContext, admitted = testWireId)
+
+            val line = awaitCaptureLine(capture, "reason=TurnTerminalReceived", testWireId)
+            assertTrue("the diagnostic must carry the code, got: $line", line.contains("conversation_expired"))
+            assertFalse("the code must not be bucketed as unknown, got: $line", line.contains("unknown"))
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
     fun `server refusal before render carries limit_exceeded terminal and localized feedback`() = runTest {
         val recording = RecordingObserver()
         val deps = TestDeps(
@@ -4747,5 +5053,230 @@ class CloudRouteSinkTest {
             "You have reached your Auris free daily limit. Please try again tomorrow.",
             (feedback as VoiceResponse.Spoken).text,
         )
+    }
+
+    @Test
+    fun `the send attempt marks the live turn's timing table with the cloud request stage`() = runTest {
+        val admittedId = testWireId
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        // Acoustic end on the capture clock's monotonic ns base: 1s.
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        // THE REAL BRIDGE: the sink's own observer sees the send attempt, as the
+                        // transport invokes it on the wire.
+                        observer?.onSendAttempted(rid)
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        // The registry route lands in the live record: without the sink's observer mark the stage
+        // is absent, and the acoustic-end baseline makes its absence (not a null lag) the failure.
+        assertNotNull(
+            "cloud request stage must be marked through the registry",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.CloudRequestSent),
+        )
+    }
+
+    @Test
+    fun `the first audible from the player marks the active turn's timing table`() = runTest {
+        val admittedId = testWireId
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        // Acoustic end on the capture clock's monotonic ns base: 1s.
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        // The sink now registers for PRESENTATION evidence (first AudioTimestamp with a positive
+        // framePosition), not the submission-side audible stamp.
+        val firstAudibleListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstAudibleListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstAudibleListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // The player's first-audible callback arrives DURING the turn, through
+                        // the listener the sink registered — after the turn it is not the first.
+                        // The instant is the track's presentation nanoTime (monotonic ns).
+                        firstAudibleListeners.forEach { it(5_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        assertTrue("sink must register a first-audible listener", firstAudibleListeners.isNotEmpty())
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        assertNotNull(
+            "first audible must be marked through the registry while the turn is live",
+            record.stageMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstAudible),
+        )
+    }
+
+    @Test
+    fun `the turn's timing table splits start, auth, duck and first write between request and audible`() = runTest {
+        // The 1.4 s between a first audio frame arriving and sound has parts the table could not
+        // tell apart, and the 4.5 s auth step on one turn was invisible. Four stages make them
+        // readable: the turn starting, its auth resolving, the duck finishing and the player's
+        // first write returning. Each is observed where it happens and marked by turn id.
+        val admittedId = testWireId
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        val firstWriteListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstWriteListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstWriteListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
+                        observer?.onSendAttempted(rid)
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)))
+                        // The player reports its first write while the turn is live.
+                        firstWriteListeners.forEach { it(7_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        assertTrue("sink must register a first-write listener", firstWriteListeners.isNotEmpty())
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        val stages = record.lines().map { line -> line.substringAfter("stage=").substringBefore(" ") }
+        for (stage in listOf("turn_started", "auth_resolved", "cloud_request_sent", "duck_finished", "first_write_returned")) {
+            assertTrue("stage $stage must be in the table, got $stages", stage in stages)
+        }
+        assertEquals(
+            "the first write carries the player's own instant (7 s on the timing clock, 6 s after acoustic end)",
+            6_000L,
+            record.elapsedMs(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.FirstWriteReturned),
+        )
+        assertTrue(
+            "the stages are in the order they happen: started, auth, request, duck",
+            stages.indexOf("turn_started") < stages.indexOf("auth_resolved") &&
+                stages.indexOf("auth_resolved") < stages.indexOf("cloud_request_sent") &&
+                stages.indexOf("cloud_request_sent") < stages.indexOf("duck_finished"),
+        )
+    }
+
+    @Test
+    fun `a turn logs which conversation it asks the worker to create or resume`() = runTest {
+        // A resume of a conversation the worker no longer has is refused, and until now the phone
+        // could not say which id and mode it had sent. The first eight characters identify it in a
+        // log without printing the whole handle.
+        val lines = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                lines += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(0, 0)))
+            val sink = deps.sink()
+            sink.routeToCloud("question", playbackContext, admitted = testWireId)
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+        val line = lines.singleOrNull { it.startsWith("[CloudRoute] turn conversation=") }
+        assertNotNull("the turn must log its conversation, got: $lines", line)
+        assertTrue("a first turn creates: $line", line!!.contains(" mode=create "))
+        assertTrue("the id is eight characters: $line", Regex("conversation=[0-9a-f]{8} ").containsMatchIn(line))
+    }
+
+    @Test
+    fun `the record lives until the cloud turn actually ends - published once, not at handoff`() = kotlinx.coroutines.test.runTest {
+        // REVIEWER (task81): the engine published the table the moment it dispatched the intent,
+        // and publish() unregisters the id — so the sink's CloudRequestSent, the player's
+        // FirstAudible and the disposition arrived at an EMPTY registry and were silently
+        // dropped. The record must live through the whole async turn: the sink publishes at the
+        // turn's real end (Done, failure or cancellation), inside its non-cancellable cleanup.
+        val admittedId = testWireId
+        val published = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(admittedId)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message -> published += message }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(admittedId, record)
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+        val firstAudibleListeners = java.util.concurrent.CopyOnWriteArrayList<(Long) -> Unit>()
+        org.mockito.kotlin.doAnswer { invocation ->
+            firstAudibleListeners += invocation.getArgument<(Long) -> Unit>(0)
+            Unit
+        }.whenever(player).addFirstAudibleListener(any())
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(0, 0)),
+            audioPlayer = player,
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // First audible arrives mid-turn, as the player would report it.
+                        firstAudibleListeners.forEach { it(5_000_000_000L) }
+                        emit(CloudRouteEvent.Done(0, 0))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        try {
+            sink.routeToCloud("question", playbackContext, admitted = admittedId)
+        } finally {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.unregister(admittedId)
+        }
+        val text = published.joinToString("\n")
+        assertTrue("the table must be published at the turn's real end: '$text'", text.isNotEmpty())
+        // The VALUE, not the label: a substring check passes while the number is wrong or absent.
+        // AcousticEnd is 1 s and first audible 5 s, so the stage must read 4000 ms.
+        val audibleLine = text.lines().firstOrNull { it.contains("stage=first_audible") }
+        assertNotNull("the published table carries first_audible: '$text'", audibleLine)
+        assertTrue(
+            "first_audible must be measured from acoustic end, got: '$audibleLine'",
+            audibleLine!!.contains("elapsed_ms=4000"),
+        )
+        assertTrue("the published table carries the committed outcome: '$text'", text.contains("outcome=committed"))
     }
 }

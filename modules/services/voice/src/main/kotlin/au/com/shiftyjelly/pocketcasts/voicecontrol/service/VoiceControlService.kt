@@ -263,6 +263,8 @@ class VoiceControlService : Service() {
         // to the REQUEST: a field on the executor would be shared between turns, and a later reader could
         // not tell whose outcome it was.
         turnOutcome: VoicePlaybackIntentExecutor.TurnOutcome = VoicePlaybackIntentExecutor.TurnOutcome(),
+        // The utterance's admitted id, for the executor's timing mark.
+        requestId: String? = null,
     ) {
         VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
         // The transport can throw: its channel closes with a cause when a terminal event is refused,
@@ -275,7 +277,7 @@ class VoiceControlService : Service() {
         // the action it dispatched actually ran. Reading only the feedback would let an action whose
         // outcome could not be established pass as a delivered turn.
         val response = try {
-            voicePlaybackIntentExecutor.execute(intent, turnOutcome)
+            voicePlaybackIntentExecutor.execute(intent, outcome = turnOutcome, timingRequestId = requestId)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
             // have transferred this turn's hold to the renderer path. Rethrow without releasing and
@@ -781,7 +783,7 @@ class VoiceControlService : Service() {
                         listeningMode = mode,
                         playbackBufferProvider = playbackBufferRecorder::reference,
                         micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                        onIntent = { intent, token -> handleIntent(intent, token) },
+                        onIntent = { intent, token, requestId -> handleIntent(intent, token, requestId) },
                         onTerminated = {
                             serviceScope.launch(Dispatchers.Main) { onPipelineTerminated(generation) }
                         },
@@ -1057,6 +1059,9 @@ class VoiceControlService : Service() {
     private fun handleIntent(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
         invocationToken: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.InvocationToken?,
+        // The admitted request id the engine minted for this utterance, so the executor can mark
+        // the timing table for the turn the intent belongs to.
+        requestId: String? = null,
     ) {
         // THE OBSERVABLE SEAM: the dispatch lifecycle (debounce settle, invocation-local fact
         // channel, all-exit one-shot settlement) lives in VoiceIntentDispatcher so REAL controls
@@ -1073,6 +1078,7 @@ class VoiceControlService : Service() {
             },
             intent = intent,
             invocationToken = invocationToken,
+            timingRequestId = requestId,
         )
     }
 

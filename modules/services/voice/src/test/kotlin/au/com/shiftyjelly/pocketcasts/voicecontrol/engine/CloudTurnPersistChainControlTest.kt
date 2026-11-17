@@ -86,12 +86,12 @@ class CloudTurnPersistChainControlTest {
         val token = engine.openInvocationForTest(UUID.randomUUID(), id = 11L)
         val dispatcher = VoiceIntentDispatcher()
         runBlocking {
-            executor.execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium)) { fact ->
+            executor.execute(VoiceIntent.CloudRoute(request = "play something", tier = VoiceIntent.CloudTier.Premium), onOutcome = { fact ->
                 dispatcher.executionOutcomeOf(fact)?.let {
                     observed += it
                     engine.reportExecutionResult(token, it)
                 }
-            }
+            })
         }
         engine.settleInvocation(token)
 

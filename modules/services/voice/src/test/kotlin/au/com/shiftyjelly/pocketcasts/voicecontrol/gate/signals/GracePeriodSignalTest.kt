@@ -530,7 +530,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `a delayed arm cannot take over a window that already ended`() = runTest {
-        // @reviewer's finding. `armTimerForLocked` checked GENERATION ownership only -- and a PRIVACY
+        // `armTimerForLocked` checked GENERATION ownership only -- and a PRIVACY
         // CLOSE PRESERVES THE GENERATION, because it ends the window without advancing it. So a
         // completion that was valid when it started could still arm this window's timer AFTER the window
         // was closed: the closed window holds a live timer owned by nobody, and that timer later reports

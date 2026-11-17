@@ -80,7 +80,7 @@ class CloudRouteGraceLifecycleTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
         val origin = signal.currentGeneration
-        val player = CloudAudioPlayer(RuntimeEnvironment.getApplication())
+        val player = CloudAudioPlayer(RuntimeEnvironment.getApplication(), writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD)
         player.writeToSink = { _, _, _, count -> count }
         var head = 0L
         player.readPlaybackHeadFrames = { head }
@@ -190,7 +190,7 @@ class CloudRouteGraceLifecycleTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
         val origin = signal.currentGeneration
-        val player = CloudAudioPlayer(RuntimeEnvironment.getApplication())
+        val player = CloudAudioPlayer(RuntimeEnvironment.getApplication(), writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD)
         player.writeToSink = { _, _, _, count -> count }
         player.readPlaybackHeadFrames = { 0L }
         val playing = CompletableDeferred<Unit>()

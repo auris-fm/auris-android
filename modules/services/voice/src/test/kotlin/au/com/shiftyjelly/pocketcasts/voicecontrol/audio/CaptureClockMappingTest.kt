@@ -143,6 +143,47 @@ class CaptureClockMappingTest {
     }
 
     @Test
+    fun `the acoustic end is the SPEECH end, not the end of the retained buffer`() {
+        // The retained buffer includes the trailing silence, so its end is not when the user
+        // stopped speaking. Anchoring there puts the acoustic end after the speech: a 2 s
+        // buffer whose speech stopped at 1 s would report an end 1 s late, hiding the very latency
+        // the timing table measures. The acoustic end is
+        // `segmentEndStreamPosition - totalRetainedSamples + speechEndSample`.
+        val frames = listOf(
+            PcmAudioFrame(ShortArray(16_000), 16_000),
+            PcmAudioFrame(ShortArray(16_000), 16_000),
+        )
+        val observation = clock(framePosition = 32_000, timestampNs = 10_000_000_000L)
+        val acousticEndMs = VoiceSegmenterResult.SpeechEnded(
+            frames = frames,
+            speechOnsetSample = 100,
+            speechEndSample = 16_000, // speech stopped halfway; the rest is trailing silence
+            captureClock = observation,
+            segmentEndStreamPosition = 32_000L,
+        ).captureTimeOfSegmentEndMs()
+        // 32_000 - 32_000 + 16_000 = 16_000: one second before the observed instant. A
+        // buffer-end-anchoring mutant reports 10_000 ms and fails.
+        assertEquals(9_000L, acousticEndMs!!)
+    }
+
+    @Test
+    fun `a segment without speech-end evidence has no acoustic end, even with a clock`() {
+        // Absent evidence stays absent: speechEndSample == 0 means the segmenter does not report
+        // it, and substituting the buffer end would restate the old bug as a default.
+        val frames = listOf(PcmAudioFrame(ShortArray(16_000), 16_000))
+        val observation = clock(framePosition = 16_000, timestampNs = 4_000_000_000L)
+        assertNull(
+            VoiceSegmenterResult.SpeechEnded(
+                frames = frames,
+                speechOnsetSample = 100,
+                speechEndSample = 0,
+                captureClock = observation,
+                segmentEndStreamPosition = 16_000L,
+            ).captureTimeOfSegmentEndMs(),
+        )
+    }
+
+    @Test
     fun `a clock observation delivered after the stream advanced leaves the anchor unchanged`() {
         // REVIEWER (round 2): reading the timestamp AFTER copying the completed segment does not
         // mean the observation's frame position is the segment's end -- the callback and ring can

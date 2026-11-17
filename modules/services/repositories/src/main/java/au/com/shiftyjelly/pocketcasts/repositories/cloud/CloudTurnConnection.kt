@@ -88,10 +88,12 @@ interface CloudTurnConnection {
          *
          * The landed contract still states five seconds, so against a server running that build the
          * nine-second bound is LOOSER than the server's own limit, not inside it: a connection this
-         * old may already have been closed. Nothing here keeps a socket alive, and this bound must
-         * not be read as doing so — a connection that dies while held is marked dead and replaced on
-         * the next open rather than adopted, and a turn only ever reaches this check to decide
-         * whether to keep what is held.
+         * old may be one the server has already closed, and there is no second chance after that.
+         * A dead connection is caught when it fails while held — it is marked dead and replaced on
+         * the next open — but a close the client never observes looks alive until the frame is sent,
+         * and a send that is refused does not redial: the turn ends and the user hears the failure.
+         * So this margin is only fully safe against the revision that widens the window to ten, and
+         * the five-second build is the one where it can cost a turn.
          */
         const val MAX_AGE_MS = 9_000L
     }

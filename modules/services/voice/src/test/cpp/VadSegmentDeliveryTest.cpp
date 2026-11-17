@@ -1,17 +1,21 @@
 // Host-only probe: each queued end event must deliver ITS OWN segment's audio.
 //
-// The finished-segment copy is built from the snapshot members (mSnapshotBuffer and its onset /
-// end / stream-position companions). Those members are also what waitForEvent OVERWRITES when it
-// serves an end event: it moves the queued segment's pcm into mSnapshotBuffer under mSpeechMutex.
-// So if the producer builds its CompletedSegment outside that mutex, a consumer serving the
-// PREVIOUS end event can move the buffer out from under the copy -- handing recognition the wrong
-// utterance's audio, or a torn vector. Building the segment inside the locked scope removes the
-// window entirely.
+// The PRODUCER's copy is taken from mSpeechBuffer into its own vector under mSpeechMutex, and
+// waitForEvent's REPLAY into mSnapshotBuffer takes the same mutex. The two therefore serialize: an
+// owning producer's copy cannot interleave with the consumer's move, whatever order the queue
+// delivers them in.
 //
-// This drives the real frame loop through TWO utterances whose samples differ, consumes both end
-// events back to back, and checks each delivered segment carries its own audio and its own
-// accounting. A consumer that lags (the realistic case: recognition is slower than capture) is
-// exercised by draining both events only after both have been published.
+// WHAT THIS CONTROL ACTUALLY PINS: that the replay serves the segment belonging to the end event it
+// was queued with, through the getters a real consumer calls. It drives the real frame loop through
+// two utterances with different amplitudes, drains both end events (one run back to back, one with
+// the consumer busy for 30 ms after each delivery, so later utterances complete behind a lagging
+// consumer), and checks each delivered segment carries its own audio and its own accounting. It
+// fails if the replay serves the wrong queued segment or drops one.
+//
+// WHAT IT DOES NOT PIN: the lock placement of the producer's copy. Moving that copy back outside
+// mSpeechMutex leaves this control green -- measured -- and a ThreadSanitizer build of it stays
+// silent either way. So the placement is verified against the source, not here; the
+// `vad_segment_delivery_tsan_test` target records what the sanitizer does and does not say.
 //
 // Run it with: src/test/cpp/run.sh
 //
@@ -216,8 +220,15 @@ int main() {
                     const int32_t n = p.getSpeechPcmSize();
                     std::vector<int16_t> pcm(n > 0 ? static_cast<size_t>(n) : 0);
                     if (n > 0) p.getSpeechPcm(pcm.data(), n);
-                    std::lock_guard<std::mutex> g(gotLock);
-                    got.push_back(std::move(pcm));
+                    {
+                        std::lock_guard<std::mutex> g(gotLock);
+                        got.push_back(std::move(pcm));
+                    }
+                    // LAG AFTER DELIVERY: this consumer stays busy with the segment it just took
+                    // while later utterances complete, so ends queue up behind it. That is the
+                    // realistic shape -- recognition is slower than capture -- and the one where an
+                    // older end event is still being served as a newer segment is built.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
                 }
             });
             // Long enough for the whole paced script to run with the consumer live throughout.

@@ -70,13 +70,22 @@ interface CloudTurnConnection {
      * Whether this connection is too old to be worth using, measured from the upgrade request.
      *
      * A stale connection is replaced silently: it is not an error, and the user must never see it.
-     * The threshold is the server's own limit, because past it the server may have closed the
-     * socket already and the only honest move is to dial again.
+     * The threshold sits a second inside the server's limit ("the first message must arrive within
+     * 5 seconds" is the landed contract — see [MAX_AGE_MS] for which revision), so a connection that
+     * passes this check still has time for its frame to arrive and be admitted. The client cannot
+     * tell why a socket closed, so the rule rests on its own clock rather than on the expectation of
+     * a close handler; past the threshold the only honest move is to dial again.
      */
     fun isStale(nowMs: Long, maxAgeMs: Long = MAX_AGE_MS): Boolean = nowMs - openedAtMs >= maxAgeMs
 
     companion object {
-        /** The server closes an idle route connection at ten seconds; stay inside that. */
+        /**
+         * The server requires the first frame within its auth-frame budget, and a client cannot
+         * know which build it is talking to: the landed contract states 5 seconds, and the pending
+         * revision widens it to 10. Nine seconds is one second inside the landed figure, so it is
+         * correct against both — a connection this old is refused before either deadline, and the
+         * margin leaves time for the frame to arrive and be admitted.
+         */
         const val MAX_AGE_MS = 9_000L
     }
 }

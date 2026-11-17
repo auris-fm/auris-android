@@ -60,10 +60,11 @@ class EarlyConnectionOpener(
             if (current != null &&
                 (current.ownerTag != tag || current.isSpent || current.isDead || current.isStale(nowMs, maxAgeMs))
             ) {
-                // Replacement is the only early close. A stale handle is discarded silently.
-                // This is the one place a held connection dies before its turn can take it, so it
-                // says which tag it belonged to and why it went: otherwise the turn's later
-                // "does not match" or "none held" is the only trace, and the cause is lost.
+                // Replacement closes the handle it displaces; take-time refusals close their own.
+                // A stale handle is discarded silently. This branch is the only place a held
+                // connection dies while its turn could still have taken it, so it says which tag it
+                // belonged to and why it went: otherwise the turn's later "does not match" or "none
+                // held" is the only trace, and the cause is lost.
                 Timber.i(
                     "Early connection dial tag=%s replacing=%s reason=%s",
                     tag,

@@ -10,9 +10,11 @@ import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -232,5 +234,41 @@ class VoiceIntentDispatcherLifecycleTest {
         verify(engine, times(1)).reportExecutionResult(eq(t), eq(ExecutionOutcome.Success))
         verify(engine, times(1)).reportExecutionResult(eq(t), eq(ExecutionOutcome.Failure))
         Unit
+    }
+
+    @Test
+    fun `a dispatch cancelled before its body runs leaves no live timing record`() {
+        // The executor's finally is what normally finishes the record. A launch cancelled BEFORE
+        // its body first executes never reaches it, so without an owner in invokeOnCompletion the
+        // registry keeps one live entry per such turn -- and a superseded turn is cancelled
+        // routinely.
+        val engine = engine()
+        val d = dispatcher()
+        val id = "wire-cancelled-before-body"
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
+        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
+
+        // Already-cancelled scope: the body never gets to run.
+        val cancelled = CoroutineScope(
+            kotlinx.coroutines.SupervisorJob().apply { cancel() } + Dispatchers.Default,
+        )
+        val job = d.dispatch(
+            scope = cancelled,
+            engine = engine,
+            executor = executor { _, _ -> error("the body must never run in this test") },
+            render = { _, _ -> },
+            onCommandRecognized = { },
+            intent = VoiceIntent.Playback.Pause,
+            invocationToken = token(),
+            timingRequestId = id,
+        )
+        assertNotNull("a dispatch still returns its job", job)
+        runBlocking { job?.join() }
+
+        assertTrue(
+            "a dispatch cancelled before its body ran must finish its record",
+            !au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+        )
     }
 }

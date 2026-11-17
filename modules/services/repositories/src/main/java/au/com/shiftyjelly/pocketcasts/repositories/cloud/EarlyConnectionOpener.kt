@@ -38,21 +38,28 @@ class EarlyConnectionOpener(
     private var held: CloudTurnConnection? = null
 
     /**
-     * Open a connection for [tag], replacing whatever is held.
+     * Open a connection for [tag] and return the one now held for it.
      *
-     * Returns the connection now held for [tag]. An open for an utterance that is already holding a
-     * connection is a resumption and leaves that connection in place rather than dialling again.
+     * The same tag on an unspent, live connection keeps what is held: that is a resumption, and it
+     * does not dial again. A different tag, a spent connection, a dead one, or a stale one is closed
+     * and replaced.
      */
     suspend fun openFor(tag: String): CloudTurnConnection = withContext(dispatcher) {
         lock.withLock {
             val current = held
-            if (current != null && current.ownerTag == tag && !current.isSpent) {
+            // A DEAD handle is not a resumption. Liveness is part of the keep condition, so a socket
+            // that failed while the same utterance was still speaking is replaced here rather than
+            // handed back and refused later at take time -- which forfeited the early open this
+            // exists for and logged "resume" about a dead socket.
+            if (current != null && current.ownerTag == tag && !current.isSpent && !current.isDead) {
                 // Resumption: the same utterance speaking again keeps the connection it opened.
                 Timber.i("Early connection resume tag=%s", tag)
                 return@withLock current
             }
             val nowMs = now()
-            if (current != null && (current.ownerTag != tag || current.isSpent || current.isStale(nowMs, maxAgeMs))) {
+            if (current != null &&
+                (current.ownerTag != tag || current.isSpent || current.isDead || current.isStale(nowMs, maxAgeMs))
+            ) {
                 // Replacement is the only early close. A stale handle is discarded silently.
                 // This is the one place a held connection dies before its turn can take it, so it
                 // says which tag it belonged to and why it went: otherwise the turn's later
@@ -64,6 +71,7 @@ class EarlyConnectionOpener(
                     when {
                         current.ownerTag != tag -> "other tag"
                         current.isSpent -> "spent"
+                        current.isDead -> "dead"
                         else -> "stale"
                     },
                 )

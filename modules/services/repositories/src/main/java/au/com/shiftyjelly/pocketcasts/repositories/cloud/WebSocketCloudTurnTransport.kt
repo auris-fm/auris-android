@@ -225,10 +225,16 @@ class WebSocketCloudTurnTransport(
         // path cannot drift from the dialled one. They are buffered because the socket can open,
         // fail or close in the window between the early open and this turn adopting it.
         val early = adopted.getAndSet(null)
-        val request = Request.Builder()
-            .url(baseUrl.trimEnd('/') + ROUTE_PATH)
-            .build()
-        val socket: WebSocket? = if (early != null) null else dial(request, listener)
+        // Built only when this exchange dials: an adopted exchange already has its socket and its
+        // upgrade request, so it has no use for one.
+        val socket: WebSocket? = if (early != null) {
+            null
+        } else {
+            dial(
+                Request.Builder().url(baseUrl.trimEnd('/') + ROUTE_PATH).build(),
+                listener,
+            )
+        }
         val replayJob = early?.let { connection ->
             // An early connection's exchange owns the socket the moment it adopts it. The first
             // frame is this exchange's job now: sent immediately when the open is already buffered,

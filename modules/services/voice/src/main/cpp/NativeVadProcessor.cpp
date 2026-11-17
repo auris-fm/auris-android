@@ -516,6 +516,12 @@ void NativeVadProcessor::runLoop() {
                 {
                     // Finalize the utterance.
                     int32_t endedGeneration = -1;
+                    // This utterance's completed segment: its own generation (pre-increment -- the
+                    // one the engine learned from this utterance's early snapshots), PCM copy,
+                    // onset, speech end and accounting anchor. Declared here so it outlives the
+                    // locked scope that fills it, and queued with the end event so the consumer
+                    // pops one coherent segment per event even when two ends are queued.
+                    CompletedSegment completed;
 
                     // The finalize point IS the sample-accounting anchor: this thread just
                     // consumed the frame containing the segment's last sample, and the ring's read
@@ -554,24 +560,20 @@ void NativeVadProcessor::runLoop() {
                         mSpeechOnsetSample = 0;
                         mSpeechEndSample = 0;
                         mSpeechActive = false;
+                        // The segment is built INSIDE this lock because waitForEvent MOVES
+                        // mSnapshotBuffer under the same mutex when it serves an earlier queued end
+                        // event. Copying these members outside the lock lets that move run during
+                        // the copy, which hands an end event another utterance's audio.
+                        completed.generation = endedGeneration;
+                        completed.pcm = mSnapshotBuffer;
+                        completed.onset = mSnapshotSpeechOnsetSample;
+                        completed.endSample = mSnapshotSpeechEndSample;
+                        completed.segmentEndStreamPosition = mSnapshotSpeechEndStreamPosition;
                     }
 
                     mConsecutiveSilentFrames = 0;
                     mContextCount = 0;
                     mContextHead = 0;
-                    // THIS utterance's completed segment, captured under the same lock as the
-                    // snapshot members: its OWN generation (pre-increment — the generation the
-                    // engine learned from its early snapshots for this utterance), PCM copy,
-                    // onset, speech end and the accounting anchor. Queued with the end event so
-                    // the consumer pops one coherent segment per event even when two ends are
-                    // queued.
-                    CompletedSegment completed;
-                    completed.generation = endedGeneration;
-                    completed.pcm = mSnapshotBuffer;
-                    completed.onset = mSnapshotSpeechOnsetSample;
-                    completed.endSample = mSnapshotSpeechEndSample;
-                    completed.segmentEndStreamPosition = mSnapshotSpeechEndStreamPosition;
-
                     std::lock_guard<std::mutex> lock(mEventMutex);
                     mCompletedSegments.push_back(std::move(completed));
                     mPendingEvents.push_back({2, endedGeneration}); // speech ended

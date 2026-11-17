@@ -36,6 +36,15 @@ class SocketOpeningEarlyConnections(
     }.asCoroutineDispatcher(),
     private val eventBufferSize: Int = 64,
 ) {
+    /**
+     * The dial seam, as [WebSocketCloudTurnTransport] has. OkHttpClient is final, so a control that
+     * needs a socket dying at a chosen moment substitutes this instead, firing a terminal callback
+     * inside the dial window where the pre-connection flag is the only record of it.
+     */
+    internal var dialSocket: (Request, WebSocketListener) -> WebSocket = { request, listener ->
+        okHttpClient.newWebSocket(request, listener)
+    }
+
     val opener: EarlyConnectionOpener =
         EarlyConnectionOpener(
             dispatcher = dispatcher,
@@ -61,14 +70,20 @@ class SocketOpeningEarlyConnections(
         // must not present itself alive over a socket that already died: remember the terminal
         // state here and apply it to the connection the moment it exists.
         val socketDiedBeforeConnection = java.util.concurrent.atomic.AtomicBoolean(false)
+        // Serialises "publish the reference / read the flag" against the listener's "set the flag /
+        // read the reference", which is what makes the install check exhaustive.
+        val disseminationLock = Any()
+        fun rememberTerminalState() = synchronized(disseminationLock) {
+            socketDiedBeforeConnection.set(true)
+            connectionRef.get()?.markDead()
+        }
         val request = Request.Builder()
             .url(baseUrl().trimEnd('/') + WebSocketCloudTurnTransport.ROUTE_PATH)
             .build()
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (response.code != 101) {
-                    val existing = connectionRef.get()
-                    if (existing != null) existing.markDead() else socketDiedBeforeConnection.set(true)
+                    rememberTerminalState()
                     events.trySendBlocking(RawSocketEvent.Failed(code = response.code, message = response.message))
                 } else {
                     // 101 says nothing the adopting turn does not already know: it opened. Recorded
@@ -96,14 +111,12 @@ class SocketOpeningEarlyConnections(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                val existing = connectionRef.get()
-                if (existing != null) existing.markDead() else socketDiedBeforeConnection.set(true)
+                rememberTerminalState()
                 events.trySendBlocking(RawSocketEvent.Failed(code = response?.code ?: 0, message = t.message ?: "failed"))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                val existing = connectionRef.get()
-                if (existing != null) existing.markDead() else socketDiedBeforeConnection.set(true)
+                rememberTerminalState()
                 events.trySendBlocking(RawSocketEvent.Closed(code, reason))
             }
 
@@ -111,7 +124,7 @@ class SocketOpeningEarlyConnections(
                 webSocket.close(code, reason)
             }
         }
-        val socket = okHttpClient.newWebSocket(request, listener)
+        val socket = dialSocket(request, listener)
         val connection = SocketCloudTurnConnection(
             ownerTag = tag,
             openedAtMs = openedAtMs,
@@ -119,8 +132,15 @@ class SocketOpeningEarlyConnections(
             events = events,
             socket = socket,
         )
-        connectionRef.set(connection)
-        if (socketDiedBeforeConnection.get()) connection.markDead()
+        // Publishing the reference and reading the flag happen under the SAME lock the listener
+        // takes, so a terminal event cannot fall between them: it runs either wholly before this
+        // block, leaving its flag visible here, or wholly after it, seeing the published reference
+        // and marking the connection itself. Ordering the two writes without the lock leaves a gap
+        // in both directions, because an event that reads a null reference marks nothing.
+        synchronized(disseminationLock) {
+            connectionRef.set(connection)
+            if (socketDiedBeforeConnection.get()) connection.markDead()
+        }
         return connection
     }
 }

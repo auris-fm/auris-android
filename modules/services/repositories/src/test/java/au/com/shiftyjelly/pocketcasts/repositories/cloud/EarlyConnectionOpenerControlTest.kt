@@ -155,6 +155,35 @@ class EarlyConnectionOpenerControlTest {
         assertTrue("a refused dead connection must be closed, not left open", dead.isClosed)
         assertEquals("a refused connection must not count as spent-adopted", false, dead.isSpent)
     }
+
+    @Test
+    fun `a dead held connection is replaced on the next open rather than resumed`() = runTest {
+        // The same utterance speaking again normally keeps its connection. A socket that died in
+        // between must not be handed back as a resumption: the early open exists to spare the dial,
+        // and resuming a dead handle forfeits it while logging "resume" about a dead socket.
+        val harness = Harness()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val opener = harness.opener(this, dispatcher)
+
+        val first = opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+        // markDead alone: nothing was adopted, so isSpent stays false and the tag still matches --
+        // liveness is the ONLY thing that can trigger the replacement here.
+        (first as SocketCloudTurnConnection).markDead()
+        // Advance a little, but far below MAX_AGE_MS, so staleness cannot be the cause either.
+        harness.clock += 10L
+
+        val second = opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("a dead held connection must be replaced, not resumed", 2, harness.opens.get())
+        assertTrue("the replacement must be a different connection", second !== first)
+        assertTrue("the dead connection must be closed, not leaked open", first.isClosed)
+        assertTrue(
+            "the replacement must be alive",
+            !(second as SocketCloudTurnConnection).isDead,
+        )
+    }
 }
 
 /** `ExecutorService.asCoroutineDispatcher()` under a name that reads as what it is here. */

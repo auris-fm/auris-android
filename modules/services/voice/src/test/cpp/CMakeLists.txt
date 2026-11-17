@@ -110,6 +110,27 @@ target_compile_options(vad_snapshot_carryover_test PRIVATE -Wall -Wextra -O1 -g)
 
 target_link_libraries(vad_snapshot_carryover_test PRIVATE Threads::Threads)
 
+# Each queued end event must deliver its OWN segment. The producer builds the finished-segment copy
+# from the same snapshot members waitForEvent overwrites when it serves an end event, so the copy has
+# to happen under mSpeechMutex. Same shape as the carry-over target: no Oboe library, VAD externs
+# stubbed in the test file.
+add_executable(vad_segment_delivery_test
+    VadSegmentDeliveryTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_segment_delivery_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+target_compile_options(vad_segment_delivery_test PRIVATE -Wall -Wextra -O1 -g)
+
+target_link_libraries(vad_segment_delivery_test PRIVATE Threads::Threads)
+
 # The capture/VAD start-ownership control compiles the REAL jni_bridge.cpp entry points together
 # with the real capture and processor translation units. JniBridgeHostPlatformStubs.cpp supplies
 # ONLY the platform boundaries a host lacks (the five JNIEnv calls jni_bridge.cpp makes, dlopen,

@@ -434,9 +434,10 @@ class VoiceAsrEngine @Inject constructor(
 
                             // The acoustic end is the table's zero point: the instant the user
                             // stopped speaking, after which every cost is the client's. It comes
-                            // from the capture sample accounting, not "now": the drain between the
-                            // last captured sample and this delivery is CLIENT cost, and stamping
-                            // it here would hide exactly the latency the table exists to measure.
+                            // from the capture sample accounting, not "now": the endpoint wait and
+                            // the delivery lag between the last captured sample and this point are
+                            // CLIENT cost, and stamping it here would hide exactly the latency the
+                            // table exists to measure.
                             // Absent accounting stays absent — the table starts at the endpoint.
                             val timing = TurnTimingRecord(
                                 requestId = "utt-" + elapsedClockMs(),

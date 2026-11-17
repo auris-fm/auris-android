@@ -144,8 +144,8 @@ class CaptureClockMappingTest {
 
     @Test
     fun `the acoustic end is the SPEECH end, not the end of the retained buffer`() {
-        // The retained buffer includes trailing silence and the drain, so its end is not when the
-        // user stopped speaking. Anchoring there puts the acoustic end after the speech: a 2 s
+        // The retained buffer includes the trailing silence, so its end is not when the user
+        // stopped speaking. Anchoring there puts the acoustic end after the speech: a 2 s
         // buffer whose speech stopped at 1 s would report an end 1 s late, hiding the very latency
         // the timing table measures. The acoustic end is
         // `segmentEndStreamPosition - totalRetainedSamples + speechEndSample`.

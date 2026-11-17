@@ -265,11 +265,12 @@ int main() {
         check(shortOnset == 1, "short utterance: onset is reported");
         const int shortTrail = processor.waitForEvent(10000, &gen);
         check(shortTrail == 3, "short utterance: trailing silence fires without a cutoff first");
-        // The 40 silent frames run past the 7-frame silence timeout, so the utterance closes
-        // (event 2). No cutoff fired before trailing silence.
         const int shortEnd = processor.waitForEvent(15000, &gen);
         std::printf("      short utterance final event=%d\n", shortEnd);
-        // The property under test is only that no cutoff fired — asserted by the two checks above.
+        // The 40 silent frames run past the 7-frame silence timeout, so the segment CLOSES: the final
+        // event is the close, not a cutoff and not a timeout. Pinning the value keeps this case on the
+        // path it describes; no cutoff fired before trailing silence.
+        check(shortEnd == 2, "short utterance: the silence timeout closes the segment");
         check(shortEnd != 4, "short utterance: ends without a cutoff event");
         processor.stop();
         processor.stop();

@@ -93,6 +93,24 @@ class VoiceControlCaptureRestartTest {
     companion object {
         /** The id the harness gives the SCO input once the link is up (device ids are platform-owned). */
         private const val SCO_INPUT_ID = 41
+
+        /** One scheduler step per pass of a wait; the budget below is counted in these. */
+        private const val WAIT_STEP_MS = 25L
+
+        /**
+         * How much SIMULATED time a wait may give its subject before declaring it stuck. Generous
+         * against the longest debounce and poll interval the stack uses, so expiry means the subject
+         * really did not advance rather than that the host was slow to pump it.
+         */
+        private const val WAIT_BUDGET_MS = 60_000L
+
+        /**
+         * Real-time ceiling on the outer pump only. It exists so a wedged harness cannot hang the
+         * suite forever, not to judge the subject: a loaded host legitimately needs far more wall
+         * clock to deliver the same simulated time, so this is deliberately much larger than the
+         * waits it carries.
+         */
+        private const val PUMP_BUDGET_MS = 180_000L
     }
 
     private lateinit var context: Context
@@ -376,15 +394,21 @@ class VoiceControlCaptureRestartTest {
         val scope = kotlinx.coroutines.CoroutineScope(job + kotlinx.coroutines.Dispatchers.Main.immediate)
         scope.launch {
             try {
-                val deadline = System.currentTimeMillis() + 8_000
+                // The budget is SIMULATED time, not wall clock. Each pass advances the scheduler by
+                // a fixed step, so this counts how much of the subject's own timeline has been given
+                // to it rather than how long the host took to get there. A starved machine buys fewer
+                // steps per real second; with a wall-clock deadline that expires the wait while the
+                // subject is still strictly behind, which reads as a product race and is not one.
+                var waitedMs = 0L
                 var last = ""
                 while (!predicate()) {
-                    if (System.currentTimeMillis() > deadline) {
+                    if (waitedMs >= WAIT_BUDGET_MS) {
                         startProbe(last)
-                        error("timed out waiting for $what; last=$last")
+                        error("timed out waiting for $what after ${waitedMs}ms of simulated time; last=$last")
                     }
-                    testScheduler.advanceTimeBy(25.milliseconds)
-                    kotlinx.coroutines.delay(25)
+                    testScheduler.advanceTimeBy(WAIT_STEP_MS.milliseconds)
+                    kotlinx.coroutines.delay(WAIT_STEP_MS)
+                    waitedMs += WAIT_STEP_MS
                     last = probe()
                 }
                 outcome.complete(Result.success(Unit))
@@ -396,9 +420,16 @@ class VoiceControlCaptureRestartTest {
             // Drive the test scheduler, Robolectric's shadow main looper, and real dispatcher
             // threads until the watcher settles. Production code uses Dispatchers.IO (real threads)
             // and posts broadcasts via Handler(Looper.getMainLooper()) — all three must be pumped.
+            // Real time bounds ONLY this outer pump, and generously: its job is to keep the host
+            // moving, so a slow machine needs more of it, not less. Expiry here means the harness
+            // itself stopped making progress, which is a different failure from the subject's.
+            val pumpDeadline = System.currentTimeMillis() + PUMP_BUDGET_MS
             while (!outcome.isCompleted) {
+                if (System.currentTimeMillis() > pumpDeadline) {
+                    error("harness pump stalled waiting for $what after ${PUMP_BUDGET_MS}ms of real time")
+                }
                 testScheduler.runCurrent()
-                testScheduler.advanceTimeBy(25.milliseconds)
+                testScheduler.advanceTimeBy(WAIT_STEP_MS.milliseconds)
                 // Drain at most one pending main-looper task per pump cycle to avoid infinite
                 // idle loops when production code continuously schedules work.
                 runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }

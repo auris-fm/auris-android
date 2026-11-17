@@ -94,10 +94,11 @@ class SpokenTemplateResolver(
                 val parts = entry.split("|", limit = 2)
                 parts[0] to parts[1]
             }.toMutableMap()
-            // The daily-limit line lives OUTSIDE the array as its own string resource, so each
-            // values-* locale overrides this one key without redefining the whole array. The
-            // overlay wins over any array entry: a locale's translation must be spoken, and a
-            // missing locale entry falls through to the default values/ line, never to generic.
+            // The daily-limit and expired-conversation lines live OUTSIDE the array as their own
+            // string resources, so each values-* locale overrides those keys without redefining the
+            // whole array. The overlay wins over any array entry: a locale's translation must be
+            // spoken, and a missing locale entry falls through to the default values/ line, never to
+            // generic.
             templates[KEY_DAILY_LIMIT] = resources.getString(R.string.voice_cloud_error_limit_exceeded)
             templates[KEY_CONVERSATION_EXPIRED] = resources.getString(R.string.voice_cloud_error_conversation_expired)
             return templates

@@ -670,7 +670,11 @@ class VoiceAsrEngine @Inject constructor(
      *
      * The connection is opened per UTTERANCE, and the tag must be the same one the turn will later
      * carry, so the identity has to exist before the endpoint decision -- not be minted there.
-     * It is cleared when the segment closes, so the next utterance gets its own.
+     *
+     * Cleared when the NEXT utterance starts, not when this segment ends. It has to survive the
+     * endpoint: the turn adopts this id as its admitted id so it claims the connection already
+     * opened under it. Clearing it at the end of the segment would make the turn mint a fresh id
+     * and open a second connection that no turn ever claims.
      */
     private var inFlightUtteranceId: String? = null
 
@@ -1309,11 +1313,6 @@ class VoiceAsrEngine @Inject constructor(
             reason,
             input.routerTranscript,
         )
-        // The router ran and produced no intent. That is not an executed action, and the table
-        // says so rather than leaving the reader to infer it from a missing stage. The OUTCOME is
-        // recorded here; whether the table is PUBLISHED yet is decided below, because a turn that
-        // escalates to the cloud has not ended.
-        timing?.markOutcome(TurnTimingRecord.Outcome.ActionFailed)
 
         // P1: the recognizer's OWN reported decision travels — a null
         // intent is NOT always no_candidates (it may be validation or a model failure), and
@@ -1329,6 +1328,11 @@ class VoiceAsrEngine @Inject constructor(
         // played and no `first_audible` stage was ever recorded. Only a turn that ends locally
         // (rejection, earcon, spoken fallback, error) publishes at this point.
         if (escalation != CloudEscalation.DISPATCH) {
+            // The router ran and produced no intent, and the turn ENDS here: no action was executed,
+            // and the table says so rather than leaving the reader to infer it from a missing stage.
+            // A turn that escalates has not ended -- the cloud answers it, so recording a failed
+            // action would claim a failure for the very turn whose answer the table reports.
+            timing?.markOutcome(TurnTimingRecord.Outcome.ActionFailed)
             timing?.publish()
         }
 

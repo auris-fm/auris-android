@@ -395,6 +395,17 @@ class TurnTimingWiringTest {
             "the record must not have been published before the cloud owns the turn: got '$text'",
             !text.contains("stage=acoustic_end"),
         )
+        // A turn the cloud goes on to answer did not fail an action. The router declining is what
+        // ESCALATED it, so recording a failed action here makes the table claim a failure for the
+        // very turn whose successful answer it exists to report. Finished the way the sink finishes
+        // a completed cloud turn, and asserted on the PUBLISHED table -- what a reader actually sees.
+        TurnTimingRecord.finishFor(id, cancelled = false, failed = false)
+        testScheduler.advanceUntilIdle()
+        val finished = synchronized(published) { published.toList() }.joinToString("\n")
+        assertTrue(
+            "a cloud-answered turn must not report a failed action: got '$finished'",
+            !finished.contains("action_failed"),
+        )
     }
 
     @Test

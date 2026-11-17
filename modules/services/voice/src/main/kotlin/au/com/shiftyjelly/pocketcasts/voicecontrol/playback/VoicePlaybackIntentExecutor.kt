@@ -369,10 +369,16 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     )
                 } else if (!sinkTookOwnership) {
                     // The turn never reached the sink, so no one downstream will finish it.
+                    //
+                    // CANCELLED, NOT FAILED: this exit means the dispatch was discarded before a
+                    // route opened — superseded by a newer window, an unknown retry, or a refused
+                    // prepare. No action was attempted, so a failed-action outcome would tell a
+                    // support bundle that one ran and failed. The sink records cancelled for the
+                    // same never-routed case, and both ends must agree.
                     au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
                         timingRequestId,
-                        cancelled = false,
-                        failed = true,
+                        cancelled = true,
+                        failed = false,
                     )
                 }
             }

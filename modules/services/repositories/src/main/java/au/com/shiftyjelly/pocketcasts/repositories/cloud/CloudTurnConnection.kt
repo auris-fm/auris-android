@@ -69,39 +69,14 @@ interface CloudTurnConnection {
     /**
      * Whether this connection is too old to be worth using, measured from the upgrade request.
      *
-     * A stale connection is replaced silently: it is not an error, and the user must never see it.
-     * What it bounds is IDLENESS, not margin against the server's first-frame budget: the server
-     * starts its auth-frame timer when it accepts the upgrade, so a client that takes a nine-second
-     * old socket and sends immediately lands at the start of a fresh window, not at the end of one.
-     * The two numbers that pair are this threshold and the server's own idle close — nine seconds
-     * against ten — and [MAX_AGE_MS] states what that pairing costs against the older contract. The
-     * client cannot tell why a socket closed, so the rule rests on its own clock rather than on the
-     * expectation of a close handler; past the threshold the only honest move is to dial again.
+     * The client does not send on a connection older than nine seconds, counted from when it sent the
+     * upgrade request (`cloud-assistant.md`, Unused connections). A stale connection is replaced
+     * silently: it is not an error, and the user must never see it.
      */
     fun isStale(nowMs: Long, maxAgeMs: Long = MAX_AGE_MS): Boolean = nowMs - openedAtMs >= maxAgeMs
 
     companion object {
-        /**
-         * One second inside the server's idle close, which the pending revision states as ten
-         * seconds: it closes a connection that has received no first frame within that window measured
-         * from the upgrade, and this bounds how long the client will let a connection sit unsent.
-         *
-         * The landed contract still states five seconds, which makes the exposure a band rather
-         * than a blanket margin. Below five seconds a held connection is sound against that build;
-         * above nine this check refuses it and the turn dials fresh. In between — five to nine — the
-         * socket passes here and may already have been closed by the server, and there is no second
-         * chance: nothing above `exchange` retries, so the turn is over.
-         *
-         * What the user gets then is the QUIETER outcome, not the louder one: a send onto a socket
-         * the server has closed does not produce a terminal event, so the sink has nothing to speak
-         * and the turn ends silent rather than apologising. A close that is reported while the
-         * connection is held is caught earlier (it is marked dead and replaced on the next open), but
-         * one the client never observes looks alive until the frame goes out.
-         *
-         * So nine is fully safe only against the revision that widens the window to ten; against the
-         * five-second build the safe interim figure would be four. That choice belongs with the
-         * deployment, not with this constant.
-         */
+        /** The bound behind [isStale]; see its doc for the contract this mirrors. */
         const val MAX_AGE_MS = 9_000L
     }
 }

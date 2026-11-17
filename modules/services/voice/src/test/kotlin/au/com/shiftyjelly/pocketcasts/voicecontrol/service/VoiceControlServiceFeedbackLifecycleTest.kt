@@ -65,7 +65,7 @@ class VoiceControlServiceFeedbackLifecycleTest {
         }
     }
 
-    private suspend fun service(renderer: AudioFeedbackRenderer, reply: String): VoiceControlService = spy(VoiceControlService()).apply {
+    private suspend fun service(renderer: AudioFeedbackRenderer, reply: String): VoiceControlService = spy(VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }).apply {
         audioFeedbackRenderer = renderer
         playbackBufferRecorder = mock<PlaybackBufferRecorder>()
         routeAcquisition = mock<RouteAcquisition>()

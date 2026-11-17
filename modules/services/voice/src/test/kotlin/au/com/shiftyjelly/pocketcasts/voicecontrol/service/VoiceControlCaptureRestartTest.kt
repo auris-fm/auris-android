@@ -478,7 +478,7 @@ class VoiceControlCaptureRestartTest {
         // would run Hilt's onCreate injection, which needs an @HiltAndroidApp application; this
         // harness supplies every injected field itself. attachBaseContext via reflection so
         // filesDir/checkSelfPermission work.
-        val service = VoiceControlService()
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }
         // android.app.Service overrides attachBaseContext (final); ContextWrapper's is the one
         // that actually stores the base.
         android.content.ContextWrapper::class.java.getDeclaredMethod(

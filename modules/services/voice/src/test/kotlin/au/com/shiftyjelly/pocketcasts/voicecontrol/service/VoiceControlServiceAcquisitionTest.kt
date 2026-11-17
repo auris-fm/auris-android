@@ -111,7 +111,7 @@ class VoiceControlServiceAcquisitionTest {
         )
 
         val platform = RecordingPlatform()
-        val service = VoiceControlService().apply {
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
             gate = VoiceControlGate(rules = emptyList(), scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler)))
             audioRouteMonitor = monitor
             routeAcquisition = RouteAcquisition(platform, timeoutMs = 500, pollIntervalMs = 10)
@@ -133,7 +133,7 @@ class VoiceControlServiceAcquisitionTest {
         setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
         val platform = RecordingPlatform()
-        val service = VoiceControlService().apply {
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
             gate = VoiceControlGate(rules = emptyList(), scope = CoroutineScope(UnconfinedTestDispatcher(testScheduler)))
             audioRouteMonitor = monitor
             routeAcquisition = RouteAcquisition(platform, timeoutMs = 500, pollIntervalMs = 10)

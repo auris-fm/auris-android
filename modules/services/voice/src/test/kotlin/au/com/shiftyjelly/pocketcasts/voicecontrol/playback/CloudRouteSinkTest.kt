@@ -4032,7 +4032,7 @@ class CloudRouteSinkTest {
                 playbackManager = mock(),
                 playbackContextMonitor = mock(),
             )
-            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
                 audioFeedbackRenderer = renderer
                 voicePlaybackIntentExecutor = executor
             }
@@ -4185,7 +4185,7 @@ class CloudRouteSinkTest {
                 gracePeriodSignal = graceSignal, playbackManager = mock(),
                 playbackContextMonitor = mock(),
             )
-            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
                 audioFeedbackRenderer = renderer
                 voicePlaybackIntentExecutor = executor
             }
@@ -4302,7 +4302,7 @@ class CloudRouteSinkTest {
                 gracePeriodSignal = graceSignal, playbackManager = mock(),
                 playbackContextMonitor = mock(),
             )
-            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
                 audioFeedbackRenderer = renderer
                 voicePlaybackIntentExecutor = executor
             }
@@ -4437,7 +4437,7 @@ class CloudRouteSinkTest {
                 gracePeriodSignal = graceSignal, playbackManager = mock(),
                 playbackContextMonitor = mock(),
             )
-            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
                 audioFeedbackRenderer = renderer
                 voicePlaybackIntentExecutor = executor
             }
@@ -4523,7 +4523,7 @@ class CloudRouteSinkTest {
             graceSignal.transferHoldToOutput(testWireId, hold)
             throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
         }
-        val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+        val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
             voicePlaybackIntentExecutor = executor
             audioFeedbackRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
                 mock(),

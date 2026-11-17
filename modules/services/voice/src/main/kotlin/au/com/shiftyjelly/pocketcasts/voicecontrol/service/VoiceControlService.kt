@@ -1232,6 +1232,17 @@ class VoiceControlService : Service() {
                 // cleanup's result is known, gives the release one owner.
                 if (session == null) {
                     session = voiceSession
+                    if (session == null) {
+                        // NOBODY CLAIMED, SO ASK WHETHER THE SHARED OBJECTS ARE UNOWNED -- without
+                        // waiting. If the gate is free this idle stop takes it and releases everything,
+                        // recognizer included; leaving them loaded would leak them for the life of the
+                        // process. If another instance holds it, the take refuses at once and the
+                        // shared objects are left for that holder.
+                        val taken = voiceSessionGate.tryAcquire()
+                        if (taken is VoiceSessionGate.Admission.Acquired) {
+                            session = taken.session
+                        }
+                    }
                     session?.let { voiceSessionGate.beginRelease(it) }
                 }
                 // The releases themselves run on MAIN: the media session and the feedback renderer

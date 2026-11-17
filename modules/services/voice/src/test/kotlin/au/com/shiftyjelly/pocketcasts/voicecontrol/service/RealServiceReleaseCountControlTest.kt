@@ -72,17 +72,6 @@ class RealServiceReleaseCountControlTest {
         )
         hiltRule.inject()
         controller = Robolectric.buildService(VoiceControlService::class.java).create()
-        // THESE CONTROLS ARE ABOUT THE SHARED OBJECTS, so the service has to own the voice session:
-        // a teardown releases the process-wide kinds only for the holder, and an instance that never
-        // acquired one touches none of them. Claiming here keeps every assertion below about the
-        // recognizer's release count rather than about ownership.
-        val service = controller.get()
-        runBlocking {
-            val admission = service.voiceSessionGate.acquire(timeoutMs = 5_000)
-            check(admission is VoiceSessionGate.Admission.Acquired) { "could not claim the session" }
-            VoiceControlService::class.java.getDeclaredField("voiceSession")
-                .apply { isAccessible = true }.set(service, admission.session)
-        }
     }
 
     @After

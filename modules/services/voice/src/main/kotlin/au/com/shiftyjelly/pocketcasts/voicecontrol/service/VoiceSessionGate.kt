@@ -112,6 +112,22 @@ class VoiceSessionGate @Inject constructor() {
     }
 
     /**
+     * Take the session only if it is free RIGHT NOW, without waiting.
+     *
+     * A stop that owns no session uses this to find out whether it may release the process-wide
+     * objects: if nobody holds them they are unowned and releasing them is correct, and if another
+     * instance holds them they must be left alone. Waiting is not an option here -- a stop cannot
+     * block on whoever is using voice.
+     */
+    fun tryAcquire(): Admission = synchronized(stateLock) {
+        if (holder == null) {
+            Admission.Acquired(Session(++nextId).also { holder = it })
+        } else {
+            Admission.TimedOut
+        }
+    }
+
+    /**
      * The holder's teardown has begun. The gate stays held: the releases run asynchronously and a
      * start arriving now would meet resources mid-release.
      */

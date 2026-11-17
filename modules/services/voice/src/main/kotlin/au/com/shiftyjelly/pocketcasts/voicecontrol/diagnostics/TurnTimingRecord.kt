@@ -31,10 +31,14 @@ class TurnTimingRecord(private val requestId: String) {
         /**
          * The next four split the gaps the stages above cannot see. Each is a plain instant; the
          * step is the difference between two lines' elapsed_ms: turn_started to auth_resolved is
-         * the auth step, cloud audio arriving to duck_finished is the duck, duck_finished to
-         * first_write_returned is the hand-off to the track, and first_write_returned to
-         * first_audible is the platform's own start-up. They are diagnostics only and change no
-         * behaviour.
+         * the auth step, duck_finished to first_write_returned is the hand-off to the track, and
+         * first_write_returned to first_audible is the platform's own start-up.
+         *
+         * THE DUCK IS NOT ISOLATED BY THIS TABLE. No line marks the first audio frame's arrival,
+         * so the span ending at duck_finished starts at cloud_request_sent (or
+         * local_action_executed) and contains the server's time to its first frame as well as the
+         * duck. Reading that difference as the duck alone attributes the server's latency to the
+         * host player. They are diagnostics only and change no behaviour.
          */
         TurnStarted("turn_started"),
         AuthResolved("auth_resolved"),

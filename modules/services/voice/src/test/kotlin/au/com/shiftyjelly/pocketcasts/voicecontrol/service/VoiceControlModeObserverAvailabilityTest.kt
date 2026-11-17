@@ -447,7 +447,7 @@ class VoiceControlModeObserverAvailabilityTest {
         whenever(notificationManager.createListeningNotification(any())).thenReturn(mock(Notification::class.java))
         whenever(notificationManager.createDownloadingNotification()).thenReturn(mock(Notification::class.java))
 
-        val service = VoiceControlService()
+        val service = VoiceControlService().also { it.voiceSessionGate = VoiceSessionGate() }
         android.content.ContextWrapper::class.java.getDeclaredMethod(
             "attachBaseContext",
             Context::class.java,
@@ -1049,7 +1049,7 @@ class VoiceControlModeObserverAvailabilityTest {
     @Test
     fun `the restart decision spends only on a startable surface`() = runBlocking {
         fun newBudgetAndService(): VoiceControlService {
-            val service = VoiceControlService()
+            val service = VoiceControlService().also { it.voiceSessionGate = VoiceSessionGate() }
             android.content.ContextWrapper::class.java.getDeclaredMethod(
                 "attachBaseContext",
                 android.content.Context::class.java,
@@ -1129,10 +1129,18 @@ class VoiceControlModeObserverAvailabilityTest {
         }
         // onDestroy discards the Deferred its teardown returns, and that teardown finishes on
         // Dispatchers.IO -- so the service scope being cancelled is not the same as the teardown
-        // being over. Not asking the lifecycle for a second stop (the service is already stopped
-        // by now, and a re-stop is not this test's business); waiting for the work to drain off
-        // the main thread, bounded by the timeout the teardown uses to prove a join.
-        val budgetMs = 5_000L
+        // being over. The scope's root completing was the wrong thing to wait on: it says the
+        // service's own children ended, not that the shared resources were released.
+        //
+        // THE FACT TO WAIT ON IS THE SESSION BEING AVAILABLE AGAIN. The gate is held until every
+        // release has finished, so an admission that succeeds means the previous session is really
+        // done -- which is exactly what must be true before the next test installs its main
+        // dispatcher. ADMISSION IS THE PROBE, so the session it hands back is given up immediately.
+        val gate = getField(service, "voiceSessionGate") as VoiceSessionGate
+        // The bound has to cover the teardown's OWN worst case, not a guess: it joins the engine's
+        // work in rounds of up to five seconds each, so on a loaded machine five seconds total can
+        // expire while the release is still legitimately in progress.
+        val budgetMs = 60_000L
         val deadline = System.currentTimeMillis() + budgetMs
         var settled = false
         while (System.currentTimeMillis() < deadline) {
@@ -1140,14 +1148,14 @@ class VoiceControlModeObserverAvailabilityTest {
             testScheduler.advanceTimeBy(25.milliseconds)
             runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
             kotlinx.coroutines.yield()
-            val root = (getField(service, "serviceScope") as? kotlinx.coroutines.CoroutineScope)
-                ?.coroutineContext?.get(kotlinx.coroutines.Job)
-            if (root != null && root.isCompleted) {
+            val admission = gate.acquire(timeoutMs = 20)
+            if (admission is VoiceSessionGate.Admission.Acquired) {
+                gate.release(admission.session)
                 settled = true
                 break
             }
         }
-        check(settled) { "service teardown did not finish within ${budgetMs}ms of onDestroy" }
+        check(settled) { "the voice session was still held ${budgetMs}ms after onDestroy" }
     }
 
     // ---- tests ---------------------------------------------------------------

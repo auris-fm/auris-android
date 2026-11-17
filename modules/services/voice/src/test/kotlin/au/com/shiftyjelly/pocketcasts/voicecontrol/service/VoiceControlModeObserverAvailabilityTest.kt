@@ -830,6 +830,7 @@ class VoiceControlModeObserverAvailabilityTest {
             awaitState("wired capture up") { harness.hardware.attachCount >= 2 }
             awaitState("wired capture committed") { harness.engineStarted() }
 
+
             // The wired capture ends by itself: one restart at once (its stream was its own,
             // not an acquisition's), then the fast second death withholds.
             withheldLogs[0] = 0
@@ -1115,9 +1116,38 @@ class VoiceControlModeObserverAvailabilityTest {
         awaitState("observer install") { getField(service, "modeJob") != null }
     }
 
+    /**
+     * End the service the way Android does, so its real teardown runs and no work from this test
+     * is still live when the next one installs its main dispatcher. `onDestroy` cancels the
+     * service scope and joins it before releasing anything; the leaked children were what made a
+     * following test fail with "Dispatchers.Main is used concurrently with setting it".
+     */
     private suspend fun Harness.stop() {
-        runCatching { (getField(service, "modeJob") as? kotlinx.coroutines.Job)?.cancel() }
-        runCatching { microphoneCapture.stopCapture() }
+        runCatching {
+            VoiceControlService::class.java.getDeclaredMethod("onDestroy")
+                .apply { isAccessible = true }.invoke(service)
+        }
+        // onDestroy discards the Deferred its teardown returns, and that teardown finishes on
+        // Dispatchers.IO -- so the service scope being cancelled is not the same as the teardown
+        // being over. Not asking the lifecycle for a second stop (the service is already stopped
+        // by now, and a re-stop is not this test's business); waiting for the work to drain off
+        // the main thread, bounded by the timeout the teardown uses to prove a join.
+        val budgetMs = 5_000L
+        val deadline = System.currentTimeMillis() + budgetMs
+        var settled = false
+        while (System.currentTimeMillis() < deadline) {
+            testScheduler.runCurrent()
+            testScheduler.advanceTimeBy(25.milliseconds)
+            runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+            kotlinx.coroutines.yield()
+            val root = (getField(service, "serviceScope") as? kotlinx.coroutines.CoroutineScope)
+                ?.coroutineContext?.get(kotlinx.coroutines.Job)
+            if (root != null && root.isCompleted) {
+                settled = true
+                break
+            }
+        }
+        check(settled) { "service teardown did not finish within ${budgetMs}ms of onDestroy" }
     }
 
     // ---- tests ---------------------------------------------------------------

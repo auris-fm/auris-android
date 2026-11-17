@@ -1064,6 +1064,10 @@ class CloudRouteSinkTest {
                 "(recorded=${recorded.recentReferencePositions})",
             recorded.recentReferencePositions.isEmpty(),
         )
+        assertNull(
+            "and no pre-action provenance either (previous=${recorded.previousReferencePositionMs})",
+            recorded.previousReferencePositionMs,
+        )
     }
 
     @Test

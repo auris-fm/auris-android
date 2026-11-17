@@ -119,7 +119,9 @@ int main() {
 
     if (started) {
         while (true) {
-            const int event = processor.waitForEvent(30000);
+            // This control reads the PCM size counter, not the utterance generation, so it passes
+            // no out-pointer; waitForEvent accepts nullptr for a caller that does not need it.
+            const int event = processor.waitForEvent(30000, nullptr);
             if (event == 1) {
                 // THE CALL SITE: this is exactly what VoiceAsrEngine.SpeechStarted does on main —
                 // read the size counter, then drain the buffer as the utterance's initial chunk.
@@ -150,6 +152,10 @@ int main() {
                     sizeAtStart2, sawClose2 ? 1 : 0);
                 break;
             } else {
+                // Trailing silence (3) and the length cutoff (4) are progress reports, not the end
+                // of the utterance: the consumer keeps reading until the end event arrives. Breaking
+                // on them would abandon the script halfway and read the snapshot at the wrong point.
+                if (event == 3 || event == 4) continue;
                 std::printf("      waitForEvent returned %d\n", event);
                 break;
             }

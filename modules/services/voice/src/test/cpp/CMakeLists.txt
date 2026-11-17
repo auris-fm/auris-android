@@ -136,13 +136,13 @@ target_link_libraries(vad_segment_delivery_test PRIVATE Threads::Threads)
 # history, without needing the bad interleaving to occur.
 #
 # WHAT IT SHOWS TODAY: nothing, either with the segment copy inside mSpeechMutex or with it moved back
-# outside -- including with a consumer busy for 30 ms after each delivery, so later utterances complete
-# while it is still on an older queued end event. Both versions still READ mSnapshotBuffer under
-# mSpeechMutex, and the consumer's replay WRITES it under the same mutex -- so the placement decides
-# whether the read holds that lock, not whether the mutex is the one guarding the pair. TSAN is silent
-# because the read and the replay are on the same ordering whichever way it is placed in this build.
-# TSAN does report a deliberate race in a self-test on this toolchain, so the silence concerns this
-# access pair rather than the instrumentation. The lock placement is verified against the source.
+# outside that scope -- including with a consumer busy for 30 ms after each delivery, so later
+# utterances complete while it is still on an older queued end event. The two versions differ exactly
+# as the fix intended: the copy of mSnapshotBuffer holds mSpeechMutex in this build, and did not before
+# it. The sanitizer reports no race in either, and this build's code does not explain that silence, so
+# it is not offered as evidence for the placement -- which stays verified against the source. TSAN does
+# report a deliberate race in a self-test on this toolchain, so the silence concerns this access pair
+# rather than the instrumentation.
 add_executable(vad_segment_delivery_tsan_test
     VadSegmentDeliveryTest.cpp
     ${CPP_DIR}/NativeVadProcessor.cpp

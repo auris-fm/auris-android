@@ -1,9 +1,9 @@
 // Host-only probe: each queued end event must deliver ITS OWN segment's audio.
 //
-// The PRODUCER's copy is taken from mSpeechBuffer into its own vector under mSpeechMutex, and
-// waitForEvent's REPLAY into mSnapshotBuffer takes the same mutex. The two therefore serialize: an
-// owning producer's copy cannot interleave with the consumer's move, whatever order the queue
-// delivers them in.
+// The PRODUCER copies the snapshot members into its own CompletedSegment, and waitForEvent's REPLAY
+// moves a queued segment's pcm back into mSnapshotBuffer under mSpeechMutex. Whether that copy holds
+// the same mutex is what the fix changed: it now does, so the copy and the replay cannot interleave,
+// whatever order the queue delivers them in.
 //
 // WHAT THIS CONTROL ACTUALLY PINS: that the replay serves the segment belonging to the end event it
 // was queued with, through the getters a real consumer calls. It drives the real frame loop through

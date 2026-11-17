@@ -73,10 +73,10 @@ interface CloudTurnConnection {
      * What it bounds is IDLENESS, not margin against the server's first-frame budget: the server
      * starts its auth-frame timer when it accepts the upgrade, so a client that takes a nine-second
      * old socket and sends immediately lands at the start of a fresh window, not at the end of one.
-     * The two numbers that pair are this threshold and the server's idle close — nine seconds
-     * against ten — and [MAX_AGE_MS] states which revision each figure belongs to. The client cannot
-     * tell why a socket closed, so the rule rests on its own clock rather than on the expectation of
-     * a close handler; past the threshold the only honest move is to dial again.
+     * The two numbers that pair are this threshold and the server's own idle close — nine seconds
+     * against ten — and [MAX_AGE_MS] states what that pairing costs against the older contract. The
+     * client cannot tell why a socket closed, so the rule rests on its own clock rather than on the
+     * expectation of a close handler; past the threshold the only honest move is to dial again.
      */
     fun isStale(nowMs: Long, maxAgeMs: Long = MAX_AGE_MS): Boolean = nowMs - openedAtMs >= maxAgeMs
 
@@ -86,14 +86,21 @@ interface CloudTurnConnection {
          * seconds: it closes a connection that has received no first frame within that window measured
          * from the upgrade, and this bounds how long the client will let a connection sit unsent.
          *
-         * The landed contract still states five seconds, so against a server running that build the
-         * nine-second bound is LOOSER than the server's own limit, not inside it: a connection this
-         * old may be one the server has already closed, and there is no second chance after that.
-         * A dead connection is caught when it fails while held — it is marked dead and replaced on
-         * the next open — but a close the client never observes looks alive until the frame is sent,
-         * and a send that is refused does not redial: the turn ends and the user hears the failure.
-         * So this margin is only fully safe against the revision that widens the window to ten, and
-         * the five-second build is the one where it can cost a turn.
+         * The landed contract still states five seconds, which makes the exposure a band rather
+         * than a blanket margin. Below five seconds a held connection is sound against that build;
+         * above nine this check refuses it and the turn dials fresh. In between — five to nine — the
+         * socket passes here and may already have been closed by the server, and there is no second
+         * chance: nothing above `exchange` retries, so the turn is over.
+         *
+         * What the user gets then is the QUIETER outcome, not the louder one: a send onto a socket
+         * the server has closed does not produce a terminal event, so the sink has nothing to speak
+         * and the turn ends silent rather than apologising. A close that is reported while the
+         * connection is held is caught earlier (it is marked dead and replaced on the next open), but
+         * one the client never observes looks alive until the frame goes out.
+         *
+         * So nine is fully safe only against the revision that widens the window to ten; against the
+         * five-second build the safe interim figure would be four. That choice belongs with the
+         * deployment, not with this constant.
          */
         const val MAX_AGE_MS = 9_000L
     }

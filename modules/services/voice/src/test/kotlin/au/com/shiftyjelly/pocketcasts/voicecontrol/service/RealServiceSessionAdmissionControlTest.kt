@@ -10,6 +10,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -308,5 +309,46 @@ class RealServiceSessionAdmissionControlTest {
         )
         (next as? VoiceSessionGate.Admission.Acquired)?.let { sessionGate.release(it.session) }
         Unit
+    }
+
+    /**
+     * The process-wide objects belong to the holder. A second instance is refused while the first
+     * holds the session; when that refused instance stops, it must leave the recognizer loaded, or
+     * it would pull the shared recognizer out from under the instance still using it.
+     */
+    @Test(timeout = 60_000)
+    fun `a refused instance's teardown leaves the recognizer loaded for the holder`() {
+        val holder = newService()
+        val refused = newService()
+        try {
+            runBlocking {
+                holder.onStartCommand(Intent(), 0, 1)
+                pump(2500)
+                val taken = takenSession(holder)
+                assertNotNull("the holder must own a session", taken)
+
+                refused.onStartCommand(Intent(), 0, 2)
+                pump(1500)
+                assertNull("a refused instance must own no session", takenSession(refused))
+
+                val callsBefore = RecognizerReleaseProbe.calls.get()
+                // The refused instance stops. It owns nothing shared, so it must release nothing shared.
+                refused.onDestroy()
+                pump(2000)
+                assertEquals(
+                    "a refused instance's stop must not release the holder's recognizer",
+                    callsBefore,
+                    RecognizerReleaseProbe.calls.get(),
+                )
+                assertTrue(
+                    "the holder must still own the session after the refused instance stopped",
+                    holder.voiceSessionGate.holds(taken as VoiceSessionGate.Session),
+                )
+            }
+        } finally {
+            runCatching { holder.onDestroy() }
+            runCatching { refused.onDestroy() }
+            pump(1000)
+        }
     }
 }

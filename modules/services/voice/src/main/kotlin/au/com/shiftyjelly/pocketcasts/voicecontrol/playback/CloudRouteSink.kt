@@ -1147,25 +1147,15 @@ class CloudRouteSink internal constructor(
                             is EpisodeOperationResult.Accepted -> {
                                 capturePreActionPosition(
                                     positionSeconds * 1000L,
-                                        outcome.episodeId,
+                                    outcome.episodeId,
                                     outcome.preActionPositionMs,
                                 )
                                 ActionOutcome.Confirmed
                             }
 
-                            is EpisodeOperationResult.Unknown -> {
-                                // An UNKNOWN outcome records NOTHING. Passing no target keeps the
-                                // record from being written at all -- `record` is the only writer and
-                                // it is reached only with a target -- so this attempt contributes no
-                                // history, because nothing established where the player ended up.
-                                capturePreActionPosition(
-                                    targetReferenceMs = null,
-                                    acceptedEpisodeId = outcome.episodeId,
-                                    preActionPositionMs = outcome.preActionPositionMs,
-                                    recordTarget = false,
-                                )
-                                ActionOutcome.Unknown
-                            }
+                            // AN UNKNOWN OUTCOME RECORDS NOTHING: nothing established where the
+                            // player ended up, so this attempt contributes no history.
+                            is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
                         }
                     }
                     // The reference branch is reached only when that form was supplied, so a null
@@ -1303,30 +1293,14 @@ class CloudRouteSink internal constructor(
             ActionOutcome.Confirmed
         }
 
-        is EpisodeOperationResult.Unknown -> {
-            capturePreActionPosition(
-                targetReferenceMs = targetReferenceMs,
-                acceptedEpisodeId = outcome.episodeId,
-                preActionPositionMs = outcome.preActionPositionMs,
-                recordTarget = false,
-            )
-            // AN UNKNOWN OUTCOME IS ITS OWN ANSWER: dispatched, and nothing observed it.
-            ActionOutcome.Unknown
-        }
+        // AN UNKNOWN OUTCOME IS ITS OWN ANSWER: dispatched, and nothing observed it. No history.
+        is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
     }
 
     private fun capturePreActionPosition(
         targetReferenceMs: Long?,
         acceptedEpisodeId: String?,
         preActionPositionMs: Long?,
-        /**
-         * Whether the TARGET was observed to be reached, so it may be recorded.
-         *
-         * FALSE FOR AN UNKNOWN OUTCOME, and it suppresses the whole record rather than the target
-         * alone: nothing established that the player reached the target, so the attempt produces no
-         * history at all. With no target there is no destination to attach a previous position to.
-         */
-        recordTarget: Boolean = true,
     ) {
         // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
         // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
@@ -1338,13 +1312,7 @@ class CloudRouteSink internal constructor(
         // was snapshotted by the manager at the mutation, so it IS the position before the action. The
         // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
         // the starting point -- reading it here would record the destination as the previous position.
-        // AN UNOBSERVED ATTEMPT RECORDS NOTHING. For an UNKNOWN outcome the target is null, so the
-        // return below fires and no record is written -- a previous position with no destination
-        // describes a seek that has no history. Recording a target would claim an observation
-        // nobody made.
-        // THE FLAG GATES THE TARGET ITSELF. Keeping `recordTarget` as a parameter but never consulting
-        // it made it decorative: the target was recorded for an Unknown outcome exactly as before.
-        val target = targetReferenceMs.takeIf { recordTarget }
+        val target = targetReferenceMs
         val previousPlaybackMs = preActionPositionMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
@@ -1362,11 +1330,8 @@ class CloudRouteSink internal constructor(
         // reattribute the position to a recording the action never touched. The live provider is the
         // wrong authority here: it answers "what is selected NOW", which is the question this is
         // deliberately not asking.
-        // NOTHING IS RECORDED WHEN THE TARGET WAS NOT OBSERVED. The provenance above is not written
-        // on its own: `record` is the only writer, and it is reached only with a target, so an UNKNOWN
-        // outcome records neither the previous position nor the target -- nothing established where
-        // the player ended up, and a previous position for that attempt would describe a seek whose
-        // history has no destination.
+        // THE PROVENANCE IS NEVER WRITTEN ON ITS OWN: `record` is the only writer and takes both
+        // values together, so a position with no destination cannot become history.
         if (acceptedEpisodeId == null || target == null) return
         cloudPlaybackContextState.record(
             // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:

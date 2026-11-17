@@ -789,6 +789,39 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a resume does not resume a replacement episode`() = runTest {
+        // A resume is a player-state mutation, so it carries the turn's episode binding: resuming a
+        // recording the user moved away from would start audio under a turn about something else.
+        val deps = TestDeps(
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "resume",
+                    params = emptyMap(),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // The user changes episode MID-TURN: the provider reports B while the turn is about A. The
+        // fake's resume accepts whatever it is handed, so the sink's own binding is what must refuse.
+        deps.selectEpisodeForTest("B")
+        deps.playback.currentEpisodeIdForTest = "B"
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about episode A",
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+            admitted = testWireId,
+        ).feedback
+
+        assertTrue(
+            "a resume whose episode was replaced must not reach the player (calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it == "resume" },
+        )
+    }
+
+    @Test
     fun `a REFUSED bound skip is not reported as a performed action`() = runTest {
         // requirement: the scoped mutation's own payload decides, and statistics/history follow
         // ACCEPTANCE. A refused skip moved nothing, so reporting it as performed would publish a skip
@@ -933,6 +966,45 @@ class CloudRouteSinkTest {
             "an unknown outcome must record NO target, because nothing observed it being reached " +
                 "(recorded=${recorded.recentReferencePositions})",
             recorded.recentReferencePositions.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `an UNKNOWN plain seek records no history either`() = runTest {
+        // The plain branch decides its own history, separately from the reference branch: a target in
+        // seconds is converted here rather than mapped through the fingerprint. An unobserved attempt
+        // records nothing on this path too, including the pre-action provenance alone.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            episodeId = "episode-id",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 100),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // UNKNOWN, carrying a KNOWN pre-action position.
+        deps.playback.seekOutcomeForTest = EpisodeOperationResult.Unknown("episode-id", 60_000L)
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "go to 100 seconds",
+            PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+            admitted = testWireId,
+        ).feedback
+
+        val recorded = state.snapshot("episode-id")
+        assertTrue(
+            "an unknown plain seek must record NO target (recorded=${recorded.recentReferencePositions})",
+            recorded.recentReferencePositions.isEmpty(),
+        )
+        assertNull(
+            "and no pre-action provenance either (previous=${recorded.previousReferencePositionMs})",
+            recorded.previousReferencePositionMs,
         )
     }
 

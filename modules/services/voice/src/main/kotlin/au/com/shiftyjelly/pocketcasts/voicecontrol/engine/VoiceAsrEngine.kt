@@ -670,7 +670,11 @@ class VoiceAsrEngine @Inject constructor(
      *
      * The connection is opened per UTTERANCE, and the tag must be the same one the turn will later
      * carry, so the identity has to exist before the endpoint decision -- not be minted there.
-     * It is cleared when the segment closes, so the next utterance gets its own.
+     *
+     * Cleared when the NEXT utterance starts, not when this segment ends. It has to survive the
+     * endpoint: the turn adopts this id as its admitted id so it claims the connection already
+     * opened under it. Clearing it at the end of the segment would make the turn mint a fresh id
+     * and open a second connection that no turn ever claims.
      */
     private var inFlightUtteranceId: String? = null
 

@@ -143,6 +143,15 @@ class VoiceControlService : Service() {
     /** The process-wide session this instance holds, once its start was admitted. */
     @Volatile
     private var voiceSession: VoiceSessionGate.Session? = null
+
+    /**
+     * The session the current teardown owns, which is not always [voiceSession]: a stop with no start
+     * takes a free gate for itself, and that claim belongs to the teardown rather than to any start.
+     * Both the completion callback and the retry read this, so a held idle stop can still finish its
+     * release -- reading the start's field there would find nothing and hold the gate for good.
+     */
+    @Volatile
+    private var teardownSession: VoiceSessionGate.Session? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
@@ -1156,6 +1165,9 @@ class VoiceControlService : Service() {
         // means a start from another instance waits rather than using resources this teardown is
         // about to free. It is given up only when the completion job below has finished.
         var session = voiceSession
+        // One place records what this teardown owns, so the retry and the completion callback agree
+        // with the first pass whether the claim came from a start or from this stop itself.
+        teardownSession = session
         if (session != null) {
             voiceSessionGate.beginRelease(session)
         }
@@ -1238,6 +1250,7 @@ class VoiceControlService : Service() {
                 // cleanup's result is known, gives the release one owner.
                 if (session == null) {
                     session = voiceSession
+                    teardownSession = session
                     if (session == null) {
                         // NOBODY CLAIMED, SO ASK WHETHER THE SHARED OBJECTS ARE UNOWNED -- without
                         // waiting. If the gate is free this idle stop takes it and releases everything,
@@ -1247,6 +1260,7 @@ class VoiceControlService : Service() {
                         val taken = voiceSessionGate.tryAcquire()
                         if (taken is VoiceSessionGate.Admission.Acquired) {
                             session = taken.session
+                            teardownSession = taken.session
                         }
                     }
                     session?.let { voiceSessionGate.beginRelease(it) }
@@ -1364,7 +1378,8 @@ class VoiceControlService : Service() {
                         // keeps the session, so this is normally true; if it is not, another session
                         // owns the shared objects and releasing them here would free resources that
                         // owner is using. Nothing is released in that case.
-                        val session = voiceSession
+                        // THE TEARDOWN'S OWN SESSION, not the start's: an idle stop's claim lives here.
+                        val session = teardownSession ?: voiceSession
                         if (session != null && !voiceSessionGate.holds(session)) {
                             Timber.w("[VoicePipeline] retry skipped: the voice session is no longer held")
                             return@async TeardownResult.Held(previous)

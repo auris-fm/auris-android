@@ -27,7 +27,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 class VoiceSessionGate @Inject constructor() {
     /** Why a start was or was not admitted. A refusal is explicit, never a silent no-op. */
     sealed interface Admission {
-        /** The caller owns the session and must [VoiceSessionGate.release] it when done. */
+        /**
+         * The caller owns the session. A start that goes on to run a pipeline hands it to its
+         * teardown, which calls [beginRelease] and then [finishRelease] once every release has
+         * finished. A start that goes no further gives it back with [release].
+         */
         data class Acquired(val session: Session) : Admission
 
         /** Another session holds the resources and did not give them up within the bound. */
@@ -46,7 +50,7 @@ class VoiceSessionGate @Inject constructor() {
     // field read or write, so nothing suspends while holding it.
     private val stateLock = Any()
 
-    // Guarded by [mutex]. `holder` is the session entitled to the resources; `releasing` records
+    // Guarded by [stateLock]. `holder` is the session entitled to the resources; `releasing` records
     // that its teardown has begun but not finished, which is the window a new start must not enter.
     private var holder: Session? = null
     private var releasing: Session? = null
@@ -64,25 +68,47 @@ class VoiceSessionGate @Inject constructor() {
      * start and say so; proceeding would use resources whose release never completed.
      */
     suspend fun acquire(timeoutMs: Long): Admission {
-        val admitted = withTimeoutOrNull(timeoutMs) {
-            // The lock serializes the CHECK, not the holding: taking it and assigning would let
-            // every caller in turn overwrite the holder. Wait until nobody holds the resources,
-            // then claim them under the same lock so two waiters cannot both see it free.
-            while (true) {
-                val claimed = synchronized(stateLock) {
-                    if (holder == null) {
-                        Session(++nextId).also { holder = it }
-                    } else {
-                        null
+        // A CLAIM MUST NOT OUTLIVE ITS WAITER. Claiming happens under the lock inside the timeout,
+        // and cancellation can land between the claim and the return: the session would then have
+        // an owner that never learns it owns anything, so no release ever arrives and every later
+        // start is refused for the life of the process. The claim is therefore recorded here as it
+        // is made, and given back below unless this call actually returns it to a live caller.
+        var claimed: Session? = null
+        try {
+            val admitted = withTimeoutOrNull(timeoutMs) {
+                // The lock serializes the CHECK, not the holding: taking it and assigning would let
+                // every caller in turn overwrite the holder. Wait until nobody holds the resources,
+                // then claim them under the same lock so two waiters cannot both see it free.
+                while (true) {
+                    val taken = synchronized(stateLock) {
+                        if (holder == null) {
+                            Session(++nextId).also { holder = it }
+                        } else {
+                            null
+                        }
                     }
+                    if (taken != null) {
+                        claimed = taken
+                        return@withTimeoutOrNull taken
+                    }
+                    delay(POLL_MS)
                 }
-                if (claimed != null) return@withTimeoutOrNull claimed
-                delay(POLL_MS)
+                @Suppress("UNREACHABLE_CODE")
+                null
             }
-            @Suppress("UNREACHABLE_CODE")
-            null
+            if (admitted == null) {
+                // The bound expired. Give back anything claimed as it expired.
+                claimed?.let { release(it) }
+                return Admission.TimedOut
+            }
+            // Handed to the caller: from here the caller owns it.
+            claimed = null
+            return Admission.Acquired(admitted)
+        } finally {
+            // Cancellation, including a timeout that fires after the claim. `release` is a no-op once
+            // a teardown has begun releasing this session, so this cannot undo a real teardown.
+            claimed?.let { release(it) }
         }
-        return if (admitted == null) Admission.TimedOut else Admission.Acquired(admitted)
     }
 
     /**
@@ -107,6 +133,13 @@ class VoiceSessionGate @Inject constructor() {
             holder = null
         }
     }
+
+    /**
+     * Whether this session still owns the shared resources, including while its release is in
+     * progress. A retry uses this to decide whether it may still release them: once another session
+     * holds the gate, releasing would free objects the new owner is using.
+     */
+    fun holds(session: Session): Boolean = synchronized(stateLock) { holder?.id == session.id }
 
     /**
      * Give up a session that was acquired but never began a release -- a start that was refused

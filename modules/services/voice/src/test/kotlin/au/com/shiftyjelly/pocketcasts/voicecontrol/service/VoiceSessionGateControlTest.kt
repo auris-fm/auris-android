@@ -2,7 +2,10 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -171,5 +174,76 @@ class VoiceSessionGateControlTest {
             third is VoiceSessionGate.Admission.Acquired,
         )
         gate.release(second.session)
+    }
+
+    /**
+     * A waiter cancelled at the moment it claims must not leave the session held by nobody.
+     *
+     * The claim and the return are separate steps: the claim happens under the lock inside a
+     * timeout, and cancellation can land between them. The session would then have an owner that
+     * never learns it owns anything, so no release ever comes and every later start is refused.
+     */
+    @Test
+    fun `a waiter cancelled right after claiming leaves the gate free`() = runBlocking {
+        val gate = VoiceSessionGate()
+        // The claim happens on a DISPATCHER thread while the caller waits, so cancellation has to be
+        // able to land after the claim and before the caller resumes. A plain yield lets the whole
+        // acquire finish first -- measured: every waiter returned normally that way, so the race was
+        // never exercised. Blocking the gate first forces each waiter to be parked in its poll, and
+        // freeing it while cancelling makes the claim and the cancellation concurrent.
+        repeat(100) {
+            val blocker = gate.acquire(timeoutMs = 1_000) as VoiceSessionGate.Admission.Acquired
+            val waiter = launch(kotlinx.coroutines.Dispatchers.Default) {
+                val admission = gate.acquire(timeoutMs = 5_000)
+                if (admission is VoiceSessionGate.Admission.Acquired) {
+                    gate.release(admission.session)
+                }
+            }
+            // Let the waiter reach its poll, then free the gate and cancel in the same instant.
+            delay(15)
+            gate.release(blocker.session)
+            waiter.cancel()
+            waiter.join()
+            // Whatever the outcome, nothing may remain held: the waiter either got the session and
+            // gave it back, or never received it and must not keep it.
+            val probe = gate.acquire(timeoutMs = 300)
+            assertTrue(
+                "iteration $it left the session stranded: $probe",
+                probe is VoiceSessionGate.Admission.Acquired,
+            )
+            (probe as VoiceSessionGate.Admission.Acquired).let { p -> gate.release(p.session) }
+        }
+
+        val next = gate.acquire(timeoutMs = 500)
+        assertTrue(
+            "a cancelled waiter must not strand the session: got $next",
+            next is VoiceSessionGate.Admission.Acquired,
+        )
+    }
+
+    /** A timed-out waiter must not keep a session it claimed as the bound expired. */
+    @Test
+    fun `a waiter whose bound expires right after claiming leaves the gate free`() = runBlocking {
+        val gate = VoiceSessionGate()
+        // Repeat with the release timed near the bound, so some iterations claim just as the timeout
+        // fires and others time out first. Both outcomes must leave nothing stranded: a claim that
+        // expired is given back, and a waiter that never claimed holds nothing.
+        repeat(40) {
+            val blocker = gate.acquire(timeoutMs = 1_000) as VoiceSessionGate.Admission.Acquired
+            val waiter = async(kotlinx.coroutines.Dispatchers.Default) { gate.acquire(timeoutMs = 20) }
+            delay(15)
+            gate.release(blocker.session)
+            val outcome = waiter.await()
+            // A waiter that WAS handed a session owns it until it gives it back, exactly like any
+            // caller; only a refusal must leave nothing behind.
+            if (outcome is VoiceSessionGate.Admission.Acquired) gate.release(outcome.session)
+
+            val next = gate.acquire(timeoutMs = 500)
+            assertTrue(
+                "iteration $it stranded the session (waiter outcome $outcome): $next",
+                next is VoiceSessionGate.Admission.Acquired,
+            )
+            (next as VoiceSessionGate.Admission.Acquired).let { n -> gate.release(n.session) }
+        }
     }
 }

@@ -36,6 +36,37 @@ object CloudRouteErrorCodes {
     const val SPEECH_UNAVAILABLE = "speech_unavailable"
 
     /**
+     * The turn's application-level audio queue exceeded its bound: the service produced audio faster
+     * than it could be written. Recognised so the trace and the log name the cause rather than
+     * collapsing a promised failure to `unrecognized`.
+     */
+    const val QUEUE_OVERFLOW = "queue_overflow"
+
+    /**
+     * Another turn in this conversation is still active. The request is never queued and never
+     * resubmitted; the user retries when the current answer finishes or is interrupted.
+     */
+    const val TURN_CONFLICT = "turn_conflict"
+
+    /**
+     * The stored record is unreadable, so prior admissions cannot be established. This turn neither
+     * executes nor consumes allowance, and a fresh conversation is required.
+     */
+    const val CORRUPT_RECORD = "corrupt_record"
+
+    /**
+     * The named conversation belongs to another user. Nothing is created, and the refused request is
+     * never resubmitted: a new user request carries a fresh identifier.
+     */
+    const val CONVERSATION_FORBIDDEN = "conversation_forbidden"
+
+    /**
+     * The conversation cannot retain another admitted request. This turn neither executes nor
+     * consumes allowance, and waiting does not free capacity — a new conversation is required.
+     */
+    const val RETENTION_EXHAUSTED = "retention_exhausted"
+
+    /**
      * Every code this client recognises — those adopted from the server, those it mints itself,
      * and those recognised for log normalization only. Internal rather than private so the
      * contract check can re-derive it from code instead of restating it: a code added here
@@ -56,6 +87,11 @@ object CloudRouteErrorCodes {
         NO_ANSWER,
         CONVERSATION_EXPIRED,
         SPEECH_UNAVAILABLE,
+        QUEUE_OVERFLOW,
+        TURN_CONFLICT,
+        CORRUPT_RECORD,
+        CONVERSATION_FORBIDDEN,
+        RETENTION_EXHAUSTED,
     )
 
     /**

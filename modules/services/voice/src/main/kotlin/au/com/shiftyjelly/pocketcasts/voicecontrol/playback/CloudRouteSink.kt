@@ -154,24 +154,6 @@ class CloudRouteSink internal constructor(
     )
 
     /**
-     * Per-turn audio bookkeeping. Deliberately NOT instance state: this sink
-     * is a singleton and a superseded turn unwinds on another thread, so
-     * shared flags would let turn A's restore resume playback for turn B
-     * (A resumes and clears the flag, then B streams over playing audio).
-     */
-    private class TurnState {
-        var preQuotePositionMs: Long? = null
-
-        /**
-         * Whether an action in this turn was ISSUED with an unknowable outcome.
-         *
-         * Recorded on the TURN because the Boolean `executeAction` result cannot express it: it reaches
-         * the turn's final outcome from inside a function whose whole contract is performed-or-not.
-         */
-        var actionUnknown: Boolean = false
-    }
-
-    /**
      * Turn ownership and player-state transitions, serialized by one mutex.
      *
      * A monitor lock is not enough: the restore *suspends* (resume loads the
@@ -496,7 +478,6 @@ class CloudRouteSink internal constructor(
                 )
             }
         }
-        val turnState = TurnState()
         // THE TURN'S ACTION OUTCOME IS THREE-VALUED, not a flag. A Boolean collapses "the action was
         // confirmed performed" with "the action was attempted and its outcome is unknown", so an
         // unknowable execution would be reported as DELIVERED -- claiming a success nobody observed.
@@ -709,7 +690,6 @@ class CloudRouteSink internal constructor(
                             event.tool,
                             event.action,
                             event.params,
-                            turnState,
                             myId,
                             plannedEpisodeId = context.episodeId,
                         )
@@ -1222,7 +1202,6 @@ class CloudRouteSink internal constructor(
         tool: String,
         action: String,
         params: Map<String, Any?>,
-        turnState: TurnState,
         myId: Long,
         plannedEpisodeId: String?,
     ): ActionOutcome {
@@ -1279,39 +1258,23 @@ class CloudRouteSink internal constructor(
                         // lambda rather than producing a value, so the expression's type collapses.
                         // RETURNED, NOT MERELY EVALUATED. A bare `when` here computes the outcome and
                         // then DISCARDS it, so execution falls through to the REFERENCE branch below and
-                        // an ordinary seek is followed by a reference seek -- @reviewer's measured
-                        // regression from my conversion. The branch must RETURN its typed outcome.
+                        // an ordinary seek is followed by a reference seek. The branch must RETURN its
+                        // typed outcome.
                         return@withLock when (outcome) {
                             is EpisodeOperationResult.Refused -> ActionOutcome.None
 
                             is EpisodeOperationResult.Accepted -> {
                                 capturePreActionPosition(
                                     positionSeconds * 1000L,
-                                    turnState,
                                     outcome.episodeId,
                                     outcome.preActionPositionMs,
                                 )
                                 ActionOutcome.Confirmed
                             }
 
-                            is EpisodeOperationResult.Unknown -> {
-                                // UNKNOWN RECORDS NOTHING AS PERFORMED. @reviewer's measured defect was
-                                // the opposite of what I described: Unknown became ACCEPTED and wrote
-                                // history, claiming a target the client never observed being reached.
-                                //
-                                // The PRE-ACTION provenance is still kept, because it is what the client
-                                // knew BEFORE the attempt and it is needed if a later observation
-                                // resolves the outcome; the TARGET is not, because nothing established
-                                // that the player reached it.
-                                capturePreActionPosition(
-                                    targetReferenceMs = null,
-                                    turnState = turnState,
-                                    acceptedEpisodeId = outcome.episodeId,
-                                    preActionPositionMs = outcome.preActionPositionMs,
-                                    recordTarget = false,
-                                )
-                                ActionOutcome.Unknown
-                            }
+                            // AN UNKNOWN OUTCOME RECORDS NOTHING: nothing established where the
+                            // player ended up, so this attempt contributes no history.
+                            is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
                         }
                     }
                     // The reference branch is reached only when that form was supplied, so a null
@@ -1324,73 +1287,7 @@ class CloudRouteSink internal constructor(
                     // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
                     // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
                     // never a live re-read, and only an OBSERVED outcome records the target.
-                    return@withLock handleSeekOutcome(outcome, referenceMs, turnState)
-                }
-
-                "play_quote" -> {
-                    val referenceMs = params.referencePositionMs() ?: return@withLock ActionOutcome.None
-                    // Same rule: the seek is attempted FIRST and history follows only an accepted one.
-                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock ActionOutcome.None
-                    val seekOutcome = handleSeekOutcome(outcome, referenceMs, turnState)
-                    if (seekOutcome == ActionOutcome.None) return@withLock ActionOutcome.None
-                    // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
-                    // the quote's own resume makes, not the standalone "resume" action. A quote means
-                    // "hear this, then carry on with the recording we were in", so resuming a
-                    // replacement episode would start audio the user never asked for, under a turn
-                    // about a different recording. Refused when the selection has moved.
-                    if (turnEpisodeId != null &&
-                        playbackContextProvider.current().episodeId != turnEpisodeId
-                    ) {
-                        return@withLock ActionOutcome.None
-                    }
-                    // Cleared before the suspending call so the flag never
-                    // outlives the player state it refers to. (Here a throw
-                    // would make the finally resume, which is what this action
-                    // wanted anyway — the reorder is for uniformity, not safety.)
-                    playerAutoPaused = false
-                    pauseReserved = false
-                    // THE QUOTE'S RESUME OUTCOME IS ITS OWN ANSWER. Returning true unconditionally
-                    // made a refused resume a delivered action -- and a quote whose episode was
-                    // replaced must not be counted as played.
-                    //
-                    // BUT THE SEEK'S OUTCOME IS PART OF THE SAME ACTION. A quote is "seek, then
-                    // resume"; returning only the resume's outcome would DISCARD an unknown seek when
-                    // the resume happened to succeed -- reporting the whole action as confirmed while
-                    // half of it was never established. The two are MERGED so the weaker observation
-                    // survives.
-                    val resumeOutcome = if (
-                        playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
-                    ) {
-                        ActionOutcome.Confirmed
-                    } else {
-                        ActionOutcome.None
-                    }
-                    // COMPOSITE AGGREGATION, not the turn-level merge: all required steps must be
-                    // confirmed, so an unknown seek plus an accepted resume stays Unknown instead of
-                    // being promoted to Confirmed by the resume's success.
-                    mergeCompositeSteps(seekOutcome, resumeOutcome)
-                }
-
-                "stop_quote" -> {
-                    // THE RESTORE CARRIES ITS ORIGINAL EXPECTATION. The position to return to belongs to
-                    // the episode the quote was played FROM, so a selection change during the quote must
-                    // refuse the restore rather than seek the replacement episode back into a recording
-                    // the user was not listening to. The outcome is honoured, not assumed.
-                    val restoreMs = turnState.preQuotePositionMs ?: return@withLock ActionOutcome.None
-                    val restored = playbackSink.seekTo(
-                        restoreMs.toInt() / 1000,
-                        episodeDurationSeconds(),
-                        turnEpisodeId,
-                    )
-                    // UNKNOWN IS NOT None. Collapsing it here reported an attempt whose outcome was
-                    // never established as "nothing happened" -- the very reading a caller uses to
-                    // decide a retry is safe. A restore that was DISPATCHED and not observed maps to
-                    // Unknown.
-                    when (restored) {
-                        is EpisodeOperationResult.Accepted -> ActionOutcome.Confirmed
-                        is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
-                        is EpisodeOperationResult.Refused -> ActionOutcome.None
-                    }
+                    return@withLock handleSeekOutcome(outcome, referenceMs)
                 }
 
                 "pause" -> {
@@ -1404,17 +1301,18 @@ class CloudRouteSink internal constructor(
                 }
 
                 "resume" -> {
-                    // THE EPISODE BINDING APPLIES TO RESUME TOO. A resume is a player-state mutation, and
-                    // a quote's "resume" means "carry on with the recording we were playing" -- resuming
-                    // a replacement episode would start audio the user never asked for, under a turn
-                    // about a different recording. Refused when the selection has moved.
+                    // THE EPISODE BINDING APPLIES TO RESUME. A resume is a player-state mutation, so it
+                    // carries the same binding as the other mutations: it continues the recording the
+                    // turn is about, and resuming a replacement episode would start audio the user never
+                    // asked for, under a turn about a different recording. Refused when the selection
+                    // has moved.
                     if (turnEpisodeId != null &&
                         playbackContextProvider.current().episodeId != turnEpisodeId
                     ) {
                         return@withLock ActionOutcome.None
                     }
-                    // As at play_quote: cleared first for uniformity, so a throw
-                    // cannot leave the flag describing a state we failed to reach.
+                    // Cleared before the suspending call so a throw cannot leave
+                    // the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     pauseReserved = false
                     // Both the guard above and the sink's own binding decide, and the OUTCOME is what is
@@ -1493,54 +1391,35 @@ class CloudRouteSink internal constructor(
      *
      * THE THREE OUTCOMES ARE DISTINCT AND STAY DISTINCT:
      *   Accepted -> the target was observed; record the pre-action provenance AND the target.
-     *   Unknown  -> the attempt was made and nothing established its result; record the PRE-ACTION
-     *               provenance only. Recording the target would claim an observation nobody made, and
-     *               returning false would present an unknowable execution as "nothing happened".
+     *   Unknown  -> the attempt was made and nothing established its result; record NOTHING. A target
+     *               would claim an observation nobody made, and a previous position with no destination
+     *               describes a seek that has no history, and returning false would present an
+     *               unknowable execution as "nothing happened".
      *   Refused  -> nothing happened; record nothing.
      */
     private fun handleSeekOutcome(
         outcome: EpisodeOperationResult,
         targetReferenceMs: Long,
-        turnState: TurnState,
     ): ActionOutcome = when (outcome) {
         is EpisodeOperationResult.Refused -> ActionOutcome.None
 
         is EpisodeOperationResult.Accepted -> {
             capturePreActionPosition(
                 targetReferenceMs = targetReferenceMs,
-                turnState = turnState,
                 acceptedEpisodeId = outcome.episodeId,
                 preActionPositionMs = outcome.preActionPositionMs,
             )
             ActionOutcome.Confirmed
         }
 
-        is EpisodeOperationResult.Unknown -> {
-            capturePreActionPosition(
-                targetReferenceMs = targetReferenceMs,
-                turnState = turnState,
-                acceptedEpisodeId = outcome.episodeId,
-                preActionPositionMs = outcome.preActionPositionMs,
-                recordTarget = false,
-            )
-            // AN UNKNOWN OUTCOME IS ITS OWN ANSWER: dispatched, and nothing observed it.
-            ActionOutcome.Unknown
-        }
+        // AN UNKNOWN OUTCOME IS ITS OWN ANSWER: dispatched, and nothing observed it. No history.
+        is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
     }
 
     private fun capturePreActionPosition(
-        targetReferenceMs: Long?,
-        turnState: TurnState,
+        targetReferenceMs: Long,
         acceptedEpisodeId: String?,
         preActionPositionMs: Long?,
-        /**
-         * Whether the TARGET was observed to be reached, so it may be recorded.
-         *
-         * FALSE FOR AN UNKNOWN OUTCOME: the pre-action provenance is kept because it describes what the
-         * client knew BEFORE the attempt, but the target is not, because nothing established that the
-         * player reached it. Recording it would claim an observation nobody made.
-         */
-        recordTarget: Boolean = true,
     ) {
         // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
         // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
@@ -1552,23 +1431,7 @@ class CloudRouteSink internal constructor(
         // was snapshotted by the manager at the mutation, so it IS the position before the action. The
         // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
         // the starting point -- reading it here would record the destination as the previous position.
-        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. An UNKNOWN outcome keeps the PRE-ACTION
-        // provenance -- what the client knew before the attempt -- but records no target, because
-        // nothing established that the player reached it. Recording it would claim an observation
-        // nobody made, which is @reviewer's measured e201 defect.
-        // The caller passes null when the TARGET was not observed -- but that suppresses only the
-        // TARGET, not the PRE-ACTION provenance. Returning here would ALSO skip `preQuotePositionMs`,
-        // discarding a value the owner had already captured: the same "unknown concerns execution, not
-        // whether the snapshot existed" distinction the manager now honours.
-        // THE FLAG GATES THE TARGET ITSELF. Keeping `recordTarget` as a parameter but never consulting
-        // it made it decorative: the target was recorded for an Unknown outcome exactly as before.
-        val target = targetReferenceMs.takeIf { recordTarget }
         val previousPlaybackMs = preActionPositionMs
-        // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
-        // it. When NO episode is playing there is no position to return to, so this records null and
-        // the restore path refuses -- substituting zero would send the user to the start of a
-        // recording they were not listening to.
-        turnState.preQuotePositionMs = previousPlaybackMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
         // mapping exists yet, omit the field rather than send a wrong-timeline
@@ -1585,17 +1448,16 @@ class CloudRouteSink internal constructor(
         // reattribute the position to a recording the action never touched. The live provider is the
         // wrong authority here: it answers "what is selected NOW", which is the question this is
         // deliberately not asking.
-        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. The provenance above is already committed
-        // (preQuotePositionMs) because it describes what the client knew BEFORE the attempt; the TARGET
-        // is not, because nothing established the player reached it.
-        if (acceptedEpisodeId == null || target == null) return
+        // THE PROVENANCE IS NEVER WRITTEN ON ITS OWN: `record` is the only writer and takes both
+        // values together, so a position with no destination cannot become history.
+        if (acceptedEpisodeId == null) return
         cloudPlaybackContextState.record(
             // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:
             // this is the reference-timeline position the action ASKED for, while `previousPlaybackMs`
             // above is where the client WAS. Passing the accepted operation's pre-action playback
             // position here would record a playback instant as the reference target -- a value on the
             // wrong timeline AND the wrong quantity.
-            referencePositionMs = target,
+            referencePositionMs = targetReferenceMs,
             previousReferencePositionMs = previousReferenceMs,
             episodeId = acceptedEpisodeId,
         )
@@ -1699,25 +1561,10 @@ class CloudRouteSink internal constructor(
         }
 
         /**
-         * Aggregates the outcomes of ONE action's COMPOSITE steps -- a quote's seek and its resume.
-         *
-         * A composite succeeds only if EVERY required step was confirmed: one step whose outcome could not
-         * be established leaves the whole action unknown, however well a LATER step went. Precedence for
-         * [ActionOutcome.Confirmed] would report the composite as achieved on the strength of whichever step
-         * happened to be observable, which is a claim nobody made.
-         */
-        internal fun mergeCompositeSteps(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
-            previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
-            previous == ActionOutcome.Confirmed && next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
-            else -> ActionOutcome.None
-        }
-
-        /**
          * Aggregates the outcomes of INDEPENDENT actions within a turn.
          *
-         * This is a DIFFERENT contract from [mergeCompositeSteps]: these actions do not depend on each
-         * other, so one confirmed action is a confirmed action regardless of a sibling's fate. It is
-         * deliberately not reused for composite steps, where the same rule would erase an unknown step.
+         * These actions do not depend on each other, so one confirmed action is a confirmed action
+         * regardless of a sibling's fate.
          */
         internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
             previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed

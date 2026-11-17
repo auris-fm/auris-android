@@ -793,18 +793,25 @@ class CloudRouteSinkTest {
                 "(calls=${deps.playback.calls} recorded=${state.snapshot("B").recentReferencePositions})",
             !deps.playback.calls.any { it.startsWith("seekTo:") },
         )
+        // THE HISTORY IS THE OBSERVATION, not the call list: a refusal that reached no player must
+        // leave both episodes' stored positions exactly as they were.
+        assertTrue(
+            "and it must not record history against any episode " +
+                "(A=${state.snapshot("A").recentReferencePositions} " +
+                "B=${state.snapshot("B").recentReferencePositions})",
+            state.snapshot("A").recentReferencePositions.isEmpty() &&
+                state.snapshot("B").recentReferencePositions.isEmpty(),
+        )
     }
 
     @Test
-    fun `a REFUSED reference seek does not record history, and a refused quote does not either`() = runTest {
-        // The reference branch is where measured this, and it is a different branch from
-        // `position_seconds`: that one routes to the plain seek, this one through the fingerprint
-        // mapping. A case for one cannot see a defect in the other -- which is how my first version of
-        // this control passed while the reference branch still recorded history on a refusal.
+    fun `a REFUSED reference seek does not record history`() = runTest {
+        // The reference branch is a different branch from `position_seconds`: that one routes to the
+        // plain seek, this one through the fingerprint mapping. A case for one cannot see a defect in
+        // the other, so each branch needs its own refusal control.
         //
-        // Both reference verbs are covered because both recorded first: `seek_to` with
-        // `reference_position_ms`, and `play_quote`.
-        listOf("seek_to" to "reference_position_ms", "play_quote" to "reference_position_ms").forEach { (action, field) ->
+        // `seek_to` is the only reference verb.
+        listOf("seek_to" to "reference_position_ms").forEach { (action, field) ->
             val state = CloudPlaybackContextState()
             val deps = TestDeps(
                 cloudPlaybackContextState = state,
@@ -830,8 +837,7 @@ class CloudRouteSinkTest {
 
             // THE HISTORY IS THE OBSERVATION, not the call list. A refused operation records nothing,
             // so the episode's saved positions must be exactly what they were -- an assertion about
-            // `calls` alone passes whether or not history was corrupted, which is how my first version
-            // of this control survived its mutation.
+            // `calls` alone passes whether or not history was corrupted.
             assertTrue(
                 "$action: a refused reference seek must not reach the player " +
                     "(calls=${deps.playback.calls})",
@@ -880,31 +886,35 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a quote resume does not resume a replacement episode`() = runTest {
-        // The quote's own resume is bound to the recording the quote came from.
+    fun `a resume does not resume a replacement episode`() = runTest {
+        // A resume is a player-state mutation, so it carries the turn's episode binding: resuming a
+        // recording the user moved away from would start audio under a turn about something else.
         val deps = TestDeps(
             episodeId = "A",
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 45_000_000L),
+                    action = "resume",
+                    params = emptyMap(),
                 ),
                 CloudRouteEvent.Done(1, 0),
             ),
         )
+        // The user changes episode MID-TURN: the provider reports B while the turn is about A. The
+        // fake's resume accepts whatever it is handed, so the sink's own binding is what must refuse.
+        deps.selectEpisodeForTest("B")
         deps.playback.currentEpisodeIdForTest = "B"
         val sink = deps.sink()
 
         sink.routeToCloud(
-            "play the quote",
+            "about episode A",
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
 
         assertTrue(
-            "a quote whose episode was replaced must not seek or resume (calls=${deps.playback.calls})",
-            !deps.playback.calls.any { it.startsWith("seekTo:") || it == "resume" },
+            "a resume whose episode was replaced must not reach the player (calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it == "resume" },
         )
     }
 
@@ -1020,11 +1030,11 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `an UNKNOWN outcome keeps the pre-action provenance while recording NO target`() = runTest {
-        // "Preserve the owner's known value; Unknown concerns execution, not whether its
-        // pre-action snapshot existed." The TARGET is suppressed because nothing established the player
-        // reached it; the PRE-ACTION position is kept because the owner captured it before the attempt.
-        // An early return on a null target would discard BOTH, which is the defect this pins.
+    fun `an UNKNOWN outcome records no history`() = runTest {
+        // An UNKNOWN outcome records nothing: nothing established that the player reached the target,
+        // and a previous position with no destination describes a seek that has no history. The
+        // observation is the stored positions, so this fails if any record is written -- including one
+        // carrying only the pre-action provenance.
         val state = CloudPlaybackContextState()
         val deps = TestDeps(
             cloudPlaybackContextState = state,
@@ -1032,7 +1042,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1043,7 +1053,7 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
 
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -1053,6 +1063,45 @@ class CloudRouteSinkTest {
             "an unknown outcome must record NO target, because nothing observed it being reached " +
                 "(recorded=${recorded.recentReferencePositions})",
             recorded.recentReferencePositions.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `an UNKNOWN plain seek records no history either`() = runTest {
+        // The plain branch decides its own history, separately from the reference branch: a target in
+        // seconds is converted here rather than mapped through the fingerprint. An unobserved attempt
+        // records nothing on this path too, including the pre-action provenance alone.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            episodeId = "episode-id",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 100),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // UNKNOWN, carrying a KNOWN pre-action position.
+        deps.playback.seekOutcomeForTest = EpisodeOperationResult.Unknown("episode-id", 60_000L)
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "go to 100 seconds",
+            PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+            admitted = testWireId,
+        ).feedback
+
+        val recorded = state.snapshot("episode-id")
+        assertTrue(
+            "an unknown plain seek must record NO target (recorded=${recorded.recentReferencePositions})",
+            recorded.recentReferencePositions.isEmpty(),
+        )
+        assertNull(
+            "and no pre-action provenance either (previous=${recorded.previousReferencePositionMs})",
+            recorded.previousReferencePositionMs,
         )
     }
 
@@ -1113,7 +1162,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1123,7 +1172,7 @@ class CloudRouteSinkTest {
 
         // A turn with NO episode: an episode-specific reference action has nothing to act on.
         sink.routeToCloud(
-            "play the quote",
+            "play from the reference",
             PlaybackContext(episodeId = null, clientPositionMs = 0L),
             admitted = testWireId,
         ).feedback
@@ -1739,7 +1788,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1749,7 +1798,7 @@ class CloudRouteSinkTest {
         deps.playback.preActionPositionMsForTest = 60_000L
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         val recorded = state.snapshot("episode-id")
         // 60_000 playback maps to 45_000 reference. The provider's 999_000 would map far away, so a live
@@ -1762,47 +1811,9 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `composite steps stay unknown when one step was not established`() {
-        // THE THREE INPUTS THAT DECIDE IT are enumerated, so the case cannot pass on a rule that only
-        // happens to agree for one of them. A confirmed-later-step rule would report the first two as
-        // Confirmed.
-        assertEquals(
-            "an unknown step leaves the composite unknown however well the later step went",
-            CloudRouteSink.Companion.ActionOutcome.Unknown,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Unknown,
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            ),
-        )
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.Unknown,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.Unknown,
-            ),
-        )
-        // The composite is confirmed only when EVERY required step was.
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-            ),
-        )
-        // A step that did nothing cannot make the composite confirmed.
-        assertEquals(
-            CloudRouteSink.Companion.ActionOutcome.None,
-            CloudRouteSink.mergeCompositeSteps(
-                CloudRouteSink.Companion.ActionOutcome.Confirmed,
-                CloudRouteSink.Companion.ActionOutcome.None,
-            ),
-        )
-    }
-
-    @Test
     fun `turn aggregation still promotes a confirmed action past an unknown sibling`() {
-        // THE OTHER CONTRACT, asserted here so the two rules cannot silently become one. Independent
-        // actions do not depend on each other, so an unknown sibling must not erase a confirmed one.
+        // Independent actions do not depend on each other, so an unknown sibling must not erase a
+        // confirmed one.
         assertEquals(
             CloudRouteSink.Companion.ActionOutcome.Confirmed,
             CloudRouteSink.mergeActionOutcome(
@@ -1813,7 +1824,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `play_quote records previous position on the reference timeline`() = runTest {
+    fun `a reference seek records the previous position on the reference timeline`() = runTest {
         val fingerprint = mock<FingerprintTimingManager>()
         whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
         whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
@@ -1825,7 +1836,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1833,9 +1844,9 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
-        // preQuote is playback-timeline; the context state must carry the
+        // The previous position is playback-timeline; the context state must carry the
         // reference-timeline conversion (45s reference == 60s playback here).
         assertEquals(
             "episode-id",
@@ -1846,9 +1857,7 @@ class CloudRouteSinkTest {
             45_000L,
             state.snapshot(playbackContext.episodeId).previousReferencePositionMs,
         )
-        // stop_quote recovery still uses the playback-timeline position.
         assertTrue(deps.playback.calls.contains("seekTo:45"))
-        assertTrue(deps.playback.calls.contains("resume"))
     }
 
     @Test
@@ -1871,7 +1880,7 @@ class CloudRouteSinkTest {
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
-                    action = "play_quote",
+                    action = "seek_to",
                     params = mapOf("reference_position_ms" to 45_000_000L),
                 ),
                 CloudRouteEvent.Done(1, 0),
@@ -1879,7 +1888,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play from the reference", playbackContext, admitted = testWireId).feedback
 
         // Turn 2+ regression guard: null must clear, not retain turn 1's value.
         assertEquals(null, state.snapshot("episode-id").previousReferencePositionMs)
@@ -2152,14 +2161,14 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `play_quote captures position seeks and resumes`() = runTest {
+    fun `a reference seek maps the reference timeline onto the sink timeline`() = runTest {
         val deps = TestDeps(
             clientPositionMs = 60_000L,
             routeInvoker = withHold(
                 flowOf(
                     CloudRouteEvent.Action(
                         tool = "playback",
-                        action = "play_quote",
+                        action = "seek_to",
                         params = mapOf("reference_position_ms" to 900_000L),
                     ),
                     CloudRouteEvent.Done(1, 0),
@@ -2168,35 +2177,16 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play quote", playbackContext, admitted = testWireId).feedback
+        sink.routeToCloud("play the reference", playbackContext, admitted = testWireId).feedback
 
-        assertEquals(
-            // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
-            // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
-            listOf("pause", "seekTo:945", "resume"),
-            deps.playback.calls,
+        // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
+        // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
+        // Asserted by containment rather than the whole list, so the test pins the mapping it is
+        // about (the seekTo argument) and not the surrounding call sequence.
+        assertTrue(
+            "expected a mapped seek of 945s, got ${deps.playback.calls}",
+            deps.playback.calls.contains("seekTo:945"),
         )
-    }
-
-    @Test
-    fun `stop_quote restores pre-quote playback position`() = runTest {
-        val deps = TestDeps(
-            clientPositionMs = 60_000L,
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 900_000L),
-                ),
-                CloudRouteEvent.Action("playback", "stop_quote", emptyMap()),
-                CloudRouteEvent.Done(1, 0),
-            ),
-        )
-        val sink = deps.sink()
-
-        sink.routeToCloud("quote", playbackContext, admitted = testWireId).feedback
-
-        assertTrue(deps.playback.calls.contains("seekTo:60"))
     }
 
     @Test
@@ -2561,8 +2551,8 @@ class CloudRouteSinkTest {
                 flowOf(
                     CloudRouteEvent.Action(
                         tool = "playback",
-                        action = "play_quote",
-                        params = mapOf("reference_position_ms" to 45_000_000L),
+                        action = "resume",
+                        params = emptyMap(),
                     ),
                     CloudRouteEvent.Done(1, 0),
                 ),
@@ -2571,7 +2561,7 @@ class CloudRouteSinkTest {
         deps.playback.resumeGate = gate
         val sink = deps.sink()
 
-        // Turn A: auto-pause, then its play_quote action resumes — suspending
+        // Turn A: auto-pause, then its resume action resumes — suspending
         // inside the player while A still owns it.
         val first = launch { sink.routeToCloud("first", playbackContext, admitted = testWireId).feedback }
         deps.playback.resumeStarted.await()

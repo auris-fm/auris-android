@@ -15,13 +15,12 @@
         <item>bookmark.add|Bookmarked at {position}</item>
         <item>playback.next_episode|Playing {episode title}</item>
         <!-- Cloud diagnostics. A code with a user-facing meaning gets its own line
-             here; anything else gets cloud_error_generic below, and the error earcon
+             here; anything else gets the dedicated cloud_error_generic string below, and the error earcon
              only if even that is missing. -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
         <item>general.cloud_incomplete_turn|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_no_answer|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_unauthorized|Service is unavailable at the moment.</item>
-        <item>cloud_error_generic|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_retrieval_unavailable|I can\'t reach the podcast evidence right now.</item>
         <item>cloud_error_provider_error|The assistant couldn\'t finish that request.</item>
         <item>cloud_error_connection_lost|Connection lost. Please try again.</item>
@@ -37,4 +36,14 @@
          whole template array; SpokenTemplateResolver overlays it onto the resolved map. A missing
          locale entry is a client gap, not a silent fallback to the generic line. -->
     <string name="voice_cloud_error_limit_exceeded" translatable="true">You have reached your Auris free daily limit. Please try again tomorrow.</string>
+    <!-- A resume of a conversation the worker no longer holds. Dedicated string for the same reason as
+         the daily limit: each values-* locale overrides this one key without redefining the array. -->
+    <string name="voice_cloud_error_conversation_expired" translatable="true">That conversation has ended.</string>
+    <!-- Synthesis failed, or the service failed internally: one shared line for both codes, so the
+         user hears the same apology whichever it was. Dedicated strings, NOT array entries — an array
+         entry cannot be overridden per locale without redefining the whole array, which is how these
+         two came to be English-only for every non-English speaker. -->
+    <string name="voice_cloud_error_answer_unavailable" translatable="true">Sorry, I couldn\'t answer that just now. Please try again.</string>
+    <!-- The catch-all for a code with no line of its own. Same reason as above. -->
+    <string name="voice_cloud_error_generic" translatable="true">Sorry, I couldn\'t complete that request.</string>
 </resources>

@@ -111,6 +111,18 @@ class CloudConversationAdmission @Inject constructor() {
         handle = null
     }
 
+    /**
+     * Forgets the conversation the worker refused as expired, so the next turn creates a new one.
+     *
+     * Keyed by the refused id: a refusal can arrive after a newer conversation has begun, and it is
+     * about the old one, so it must not clear the handle that replaced it.
+     */
+    fun forgetConversation(conversationId: String) {
+        synchronized(lock) {
+            if (handle == conversationId) handle = null
+        }
+    }
+
     private var currentOrigin: Long = 0
 
     /** One in-memory owner of preparation and dispatch for each retained request. */

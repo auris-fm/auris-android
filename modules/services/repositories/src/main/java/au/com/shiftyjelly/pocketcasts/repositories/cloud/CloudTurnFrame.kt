@@ -26,5 +26,7 @@ sealed interface CloudTurnFrame {
         val conversationMode: CloudConversationMode,
         /** Optional ASR source-language tag, omitted when unknown. */
         val sourceLanguage: String? = null,
+        /** Optional primary subtag of the app's UI language, omitted when unknown. */
+        val uiLanguage: String? = null,
     ) : CloudTurnFrame
 }

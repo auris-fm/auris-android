@@ -48,6 +48,7 @@ object VoiceLifecycleDiagnostics {
         TurnFeedbackRendered,
         TurnFeedbackDropped,
         TurnConnectionFailed,
+        TurnSocketClosedAfterEnd,
         Observed,
         ContextLost,
         CaptureStarted,

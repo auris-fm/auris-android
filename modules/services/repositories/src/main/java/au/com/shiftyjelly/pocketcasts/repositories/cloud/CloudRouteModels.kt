@@ -71,6 +71,14 @@ data class CloudRouteTurn(
     val capturedOrigin: Long? = null,
     /** Optional ASR source language; absence is unknown, not the UI locale. */
     val sourceLanguage: String? = null,
+    /**
+     * Primary subtag of the app's UI language, when it is known.
+     *
+     * The server decides the reply language before inference and uses this when the spoken language
+     * is absent or unsupported. Absence is honest here: a locale this client could not resolve is
+     * sent as nothing, never as an empty or invented tag the server would read as a real claim.
+     */
+    val uiLanguage: String? = null,
 )
 
 /** Capability names negotiated with the server (cloud-assistant.md). */

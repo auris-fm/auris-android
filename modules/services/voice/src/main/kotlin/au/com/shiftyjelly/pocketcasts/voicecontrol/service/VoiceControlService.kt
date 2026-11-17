@@ -143,6 +143,15 @@ class VoiceControlService : Service() {
     /** The process-wide session this instance holds, once its start was admitted. */
     @Volatile
     private var voiceSession: VoiceSessionGate.Session? = null
+
+    /**
+     * The session the current teardown owns, which is not always [voiceSession]: a stop with no start
+     * takes a free gate for itself, and that claim belongs to the teardown rather than to any start.
+     * Both the completion callback and the retry read this, so a held idle stop can still finish its
+     * release -- reading the start's field there would find nothing and hold the gate for good.
+     */
+    @Volatile
+    private var teardownSession: VoiceSessionGate.Session? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
@@ -290,6 +299,8 @@ class VoiceControlService : Service() {
         // to the REQUEST: a field on the executor would be shared between turns, and a later reader could
         // not tell whose outcome it was.
         turnOutcome: VoicePlaybackIntentExecutor.TurnOutcome = VoicePlaybackIntentExecutor.TurnOutcome(),
+        // The utterance's admitted id, for the executor's timing mark.
+        requestId: String? = null,
     ) {
         VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
         // The transport can throw: its channel closes with a cause when a terminal event is refused,
@@ -302,7 +313,7 @@ class VoiceControlService : Service() {
         // the action it dispatched actually ran. Reading only the feedback would let an action whose
         // outcome could not be established pass as a delivered turn.
         val response = try {
-            voicePlaybackIntentExecutor.execute(intent, turnOutcome)
+            voicePlaybackIntentExecutor.execute(intent, outcome = turnOutcome, timingRequestId = requestId)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
             // have transferred this turn's hold to the renderer path. Rethrow without releasing and
@@ -677,16 +688,6 @@ class VoiceControlService : Service() {
             startJob.invokeOnCompletion { shutdownBarrier.release(listOf(startJob)) }
         }
         startInFlightJob = startJob
-        // A START THAT ENDS ABNORMALLY GIVES BACK ANY SESSION IT CLAIMED. The teardown reads the
-        // session before it cancels the scope, while this job runs on IO: a start still waiting for
-        // another holder's release can claim the session AFTER that read, so the teardown sees null
-        // and neither begins nor finishes a release for it. Nothing would ever free it, and every
-        // later start in the process would wait the full bound and be refused. Re-reading the field
-        // here, on the job's own exit, covers that ordering. `release` is a no-op once a teardown has
-        // begun releasing the session, so this cannot undo a real teardown.
-        startJob.invokeOnCompletion { cause ->
-            if (cause != null) voiceSession?.let { voiceSessionGate.release(it) }
-        }
         startGate.complete(Unit)
 
         Timber.i("Voice control service started, observing listening mode")
@@ -883,7 +884,7 @@ class VoiceControlService : Service() {
                         listeningMode = mode,
                         playbackBufferProvider = playbackBufferRecorder::reference,
                         micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                        onIntent = { intent, token -> handleIntent(intent, token) },
+                        onIntent = { intent, token, requestId -> handleIntent(intent, token, requestId) },
                         onTerminated = {
                             serviceScope.launch(Dispatchers.Main) { onPipelineTerminated(generation) }
                         },
@@ -1250,6 +1251,9 @@ class VoiceControlService : Service() {
     private fun handleIntent(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
         invocationToken: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.InvocationToken?,
+        // The admitted request id the engine minted for this utterance, so the executor can mark
+        // the timing table for the turn the intent belongs to.
+        requestId: String? = null,
     ) {
         // THE OBSERVABLE SEAM: the dispatch lifecycle (debounce settle, invocation-local fact
         // channel, all-exit one-shot settlement) lives in VoiceIntentDispatcher so REAL controls
@@ -1266,6 +1270,7 @@ class VoiceControlService : Service() {
             },
             intent = intent,
             invocationToken = invocationToken,
+            timingRequestId = requestId,
         )
     }
 
@@ -1342,7 +1347,10 @@ class VoiceControlService : Service() {
         // THE SESSION STAYS HELD WHILE THE RELEASES RUN. Marking it before anything is cancelled
         // means a start from another instance waits rather than using resources this teardown is
         // about to free. It is given up only when the completion job below has finished.
-        val session = voiceSession
+        var session = voiceSession
+        // One place records what this teardown owns, so the retry and the completion callback agree
+        // with the first pass whether the claim came from a start or from this stop itself.
+        teardownSession = session
         if (session != null) {
             voiceSessionGate.beginRelease(session)
         }
@@ -1417,6 +1425,29 @@ class VoiceControlService : Service() {
                     Timber.e("[VoicePipeline] engine not settled ($verdict); skipping resource release")
                     return@withContext TeardownResult.Held(TeardownFailure(verdict))
                 }
+                // A START THAT CLAIMED WHILE THIS TEARDOWN WAS JOINING is covered HERE, not by a hook
+                // on the start job. The read above happens before the scope is cancelled, so a start
+                // still waiting for another holder can claim afterwards; a completion hook would fire
+                // on the job's schedule -- before anything here has been released -- and could admit a
+                // new start over objects still being freed. Re-reading after the joins, where the
+                // cleanup's result is known, gives the release one owner.
+                if (session == null) {
+                    session = voiceSession
+                    teardownSession = session
+                    if (session == null) {
+                        // NOBODY CLAIMED, SO ASK WHETHER THE SHARED OBJECTS ARE UNOWNED -- without
+                        // waiting. If the gate is free this idle stop takes it and releases everything,
+                        // recognizer included; leaving them loaded would leak them for the life of the
+                        // process. If another instance holds it, the take refuses at once and the
+                        // shared objects are left for that holder.
+                        val taken = voiceSessionGate.tryAcquire()
+                        if (taken is VoiceSessionGate.Admission.Acquired) {
+                            session = taken.session
+                            teardownSession = taken.session
+                        }
+                    }
+                    session?.let { voiceSessionGate.beginRelease(it) }
+                }
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so
                 // touching them from this IO job would be an off-thread release.
@@ -1431,7 +1462,7 @@ class VoiceControlService : Service() {
                 // Renderer release is destructive. One enforcement point, one record.
                 runCatching {
                     withContext(Dispatchers.Main) {
-                        releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES, releasedResources))
+                        releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES, releasedResources), session)
                     }
                 }.fold(
                     onSuccess = { TeardownResult.Released },
@@ -1455,14 +1486,14 @@ class VoiceControlService : Service() {
             // Keeps the failure visible to status and health surfaces, so a hold is never mistaken
             // For a clean teardown just because nothing threw.
             recordTeardownOutcome(teardown)
-            // REGISTERED AFTER THE OUTCOME RECORD, so the settled verdict is already published when
-            // this runs: completion callbacks fire in registration order.
-            if (session != null) {
-                teardown.invokeOnCompletion {
-                    if (teardownOutcome?.Released == true) {
-                        voiceSessionGate.finishRelease(session)
-                    }
-                }
+            // THE RESULT IS READ FROM THE DEFERRED ITSELF, not from the published outcome: that would
+            // depend on completion handlers running in registration order, which is not documented.
+            // The session is read here rather than captured, because a start that claimed while this
+            // teardown was joining is adopted inside it, after this point.
+            teardown.invokeOnCompletion { cause ->
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                val released = cause == null && teardown.getCompleted() is TeardownResult.Released
+                if (released) session?.let { voiceSessionGate.finishRelease(it) }
             }
         }
     }
@@ -1530,7 +1561,8 @@ class VoiceControlService : Service() {
                         // keeps the session, so this is normally true; if it is not, another session
                         // owns the shared objects and releasing them here would free resources that
                         // owner is using. Nothing is released in that case.
-                        val session = voiceSession
+                        // THE TEARDOWN'S OWN SESSION, not the start's: an idle stop's claim lives here.
+                        val session = teardownSession ?: voiceSession
                         if (session != null && !voiceSessionGate.holds(session)) {
                             Timber.w("[VoicePipeline] retry skipped: the voice session is no longer held")
                             return@async TeardownResult.Held(previous)
@@ -1538,7 +1570,7 @@ class VoiceControlService : Service() {
                         val all = ALL_RELEASES
                         val pending = TeardownRetry.pendingReleases(all, releasedResources)
                         val released = runCatching {
-                            withContext(Dispatchers.Main) { releaseResources(pending) }
+                            withContext(Dispatchers.Main) { releaseResources(pending, session) }
                         }
                         released.exceptionOrNull()?.let { error ->
                             Timber.e(error, "[VoicePipeline] retry release failed")
@@ -1577,7 +1609,7 @@ class VoiceControlService : Service() {
      * Splitting them out is what makes a retry safe: a repeated media-session or renderer release is
      * destructive, so only pending kinds may run (spec d885d207).
      */
-    private fun releaseResources(pending: List<String>) {
+    private fun releaseResources(pending: List<String>, session: VoiceSessionGate.Session?) {
         // RECORD EACH RELEASE AS IT CONFIRMS (reviewer 9f873b94). Adding the whole batch after the
         // loop meant a throw halfway through lost the record of kinds that HAD already released, so a
         // retry would release them a second time — and a repeated media-session or renderer release
@@ -1585,7 +1617,17 @@ class VoiceControlService : Service() {
         //
         // A kind whose release throws is deliberately NOT recorded: it is not known to have
         // completed, so the ambiguity is preserved rather than assumed either way.
+        // THE PROCESS-WIDE OBJECTS BELONG TO WHOEVER HOLDS THE SESSION. The recognizer and the
+        // feedback renderer outlive any one service instance, so a teardown that does not own the
+        // session must not free them: it would pull them out from under the instance that is using
+        // them. Everything else here is this instance's own and is released regardless. Both release
+        // passes come through this one function, so the rule holds for the retry as well.
+        val ownsSharedResources = session != null && voiceSessionGate.holds(session)
         pending.forEach { kind ->
+            if ((kind == "recognizer" || kind == "feedback") && !ownsSharedResources) {
+                Timber.i("[VoicePipeline] keeping $kind: this stop does not own the voice session")
+                return@forEach
+            }
             when (kind) {
                 "backend" -> {
                     wiredBackend?.release()

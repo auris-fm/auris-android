@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /** Server-supplied codes must never reach device logs verbatim. */
@@ -32,6 +33,26 @@ class CloudRouteErrorCodesTest {
         assertEquals("unrecognized", CloudRouteErrorCodes.normalizeForLog("http_50"))
         assertEquals("unrecognized", CloudRouteErrorCodes.normalizeForLog("http_5033"))
         assertEquals("unrecognized", CloudRouteErrorCodes.normalizeForLog("http_5xx"))
+    }
+
+    @Test
+    fun `a speech failure keeps its own name in the log`() {
+        // The service ends a turn with this when synthesis fails. Collapsing it to `unrecognized`
+        // hid the cause: a device run logged `turn error code=unrecognized` for what was actually
+        // a speech outage, and the diagnosis needed the server's logs to recover it.
+        assertEquals(
+            CloudRouteErrorCodes.SPEECH_UNAVAILABLE,
+            CloudRouteErrorCodes.normalizeForLog(CloudRouteErrorCodes.SPEECH_UNAVAILABLE),
+        )
+    }
+
+    @Test
+    fun `only a recognised code may be persisted verbatim`() {
+        // What the predicate must REFUSE. Asserting it accepts every member of KNOWN would only
+        // restate its own implementation; the sink's speech-outage trace test is what proves a
+        // recognised code actually reaches the persisted line.
+        assertFalse("an unseen code stays out", CloudRouteErrorCodes.isRecognised("user_email@example.com"))
+        assertFalse("a status shape is not a code", CloudRouteErrorCodes.isRecognised("http_503"))
     }
 
     @Test

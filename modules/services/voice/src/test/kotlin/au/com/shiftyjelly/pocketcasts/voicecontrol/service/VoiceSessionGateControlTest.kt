@@ -277,4 +277,31 @@ class VoiceSessionGateControlTest {
             gate.acquire(timeoutMs = 1_000) is VoiceSessionGate.Admission.Acquired,
         )
     }
+
+    /**
+     * A teardown that owns no session still has to release the shared objects when nobody else is
+     * using them, and it must not wait to find out: an idle process's stop cannot block on a holder.
+     */
+    @Test
+    fun `a non-waiting take succeeds only while the gate is free`() = runBlocking {
+        val gate = VoiceSessionGate()
+
+        val first = gate.tryAcquire()
+        assertTrue("a free gate must be taken without waiting", first is VoiceSessionGate.Admission.Acquired)
+        val held = (first as VoiceSessionGate.Admission.Acquired).session
+
+        // Someone holds it: the answer is immediate refusal, not a wait for the holder to finish.
+        assertTrue("a held gate must refuse at once", gate.tryAcquire() is VoiceSessionGate.Admission.TimedOut)
+
+        gate.beginRelease(held)
+        assertTrue(
+            "a release in progress is still held",
+            gate.tryAcquire() is VoiceSessionGate.Admission.TimedOut,
+        )
+
+        gate.finishRelease(held)
+        val again = gate.tryAcquire()
+        assertTrue("a freed gate must be takeable again", again is VoiceSessionGate.Admission.Acquired)
+        gate.release((again as VoiceSessionGate.Admission.Acquired).session)
+    }
 }

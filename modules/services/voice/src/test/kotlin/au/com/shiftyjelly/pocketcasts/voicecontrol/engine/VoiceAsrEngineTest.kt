@@ -174,7 +174,7 @@ class VoiceAsrEngineTest {
             listeningMode = mode,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
     }
 
@@ -192,7 +192,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
             onTerminated = { terminated = true },
         )
 
@@ -244,7 +244,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
             onTerminated = { terminated = true },
         )
 
@@ -430,7 +430,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { intent, _, _ -> handledIntents += intent },
         )
 
         // The cue reaches AudioTrack.write on the PLAYER'S OWN thread via submit(), so it must be
@@ -601,7 +601,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -624,7 +624,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -644,7 +644,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -672,7 +672,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -693,7 +693,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -712,7 +712,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -731,7 +731,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
 
         advanceUntilIdle()
@@ -827,7 +827,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
 
         advanceUntilIdle()
@@ -880,7 +880,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handled += intent },
+            onIntent = { intent, _, _ -> handled += intent },
         )
         advanceUntilIdle()
         assertEquals("content is not discarded", listOf(VoiceIntent.Playback.Pause), handled)
@@ -930,7 +930,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { intent, _, _ -> handledIntents += intent },
         )
         advanceUntilIdle()
         assertEquals(listOf("ensureReady", "recognize:pause"), recognizer.calls)
@@ -993,7 +993,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { intent, _, _ -> handledIntents += intent },
         )
         advanceUntilIdle()
         assertEquals("a bleed-rejected segment must not reach the recognizer", emptyList<String>(), recognizer.calls)
@@ -1243,7 +1243,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1307,7 +1307,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1366,7 +1366,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1440,7 +1440,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1506,7 +1506,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
 
@@ -1558,7 +1558,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1615,7 +1615,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1665,7 +1665,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1720,7 +1720,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1786,7 +1786,7 @@ class VoiceAsrEngineTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
-                onIntent = { _, _ -> },
+                onIntent = { _, _, _ -> },
             )
             advanceUntilIdle()
 
@@ -1864,7 +1864,7 @@ class VoiceAsrEngineTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
-                onIntent = { _, _ -> },
+                onIntent = { _, _, _ -> },
             )
             advanceUntilIdle()
 
@@ -1919,7 +1919,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1954,7 +1954,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -1983,7 +1983,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
 
@@ -2029,7 +2029,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
         verify(voiceAudioProcessor, times(0)).drainSpeechPcm(org.mockito.kotlin.any<ShortArray>())
@@ -2056,7 +2056,7 @@ class VoiceAsrEngineTest {
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
             flowOf(
                 VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechContinuing,
+                VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
                 ),
@@ -2107,7 +2107,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> handledIntents += intent },
+            onIntent = { intent, _, _ -> handledIntents += intent },
         )
         advanceUntilIdle()
         verify(gracePeriodSignal).onWakeWordDetected()
@@ -2137,7 +2137,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
         verify(gracePeriodSignal).onWakeWordDetected()
@@ -2173,7 +2173,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
         verify(gracePeriodSignal, never()).onWakeWordDetected()
@@ -2196,7 +2196,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         assertFalse("the pipeline never attached capture", attachment.await())
         verify(voiceAudioProcessor, never()).startProcessing()
@@ -2213,7 +2213,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         assertTrue("the pipeline attached capture", attachment.await())
 
@@ -2238,7 +2238,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
 
         assertFalse("the pipeline never attached capture", attachment.await())
@@ -2264,7 +2264,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
 
         assertTrue("the pipeline attached capture", attachment.await())
@@ -2328,7 +2328,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
         assertEquals("exactly one cloud dispatch", 1, intents.size)
@@ -2427,7 +2427,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> intents += intent },
+            onIntent = { intent, _, _ -> intents += intent },
         )
         advanceUntilIdle()
         assertEquals("exactly one intent dispatched", 1, intents.size)
@@ -2538,7 +2538,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, _ -> engineIntents += intent },
+            onIntent = { intent, _, _ -> engineIntents += intent },
         )
         advanceUntilIdle()
         engine.stop()
@@ -2821,7 +2821,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intent, token ->
+            onIntent = { intent, token, _ ->
                 gotIntents += intent
                 if (token != null) tokens += token
             },
@@ -2888,7 +2888,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, token -> if (token != null) stopped = token },
+            onIntent = { _, token, _ -> if (token != null) stopped = token },
         )
         advanceUntilIdle()
         engine.stop()
@@ -3049,7 +3049,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
         assertEquals(2, gateChecks)
@@ -3102,12 +3102,12 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
         pending.emit(VoiceSegmenterResult.SpeechStarted)
         advanceUntilIdle()
-        pending.emit(VoiceSegmenterResult.SpeechContinuing)
+        pending.emit(VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null))
         advanceUntilIdle()
         engine.stop()
         advanceUntilIdle()
@@ -3142,7 +3142,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
         advanceUntilIdle()
         engine.stop()
@@ -3218,7 +3218,7 @@ class VoiceAsrEngineTest {
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
             micExposureProvider = { MicExposure.Exposed },
-            onIntent = { _, _ -> },
+            onIntent = { _, _, _ -> },
         )
     }
 
@@ -3325,7 +3325,7 @@ class VoiceAsrEngineTest {
                 VoiceSegmenterResult.SpeechStarted,
                 VoiceSegmenterResult.SpeechEnded(utterance1, speechOnsetSample = 2),
                 VoiceSegmenterResult.SpeechStarted,
-                VoiceSegmenterResult.SpeechContinuing,
+                VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                 VoiceSegmenterResult.SpeechEnded(utterance2(500, 600, 700, 800, 900, 1000), speechOnsetSample = 2),
             ),
         )

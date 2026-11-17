@@ -1298,7 +1298,7 @@ class CloudRouteSink internal constructor(
     }
 
     private fun capturePreActionPosition(
-        targetReferenceMs: Long?,
+        targetReferenceMs: Long,
         acceptedEpisodeId: String?,
         preActionPositionMs: Long?,
     ) {
@@ -1312,7 +1312,6 @@ class CloudRouteSink internal constructor(
         // was snapshotted by the manager at the mutation, so it IS the position before the action. The
         // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
         // the starting point -- reading it here would record the destination as the previous position.
-        val target = targetReferenceMs
         val previousPlaybackMs = preActionPositionMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
@@ -1332,14 +1331,14 @@ class CloudRouteSink internal constructor(
         // deliberately not asking.
         // THE PROVENANCE IS NEVER WRITTEN ON ITS OWN: `record` is the only writer and takes both
         // values together, so a position with no destination cannot become history.
-        if (acceptedEpisodeId == null || target == null) return
+        if (acceptedEpisodeId == null) return
         cloudPlaybackContextState.record(
             // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:
             // this is the reference-timeline position the action ASKED for, while `previousPlaybackMs`
             // above is where the client WAS. Passing the accepted operation's pre-action playback
             // position here would record a playback instant as the reference target -- a value on the
             // wrong timeline AND the wrong quantity.
-            referencePositionMs = target,
+            referencePositionMs = targetReferenceMs,
             previousReferencePositionMs = previousReferenceMs,
             episodeId = acceptedEpisodeId,
         )

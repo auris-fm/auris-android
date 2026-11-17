@@ -1139,8 +1139,8 @@ class CloudRouteSink internal constructor(
                         // lambda rather than producing a value, so the expression's type collapses.
                         // RETURNED, NOT MERELY EVALUATED. A bare `when` here computes the outcome and
                         // then DISCARDS it, so execution falls through to the REFERENCE branch below and
-                        // an ordinary seek is followed by a reference seek -- @reviewer's measured
-                        // regression from my conversion. The branch must RETURN its typed outcome.
+                        // an ordinary seek is followed by a reference seek. The branch must RETURN its
+                        // typed outcome.
                         return@withLock when (outcome) {
                             is EpisodeOperationResult.Refused -> ActionOutcome.None
 
@@ -1154,10 +1154,6 @@ class CloudRouteSink internal constructor(
                             }
 
                             is EpisodeOperationResult.Unknown -> {
-                                // UNKNOWN RECORDS NOTHING AS PERFORMED. @reviewer's measured defect was
-                                // the opposite of what I described: Unknown became ACCEPTED and wrote
-                                // history, claiming a target the client never observed being reached.
-                                //
                                 // An UNKNOWN outcome records NOTHING. Passing no target keeps the
                                 // record from being written at all -- `record` is the only writer and
                                 // it is reached only with a target -- so this attempt contributes no

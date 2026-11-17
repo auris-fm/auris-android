@@ -696,17 +696,24 @@ class CloudRouteSinkTest {
                 "(calls=${deps.playback.calls} recorded=${state.snapshot("B").recentReferencePositions})",
             !deps.playback.calls.any { it.startsWith("seekTo:") },
         )
+        // THE HISTORY IS THE OBSERVATION, not the call list: a refusal that reached no player must
+        // leave both episodes' stored positions exactly as they were.
+        assertTrue(
+            "and it must not record history against any episode " +
+                "(A=${state.snapshot("A").recentReferencePositions} " +
+                "B=${state.snapshot("B").recentReferencePositions})",
+            state.snapshot("A").recentReferencePositions.isEmpty() &&
+                state.snapshot("B").recentReferencePositions.isEmpty(),
+        )
     }
 
     @Test
     fun `a REFUSED reference seek does not record history`() = runTest {
-        // The reference branch is where this was measured, and it is a different branch from
-        // `position_seconds`: that one routes to the plain seek, this one through the fingerprint
-        // mapping. A case for one cannot see a defect in the other -- which is how my first version of
-        // this control passed while the reference branch still recorded history on a refusal.
+        // The reference branch is a different branch from `position_seconds`: that one routes to the
+        // plain seek, this one through the fingerprint mapping. A case for one cannot see a defect in
+        // the other, so each branch needs its own refusal control.
         //
-        // `seek_to` is the only reference verb: the quote actions that shared this path were
-        // removed with the protocol.
+        // `seek_to` is the only reference verb.
         listOf("seek_to" to "reference_position_ms").forEach { (action, field) ->
             val state = CloudPlaybackContextState()
             val deps = TestDeps(
@@ -733,8 +740,7 @@ class CloudRouteSinkTest {
 
             // THE HISTORY IS THE OBSERVATION, not the call list. A refused operation records nothing,
             // so the episode's saved positions must be exactly what they were -- an assertion about
-            // `calls` alone passes whether or not history was corrupted, which is how my first version
-            // of this control survived its mutation.
+            // `calls` alone passes whether or not history was corrupted.
             assertTrue(
                 "$action: a refused reference seek must not reach the player " +
                     "(calls=${deps.playback.calls})",

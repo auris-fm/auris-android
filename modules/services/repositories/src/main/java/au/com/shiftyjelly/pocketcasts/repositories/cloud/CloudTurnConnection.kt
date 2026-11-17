@@ -70,9 +70,11 @@ interface CloudTurnConnection {
      * Whether this connection is too old to be worth using, measured from the upgrade request.
      *
      * A stale connection is replaced silently: it is not an error, and the user must never see it.
-     * The threshold sits a second inside the server's limit ("the first message must arrive within
-     * 5 seconds" is the landed contract — see [MAX_AGE_MS] for which revision), so a connection that
-     * passes this check still has time for its frame to arrive and be admitted. The client cannot
+     * What it bounds is IDLENESS, not margin against the server's first-frame budget: the server
+     * starts its auth-frame timer when it accepts the upgrade, so a client that takes a nine-second
+     * old socket and sends immediately lands at the start of a fresh window, not at the end of one.
+     * The two numbers that pair are this threshold and the server's idle close — nine seconds
+     * against ten — and [MAX_AGE_MS] states which revision each figure belongs to. The client cannot
      * tell why a socket closed, so the rule rests on its own clock rather than on the expectation of
      * a close handler; past the threshold the only honest move is to dial again.
      */
@@ -80,11 +82,16 @@ interface CloudTurnConnection {
 
     companion object {
         /**
-         * The server requires the first frame within its auth-frame budget, and a client cannot
-         * know which build it is talking to: the landed contract states 5 seconds, and the pending
-         * revision widens it to 10. Nine seconds is one second inside the landed figure, so it is
-         * correct against both — a connection this old is refused before either deadline, and the
-         * margin leaves time for the frame to arrive and be admitted.
+         * One second inside the server's idle close, which the pending revision states as ten
+         * seconds: it closes a connection that has received no first frame within that window measured
+         * from the upgrade, and this bounds how long the client will let a connection sit unsent.
+         *
+         * The landed contract still states five seconds, so against a server running that build the
+         * nine-second bound is LOOSER than the server's own limit, not inside it: a connection this
+         * old may already have been closed. Nothing here keeps a socket alive, and this bound must
+         * not be read as doing so — a connection that dies while held is marked dead and replaced on
+         * the next open rather than adopted, and a turn only ever reaches this check to decide
+         * whether to keep what is held.
          */
         const val MAX_AGE_MS = 9_000L
     }

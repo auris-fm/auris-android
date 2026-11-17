@@ -95,9 +95,10 @@ class VoiceControlModeObserverAvailabilityTest {
         private const val WAIT_STEP_MS = 25L
 
         /**
-         * How much SIMULATED time a wait may give its subject before declaring it stuck. Generous
-         * against the longest debounce and poll interval the stack uses, so expiry means the subject
-         * really did not advance rather than that the host was slow to pump it.
+         * How much SIMULATED time a wait may give its subject before declaring it stuck, read from
+         * the scheduler's own clock so every advance counts — this loop's and the outer pump's alike.
+         * Generous against the longest debounce and poll interval the stack uses, so expiry means the
+         * subject really did not advance rather than that the host was slow to pump it.
          */
         private const val WAIT_BUDGET_MS = 60_000L
 
@@ -385,16 +386,19 @@ class VoiceControlModeObserverAvailabilityTest {
                 // to it rather than how long the host took to get there. A starved machine buys fewer
                 // steps per real second; with a wall-clock deadline that expires the wait while the
                 // subject is still strictly behind, which reads as a product race and is not one.
-                var waitedMs = 0L
+                // Measured from the scheduler's OWN clock, not by counting this loop's passes: the
+                // outer pump advances the same scheduler too, so a pass count would understate how
+                // much simulated time the subject has actually been given.
+                val startedAtMs = testScheduler.currentTime
                 var last = ""
                 while (!predicate()) {
+                    val waitedMs = testScheduler.currentTime - startedAtMs
                     if (waitedMs >= WAIT_BUDGET_MS) {
                         startProbe(last)
                         error("timed out waiting for $what after ${waitedMs}ms of simulated time; last=$last")
                     }
                     testScheduler.advanceTimeBy(WAIT_STEP_MS.milliseconds)
                     kotlinx.coroutines.delay(WAIT_STEP_MS)
-                    waitedMs += WAIT_STEP_MS
                     last = probe()
                 }
                 outcome.complete(Result.success(Unit))

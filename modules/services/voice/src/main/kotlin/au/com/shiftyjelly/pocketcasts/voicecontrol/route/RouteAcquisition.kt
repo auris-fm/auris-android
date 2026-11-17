@@ -293,7 +293,12 @@ class RouteAcquisition(
     private fun openConfirmedStream(): Int {
         if (openedStream) return openedDeviceId
         val deviceId = platform.openInputStream()
-        openedStream = true
+        // Only a successful open creates something to close. A negative id means the platform
+        // opened nothing, so claiming ownership here would make release() close a stream this
+        // attempt never opened — which on the real platform deletes whatever capture exists,
+        // including one the engine is running. An open that SUCCEEDED on the wrong device type is
+        // still a real stream this attempt owns, so it stays owned and release() closes it.
+        openedStream = deviceId >= 0
         openedDeviceId = deviceId
         streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {

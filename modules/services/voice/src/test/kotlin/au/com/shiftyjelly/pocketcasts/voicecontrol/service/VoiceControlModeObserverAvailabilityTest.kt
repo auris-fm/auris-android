@@ -265,13 +265,17 @@ class VoiceControlModeObserverAvailabilityTest {
 
         override fun isCapturing() = capturing
 
-        override fun waitForVadEvent(timeoutMs: Int): Int {
+        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (capturing && System.currentTimeMillis() < deadline) {
                 Thread.sleep(5)
             }
             return 0
         }
+
+        override fun getInProgressSnapshot(buffer: ShortArray, header: LongArray): Int = 0
+
+        override fun setEarlyWakeCutoff(samples: Int) = Unit
 
         override fun getSpeechPcm(buffer: ShortArray) = 0
         override fun getSpeechPcmSize() = 0

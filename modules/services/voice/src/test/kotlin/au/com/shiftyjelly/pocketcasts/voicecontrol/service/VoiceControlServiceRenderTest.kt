@@ -33,7 +33,7 @@ class VoiceControlServiceRenderTest {
     fun `the service arms its failure handling before rendering`() = runTest {
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
-        val service = VoiceControlService().apply {
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
             audioFeedbackRenderer = renderer
             voicePlaybackIntentExecutor = StubVoiceExecutor()
         }
@@ -72,7 +72,7 @@ class VoiceControlServiceRenderTest {
         // reads back the holder the CALLER would read.
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
-        val service = VoiceControlService().apply {
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
             audioFeedbackRenderer = renderer
             voicePlaybackIntentExecutor = StubVoiceExecutor { _, outcome, _ ->
                 // The production write: the executor fills the caller's holder.
@@ -104,7 +104,7 @@ class VoiceControlServiceRenderTest {
             throw kotlinx.coroutines.CancellationException("caller withdrew")
         }
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
-        val service = VoiceControlService().apply {
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }.apply {
             audioFeedbackRenderer = renderer
             voicePlaybackIntentExecutor = executor
             gracePeriodSignal = signal

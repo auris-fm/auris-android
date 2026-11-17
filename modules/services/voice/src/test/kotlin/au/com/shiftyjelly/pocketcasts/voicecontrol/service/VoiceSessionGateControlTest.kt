@@ -246,4 +246,35 @@ class VoiceSessionGateControlTest {
             (next as VoiceSessionGate.Admission.Acquired).let { n -> gate.release(n.session) }
         }
     }
+
+    /**
+     * Both halves of the held-session rule, so neither a release that fires early nor one that never
+     * fires can pass: while the release is unconfirmed the gate stays held, and once it is confirmed
+     * the next session is admitted.
+     */
+    @Test
+    fun `a held session is freed only when its release is confirmed, and then it is freed`() = runBlocking {
+        val gate = VoiceSessionGate()
+        val held = (gate.acquire(timeoutMs = 1_000) as VoiceSessionGate.Admission.Acquired).session
+        gate.beginRelease(held)
+
+        // Unconfirmed: a start must be refused, not admitted over resources still in use.
+        assertTrue(
+            "an unconfirmed release must keep the session held",
+            gate.acquire(timeoutMs = 100) is VoiceSessionGate.Admission.TimedOut,
+        )
+        // A finish for a session that is not the holder cannot stand in for the confirmation.
+        gate.finishRelease(VoiceSessionGate.Session(-1))
+        assertTrue(
+            "a foreign finish must not confirm this release",
+            gate.acquire(timeoutMs = 100) is VoiceSessionGate.Admission.TimedOut,
+        )
+
+        // Confirmed: the gate must now be free, or voice would stay dead after every hold.
+        gate.finishRelease(held)
+        assertTrue(
+            "a confirmed release must free the session",
+            gate.acquire(timeoutMs = 1_000) is VoiceSessionGate.Admission.Acquired,
+        )
+    }
 }

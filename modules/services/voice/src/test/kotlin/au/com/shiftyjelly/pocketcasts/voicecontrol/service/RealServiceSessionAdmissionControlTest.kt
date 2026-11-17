@@ -123,6 +123,24 @@ class RealServiceSessionAdmissionControlTest {
     private fun takenSession(service: VoiceControlService): Any? =
         service.javaClass.getDeclaredField("voiceSession").apply { isAccessible = true }.get(service)
 
+    /** Await the current teardown, pumping the Main looper the releases run on. */
+    private suspend fun awaitTeardown(service: VoiceControlService): TeardownResult {
+        val teardown = service.currentTeardown
+        assertNotNull("a platform stop must start a teardown", teardown)
+        // Above the engine's own worst-case join: it retries up to eight rounds of five seconds.
+        val deadline = System.currentTimeMillis() + 60_000
+        while (!teardown!!.isCompleted) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (System.currentTimeMillis() > deadline) break
+            Thread.sleep(20)
+        }
+        // The bound is on the COROUTINE, and only after the pump has actually seen completion: a
+        // fixed five seconds here would expire while the engine's own join rounds were still running
+        // and report a timeout instead of the verdict under test.
+        check(teardown.isCompleted) { "teardown did not finish within the pump bound" }
+        return withTimeout(5_000) { teardown.await() }
+    }
+
     private fun pump(ms: Long) {
         val deadline = System.currentTimeMillis() + ms
         while (System.currentTimeMillis() < deadline) {

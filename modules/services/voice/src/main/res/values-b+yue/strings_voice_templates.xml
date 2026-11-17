@@ -5,4 +5,6 @@
 <resources>
     <string name="voice_cloud_error_limit_exceeded">你已經用晒 Auris 今日嘅免費額度，聽日再試過啦。</string>
     <string name="voice_cloud_error_conversation_expired">嗰個對話已經結束咗。</string>
+    <string name="voice_cloud_error_answer_unavailable">唔好意思，我啱啱答唔到你呢個問題。唔該再試一次。</string>
+    <string name="voice_cloud_error_generic">唔好意思，我完成唔到呢個請求。</string>
 </resources>

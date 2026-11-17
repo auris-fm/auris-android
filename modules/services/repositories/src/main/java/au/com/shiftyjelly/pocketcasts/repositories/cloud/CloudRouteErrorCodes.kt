@@ -29,6 +29,13 @@ object CloudRouteErrorCodes {
     const val NO_ANSWER = "no_answer"
 
     /**
+     * The service could not synthesise speech for an otherwise successful turn. Recognised so the
+     * log names the cause: collapsing it to `unrecognized` cost a diagnosis that needed the
+     * server's own logs to recover.
+     */
+    const val SPEECH_UNAVAILABLE = "speech_unavailable"
+
+    /**
      * Every code this client recognises — those adopted from the server, those it mints itself,
      * and those recognised for log normalization only. Internal rather than private so the
      * contract check can re-derive it from code instead of restating it: a code added here
@@ -48,7 +55,19 @@ object CloudRouteErrorCodes {
         INVALID_REQUEST,
         NO_ANSWER,
         CONVERSATION_EXPIRED,
+        SPEECH_UNAVAILABLE,
     )
+
+    /**
+     * Whether a server-supplied code may be persisted verbatim in the lifecycle trace. The SAME
+     * vocabulary [normalizeForLog] uses, so a code recognised for one log cannot be silently
+     * bounded to "unknown" in the other — which is how a speech outage came to be unnamed in the
+     * artifact support reads while the Timber line named it.
+     *
+     * A function rather than the set itself: [KNOWN] stays internal to this module, and widening
+     * its visibility to share a mutable collection would invite exactly the drift this closes.
+     */
+    fun isRecognised(code: String): Boolean = code in KNOWN
 
     /** `http_<3-digit status>`, recognised for log normalization (not minted by this client). */
     // Internal rather than private so the contract check can assert the declaration against the

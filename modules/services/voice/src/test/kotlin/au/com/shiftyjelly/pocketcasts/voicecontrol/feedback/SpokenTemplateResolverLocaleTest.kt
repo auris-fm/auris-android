@@ -27,8 +27,8 @@ class SpokenTemplateResolverLocaleTest {
         Locale.setDefault(Locale.forLanguageTag(qualifiers))
         RuntimeEnvironment.setQualifiers(qualifiers)
         val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
-        // The UI locale no longer decides the line (spec ruling 7c7575f6): the default table is
-        // ENGLISH BY CONTRACT, and a locale's wording is selected by the UTTERANCE's language.
+        // The UI locale does not decide the line: the default table is ENGLISH BY CONTRACT, and a
+        // locale's wording is selected by the UTTERANCE's language.
         assertEquals(
             "default line is English on any UI locale",
             "You have reached your Auris free daily limit. Please try again tomorrow.",
@@ -65,6 +65,113 @@ class SpokenTemplateResolverLocaleTest {
 
     @Test
     fun `cantonese names Auris and the daily allowance`() = assertLimitLine("yue", expected = "你已經用晒 Auris 今日嘅免費額度，聽日再試過啦。")
+
+    /**
+     * The two synthesis-failure codes share one line, and it must be spoken in the language the
+     * user spoke. Before this they had no line at all and fell through to the generic one, which
+     * lived only in the default array — so a German speaker heard English.
+     */
+    private fun assertAnswerLine(qualifiers: String, expected: String) {
+        Locale.setDefault(Locale.forLanguageTag(qualifiers))
+        RuntimeEnvironment.setQualifiers(qualifiers)
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        val lang = qualifiers.substringBefore('-')
+        for (key in listOf("cloud_error_speech_unavailable", "cloud_error_internal_error")) {
+            val spoken = resolver.resolveLocalized(key, lang)
+            assertEquals("$key in $lang", expected, spoken.text)
+            // Text and voice must agree: an untranslated line reports English, so a fallback can
+            // never pair one language's words with another language's voice.
+            assertEquals("$key voice matches its text in $lang", lang, spoken.languageTag)
+        }
+    }
+
+    @Test
+    fun `english apologises and invites a retry`() = assertAnswerLine("en", expected = "Sorry, I couldn't answer that just now. Please try again.")
+
+    @Test
+    fun `german apologises and invites a retry`() = assertAnswerLine("de", expected = "Entschuldigung, ich konnte das gerade nicht beantworten. Bitte versuche es noch einmal.")
+
+    @Test
+    fun `spanish apologises and invites a retry`() = assertAnswerLine("es", expected = "Lo siento, no he podido responder a eso ahora mismo. Inténtalo de nuevo.")
+
+    @Test
+    fun `french apologises and invites a retry`() = assertAnswerLine("fr", expected = "Désolé, je n'ai pas pu répondre à cela pour le moment. Veuillez réessayer.")
+
+    @Test
+    fun `japanese apologises and invites a retry`() = assertAnswerLine("ja", expected = "申し訳ありません。今はお答えできませんでした。もう一度お試しください。")
+
+    @Test
+    fun `korean apologises and invites a retry`() = assertAnswerLine("ko", expected = "죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.")
+
+    @Test
+    fun `simplified chinese apologises and invites a retry`() = assertAnswerLine("zh", expected = "抱歉，我刚才没能回答这个问题。请再试一次。")
+
+    @Test
+    fun `cantonese apologises and invites a retry`() = assertAnswerLine("yue", expected = "唔好意思，我啱啱答唔到你呢個問題。唔該再試一次。")
+
+    /**
+     * The catch-all for a code with no line of its own. It was English-only for the same reason:
+     * an array entry cannot be overridden per locale without redefining the whole array.
+     */
+    private fun assertGenericLine(qualifiers: String, expected: String) {
+        Locale.setDefault(Locale.forLanguageTag(qualifiers))
+        RuntimeEnvironment.setQualifiers(qualifiers)
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        val lang = qualifiers.substringBefore('-')
+        val spoken = resolver.resolveLocalized("cloud_error_generic", lang)
+        assertEquals(expected, spoken.text)
+        assertEquals("voice matches its text in $lang", lang, spoken.languageTag)
+    }
+
+    @Test
+    fun `the generic fallback is english`() = assertGenericLine("en", expected = "Sorry, I couldn't complete that request.")
+
+    @Test
+    fun `the generic fallback is german`() = assertGenericLine("de", expected = "Entschuldigung, ich konnte diese Anfrage nicht abschließen.")
+
+    @Test
+    fun `the generic fallback is spanish`() = assertGenericLine("es", expected = "Lo siento, no he podido completar esa solicitud.")
+
+    @Test
+    fun `the generic fallback is french`() = assertGenericLine("fr", expected = "Désolé, je n'ai pas pu terminer cette demande.")
+
+    @Test
+    fun `the generic fallback is japanese`() = assertGenericLine("ja", expected = "申し訳ありません。そのリクエストを完了できませんでした。")
+
+    @Test
+    fun `the generic fallback is korean`() = assertGenericLine("ko", expected = "죄송합니다. 그 요청을 완료하지 못했습니다.")
+
+    @Test
+    fun `the generic fallback is simplified chinese`() = assertGenericLine("zh", expected = "抱歉，我没能完成这个请求。")
+
+    @Test
+    fun `the generic fallback is cantonese`() = assertGenericLine("yue", expected = "唔好意思，我完成唔到呢個請求。")
+
+    /**
+     * An overlaid key must have ONE source. While the generic line sat in both the array and the
+     * dedicated string, the array entry was dead: the overlay always won, so editing it changed
+     * nothing a listener heard. This reads the array itself, not the resolver, so a re-added entry
+     * fails here rather than silently becoming the copy nobody maintains.
+     */
+    @Test
+    fun `the spoken-templates array carries no copy of an overlaid key`() {
+        val array = getApplicationContext<Context>().resources.getStringArray(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.R.array.voice_spoken_templates,
+        )
+        val overlaid = setOf(
+            "cloud_error_generic",
+            "cloud_error_speech_unavailable",
+            "cloud_error_internal_error",
+            "cloud_error_limit_exceeded",
+            "cloud_error_conversation_expired",
+        )
+        val duplicated = array.map { it.substringBefore('|') }.filter { it in overlaid }
+        assertEquals(
+            "these keys are overlaid from dedicated strings; an array entry would be dead: $duplicated",
+            emptyList<String>(),
+            duplicated,
+        )
+    }
 
     @Test
     fun `traditional chinese resolves rather than falling back to english`() {

@@ -1067,7 +1067,7 @@ class CloudRouteSink internal constructor(
                 origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin,
                 errorCode: String?,
             ) {
-                val boundedCode = errorCode?.let { if (it in ALLOWED_ERROR_CODES) it else "unknown" }
+                val boundedCode = errorCode?.let { if (isPersistableErrorCode(it)) it else "unknown" }
                 Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode, terminalOrigin = origin.name))
             }
             override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
@@ -1515,20 +1515,17 @@ class CloudRouteSink internal constructor(
     }
 
     companion object {
-        /** Allowlisted error codes for diagnostic persistence. Unmapped codes become "unknown". */
-        private val ALLOWED_ERROR_CODES: Set<String> = setOf(
-            CloudRouteErrorCodes.CONNECTION_LOST,
-            CloudRouteErrorCodes.UNAUTHORIZED,
-            CloudRouteErrorCodes.NO_ANSWER,
-            CloudRouteErrorCodes.PROVIDER_ERROR,
-            CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE,
-            CloudRouteErrorCodes.INVALID_RESPONSE,
-            CloudRouteErrorCodes.LIMIT_EXCEEDED,
-            CloudRouteErrorCodes.CONVERSATION_EXPIRED,
-            CloudRouteErrorCodes.BUDGET_EXCEEDED,
-            "done",
-            "interrupted",
-        )
+        /**
+         * Codes that may be persisted verbatim in the lifecycle trace; anything else becomes
+         * "unknown". The server vocabulary is asked of [CloudRouteErrorCodes] rather than copied
+         * here: two lists drifted once already, leaving a speech outage named in the Timber line
+         * and "unknown" in the trace support actually reads. Only the two non-code terminal
+         * markers are local, because they are not error codes at all.
+         */
+        private val PERSISTABLE_TERMINAL_MARKERS: Set<String> = setOf("done", "interrupted")
+
+        private fun isPersistableErrorCode(code: String): Boolean =
+            CloudRouteErrorCodes.isRecognised(code) || code in PERSISTABLE_TERMINAL_MARKERS
 
         private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"

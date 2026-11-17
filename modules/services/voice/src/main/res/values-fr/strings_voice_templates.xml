@@ -5,4 +5,6 @@
 <resources>
     <string name="voice_cloud_error_limit_exceeded">Vous avez atteint votre limite quotidienne gratuite Auris. Réessayez demain.</string>
     <string name="voice_cloud_error_conversation_expired">Cette conversation est terminée.</string>
+    <string name="voice_cloud_error_answer_unavailable">Désolé, je n\'ai pas pu répondre à cela pour le moment. Veuillez réessayer.</string>
+    <string name="voice_cloud_error_generic">Désolé, je n\'ai pas pu terminer cette demande.</string>
 </resources>

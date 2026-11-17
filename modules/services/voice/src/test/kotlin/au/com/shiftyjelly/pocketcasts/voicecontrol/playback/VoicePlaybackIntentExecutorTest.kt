@@ -257,13 +257,26 @@ class VoicePlaybackIntentExecutorTest {
         // A cloud dispatch refused BEFORE the sink (here: a retry of an unknown logical request)
         // never opens a route, so the sink's own end-of-turn finish never runs. The executor must
         // finish the record itself, or the registry keeps one live entry per dropped turn.
+        //
+        // AND THE OUTCOME MUST SAY CANCELLED, NOT FAILED. Nothing was attempted on this turn, so a
+        // failed-action outcome would tell a support bundle an action ran and failed when the app
+        // simply declined to route it. The sink records cancelled for the same never-routed case.
+        val lines = mutableListOf<String>()
+        val originalSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message ->
+            synchronized(lines) { lines += message }
+        }
         val sinks = FakeSinks()
         val executor = sinks.executor()
         val requestId = "leak-test-request"
-        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(
-            requestId,
-            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId),
+        // The turn reached its acoustic end before dispatch, as a real one does: the table renders
+        // one line per recorded stage, so a record with no marks would publish an empty block.
+        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(requestId)
+        record.mark(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd,
+            1_000L,
         )
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(requestId, record)
 
         val response = executor.execute(
             VoiceIntent.CloudRoute(
@@ -280,6 +293,15 @@ class VoicePlaybackIntentExecutorTest {
             "a turn refused before the sink must not keep a live timing entry",
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(requestId),
         )
+        val text = synchronized(lines) { lines.toList() }.joinToString("\n")
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = originalSink
+        assertTrue("the refused turn must still publish its table: '$text'", text.contains(requestId))
+        assertFalse(
+            "a turn that never routed did not attempt an action, so it must not be reported as a " +
+                "failed one: '$text'",
+            text.contains("action_failed"),
+        )
+        assertTrue("a declined turn is cancelled: '$text'", text.contains("cancelled"))
     }
 
     @Test

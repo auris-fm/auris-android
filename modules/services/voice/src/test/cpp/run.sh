@@ -38,3 +38,7 @@ cmake --build "$BUILD"
 "$BUILD/jni_bridge_ownership_test"
 "$BUILD/vad_snapshot_carryover_test"
 "$BUILD/vad_segment_delivery_test"
+# ThreadSanitizer build of the same control. Not run by default: TSAN is unavailable on some hosts
+# (and aborts rather than skipping), so it is built and run explicitly:
+#   cmake --build <build> --target vad_segment_delivery_tsan_test
+#   <build>/vad_segment_delivery_tsan_test

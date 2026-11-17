@@ -161,6 +161,10 @@ class WebSocketCloudTurnTransport(
                         emitOrFail(channel, event)
                     }
                 } else if (negotiatedCodec.get() == null && event !is CloudRouteEvent.Error) {
+                    // An Error is EXEMPT from the codec precondition. A refused turn is never
+                    // admitted, so it never receives `connected` and no codec is ever negotiated --
+                    // requiring one here would replace the server's own refusal code with
+                    // invalid_response and lose the cause the turn failed for.
                     emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
                 } else {
                     // Server-originated terminal: record at actual decode point.

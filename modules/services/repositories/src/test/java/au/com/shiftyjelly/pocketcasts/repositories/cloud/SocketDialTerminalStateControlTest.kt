@@ -1,7 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
+import java.io.IOException
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -41,7 +44,7 @@ class SocketDialTerminalStateControlTest {
         .body("".toResponseBody(null))
         .build()
 
-    private fun openWith(terminal: (WebSocketListener, WebSocket) -> Unit): CloudTurnConnection = kotlinx.coroutines.runBlocking {
+    private fun openWith(terminal: (WebSocketListener, WebSocket) -> Unit): CloudTurnConnection = runBlocking {
         val socket = FakeWebSocket()
         val opener = SocketOpeningEarlyConnections(
             baseUrl = { "https://example.invalid" },
@@ -62,7 +65,7 @@ class SocketDialTerminalStateControlTest {
     @Test
     fun `a failure during dial does not produce a connection that looks alive`() {
         val connection = openWith { listener, socket ->
-            listener.onFailure(socket, java.io.IOException("died during dial"), null)
+            listener.onFailure(socket, IOException("died during dial"), null)
         }
         assertTrue(
             "a socket that failed during dial must not come back looking alive",
@@ -102,12 +105,10 @@ class SocketDialTerminalStateControlTest {
     }
 
     @Test
-    fun `a terminal event landing between the ref read and the connection install still marks it dead`() {
-        // THE ACTUAL RACE, and the only window where the two orderings differ. Reading the ref
-        // first meant: read null -> callback runs here -> set the flag -> install the connection,
-        // and the install check then finds the flag UNSET, so a dead socket is handed back alive.
-        // Firing the callback before dial returns does not reproduce it, because the reader is
-        // always null then and both orderings set the flag.
+    fun `a terminal event arriving after the install marks the connection dead`() {
+        // The POST-INSTALL side: the connection object exists, so the callback must reach it through
+        // the reference rather than through the flag. This is not the race window -- an event here
+        // was handled correctly before the shared lock too.
         val socket = FakeWebSocket()
         val opener = SocketOpeningEarlyConnections(
             baseUrl = { "https://example.invalid" },
@@ -122,11 +123,11 @@ class SocketDialTerminalStateControlTest {
             listener = l
             socket
         }
-        val connection = kotlinx.coroutines.runBlocking { opener.opener.openFor("tag-" + System.nanoTime()) }
+        val connection = runBlocking { opener.opener.openFor("tag-" + System.nanoTime()) }
 
-        // The socket dies now -- after the connection object exists, which the flag path cannot
-        // cover, so the callback must reach the ref. This half is the control's premise.
-        listener.onFailure(socket, java.io.IOException("died after install"), null)
+        // The socket dies now, after the connection object exists, so the reference is what carries
+        // the marking.
+        listener.onFailure(socket, IOException("died after install"), null)
         assertTrue("a failure after install must mark the connection dead", connection.isDead)
     }
 
@@ -139,13 +140,16 @@ class SocketDialTerminalStateControlTest {
     }
 
     @Test
-    fun `a terminal event landing while the connection is being installed is not lost`() {
-        // The race needs the event BETWEEN "read the reference" and "publish the connection".
-        // A second thread firing at a random moment mostly lands outside that window, so instead
-        // of hoping for a hit, this drives the listener from INSIDE the dial's own return path:
-        // the seam fires the event on another thread and waits until it has run, which places it
-        // strictly before the publish -- the case the flag exists for -- and then the post-install
-        // check below covers the other side. Together they pin both halves of the handoff.
+    fun `a terminal event that runs before the publish is still applied to the connection`() {
+        // The PRE-PUBLISH side, made deterministic: the seam fires the event on another thread and
+        // waits for it to finish, so it strictly precedes the publish and the flag is the only thing
+        // that can record it. Repeated because the delivering thread is real.
+        //
+        // WHAT THESE CONTROLS DO NOT COVER: the race window itself, where the listener reads a null
+        // reference, the install then publishes and reads a still-unset flag, and only then does the
+        // listener set the flag. Every event here lands either wholly before the dial returns or
+        // wholly after the install, and both of those were already handled correctly. The shared lock
+        // is therefore verified against the source, not by a failing test.
         val socket = FakeWebSocket()
         val owning = Executors.newSingleThreadExecutor { r -> Thread(r, "dial-window-control") }
         try {
@@ -156,10 +160,10 @@ class SocketDialTerminalStateControlTest {
                     okHttpClient = OkHttpClient(),
                     dispatcher = owning.asCoroutineDispatcher(),
                 )
-                val fired = java.util.concurrent.CountDownLatch(1)
+                val fired = CountDownLatch(1)
                 opener.dialSocket = { _, listener ->
                     val racer = Thread {
-                        listener.onFailure(socket, java.io.IOException("died during dial"), null)
+                        listener.onFailure(socket, IOException("died during dial"), null)
                         fired.countDown()
                     }
                     racer.start()
@@ -167,7 +171,7 @@ class SocketDialTerminalStateControlTest {
                     fired.await()
                     socket
                 }
-                val connection = kotlinx.coroutines.runBlocking { opener.opener.openFor("tag-$attempt") }
+                val connection = runBlocking { opener.opener.openFor("tag-$attempt") }
                 assertTrue(
                     "attempt $attempt: an event that ran before the publish must still mark the connection dead",
                     connection.isDead,

@@ -1,10 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -64,7 +66,7 @@ class VoiceIntentDispatcher @Inject constructor() {
             // A debounced dispatch never reaches the executor, whose finally would finish the
             // record — finish it here, or the registry keeps one live entry per dropped turn.
             if (timingRequestId != null) {
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                TurnTimingRecord.finishFor(
                     timingRequestId,
                     cancelled = false,
                     failed = true,
@@ -84,7 +86,7 @@ class VoiceIntentDispatcher @Inject constructor() {
             }
         }
         return try {
-            val executorOwnsRecord = java.util.concurrent.atomic.AtomicBoolean(false)
+            val executorOwnsRecord = AtomicBoolean(false)
             scope.launch(Dispatchers.IO) {
                 try {
                     val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
@@ -122,7 +124,7 @@ class VoiceIntentDispatcher @Inject constructor() {
                     // deliberately finishes nothing, so the mark gates this rather than finishing on
                     // every completion.
                     if (timingRequestId != null && !executorOwnsRecord.get()) {
-                        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(
+                        TurnTimingRecord.finishFor(
                             timingRequestId,
                             // Nothing ran: no action was attempted and none failed.
                             cancelled = true,

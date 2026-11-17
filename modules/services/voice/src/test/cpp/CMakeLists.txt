@@ -131,6 +131,35 @@ target_compile_options(vad_segment_delivery_test PRIVATE -Wall -Wextra -O1 -g)
 
 target_link_libraries(vad_segment_delivery_test PRIVATE Threads::Threads)
 
+# The same control built with ThreadSanitizer, so the race question is answerable by anyone rather
+# than only by a hand-run command. TSAN reports an unsynchronised access pair from the vector's own
+# history, without needing the bad interleaving to occur.
+#
+# WHAT IT SHOWS TODAY: nothing, either with the segment copy inside mSpeechMutex or with it moved back
+# outside -- including with a consumer slow enough to still hold an older queued end event while later
+# utterances complete. An end event is published only after its segment has been copied, so a consumer
+# woken by that event cannot be moving the buffer for the segment still being built. The lock placement
+# is therefore verified against the source. TSAN does report a deliberate race in a self-test on this
+# toolchain, so the silence concerns this access pair rather than the instrumentation.
+add_executable(vad_segment_delivery_tsan_test
+    VadSegmentDeliveryTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_segment_delivery_tsan_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+# Sanitizer in BOTH compile and link, or the runtime is not instrumented.
+target_compile_options(vad_segment_delivery_tsan_test PRIVATE -Wall -Wextra -O1 -g -fsanitize=thread)
+target_link_options(vad_segment_delivery_tsan_test PRIVATE -fsanitize=thread)
+
+target_link_libraries(vad_segment_delivery_tsan_test PRIVATE Threads::Threads)
+
 # The capture/VAD start-ownership control compiles the REAL jni_bridge.cpp entry points together
 # with the real capture and processor translation units. JniBridgeHostPlatformStubs.cpp supplies
 # ONLY the platform boundaries a host lacks (the five JNIEnv calls jni_bridge.cpp makes, dlopen,

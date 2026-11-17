@@ -1,6 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
@@ -64,12 +66,12 @@ class SocketOpeningEarlyConnections(
         // Set the moment the connection object exists; the listener reads it to mark the
         // connection dead on any failure or close. Null only in the window before that, in which
         // case there is nothing to mark.
-        val connectionRef = java.util.concurrent.atomic.AtomicReference<SocketCloudTurnConnection?>(null)
+        val connectionRef = AtomicReference<SocketCloudTurnConnection?>(null)
         // Terminal socket state (close/failure/violation) can land while dial is still inside
         // newWebSocket, BEFORE connectionRef exists to mark dead. The connection created later
         // must not present itself alive over a socket that already died: remember the terminal
         // state here and apply it to the connection the moment it exists.
-        val socketDiedBeforeConnection = java.util.concurrent.atomic.AtomicBoolean(false)
+        val socketDiedBeforeConnection = AtomicBoolean(false)
         // Serialises "publish the reference / read the flag" against the listener's "set the flag /
         // read the reference", which is what makes the install check exhaustive.
         val disseminationLock = Any()

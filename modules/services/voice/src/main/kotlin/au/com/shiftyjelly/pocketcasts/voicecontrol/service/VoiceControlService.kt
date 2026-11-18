@@ -203,14 +203,14 @@ class VoiceControlService : Service() {
     private var captureStartedAtMs = 0L
 
     /**
-     * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
-     * observer is the single owner of engine starts, so recovery signals it rather than starting
-     * the engine from another coroutine, which could race an in-flight start.
-     */
-    /**
-     * The observer's restart wake-up. Strictly increasing: a wall-clock value would conflate two
-     * nudges in the same real millisecond, and StateFlow would drop the second one — the expiry
-     * nudge could land in exactly the silence it exists to break.
+     * The observer's restart wake-up: bumped to ask the mode observer to re-evaluate capture
+     * after it ended on its own. The observer is the single owner of engine starts, so recovery
+     * signals it rather than starting the engine from another coroutine, which could race an
+     * in-flight start.
+     *
+     * Strictly increasing: a wall-clock value would conflate two nudges in the same real
+     * millisecond, and StateFlow would drop the second one — the expiry nudge could land in
+     * exactly the silence it exists to break.
      */
     private val captureRestartSignal = MutableStateFlow(0L)
     private fun nudgeCaptureRestart() {
@@ -1219,6 +1219,14 @@ class VoiceControlService : Service() {
                         // starts: the published route flips the mode to WakeWord/Continuous and the
                         // observer's startEngine reuses this attempt's already-opened stream.
                         audioRouteMonitor.onExternalMicrophoneConfirmed()
+                        // The confirmed publish can carry an UNCHANGED route (the SCO broadcast
+                        // fixed the route while this attempt was still waiting for selection),
+                        // and StateFlow then drops it: without this the observer never re-runs,
+                        // and a restart owed on the just-confirmed surface waits in silence
+                        // even though the confirmation arrived. Nudged only when a restart is
+                        // actually owed -- every acquisition already ran the decision at its own
+                        // completion, so an unconditional nudge would double-run it.
+                        if (pendingAutomaticRestart) nudgeCaptureRestart()
                         // The gate can block between acquisition's own check and this point. The
                         // stream is still ours until the engine takes it, so release it rather than
                         // leave it live with no consumer.

@@ -177,6 +177,17 @@ class VoiceControlModeObserverAvailabilityTest {
             )
         }
 
+        /** The link goes down WITHOUT touching the device set: no trigger, only a route flip. */
+        fun deliverScoDownBroadcast() {
+            scoLinkUp = false
+            setShadowBluetoothScoOn(audioManager, false)
+            @Suppress("DEPRECATION")
+            deliver(
+                Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
+                    .putExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_DISCONNECTED),
+            )
+        }
+
         override fun stopBluetoothSco() {
             scoStops++
             scoLinkUp = false
@@ -961,10 +972,10 @@ class VoiceControlModeObserverAvailabilityTest {
     }
 
     /** Real-time-bounded wait on a virtual-clock-stable condition (no scheduler advancing). */
-    private fun settleUntil(what: String, predicate: () -> Boolean) {
+    private fun settleUntil(what: String, probe: () -> String = { "" }, predicate: () -> Boolean) {
         val deadline = System.currentTimeMillis() + 10_000
         while (!predicate()) {
-            if (System.currentTimeMillis() > deadline) error("settleUntil timed out waiting for $what")
+            if (System.currentTimeMillis() > deadline) error("settleUntil timed out waiting for $what; " + probe())
             testScheduler.runCurrent()
             runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
             Thread.sleep(10)
@@ -1166,8 +1177,17 @@ assertEquals(
      * bound — and once the bound expires, the fallback starts exactly once on the now-healthy
      * surface.
      */
+    /**
+     * The confirmation arriving INSIDE the bound must restart the mic the normal way. Held
+     * shape: the route already reads Headset (the staging broadcast fixed it before the capture
+     * died), so when the held selection completes the confirmed publish carries an UNCHANGED
+     * value and re-runs nothing by itself — the acquisition success path must wake the
+     * observer, which then spends the restart on the confirmed stream: exactly one start, the
+     * timer cancelled, no expiry WARN, and advancing past the bound changes nothing. A same-set
+     * refresh alone, before the heal, must start nothing.
+     */
     @Test
-    fun `a same-set emission inside the bound does not start early and the fallback starts once`() = runBlocking {
+    fun `a confirmation inside the bound re-confirms the restart the normal way`() = runBlocking {
         val expiryLogs = intArrayOf(0)
         val tree = object : timber.log.Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
@@ -1178,27 +1198,25 @@ assertEquals(
         val harness = heldWedge(ModelsReadyCondition(isReady = false), FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts), FakeRule("app_in_foreground", VoiceControlRuleGroup.Context))
         try {
             val attachBefore = harness.hardware.attachCount
-            // Half the bound passes: still waiting, nothing started.
             testScheduler.advanceTimeBy(750.milliseconds)
             settle()
             assertEquals("no start before the bound", attachBefore, harness.hardware.attachCount)
-            // The platform heals (selection completes) and the debounced callback fires with the
-            // device set UNCHANGED. The decision re-runs, but the surface's route already reads
-            // Headset, so nothing new can start here: still waiting.
+            // The platform heals inside the bound: link up, shadow input set, SCO broadcast --
+            // the same three facts a real headset arriving produces.
             harness.scoPlatform.bringScoUp()
-            harness.monitor.onDevicesChanged()
-            settle()
-            assertEquals("a same-set emission must not start the engine", attachBefore, harness.hardware.attachCount)
-            assertEquals("still waiting on the bound", true, getField(harness.service, "pendingAutomaticRestart"))
-            // The bound expires: the fallback attempts the start — once — and it SUCCEEDS on the
-            // now-healthy surface.
+            testScheduler.advanceTimeBy(400.milliseconds)
+            settleUntil("the normal restart") { harness.hardware.attachCount > attachBefore }
+            assertEquals("exactly one start", attachBefore + 1, harness.hardware.attachCount)
+            assertEquals(
+                "the timer is cancelled with the spent restart",
+                null,
+                getField(harness.service, "reconfirmationTimer"),
+            )
+            // Past the bound: nothing more happens, the bound never fired.
             testScheduler.advanceTimeBy(1_000.milliseconds)
-            settleUntil("the fallback start") { harness.hardware.attachCount > attachBefore }
-            assertEquals("the bound fired exactly once", 1, expiryLogs[0])
-            testScheduler.advanceTimeBy(1_500.milliseconds)
             settle()
+            assertEquals("the bound must not have expired", 0, expiryLogs[0])
             assertEquals("no stacked start", attachBefore + 1, harness.hardware.attachCount)
-            assertEquals("no second expiry", 1, expiryLogs[0])
         } finally {
             timber.log.Timber.uproot(tree)
             harness.stop()

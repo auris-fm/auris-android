@@ -1024,6 +1024,35 @@ class VoiceControlModeObserverAvailabilityTest {
         }
         return harness
     }
+    /**
+     * Stage `pendingAutomaticRestart = true` for a bound test, safely. The observer clears a
+     * pending restart whenever its run processes a route trigger it had not yet recorded (the
+     * gate's first Blocked->Allowed, a device-identity change), and those runs are asynchronous
+     * to the test. A route-eligible run can also SPEND a pending restart outright, which is why
+     * the staging below puts the restart in the acquisition wait rather than leaving it open to
+     * the observer's decision. Wait until the observer has recorded both, then stage the flag,
+     * and fail if one settle pass clears it.
+     */
+    private suspend fun stagePendingRestart(harness: Harness) {
+        awaitState("observer has seen gate allowed") {
+            (getField(harness.service, "lastGateAllowedSeenByObserver") as? Boolean) == true
+        }
+        awaitState("observer has seen the final device identity") {
+            (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
+        }
+        // STAGE THE ACQUISITION-WAIT SHAPE THE BOUND EXISTS FOR: a restart owed by a capture
+        // whose acquisition has not re-opened its stream. beginAutomaticRestart's early return
+        // holds the pending restart there without spending it, so the observer's route runs
+        // cannot consume the staged state and the bound's own expiry is the only outcome.
+        val acquisition = getField(harness.service, "routeAcquisition")!!
+        setField(acquisition, "acquiredForCapture", true)
+        setField(acquisition, "openedStream", false)
+        setField(harness.service, "pendingAutomaticRestart", true)
+        settle()
+        check(
+            getField(harness.service, "pendingAutomaticRestart") == true,
+        ) { "staged restart flag cleared after the observer caught up" }
+    }
 
     /**
      * The bound is tested one level down, driving [scheduleReconfirmationBoundTimer] directly:
@@ -1050,7 +1079,7 @@ class VoiceControlModeObserverAvailabilityTest {
             // Stage the wait state the observer's start branch reaches: a granted restart that
             // is waiting on re-confirmation, on a gate that is Allowed.
             awaitState("gate allowed") { (getField(harness.service, "gate") as au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate).state.value.allowed }
-            setField(harness.service, "pendingAutomaticRestart", true)
+            stagePendingRestart(harness)
             val schedule = harness.service.javaClass.getDeclaredMethod("scheduleReconfirmationBoundTimer")
                 .apply { isAccessible = true }
             val gateField = getField(harness.service, "gate")!!
@@ -1244,8 +1273,7 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("gate allowed") { (getField(harness.service, "gate") as au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate).state.value.allowed }
-            setField(harness.service, "pendingAutomaticRestart", true)
+            stagePendingRestart(harness)
             val schedule = harness.service.javaClass.getDeclaredMethod("scheduleReconfirmationBoundTimer")
                 .apply { isAccessible = true }
             schedule.invoke(harness.service)
@@ -1267,7 +1295,7 @@ assertEquals(
 
             // A fresh wait schedules a fresh bound that starts from zero: it must NOT behave
             // as already expired.
-            setField(harness.service, "pendingAutomaticRestart", true)
+            stagePendingRestart(harness)
             schedule.invoke(harness.service)
             val secondTimer = getField(harness.service, "reconfirmationTimer") as kotlinx.coroutines.Job
             assertTrue("a fresh wait schedules a fresh bound", secondTimer.isActive && secondTimer !== firstTimer)

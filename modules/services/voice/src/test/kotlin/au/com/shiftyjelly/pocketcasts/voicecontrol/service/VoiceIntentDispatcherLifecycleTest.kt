@@ -12,10 +12,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito
@@ -242,7 +246,33 @@ class VoiceIntentDispatcherLifecycleTest {
         // its body first executes never reaches it, so without an owner in invokeOnCompletion the
         // registry keeps one live entry per such turn -- and a superseded turn is cancelled
         // routinely.
+        val slept = intArrayOf(0)
+        // The cleanup handler settles the invocation BEFORE it finishes the record. Blocking that
+        // settle on a latch the test holds pins the handler between "started" and "finished", so
+        // the assertions below run while the record is provably still owed. Blocking only when
+        // called OFF the test thread: if the job finished before invokeOnCompletion was registered,
+        // the handler runs inline inside dispatch() and the blocked-state check could never happen.
+        val handlerStarted = java.util.concurrent.CountDownLatch(1)
+        val releaseHandler = java.util.concurrent.CountDownLatch(1)
+        val ranOnTestThread = java.util.concurrent.atomic.AtomicBoolean(false)
+        val testThreadId = Thread.currentThread().threadId()
         val engine = engine()
+        org.mockito.kotlin.whenever(engine.settleInvocation(org.mockito.kotlin.any()))
+            .thenAnswer {
+                if (Thread.currentThread().threadId() == testThreadId) {
+                    ranOnTestThread.set(true)
+                } else {
+                    handlerStarted.countDown()
+                    releaseHandler.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                }
+                true
+            }
+        // A publish wait with a bound, registered as the sink: the deterministic replacement for
+        // join(), which can return before the completion handlers have run.
+        val published = kotlinx.coroutines.CompletableDeferred<Unit>()
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, _ ->
+            published.complete(Unit)
+        }
         val d = dispatcher()
         val id = "wire-cancelled-before-body"
         val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
@@ -264,11 +294,31 @@ class VoiceIntentDispatcherLifecycleTest {
             timingRequestId = id,
         )
         assertNotNull("a dispatch still returns its job", job)
-        runBlocking { job?.join() }
 
-        assertTrue(
-            "a dispatch cancelled before its body ran must finish its record",
-            !au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+        // The handler must be observed running OFF the test thread and then blocked. If it ran
+        // inline instead, this setup cannot prove anything about join() ordering — fail loudly.
+        org.junit.Assert.assertTrue(
+            "the cleanup handler must start on another thread within 10s",
+            handlerStarted.await(10, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        org.junit.Assert.assertFalse(
+            "while the handler is blocked the record must not be published yet",
+            published.isCompleted,
+        )
+        org.junit.Assert.assertTrue(
+            "while the cleanup handler is blocked the record must still be live",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+        )
+
+        releaseHandler.countDown()
+        runBlocking {
+            withTimeout(10_000) {
+                withContext(Dispatchers.Default) { published.await() }
+            }
+        }
+        assertFalse(
+            "after the handler finished its work the record must be finished",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
         )
     }
 }

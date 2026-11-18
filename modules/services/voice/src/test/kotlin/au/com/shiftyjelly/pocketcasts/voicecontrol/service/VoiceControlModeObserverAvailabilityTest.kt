@@ -908,6 +908,67 @@ class VoiceControlModeObserverAvailabilityTest {
     }
 
     /**
+     * The re-confirmation wedge: a self-ended acquisition capture whose restart decision lands
+     * while the route is not yet startable keeps `pendingAutomaticRestart` true and waits for a
+     * route/availability emission to bring the decision back. When the platform has already torn
+     * the SCO link down before our release, teardown's `stopBluetoothSco`/`clearCommunicationDevice`
+     * are no-ops, the device list is unchanged, and NO emission ever arrives — the restart waits
+     * forever and the microphone stays dead in silence. The bound must expire, spend the credit,
+     * and attempt the start anyway (what main does), or report the restart as withheld.
+     */
+    @Test
+    fun `a pending restart waiting on re-confirmation does not wait forever`() = runBlocking {
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            Thread.sleep(300)
+            testScheduler.advanceTimeBy(300.milliseconds)
+
+            // One device-change trigger re-arms the budget and buys one restart; from here no
+            // further emissions are sent, ever.
+            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            setInputDevices()
+            harness.monitor.onDevicesChanged()
+            awaitState("capture torn down") { harness.hardware.vadStopCount >= 1 }
+            harness.scoPlatform.seedAlreadySelectedInput()
+            setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+            setInputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+            harness.monitor.onDevicesChanged()
+            awaitState("restarted capture up") { harness.hardware.attachCount >= 2 }
+
+            // This capture self-ends. Its owed restart's decision lands with the acquisition not
+            // re-confirmed (the release is settling), so it waits for an emission — and we send
+            // none. Within the bound the restart must be attempted or reported, never silent.
+            selfEndCapture(harness)
+            val attachBefore = harness.hardware.attachCount
+            Thread.sleep(200)
+            testScheduler.advanceTimeBy(2_000.milliseconds)
+            Thread.sleep(200)
+            fun budgetState(): String {
+                val b = getField(harness.service, "captureRestartBudget")!!
+                val avail = b.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }.get(b)
+                val flight = b.javaClass.getDeclaredField("restartInFlight").apply { isAccessible = true }.get(b)
+                return "available=$avail inFlight=$flight pending=${getField(harness.service, "pendingAutomaticRestart")} " +
+                    "attach=${harness.hardware.attachCount} vadStop=${harness.hardware.vadStopCount} " +
+                    "sched=${testScheduler.currentTime} mode=${getField(harness.service, "currentMode")}"
+            }
+            assertTrue(
+                "a restart pending re-confirmation must be attempted or reported within the bound, " +
+                    "not wait in silence (attach=$attachBefore -> ${harness.hardware.attachCount}; " +
+                    budgetState() + ")",
+                harness.hardware.attachCount > attachBefore,
+            )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    /**
      * Table-driven over route kinds x restart outcomes: every route must give a self-ended
      * capture exactly one automatic restart, and a restart that dies within 60 s or fails to
      * start must leave restarts withheld with exactly one `mic_restart_withheld` log. Wired

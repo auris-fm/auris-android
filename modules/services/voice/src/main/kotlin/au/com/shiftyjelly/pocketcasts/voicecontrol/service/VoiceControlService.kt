@@ -58,6 +58,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -172,6 +173,21 @@ class VoiceControlService : Service() {
     // the credit — a later trigger-driven attempt must not. Cleared where the budget re-arms
     // (a real trigger) and on a user-driven reset, never on an arbitrary observer emission.
     private var pendingAutomaticRestart = false
+
+    // Set by the re-confirmation bound when it expires; lets beginAutomaticRestart bypass the
+    // acquisition/startable gates on its next run, so a restart whose emissions never came is
+    // attempted anyway (what a plain start would have done) instead of waiting forever.
+    private var restartReconfirmationExpired = false
+    private var reconfirmationTimer: Job? = null
+
+    /**
+     * How long a restart granted but waiting on acquisition re-confirmation may wait for the
+     * route/availability emissions that bring its decision back. A little above the route
+     * monitor's 500 ms debounce, which is the longest normal settling takes: when the platform
+     * has already torn the link down before our release, those emissions never come at all, and
+     * past this bound the restart is attempted rather than left pending in silence.
+     */
+    private val restartReconfirmationBoundMs = 1_500L
     private var captureStartedAtMs = 0L
 
     /**
@@ -644,6 +660,25 @@ class VoiceControlService : Service() {
                                 val spendingRestart = beginAutomaticRestart(audioRouteMonitor.route.value)
                                 val waitingOnAcquisition =
                                     pendingAutomaticRestart && !spendingRestart
+                                if (waitingOnAcquisition) {
+                                    // The restart is granted but waits on acquisition
+                                    // re-confirmation, which only the route/availability
+                                    // emissions that follow can bring. If the platform tore the
+                                    // link down before our release, those emissions never come;
+                                    // bound the wait and fall back to attempting the start.
+                                    reconfirmationTimer?.cancel()
+                                    reconfirmationTimer = serviceScope.launch {
+                                        delay(restartReconfirmationBoundMs)
+                                        if (!pendingAutomaticRestart || !gate.state.value.allowed) {
+                                            return@launch
+                                        }
+                                        restartReconfirmationExpired = true
+                                        captureRestartSignal.value = SystemClock.elapsedRealtime()
+                                    }
+                                } else {
+                                    reconfirmationTimer?.cancel()
+                                    reconfirmationTimer = null
+                                }
                                 if (!waitingOnAcquisition) {
                                     @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                                     if (startEngine(mode)) {
@@ -1025,7 +1060,10 @@ class VoiceControlService : Service() {
      */
     private fun beginAutomaticRestart(route: AudioRoute): Boolean {
         if (!pendingAutomaticRestart) return false
-        if (routeAcquisition.acquiredForCapture && !routeAcquisition.hasConfirmedStream) return false
+        val reconfirmationExpired = restartReconfirmationExpired
+        if (!reconfirmationExpired) {
+            if (routeAcquisition.acquiredForCapture && !routeAcquisition.hasConfirmedStream) return false
+        }
         // The restart can only begin on a surface the engine can actually start on: an A2DP-only
         // restart once its acquisition has re-opened the stream, or a headset with a microphone
         // (wired, already-isolated input) when the dying capture needed no acquisition. Anything
@@ -1033,13 +1071,18 @@ class VoiceControlService : Service() {
         // start would fail on or die on: spending there would withhold the very restart the
         // spec grants. Keep the credit; the route, availability or acquisition emissions that
         // follow bring the decision back here.
-        val startableNow = when (route) {
-            is AudioRoute.BluetoothA2dpOnly -> routeAcquisition.hasConfirmedStream
-            is AudioRoute.Headset -> route.hasMicrophone
-            else -> false
+        if (!reconfirmationExpired) {
+            val startableNow = when (route) {
+                is AudioRoute.BluetoothA2dpOnly -> routeAcquisition.hasConfirmedStream
+                is AudioRoute.Headset -> route.hasMicrophone
+                else -> false
+            }
+            if (!startableNow) return false
         }
-        if (!startableNow) return false
         pendingAutomaticRestart = false
+        restartReconfirmationExpired = false
+        reconfirmationTimer?.cancel()
+        reconfirmationTimer = null
         if (!captureRestartBudget.allows()) return false
         captureRestartBudget.onAutomaticRestart()
         return true
@@ -1217,6 +1260,9 @@ class VoiceControlService : Service() {
     }
 
     private fun stopEngine(reason: Reason = Reason.ServiceStopped) {
+        reconfirmationTimer?.cancel()
+        reconfirmationTimer = null
+        restartReconfirmationExpired = false
         acquisitionJob?.cancel()
         acquisitionJob = null
         // Stop the engine before releasing acquisition routing: the engine tears down the

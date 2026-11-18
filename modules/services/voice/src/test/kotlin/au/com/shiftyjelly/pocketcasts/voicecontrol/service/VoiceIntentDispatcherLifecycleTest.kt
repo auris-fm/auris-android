@@ -276,52 +276,53 @@ class VoiceIntentDispatcherLifecycleTest {
             if (message.contains(id)) published.complete(Unit)
         }
         try {
-        val d = dispatcher()
-        val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
-        record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
-        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
+            val d = dispatcher()
+            val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
+            record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
 
-        // Already-cancelled scope: the body never gets to run.
-        val cancelled = CoroutineScope(
-            kotlinx.coroutines.SupervisorJob().apply { cancel() } + Dispatchers.Default,
-        )
-        val job = d.dispatch(
-            scope = cancelled,
-            engine = engine,
-            executor = executor { _, _ -> error("the body must never run in this test") },
-            render = { _, _ -> },
-            onCommandRecognized = { },
-            intent = VoiceIntent.Playback.Pause,
-            invocationToken = token(),
-            timingRequestId = id,
-        )
-        assertNotNull("a dispatch still returns its job", job)
+            // Already-cancelled scope: the body never gets to run.
+            val cancelled = CoroutineScope(
+                kotlinx.coroutines.SupervisorJob().apply { cancel() } + Dispatchers.Default,
+            )
+            val job = d.dispatch(
+                scope = cancelled,
+                engine = engine,
+                executor = executor { _, _ -> error("the body must never run in this test") },
+                render = { _, _ -> },
+                onCommandRecognized = { },
+                intent = VoiceIntent.Playback.Pause,
+                invocationToken = token(),
+                timingRequestId = id,
+            )
+            assertNotNull("a dispatch still returns its job", job)
 
-        // The handler must be observed running OFF the test thread and then blocked. If it ran
-        // inline instead, this setup cannot prove anything about join() ordering — fail loudly.
-        org.junit.Assert.assertTrue(
-            "the cleanup handler must start on another thread within 10s (inline on test thread: " +
-                ranOnTestThread.get() + ")",
-            handlerStarted.await(10, java.util.concurrent.TimeUnit.SECONDS),
-        )
-        org.junit.Assert.assertFalse(
-            "while the handler is blocked the record must not be published yet",
-            published.isCompleted,
-        )
-        org.junit.Assert.assertTrue(
-            "while the cleanup handler is blocked the record must still be live",
-            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
-        )
+            // The handler must be observed running OFF the test thread and then blocked. If it ran
+            // inline instead, this setup cannot prove anything about join() ordering — fail loudly.
+            org.junit.Assert.assertTrue(
+                "the cleanup handler must start on another thread within 10s (inline on test thread: " +
+                    ranOnTestThread.get() + ")",
+                handlerStarted.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            )
+            org.junit.Assert.assertFalse(
+                "while the handler is blocked the record must not be published yet",
+                published.isCompleted,
+            )
+            org.junit.Assert.assertTrue(
+                "while the cleanup handler is blocked the record must still be live",
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+            )
 
-        runBlocking {
-            withTimeout(10_000) {
-                withContext(Dispatchers.Default) { published.await() }
+            releaseHandler.countDown()
+            runBlocking {
+                withTimeout(10_000) {
+                    withContext(Dispatchers.Default) { published.await() }
+                }
             }
-        }
-        assertFalse(
-            "after the handler finished its work the record must be finished",
-            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
-        )
+            assertFalse(
+                "after the handler finished its work the record must be finished",
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+            )
         } finally {
             // Release the handler FIRST so a failed assertion cannot leave it parked for 10 s,
             // then restore the default sink so later tests in this JVM publish where they expect.

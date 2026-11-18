@@ -916,59 +916,32 @@ class VoiceControlModeObserverAvailabilityTest {
      * forever and the microphone stays dead in silence. The bound must expire, spend the credit,
      * and attempt the start anyway (what main does), or report the restart as withheld.
      */
+    /**
+     * The wedge, end to end: a self-ended acquisition capture whose stream was never confirmed
+     * leaves its owed restart waiting, and nothing resolves it — the platform tore the SCO link
+     * down, so the release's SCO/communication-device calls are no-ops and no emission follows.
+     * Within the bound it must not sit silent past expiry: the fallback attempts the start, and
+     * on a healthy surface that start succeeds.
+     */
     @Test
     fun `a pending restart waiting on re-confirmation does not wait forever`() = runBlocking {
-        val modelsReady = ModelsReadyCondition(isReady = false)
-        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
-        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
-        setAirPodsConnected()
-        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        val harness = heldWedge(ModelsReadyCondition(isReady = false), FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts), FakeRule("app_in_foreground", VoiceControlRuleGroup.Context))
         try {
-            harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
-            Thread.sleep(300)
-            testScheduler.advanceTimeBy(300.milliseconds)
-
-            // One device-change trigger re-arms the budget and buys one restart; from here no
-            // further emissions are sent, ever.
-            setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
-            setInputDevices()
-            harness.monitor.onDevicesChanged()
-            awaitState("capture torn down") { harness.hardware.vadStopCount >= 1 }
-            harness.scoPlatform.seedAlreadySelectedInput()
-            setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
-            setInputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
-            harness.monitor.onDevicesChanged()
-            awaitState("restarted capture up") { harness.hardware.attachCount >= 2 }
-
-            // This capture self-ends. Its owed restart's decision lands with the acquisition not
-            // re-confirmed (the release is settling), so it waits for an emission — and we send
-            // none. Within the bound the restart must be attempted or reported, never silent.
-            selfEndCapture(harness)
             val attachBefore = harness.hardware.attachCount
-            Thread.sleep(200)
+            // The platform heals before the bound expires; the fallback must still run.
+            harness.scoPlatform.bringScoUp()
+            Thread.sleep(100)
             testScheduler.advanceTimeBy(2_000.milliseconds)
-            Thread.sleep(200)
-            fun budgetState(): String {
-                val b = getField(harness.service, "captureRestartBudget")!!
-                val avail = b.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }.get(b)
-                val flight = b.javaClass.getDeclaredField("restartInFlight").apply { isAccessible = true }.get(b)
-                return "available=$avail inFlight=$flight pending=${getField(harness.service, "pendingAutomaticRestart")} " +
-                    "attach=${harness.hardware.attachCount} vadStop=${harness.hardware.vadStopCount} " +
-                    "sched=${testScheduler.currentTime} mode=${getField(harness.service, "currentMode")}"
-            }
-            assertTrue(
-                "a restart pending re-confirmation must be attempted or reported within the bound, " +
-                    "not wait in silence (attach=$attachBefore -> ${harness.hardware.attachCount}; " +
-                    budgetState() + ")",
-                harness.hardware.attachCount > attachBefore,
-            )
+            settleUntil("the fallback start") { harness.hardware.attachCount > attachBefore }
+            Thread.sleep(100)
+            testScheduler.advanceTimeBy(1_500.milliseconds)
+            settle()
+            assertEquals("exactly one fallback start", attachBefore + 1, harness.hardware.attachCount)
         } finally {
             harness.stop()
         }
     }
 
-    /** Shared wedge setup: acquisition capture, one trigger, fast self-end, no further emissions. */
     private fun Harness.wedgeState(): String {
         val b = getField(service, "captureRestartBudget")!!
         val avail = b.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }.get(b)
@@ -1086,6 +1059,47 @@ class VoiceControlModeObserverAvailabilityTest {
     }
 
 
+    /**
+     * The restart nudge must be strictly increasing: two nudges in the same real millisecond
+     * wrote the same wall-clock value into the StateFlow, which conflated them and DROPPED the
+     * second — the bound's expiry nudge could land in exactly the silence it exists to break.
+     */
+    @Test
+    fun `two nudges in the same millisecond are both delivered to the observer flow`() = runBlocking {
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            @Suppress("UNCHECKED_CAST")
+            val flow = getField(harness.service, "captureRestartSignal") as kotlinx.coroutines.flow.StateFlow<Long>
+            val seen = java.util.Collections.synchronizedList(mutableListOf<Long>())
+            val collector = launch(kotlinx.coroutines.Dispatchers.Main) {
+                flow.collect { seen.add(it) }
+            }
+            testScheduler.runCurrent()
+            val nudge = harness.service.javaClass.getDeclaredMethod("nudgeCaptureRestart")
+                .apply { isAccessible = true }
+            nudge.invoke(harness.service)
+            testScheduler.runCurrent()
+            nudge.invoke(harness.service)
+            testScheduler.runCurrent()
+            testScheduler.runCurrent()
+            Thread.sleep(100)
+            testScheduler.runCurrent()
+assertEquals(
+                "both nudges must reach a collector",
+                listOf(0L, 1L, 2L),
+                seen,
+            )
+            collector.cancel()
+        } finally {
+            harness.stop()
+        }
+    }
+
     @Test
     fun `the fallback start never opens a stream when the surface has no microphone`() = runBlocking {
         val withheldLogs = intArrayOf(0)
@@ -1140,6 +1154,57 @@ class VoiceControlModeObserverAvailabilityTest {
      * can only come back through its own re-confirmation — never through a stale bypass. And a
      * fresh wait after the clear must schedule a fresh bound, not inherit the expiry.
      */
+    /**
+     * The held-confirmation shape, released INSIDE the bound: the route and acquisition
+     * emissions re-run the decision the normal way — one restart, the timer cancelled, and the
+     * bound never fires. This is the only test showing the bound stays silent when it should.
+     */
+    /**
+     * The held-confirmation wedge, released inside the bound: the SCO selection completes while
+     * the restart still waits. A same-set route emission (the debounced device-list callback,
+     * the field shape) re-runs the decision but must not start anything early or reset the
+     * bound — and once the bound expires, the fallback starts exactly once on the now-healthy
+     * surface.
+     */
+    @Test
+    fun `a same-set emission inside the bound does not start early and the fallback starts once`() = runBlocking {
+        val expiryLogs = intArrayOf(0)
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (message.contains("re-confirmation timed out")) expiryLogs[0]++
+            }
+        }
+        timber.log.Timber.plant(tree)
+        val harness = heldWedge(ModelsReadyCondition(isReady = false), FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts), FakeRule("app_in_foreground", VoiceControlRuleGroup.Context))
+        try {
+            val attachBefore = harness.hardware.attachCount
+            // Half the bound passes: still waiting, nothing started.
+            testScheduler.advanceTimeBy(750.milliseconds)
+            settle()
+            assertEquals("no start before the bound", attachBefore, harness.hardware.attachCount)
+            // The platform heals (selection completes) and the debounced callback fires with the
+            // device set UNCHANGED. The decision re-runs, but the surface's route already reads
+            // Headset, so nothing new can start here: still waiting.
+            harness.scoPlatform.bringScoUp()
+            harness.monitor.onDevicesChanged()
+            settle()
+            assertEquals("a same-set emission must not start the engine", attachBefore, harness.hardware.attachCount)
+            assertEquals("still waiting on the bound", true, getField(harness.service, "pendingAutomaticRestart"))
+            // The bound expires: the fallback attempts the start — once — and it SUCCEEDS on the
+            // now-healthy surface.
+            testScheduler.advanceTimeBy(1_000.milliseconds)
+            settleUntil("the fallback start") { harness.hardware.attachCount > attachBefore }
+            assertEquals("the bound fired exactly once", 1, expiryLogs[0])
+            testScheduler.advanceTimeBy(1_500.milliseconds)
+            settle()
+            assertEquals("no stacked start", attachBefore + 1, harness.hardware.attachCount)
+            assertEquals("no second expiry", 1, expiryLogs[0])
+        } finally {
+            timber.log.Timber.uproot(tree)
+            harness.stop()
+        }
+    }
+
     @Test
     fun `clearing the pending restart clears the expired flag and the bound timer`() = runBlocking {
         val modelsReady = ModelsReadyCondition(isReady = false)

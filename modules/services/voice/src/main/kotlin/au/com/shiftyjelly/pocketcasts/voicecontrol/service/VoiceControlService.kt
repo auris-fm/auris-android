@@ -207,9 +207,11 @@ class VoiceControlService : Service() {
      * observer is the single owner of engine starts, so recovery signals it rather than starting
      * the engine from another coroutine, which could race an in-flight start.
      */
-    // Strictly increasing: a wall-clock value would conflate two nudges in the same real
-    // millisecond, and StateFlow would drop the second one — the expiry nudge could land in
-    // exactly the silence it exists to break.
+    /**
+     * The observer's restart wake-up. Strictly increasing: a wall-clock value would conflate two
+     * nudges in the same real millisecond, and StateFlow would drop the second one — the expiry
+     * nudge could land in exactly the silence it exists to break.
+     */
     private val captureRestartSignal = MutableStateFlow(0L)
     private fun nudgeCaptureRestart() {
         captureRestartSignal.value = captureRestartSignal.value + 1L
@@ -1050,19 +1052,6 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * ONE place decides whether this observer run IS the granted automatic restart, and spends
-     * the credit when it is. True when the caller should treat its start attempt as the
-     * restart's outcome: a false start must log `mic_restart_withheld`.
-     *
-     * A restart for a capture whose routing came from an acquisition only counts once the
-     * acquisition has re-opened the stream — earlier the recovery nudge runs while the route
-     * still OBSERVES the old headset (the release's debounced refresh has not landed), and
-     * spending then would open capture on the released routing: it dies at once and withholds
-     * the very restart the spec grants. A capture that needed no acquisition (wired headset,
-     * already-isolated input — `acquiredForCapture` was cleared when this capture opened its
-     * own stream in [confirmCaptureStream]) restarts at once: nothing has to re-open for it.
-     */
-    /**
      * The restart is granted but waits on acquisition re-confirmation, which only the
      * route/availability emissions that follow can bring. If the platform tore the link down
      * before our release, those emissions never come; bound the wait and fall back to
@@ -1086,6 +1075,19 @@ class VoiceControlService : Service() {
         }
     }
 
+    /**
+     * ONE place decides whether this observer run IS the granted automatic restart, and spends
+     * the credit when it is. True when the caller should treat its start attempt as the
+     * restart's outcome: a false start must log `mic_restart_withheld`.
+     *
+     * A restart for a capture whose routing came from an acquisition only counts once the
+     * acquisition has re-opened the stream — earlier the recovery nudge runs while the route
+     * still OBSERVES the old headset (the release's debounced refresh has not landed), and
+     * spending then would open capture on the released routing: it dies at once and withholds
+     * the very restart the spec grants. A capture that needed no acquisition (wired headset,
+     * already-isolated input — `acquiredForCapture` was cleared when this capture opened its
+     * own stream in [confirmCaptureStream]) restarts at once: nothing has to re-open for it.
+     */
     private fun beginAutomaticRestart(route: AudioRoute): Boolean {
         if (!pendingAutomaticRestart) return false
         val reconfirmationExpired = restartReconfirmationExpired

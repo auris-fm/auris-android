@@ -81,7 +81,8 @@ class VoiceControlService : Service() {
 
     /**
      * The early-connection owner, injected so the session's teardown can close an unspent
-     * pre-opened socket. Nullable because tests construct the service without injection.
+     * pre-opened socket. A non-null `lateinit` because tests construct the service without
+     * injection, so the teardown guards with `isInitialized`.
      */
     @Inject
     lateinit var earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener
@@ -1463,14 +1464,6 @@ class VoiceControlService : Service() {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
-                // CLOSE THE SESSION'S EARLY CONNECTION. The opener is a @Singleton: without this,
-                // an unspent pre-opened socket survives the service stop and sits open in a dead
-                // session until the next session's staleness check discards it -- plus the
-                // server-side disposal. Closing once at the session's end, after the root join (so
-                // no turn can still be taking the connection), is not the per-routing-exit churn
-                // the route spec removed.
-                runCatching { if (::earlyConnectionOpener.isInitialized) earlyConnectionOpener.shutdown() }
-                    .onFailure { Timber.w(it, "[VoicePipeline] early connection shutdown failed") }
                 // JOIN EVERYTHING THE BARRIER RETURNED. The root join covers service children; a job
                 // the barrier owned but that is NOT a child of this scope (a start admitted just
                 // before the close, work it spawned) would otherwise be left running while the
@@ -1525,6 +1518,19 @@ class VoiceControlService : Service() {
                     Timber.e("[VoicePipeline] engine not settled ($verdict); skipping resource release")
                     return@withContext TeardownResult.Held(TeardownFailure(verdict))
                 }
+                // CLOSE THE SESSION'S EARLY CONNECTION. The opener is a @Singleton: without this,
+                // an unspent pre-opened socket survives the service stop and sits open in a dead
+                // session until the next session's staleness check discards it -- plus the
+                // server-side disposal. It runs AFTER every join and the quiescence verdict, not
+                // after the root join alone: a barrier-owned job or an engine processing job that
+                // still reaches the opener would dial a fresh socket into the @Singleton and the
+                // survivor is back. shutdown() itself waits out an in-flight dial under the
+                // opener's lock, so this placement covers the last dial and closes it. A Held
+                // teardown keeps the socket too: it is holding resources, and this is one of them.
+                // Closing once at the session's end is not the per-routing-exit churn the route
+                // spec removed.
+                runCatching { if (::earlyConnectionOpener.isInitialized) earlyConnectionOpener.shutdown() }
+                    .onFailure { Timber.w(it, "[VoicePipeline] early connection shutdown failed") }
                 // A START THAT CLAIMED WHILE THIS TEARDOWN WAS JOINING is covered HERE, not by a hook
                 // on the start job. The read above happens before the scope is cancelled, so a start
                 // still waiting for another holder can claim afterwards; a completion hook would fire

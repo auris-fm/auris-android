@@ -198,6 +198,32 @@ class EarlyConnectionOpenerControlTest {
     }
 
     @Test
+    fun `after a shutdown the opener still pre-opens for the next session`() = runTest {
+        // shutdown() closes what one session held; it must not cancel the opener itself. The
+        // opener is a @Singleton: the next service session still pre-opens through the same
+        // instance, and a "tidier" shutdown that cancelled the open scope would quietly remove
+        // the early connection from every session after the first.
+        val harness = Harness()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val opener = harness.opener(this, dispatcher)
+
+        val first = opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+        opener.shutdown()
+        testScheduler.advanceUntilIdle()
+        assertTrue(first.isClosed)
+
+        opener.openForLater("utt-2")
+        testScheduler.advanceUntilIdle()
+        val second = opener.takeFor("utt-2")
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("the next session still gets its pre-opened connection", 2, harness.opens.get())
+        assertNotNull("the pre-opened connection of the next session must be adoptable", second)
+        assertFalse("the new connection must be open", (second as SocketCloudTurnConnection).isClosed)
+    }
+
+    @Test
     fun `a dead held connection is replaced on the next open rather than resumed`() = runTest {
         // The same utterance speaking again normally keeps its connection. A socket that died in
         // between must not be handed back as a resumption: the early open exists to spare the dial,

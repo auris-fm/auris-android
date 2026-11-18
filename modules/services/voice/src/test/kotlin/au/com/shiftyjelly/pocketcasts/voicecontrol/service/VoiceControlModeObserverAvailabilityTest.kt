@@ -1559,16 +1559,37 @@ assertEquals(
             FakeRule("app_in_foreground", VoiceControlRuleGroup.Context),
         )
         setField(harness.service, "earlyConnectionOpener", opener)
+        // A BARRIER-OWNED JOB THAT DIALS LATE: registered with the shutdown barrier before the
+        // stop, so the teardown owes it a join. This is the ordering trap -- a close placed before
+        // the barrier joins runs first, and the late dial then opens a socket into the @Singleton
+        // that nothing ever closes.
+        val barrier = getField(harness.service, "shutdownBarrier")
+        val lateDial = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            // DIAL DURING THE TEARDOWN, NOT BEFORE IT: hold off until the first socket closes (a
+            // bounded wait, so the ordering is observable without deadlocking the join). A close
+            // placed before the barrier joins runs first, and this dial then opens a socket into
+            // the @Singleton that nothing ever closes.
+            kotlinx.coroutines.withTimeoutOrNull(3_000) {
+                while (opened.firstOrNull()?.isClosed != true) kotlinx.coroutines.yield()
+            }
+            opener.openForLater("utt-stop-late")
+        }
+        barrier!!.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
+            .invoke(barrier, listOf(lateDial))
         try {
             opener.openForLater("utt-stop-test")
             kotlinx.coroutines.withTimeoutOrNull(5_000) {
                 while (opened.isEmpty()) kotlinx.coroutines.yield()
             }
-            org.junit.Assert.assertFalse("fixture: the socket is open before the stop", opened.single().isClosed)
+            org.junit.Assert.assertFalse("fixture: the socket is open before the stop", opened[0].isClosed)
             harness.stop()
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                while (opened.size < 2) kotlinx.coroutines.yield()
+            }
+            org.junit.Assert.assertEquals("the late barrier-owned dial must have run during the stop", 2, opened.size)
             org.junit.Assert.assertTrue(
-                "a stopped session must not keep a pre-opened socket open",
-                opened.single().isClosed,
+                "a stopped session must not keep any pre-opened socket open",
+                opened.all { it.isClosed },
             )
         } finally {
             runCatching { harness.stop() }

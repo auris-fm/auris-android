@@ -11,11 +11,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -246,7 +246,6 @@ class VoiceIntentDispatcherLifecycleTest {
         // its body first executes never reaches it, so without an owner in invokeOnCompletion the
         // registry keeps one live entry per such turn -- and a superseded turn is cancelled
         // routinely.
-        val slept = intArrayOf(0)
         // The cleanup handler settles the invocation BEFORE it finishes the record. Blocking that
         // settle on a latch the test holds pins the handler between "started" and "finished", so
         // the assertions below run while the record is provably still owed. Blocking only when
@@ -267,14 +266,17 @@ class VoiceIntentDispatcherLifecycleTest {
                 }
                 true
             }
-        // A publish wait with a bound, registered as the sink: the deterministic replacement for
-        // join(), which can return before the completion handlers have run.
-        val published = kotlinx.coroutines.CompletableDeferred<Unit>()
-        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, _ ->
-            published.complete(Unit)
-        }
-        val d = dispatcher()
         val id = "wire-cancelled-before-body"
+        // A publish wait with a bound, registered as the sink: the deterministic replacement for
+        // join(), which can return before the completion handlers have run. The sink completes
+        // only on THIS record's message, so a straggler from another test cannot satisfy it.
+        val published = CompletableDeferred<Unit>()
+        val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message ->
+            if (message.contains(id)) published.complete(Unit)
+        }
+        try {
+        val d = dispatcher()
         val record = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord(id)
         record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
@@ -298,7 +300,8 @@ class VoiceIntentDispatcherLifecycleTest {
         // The handler must be observed running OFF the test thread and then blocked. If it ran
         // inline instead, this setup cannot prove anything about join() ordering — fail loudly.
         org.junit.Assert.assertTrue(
-            "the cleanup handler must start on another thread within 10s",
+            "the cleanup handler must start on another thread within 10s (inline on test thread: " +
+                ranOnTestThread.get() + ")",
             handlerStarted.await(10, java.util.concurrent.TimeUnit.SECONDS),
         )
         org.junit.Assert.assertFalse(
@@ -310,7 +313,6 @@ class VoiceIntentDispatcherLifecycleTest {
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
         )
 
-        releaseHandler.countDown()
         runBlocking {
             withTimeout(10_000) {
                 withContext(Dispatchers.Default) { published.await() }
@@ -320,5 +322,11 @@ class VoiceIntentDispatcherLifecycleTest {
             "after the handler finished its work the record must be finished",
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
         )
+        } finally {
+            // Release the handler FIRST so a failed assertion cannot leave it parked for 10 s,
+            // then restore the default sink so later tests in this JVM publish where they expect.
+            releaseHandler.countDown()
+            au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = previousSink
+        }
     }
 }

@@ -46,17 +46,21 @@ class EarlyConnectionOpener(
      */
     suspend fun openFor(tag: String): CloudTurnConnection = withContext(dispatcher) {
         lock.withLock {
+            val nowMs = now()
             val current = held
             // A DEAD handle is not a resumption. Liveness is part of the keep condition, so a socket
             // that failed while the same utterance was still speaking is replaced here rather than
             // handed back and refused later at take time -- which forfeited the early open this
-            // exists for and logged "resume" about a dead socket.
-            if (current != null && current.ownerTag == tag && !current.isSpent && !current.isDead) {
+            // exists for and logged "resume" about a dead socket. Age is part of the keep condition
+            // too: an utterance that paused past [maxAgeMs] used to resume onto a socket the turn's
+            // staleness check then threw away, losing the dial this exists to spare on exactly the
+            // slow utterances. One read of the clock feeds both arms, so they judge age against the
+            // same instant.
+            if (current != null && current.ownerTag == tag && !current.isSpent && !current.isDead && !current.isStale(nowMs, maxAgeMs)) {
                 // Resumption: the same utterance speaking again keeps the connection it opened.
                 Timber.i("Early connection resume tag=%s", tag)
                 return@withLock current
             }
-            val nowMs = now()
             if (current != null &&
                 (current.ownerTag != tag || current.isSpent || current.isDead || current.isStale(nowMs, maxAgeMs))
             ) {

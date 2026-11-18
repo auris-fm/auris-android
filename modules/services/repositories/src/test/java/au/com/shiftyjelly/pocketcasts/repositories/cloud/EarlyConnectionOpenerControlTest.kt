@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -154,6 +155,46 @@ class EarlyConnectionOpenerControlTest {
         assertNull("a connection whose socket already failed must never be adopted", adopted)
         assertTrue("a refused dead connection must be closed, not left open", dead.isClosed)
         assertEquals("a refused connection must not count as spent-adopted", false, dead.isSpent)
+    }
+
+    @Test
+    fun `a connection gone stale before its utterance resumes is replaced, not resumed`() = runTest {
+        // The keep condition checks liveness and spend but not age, so an utterance that pauses
+        // past MAX_AGE_MS resumed onto a socket `takeFor` then threw away at the staleness check:
+        // the early open existed to spare the dial, and the resume forfeited it anyway. The KDoc
+        // already promises "a stale one is closed and replaced" -- this pins it.
+        val harness = Harness()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val opener = harness.opener(this, dispatcher)
+
+        val first = opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+        // Age past the server limit while the SAME utterance was still unspent and alive.
+        harness.clock += CloudTurnConnection.MAX_AGE_MS + 1
+
+        val second = opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+
+        assertEquals("a stale held connection must be replaced, not resumed", 2, harness.opens.get())
+        assertTrue("the replacement must be a different connection", second !== first)
+        assertTrue("the stale connection must be closed on replacement", first.isClosed)
+    }
+
+    @Test
+    fun `a stop closes the held connection and leaves nothing held`() = runTest {
+        val harness = Harness()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val opener = harness.opener(this, dispatcher)
+
+        val held = opener.openFor("utt-1")
+        testScheduler.advanceUntilIdle()
+        assertFalse("the fixture holds an open connection", held.isClosed)
+
+        opener.shutdown()
+        testScheduler.advanceUntilIdle()
+
+        assertTrue("a stopped session must not keep a socket open", held.isClosed)
+        assertNull("nothing is held after the stop", opener.takeFor("utt-1"))
     }
 
     @Test

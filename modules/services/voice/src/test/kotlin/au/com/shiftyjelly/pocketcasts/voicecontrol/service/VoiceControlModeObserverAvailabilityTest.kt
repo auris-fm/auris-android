@@ -1540,6 +1540,41 @@ assertEquals(
      * service scope and joins it before releasing anything; the leaked children were what made a
      * following test fail with "Dispatchers.Main is used concurrently with setting it".
      */
+    @Test
+    fun `a stop closes the session's early connection and leaves nothing held`() = runBlocking {
+        // The opener is a @Singleton: without a teardown close, an unspent pre-opened socket
+        // survives the service stop and sits open in a dead session until the next session's
+        // staleness check discards it.
+        val opened = java.util.Collections.synchronizedList(mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.SocketCloudTurnConnection>())
+        val opener = au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener(
+            dispatcher = kotlinx.coroutines.Dispatchers.IO,
+            open = { tag, nowMs ->
+                au.com.shiftyjelly.pocketcasts.repositories.cloud.SocketCloudTurnConnection(tag, nowMs).also { opened += it }
+            },
+            now = { android.os.SystemClock.elapsedRealtime() },
+        )
+        val harness = startService(
+            ModelsReadyCondition(isReady = false),
+            FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts),
+            FakeRule("app_in_foreground", VoiceControlRuleGroup.Context),
+        )
+        setField(harness.service, "earlyConnectionOpener", opener)
+        try {
+            opener.openForLater("utt-stop-test")
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                while (opened.isEmpty()) kotlinx.coroutines.yield()
+            }
+            org.junit.Assert.assertFalse("fixture: the socket is open before the stop", opened.single().isClosed)
+            harness.stop()
+            org.junit.Assert.assertTrue(
+                "a stopped session must not keep a pre-opened socket open",
+                opened.single().isClosed,
+            )
+        } finally {
+            runCatching { harness.stop() }
+        }
+    }
+
     private suspend fun Harness.stop() {
         runCatching {
             VoiceControlService::class.java.getDeclaredMethod("onDestroy")

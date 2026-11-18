@@ -80,6 +80,13 @@ class VoiceControlService : Service() {
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
 
     /**
+     * The early-connection owner, injected so the session's teardown can close an unspent
+     * pre-opened socket. Nullable because tests construct the service without injection.
+     */
+    @Inject
+    lateinit var earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener
+
+    /**
      * The clarification-dialog owner, injected so its abandonment reports can be bound to the cloud
      * sink's retention release.
      *
@@ -1456,6 +1463,14 @@ class VoiceControlService : Service() {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
+                // CLOSE THE SESSION'S EARLY CONNECTION. The opener is a @Singleton: without this,
+                // an unspent pre-opened socket survives the service stop and sits open in a dead
+                // session until the next session's staleness check discards it -- plus the
+                // server-side disposal. Closing once at the session's end, after the root join (so
+                // no turn can still be taking the connection), is not the per-routing-exit churn
+                // the route spec removed.
+                runCatching { if (::earlyConnectionOpener.isInitialized) earlyConnectionOpener.shutdown() }
+                    .onFailure { Timber.w(it, "[VoicePipeline] early connection shutdown failed") }
                 // JOIN EVERYTHING THE BARRIER RETURNED. The root join covers service children; a job
                 // the barrier owned but that is NOT a child of this scope (a start admitted just
                 // before the close, work it spawned) would otherwise be left running while the

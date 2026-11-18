@@ -880,12 +880,24 @@ class VoiceControlModeObserverAvailabilityTest {
             setInputDevices()
             harness.monitor.onDevicesChanged()
             awaitState("AirPods capture torn down") { harness.hardware.vadStopCount >= 1 }
-            harness.scoPlatform.seedAlreadySelectedInput()
+            // STAGE THE NEW HEADSET IN ONE STEP. Two separate list writes give the observer a
+            // transient intermediate identity (speaker output with the SCO input already seeded);
+            // seen after a capture death, such a flap would count as a fresh device trigger,
+            // re-arm the budget and clear the owed restart -- exactly the B pattern this test
+            // exists NOT to trigger.
             setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
             setInputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+            harness.scoPlatform.seedAlreadySelectedInput()
             harness.monitor.onDevicesChanged()
             awaitState("wired capture up") { harness.hardware.attachCount >= 2 }
             awaitState("wired capture committed") { harness.engineStarted() }
+            // The observer must have OBSERVED the final identity before the deaths begin: the
+            // identity comparison runs inside the observer, so a staged change it has not yet
+            // seen would fire as a trigger between a death and its restart, however it was
+            // staged. (8|7|0 is A2DP output + SCO input pair, the settled signature here.)
+            awaitState("final device identity observed") {
+                (getField(harness.service, "lastConnectedDeviceIdentity") as String) == "8|7|0"
+            }
 
 
             // The wired capture ends by itself: one restart at once (its stream was its own,

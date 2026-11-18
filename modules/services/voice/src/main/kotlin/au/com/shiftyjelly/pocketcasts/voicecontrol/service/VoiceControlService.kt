@@ -181,6 +181,18 @@ class VoiceControlService : Service() {
     private var reconfirmationTimer: Job? = null
 
     /**
+     * ONE place clears a pending restart: the flag that lets beginAutomaticRestart bypass the
+     * re-confirmation gates must never outlive the pending restart it belongs to, or the NEXT
+     * restart would skip those gates outright and start on released routing.
+     */
+    private fun clearPendingRestart() {
+        pendingAutomaticRestart = false
+        restartReconfirmationExpired = false
+        reconfirmationTimer?.cancel()
+        reconfirmationTimer = null
+    }
+
+    /**
      * How long a restart granted but waiting on acquisition re-confirmation may wait for the
      * route/availability emissions that bring its decision back. A little above the route
      * monitor's 500 ms debounce, which is the longest normal settling takes: when the platform
@@ -195,7 +207,13 @@ class VoiceControlService : Service() {
      * observer is the single owner of engine starts, so recovery signals it rather than starting
      * the engine from another coroutine, which could race an in-flight start.
      */
+    // Strictly increasing: a wall-clock value would conflate two nudges in the same real
+    // millisecond, and StateFlow would drop the second one — the expiry nudge could land in
+    // exactly the silence it exists to break.
     private val captureRestartSignal = MutableStateFlow(0L)
+    private fun nudgeCaptureRestart() {
+        captureRestartSignal.value = captureRestartSignal.value + 1L
+    }
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
@@ -215,6 +233,8 @@ class VoiceControlService : Service() {
     // observer run attempts again. A failure while the gate is not Allowed records nothing:
     // that attempt was abandoned by a blocker, and the blocker clearing is itself the trigger.
     private var failedAttemptAvailability: AudioRoute? = null
+    /** The skip log fires once per recorded failure, not on every observer run that re-checks it. */
+    private var failedAttemptSkipLogged = false
     // Set only when the GATE was Blocked during the attempt (rule 2's coalescing, narrowed to
     // what the spec calls a trigger): route or restart-signal emissions during an attempt are
     // normal side effects of setting SCO up, and a device-set change is already covered by
@@ -401,7 +421,7 @@ class VoiceControlService : Service() {
         }
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
-        pendingAutomaticRestart = false
+        clearPendingRestart()
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
@@ -548,12 +568,12 @@ class VoiceControlService : Service() {
                     if (deviceIdentity != lastConnectedDeviceIdentity) {
                         lastConnectedDeviceIdentity = deviceIdentity
                         captureRestartBudget.rearm()
-                        pendingAutomaticRestart = false
+                        clearPendingRestart()
                     }
                     val gateAllowed = gate.state.value.allowed
                     if (lastGateAllowedSeenByObserver == false && gateAllowed) {
                         captureRestartBudget.rearm()
-                        pendingAutomaticRestart = false
+                        clearPendingRestart()
                     }
                     lastGateAllowedSeenByObserver = gateAllowed
                     if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
@@ -580,7 +600,7 @@ class VoiceControlService : Service() {
                             // the automatic-restart cap so re-enabling it can capture again.
                             if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
                                 captureRestartBudget.reset()
-                                pendingAutomaticRestart = false
+                                clearPendingRestart()
                             }
                             // THE GATE GOING BLOCKED CLEARS A FAILED ATTEMPT (core
                             // voice-control-core.md > Route acquisition): any blocker clearing is a
@@ -588,12 +608,14 @@ class VoiceControlService : Service() {
                             // gate is Allowed a rule change is not a trigger, and the record stays.
                             if (!gate.state.value.allowed) {
                                 failedAttemptAvailability = null
+                                failedAttemptSkipLogged = false
                             }
                             // An availability change itself is a new trigger: the failed attempt
                             // was recorded against the OLD availability, so a different answer
                             // (device set changed) may be acquired again.
                             if (audioRouteMonitor.availability.value != failedAttemptAvailability) {
                                 failedAttemptAvailability = null
+                                failedAttemptSkipLogged = false
                             }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
@@ -660,25 +682,7 @@ class VoiceControlService : Service() {
                                 val spendingRestart = beginAutomaticRestart(audioRouteMonitor.route.value)
                                 val waitingOnAcquisition =
                                     pendingAutomaticRestart && !spendingRestart
-                                if (waitingOnAcquisition) {
-                                    // The restart is granted but waits on acquisition
-                                    // re-confirmation, which only the route/availability
-                                    // emissions that follow can bring. If the platform tore the
-                                    // link down before our release, those emissions never come;
-                                    // bound the wait and fall back to attempting the start.
-                                    reconfirmationTimer?.cancel()
-                                    reconfirmationTimer = serviceScope.launch {
-                                        delay(restartReconfirmationBoundMs)
-                                        if (!pendingAutomaticRestart || !gate.state.value.allowed) {
-                                            return@launch
-                                        }
-                                        restartReconfirmationExpired = true
-                                        captureRestartSignal.value = SystemClock.elapsedRealtime()
-                                    }
-                                } else {
-                                    reconfirmationTimer?.cancel()
-                                    reconfirmationTimer = null
-                                }
+                                if (waitingOnAcquisition) scheduleReconfirmationBoundTimer()
                                 if (!waitingOnAcquisition) {
                                     @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                                     if (startEngine(mode)) {
@@ -1042,7 +1046,7 @@ class VoiceControlService : Service() {
      */
     private fun recoverCapture() {
         if (!captureRestartBudget.allows()) return
-        captureRestartSignal.value = SystemClock.elapsedRealtime()
+        nudgeCaptureRestart()
     }
 
     /**
@@ -1058,6 +1062,30 @@ class VoiceControlService : Service() {
      * already-isolated input — `acquiredForCapture` was cleared when this capture opened its
      * own stream in [confirmCaptureStream]) restarts at once: nothing has to re-open for it.
      */
+    /**
+     * The restart is granted but waits on acquisition re-confirmation, which only the
+     * route/availability emissions that follow can bring. If the platform tore the link down
+     * before our release, those emissions never come; bound the wait and fall back to
+     * attempting the start. The bound counts from the FIRST wait: relaunching on every observer
+     * run would let a stream of non-confirming emissions push expiry back indefinitely, which
+     * is no bound at all.
+     */
+    private fun scheduleReconfirmationBoundTimer() {
+        if (reconfirmationTimer?.isActive == true) return
+        reconfirmationTimer = serviceScope.launch {
+            delay(restartReconfirmationBoundMs)
+            if (!pendingAutomaticRestart || !gate.state.value.allowed) {
+                return@launch
+            }
+            Timber.w(
+                "[VoicePipeline] restart re-confirmation timed out after %d ms; attempting start",
+                restartReconfirmationBoundMs,
+            )
+            restartReconfirmationExpired = true
+            nudgeCaptureRestart()
+        }
+    }
+
     private fun beginAutomaticRestart(route: AudioRoute): Boolean {
         if (!pendingAutomaticRestart) return false
         val reconfirmationExpired = restartReconfirmationExpired
@@ -1079,10 +1107,7 @@ class VoiceControlService : Service() {
             }
             if (!startableNow) return false
         }
-        pendingAutomaticRestart = false
-        restartReconfirmationExpired = false
-        reconfirmationTimer?.cancel()
-        reconfirmationTimer = null
+        clearPendingRestart()
         if (!captureRestartBudget.allows()) return false
         captureRestartBudget.onAutomaticRestart()
         return true
@@ -1144,11 +1169,16 @@ class VoiceControlService : Service() {
         if (failedAttemptAvailability != null &&
             audioRouteMonitor.availability.value == failedAttemptAvailability
         ) {
-            Timber.i(
-                "[VoicePipeline] acquisition skipped: a previous attempt already failed against " +
-                    "availability=%s with the same gate state; waiting for a new trigger",
-                audioRouteMonitor.availability.value,
-            )
+            // The observer re-runs this check on every emission while the failed attempt's
+            // availability stays recorded; the skip itself is logged once per recorded failure.
+            if (!failedAttemptSkipLogged) {
+                failedAttemptSkipLogged = true
+                Timber.i(
+                    "[VoicePipeline] acquisition skipped: a previous attempt already failed against " +
+                        "availability=%s with the same gate state; waiting for a new trigger",
+                    audioRouteMonitor.availability.value,
+                )
+            }
             return
         }
         if (!captureRestartBudget.allows()) {
@@ -1204,10 +1234,11 @@ class VoiceControlService : Service() {
                         // bought, and recording here would skip it.
                         if (gateState.allowed && !gateBlockedDuringAttempt) {
                             failedAttemptAvailability = attemptAvailability
+                            failedAttemptSkipLogged = false
                         }
                         if (spendingRestart) {
                             captureRestartBudget.onAutomaticRestart()
-                            pendingAutomaticRestart = false
+                            clearPendingRestart()
                             // voice-control-core.md > Microphone lifecycle logging: the
                             // never-started case is withheld with ran_ms 0 and its own reason.
                             Timber.e(
@@ -1260,9 +1291,7 @@ class VoiceControlService : Service() {
     }
 
     private fun stopEngine(reason: Reason = Reason.ServiceStopped) {
-        reconfirmationTimer?.cancel()
-        reconfirmationTimer = null
-        restartReconfirmationExpired = false
+        clearPendingRestart()
         acquisitionJob?.cancel()
         acquisitionJob = null
         // Stop the engine before releasing acquisition routing: the engine tears down the

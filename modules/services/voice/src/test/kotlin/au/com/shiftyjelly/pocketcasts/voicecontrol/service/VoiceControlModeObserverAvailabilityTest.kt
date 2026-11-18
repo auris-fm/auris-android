@@ -140,7 +140,7 @@ class VoiceControlModeObserverAvailabilityTest {
         var scoStops = 0
 
         @Volatile var scoLinkUp = false
-            private set
+            internal set
 
         override fun bluetoothCandidates() = listOf(
             BluetoothCandidate(deviceId = SCO_INPUT_ID, transport = BluetoothTransport.ClassicSco),
@@ -963,6 +963,226 @@ class VoiceControlModeObserverAvailabilityTest {
                     budgetState() + ")",
                 harness.hardware.attachCount > attachBefore,
             )
+        } finally {
+            harness.stop()
+        }
+    }
+
+    /** Shared wedge setup: acquisition capture, one trigger, fast self-end, no further emissions. */
+    private fun Harness.wedgeState(): String {
+        val b = getField(service, "captureRestartBudget")!!
+        val avail = b.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }.get(b)
+        val flight = b.javaClass.getDeclaredField("restartInFlight").apply { isAccessible = true }.get(b)
+        return "available=$avail inFlight=$flight pending=${getField(service, "pendingAutomaticRestart")} " +
+            "expired=${getField(service, "restartReconfirmationExpired")} timer=${getField(service, "reconfirmationTimer")} " +
+            "attach=${hardware.attachCount} vadStop=${hardware.vadStopCount} open=${hardware.openCount}"
+    }
+
+    /** Runs what is due WITHOUT moving the virtual clock, so time-bound state can be inspected. */
+    private fun settle() {
+        repeat(10) {
+            testScheduler.runCurrent()
+            runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+            Thread.sleep(10)
+        }
+    }
+
+    /** Real-time-bounded wait on a virtual-clock-stable condition (no scheduler advancing). */
+    private fun settleUntil(what: String, predicate: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!predicate()) {
+            if (System.currentTimeMillis() > deadline) error("settleUntil timed out waiting for $what")
+            testScheduler.runCurrent()
+            runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+            Thread.sleep(10)
+        }
+    }
+
+    /**
+     * Deterministic wedge: hold the acquisition's SCO selection down, start capture through the
+     * broadcast-only route, and self-end. The dying capture's stream is an acquisition's stream
+     * that was NEVER confirmed, so its owed restart's decision lands on the un-confirmed gate and
+     * waits — and nothing releases it until the test decides. No `awaitState` after the hold:
+     * every await pumps virtual time, which would expire exactly the bound under test.
+     */
+    private suspend fun heldWedge(
+        modelsReady: ModelsReadyCondition,
+        otherAppRule: FakeRule,
+        foregroundRule: FakeRule,
+    ): Harness {
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        harness.awaitObserverInstalled()
+        // The acquisition starts but selection never completes while the link is held down.
+        harness.scoPlatform.holdScoDown = true
+        awaitState("acquisition started") { harness.scoPlatform.scoStarts >= 1 }
+        // The SCO state broadcast arrives first: the route reads Headset and the observer starts
+        // the stream itself, before the acquisition has observed selection. Held here.
+        harness.scoPlatform.deliverScoUpBroadcast()
+        awaitState("capture up mid-acquisition") { harness.hardware.attachCount >= 1 }
+        // That capture self-ends; its owed restart waits on the never-confirmed acquisition.
+        selfEndCapture(harness)
+        settleUntil("the restart waiting on re-confirmation") {
+            getField(harness.service, "pendingAutomaticRestart") == true &&
+                (getField(harness.service, "reconfirmationTimer") as? kotlinx.coroutines.Job)?.isActive == true
+        }
+        return harness
+    }
+
+    /**
+     * The bound is tested one level down, driving [scheduleReconfirmationBoundTimer] directly:
+     * the full staging's timing depends on SCO settle races the fake cannot hold reliably. Two
+     * waits 750 ms apart must still expire exactly once, at 1500 ms from the FIRST wait — a
+     * relaunch on the second wait would push expiry to 2250 ms and silence the bound.
+     */
+    @Test
+    fun `re-scheduling the re-confirmation bound does not reset it`() = runBlocking {
+        val expiryLogs = intArrayOf(0)
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (message.contains("re-confirmation timed out")) expiryLogs[0]++
+            }
+        }
+        timber.log.Timber.plant(tree)
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            // Stage the wait state the observer's start branch reaches: a granted restart that
+            // is waiting on re-confirmation, on a gate that is Allowed.
+            awaitState("gate allowed") { (getField(harness.service, "gate") as au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate).state.value.allowed }
+            setField(harness.service, "pendingAutomaticRestart", true)
+            val schedule = harness.service.javaClass.getDeclaredMethod("scheduleReconfirmationBoundTimer")
+                .apply { isAccessible = true }
+            val gateField = getField(harness.service, "gate")!!
+            schedule.invoke(harness.service)
+            val firstTimer = getField(harness.service, "reconfirmationTimer") as kotlinx.coroutines.Job
+            assertTrue("the first wait schedules the bound", firstTimer.isActive)
+
+            // Half the bound passes; a second waiting observer run re-schedules: the SAME timer
+            // must still be running, and expiry must land at 1500 ms from the first wait.
+            testScheduler.advanceTimeBy(750.milliseconds)
+            settle()
+            schedule.invoke(harness.service)
+            assertEquals(
+                "a second waiting run must not relaunch the bound",
+                firstTimer,
+                getField(harness.service, "reconfirmationTimer"),
+            )
+            testScheduler.advanceTimeBy(750.milliseconds)
+            settle()
+            assertEquals("the bound expired once, 1500 ms from the first wait", 1, expiryLogs[0])
+            assertEquals("expiry raises the fallback flag", true, getField(harness.service, "restartReconfirmationExpired"))
+            testScheduler.advanceTimeBy(1_500.milliseconds)
+            settle()
+            assertEquals("no second expiry", 1, expiryLogs[0])
+        } finally {
+            timber.log.Timber.uproot(tree)
+            harness.stop()
+        }
+    }
+
+
+    @Test
+    fun `the fallback start never opens a stream when the surface has no microphone`() = runBlocking {
+        val withheldLogs = intArrayOf(0)
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (message.contains("mic_restart_withheld") ||
+                    message.contains("capture_start_refused") ||
+                    message.contains("engine not started: selected device is not an external microphone") ||
+                    message.contains("acquisition skipped: automatic restart withheld")
+                ) withheldLogs[0]++
+            }
+        }
+        timber.log.Timber.plant(tree)
+        val harness = heldWedge(ModelsReadyCondition(isReady = false), FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts), FakeRule("app_in_foreground", VoiceControlRuleGroup.Context))
+        try {
+            val opensBefore = harness.hardware.openCount
+            val attachBefore = harness.hardware.attachCount
+            // The platform never delivers selection: the surface has no microphone. The bound
+            // expires and the fallback attempts the start, which must refuse without opening a
+            // stream and must SAY so.
+            testScheduler.advanceTimeBy(2_000.milliseconds)
+            // Twice the bound, real and virtual time: if the attempt is going to report, it
+            // reports within this window.
+            val deadline = System.currentTimeMillis() + 10_000
+            while (withheldLogs[0] < 1 && System.currentTimeMillis() < deadline) {
+                testScheduler.runCurrent()
+                testScheduler.advanceTimeBy(100.milliseconds)
+                runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+                Thread.sleep(10)
+            }
+            assertTrue(
+                "the failed fallback start must be reported, not silent (logs=${withheldLogs[0]} open=${harness.hardware.openCount} attach=${harness.hardware.attachCount} " + harness.wedgeState() + ")",
+                withheldLogs[0] >= 1,
+            )
+            assertEquals("the fallback must not open a stream on a mic-less surface", opensBefore, harness.hardware.openCount)
+            assertEquals("no attach without a stream", attachBefore, harness.hardware.attachCount)
+        } finally {
+            timber.log.Timber.uproot(tree)
+            harness.stop()
+        }
+    }
+
+    /**
+     * The expired flag must never outlive the pending restart it belongs to: after the bound has
+     * expired and a trigger has cleared the restart, the flag and timer are gone, so a LATER
+     * pending restart can only come back through its own re-confirmation — never through a stale
+     * bypass.
+     */
+    /**
+     * The flag lifetime, one level down: once the bound has expired and the pending restart is
+     * cleared, the expired flag and the timer must be gone with it, so a LATER pending restart
+     * can only come back through its own re-confirmation — never through a stale bypass. And a
+     * fresh wait after the clear must schedule a fresh bound, not inherit the expiry.
+     */
+    @Test
+    fun `clearing the pending restart clears the expired flag and the bound timer`() = runBlocking {
+        val modelsReady = ModelsReadyCondition(isReady = false)
+        val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
+        val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
+        setAirPodsConnected()
+        val harness = startService(modelsReady, otherAppRule, foregroundRule)
+        try {
+            harness.awaitObserverInstalled()
+            awaitState("gate allowed") { (getField(harness.service, "gate") as au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate).state.value.allowed }
+            setField(harness.service, "pendingAutomaticRestart", true)
+            val schedule = harness.service.javaClass.getDeclaredMethod("scheduleReconfirmationBoundTimer")
+                .apply { isAccessible = true }
+            schedule.invoke(harness.service)
+            val firstTimer = getField(harness.service, "reconfirmationTimer") as kotlinx.coroutines.Job
+            assertTrue(firstTimer.isActive)
+
+            // The bound expires; the fallback flag is raised.
+            testScheduler.advanceTimeBy(1_500.milliseconds)
+            settle()
+            assertEquals(true, getField(harness.service, "restartReconfirmationExpired"))
+
+            // A trigger (device change, gate re-arm, spend — all go through the one helper)
+            // clears the pending restart: the flag and the timer are gone with it.
+            harness.service.javaClass.getDeclaredMethod("clearPendingRestart")
+                .apply { isAccessible = true }.invoke(harness.service)
+            assertEquals(false, getField(harness.service, "pendingAutomaticRestart"))
+            assertEquals(false, getField(harness.service, "restartReconfirmationExpired"))
+            assertEquals(null, getField(harness.service, "reconfirmationTimer"))
+
+            // A fresh wait schedules a fresh bound that starts from zero: it must NOT behave
+            // as already expired.
+            setField(harness.service, "pendingAutomaticRestart", true)
+            schedule.invoke(harness.service)
+            val secondTimer = getField(harness.service, "reconfirmationTimer") as kotlinx.coroutines.Job
+            assertTrue("a fresh wait schedules a fresh bound", secondTimer.isActive && secondTimer !== firstTimer)
+            assertEquals(false, getField(harness.service, "restartReconfirmationExpired"))
+            testScheduler.advanceTimeBy(1_400.milliseconds)
+            settle()
+            assertEquals("before the fresh bound expires the flag stays down", false, getField(harness.service, "restartReconfirmationExpired"))
+            testScheduler.advanceTimeBy(150.milliseconds)
+            settle()
+            assertEquals("the fresh bound expires on its own schedule", true, getField(harness.service, "restartReconfirmationExpired"))
         } finally {
             harness.stop()
         }

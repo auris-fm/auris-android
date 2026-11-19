@@ -1,43 +1,77 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/buildkite/pipeline-schema/main/schema.json
 ---
-# Auris Android CI, mirroring what the repo's GitHub workflows run
-# (.github/workflows/voice-unit-tests.yml, android-test-compile.yml).
-# Runs on agents tagged `queue=auris-android`; the queue line below is the
-# single place to retarget the pipeline.
+# Auris Android release pipeline: builds the signed `fm.auris` AAB and uploads
+# it to Google Play's internal testing track. Runs on agents tagged
+# `queue=auris-android`, on main, after the GitHub test workflows pass (the
+# GitHub-side trigger job invokes this pipeline via the Buildkite API).
 #
-# Every step caps the JVMs before invoking Gradle: the repo's gradle.properties
-# defaults (10 GB Gradle heap, 4 GB Kotlin daemon, 8 workers) exceed an
-# 8 GB CI machine, and a properties file keeps the LAST value for a repeated
-# key, so appending the caps overrides them without editing the repo's lines.
+# The repo's gradle.properties defaults (10 GB Gradle heap, 4 GB Kotlin
+# compiler daemon, 8 workers) exceed an 8 GB CI machine, and a properties file
+# keeps the LAST value for a repeated key, so appending the caps overrides
+# them without editing the repo's lines. The daemon `-Xmx` values should be
+# confirmed in `ps` on the first run.
+#
+# While the Play service-account key does not exist, the pipeline stops at the
+# signed AAB artifact. The upload step switches on once
+# `PLAY_SERVICE_ACCOUNT_JSON` is set, and signing once the keystore secrets
+# are; both are environment-gated, so the same definition serves both phases.
 
 agents:
   queue: "auris-android"
 
 steps:
-  - label: "Voice module unit tests"
-    key: voice-unit-tests
+  - label: "Release AAB"
+    key: release-aab
+    branches: "main"
     command: |
       printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
       echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
-      timeout 3600 ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
+
+      # Version code: continue the repo's counter with this build's number so
+      # every beta upload is strictly higher than the last.
+      BASE=$(sed -n 's/^versionCode=//p' version.properties)
+      NEW=$((BASE + BUILDKITE_BUILD_NUMBER))
+      sed -i '' "s/^versionCode=.*/versionCode=$NEW/" version.properties
+      echo "versionCode $BASE -> $NEW"
+
+      # Signing (only once the upload keystore exists as agent secrets).
+      if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
+        echo "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 --decode > auris-upload.keystore
+        printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
+          "$PWD/auris-upload.keystore" \
+          "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
+          "$ANDROID_UPLOAD_KEY_ALIAS" \
+          "$ANDROID_UPLOAD_KEY_PASSWORD" > secret.properties
+      else
+        echo "--- no keystore secret yet: building an unsigned release AAB (dry run)"
+      fi
+
+      timeout 3600 ./gradlew :app:bundleRelease --no-daemon
+
+      AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
+      [ -n "$AAB" ] || { echo "no AAB produced"; exit 1; }
+      buildkite-agent artifact upload "$AAB"
+
     timeout_in_minutes: 70
     artifact_paths:
-      - "modules/services/voice/build/test-results/testDebugUnitTest/**"
+      - "app/build/outputs/bundle/release/*.aab"
 
-  - label: "Cloud transport unit tests"
-    key: cloud-transport-tests
+  - label: "Upload to Play internal track"
+    key: play-upload
+    branches: "main"
+    depends_on: [release-aab]
     command: |
-      printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
-      echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
-      timeout 3600 ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon
-    timeout_in_minutes: 70
-    artifact_paths:
-      - "modules/services/repositories/build/test-results/testDebugUnitTest/**"
-
-  - label: "androidTest compiles"
-    key: android-test-compile
-    command: |
-      printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
-      echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
-      timeout 3600 ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon
-    timeout_in_minutes: 70
+      if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then
+        echo "--- PLAY_SERVICE_ACCOUNT_JSON not set: stopping at the signed AAB (dry run)"
+        exit 0
+      fi
+      echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
+      buildkite-agent artifact download "app/build/outputs/bundle/release/*.aab" .
+      bundle install --quiet
+      bundle exec fastlane supply \
+        --package_name fm.auris \
+        --track internal \
+        --aab app/build/outputs/bundle/release/*.aab \
+        --json_key google-upload-credentials.json
+      rm -f google-upload-credentials.json
+    timeout_in_minutes: 30

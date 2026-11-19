@@ -1030,8 +1030,9 @@ class VoiceControlModeObserverAvailabilityTest {
      * gate's first Blocked->Allowed, a device-identity change), and those runs are asynchronous
      * to the test. A route-eligible run can also SPEND a pending restart outright, which is why
      * the staging below puts the restart in the acquisition wait rather than leaving it open to
-     * the observer's decision. Wait until the observer has recorded both, then stage the flag,
-     * and fail if one settle pass clears it.
+     * the observer's decision. An acquisition attempt already in flight can also spend the
+     * restart when it fails, so the staging waits for that attempt to finish first, then stages
+     * the acquisition-wait shape and fails if one settle pass clears the flag.
      */
     private suspend fun stagePendingRestart(harness: Harness) {
         awaitState("observer has seen gate allowed") {
@@ -1044,6 +1045,19 @@ class VoiceControlModeObserverAvailabilityTest {
         // whose acquisition has not re-opened its stream. beginAutomaticRestart's early return
         // holds the pending restart there without spending it, so the observer's route runs
         // cannot consume the staged state and the bound's own expiry is the only outcome.
+        // QUIESCE THE START JOB FIRST: ensureModelsReady runs on Dispatchers.IO and flips the
+        // models condition to ready when it finishes, which re-runs the observer; a run landing
+        // after the staging would spend the restart through beginAutomaticRestart's expired
+        // bypass. Wait until the start job has completed before staging anything.
+        awaitState("the service start job has finished") {
+            (getField(harness.service, "startInFlightJob") as? kotlinx.coroutines.Job)?.isCompleted == true
+        }
+        // QUIESCE ANY IN-FLIGHT ACQUISITION NEXT: an attempt started against the initial route
+        // spends the pending restart when it fails (acquireCandidate's Failed branch), which
+        // would wipe the staged state. Wait until no attempt is running before staging.
+        awaitState("no acquisition attempt in flight") {
+            getField(harness.service, "acquisitionJob") == null
+        }
         val acquisition = getField(harness.service, "routeAcquisition")!!
         setField(acquisition, "acquiredForCapture", true)
         setField(acquisition, "openedStream", false)
@@ -1266,6 +1280,13 @@ assertEquals(
 
     @Test
     fun `clearing the pending restart clears the expired flag and the bound timer`() = runBlocking {
+        val expiryLogs = intArrayOf(0)
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (message.contains("re-confirmation timed out")) expiryLogs[0]++
+            }
+        }
+        timber.log.Timber.plant(tree)
         val modelsReady = ModelsReadyCondition(isReady = false)
         val otherAppRule = FakeRule("other_app_playing", VoiceControlRuleGroup.Conflicts)
         val foregroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
@@ -1280,9 +1301,11 @@ assertEquals(
             val firstTimer = getField(harness.service, "reconfirmationTimer") as kotlinx.coroutines.Job
             assertTrue(firstTimer.isActive)
 
-            // The bound expires; the fallback flag is raised.
+            // The bound expires; the fallback flag is raised. The log count sits next to the
+            // flag so a missing expiry fails loudly even if the flag read ever races again.
             testScheduler.advanceTimeBy(1_500.milliseconds)
             settle()
+            assertEquals("the bound expired once", 1, expiryLogs[0])
             assertEquals(true, getField(harness.service, "restartReconfirmationExpired"))
 
             // A trigger (device change, gate re-arm, spend — all go through the one helper)
@@ -1305,8 +1328,10 @@ assertEquals(
             assertEquals("before the fresh bound expires the flag stays down", false, getField(harness.service, "restartReconfirmationExpired"))
             testScheduler.advanceTimeBy(150.milliseconds)
             settle()
+            assertEquals("the fresh bound expires on its own schedule", 2, expiryLogs[0])
             assertEquals("the fresh bound expires on its own schedule", true, getField(harness.service, "restartReconfirmationExpired"))
         } finally {
+            timber.log.Timber.uproot(tree)
             harness.stop()
         }
     }

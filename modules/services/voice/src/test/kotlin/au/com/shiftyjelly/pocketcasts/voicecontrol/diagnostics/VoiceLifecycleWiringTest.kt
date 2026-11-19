@@ -188,7 +188,7 @@ class VoiceLifecycleWiringTest {
     fun `the actual service observer exports context loss and capture stop`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         val scope = CoroutineScope(Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
-        val service = VoiceControlService()
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }
         var pendingCloud: kotlinx.coroutines.Job? = null
         try {
             LifecycleLogCapture().use { log ->

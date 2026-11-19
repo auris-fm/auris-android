@@ -116,6 +116,21 @@ class AndroidAudioRouteMonitor @Inject constructor(
     internal fun onDevicesChanged() = scheduleRouteUpdate()
 
     /**
+     * The USER'S connected devices, as a comparable identity (output types, input types, input
+     * ids). Our own microphone selection and release never change the enumerated list, and the
+     * SCO link state is read separately by [readAvailability] — so this changes only when the
+     * user's devices actually connect or disconnect (voice-control-core.md > Route acquisition:
+     * a device trigger is the user's devices changing, never routing the app selects or
+     * releases).
+     */
+    fun connectedDeviceIdentity(): String {
+        val devices = enumerated()
+        return devices.outputs.joinToString(",") + "|" +
+            devices.inputs.joinToString(",") + "|" +
+            devices.inputIds.joinToString(",")
+    }
+
+    /**
      * TEST SEAM (same convention as the queue's ForTest seams): cancel a pending debounced route
      * read so it cannot fire detached after a test class has ended. Production never calls this;
      * a device event still schedules a fresh read afterwards.

@@ -365,10 +365,6 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `an UNKNOWN execution is NOT a refusal, so a caller cannot retry it as one`() = runTest {
-        // @spec's distinction: "distinguish receiver refusal/failure from timeout or lost outcome...
-        // unknown execution remains unknown through manager, history and skip/quote callers; do not map
-        // it to a retryable refusal."
-        //
         // A refusal is a DECISION a caller may act on. Unknown means we do not know whether the operation
         // ran, and reporting that as a refusal invites a RETRY THAT REPEATS an operation already
         // performed. The two must not collapse into one value.
@@ -706,7 +702,7 @@ class PlaybackManagerPlaybackSinkTest {
 
     @Test
     fun `the episode is re-decided AT the mutation, so a change across the suspension is refused`() = runTest {
-        // @reviewer's finding: `seekToTimeMsInternal` reads the episode, then SUSPENDS in
+        // `seekToTimeMsInternal` reads the episode, then SUSPENDS in
         // `withContext(Dispatchers.Main)` before the player mutation -- and a replacement can land in
         // that suspension. A read taken before the suspensions therefore does not exclude a change
         // ACROSS them.

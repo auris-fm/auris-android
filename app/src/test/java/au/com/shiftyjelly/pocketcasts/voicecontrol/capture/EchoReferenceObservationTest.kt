@@ -47,7 +47,7 @@ class EchoReferenceObservationTest {
         val paired = observations.single()
         assertNull("the intended interval needs its live reference, not the later zeroed array", paired.unusableReason())
         assertArrayEquals(source, paired.reference.samples, 0f)
-        assertEquals("native onset/end exclude the segment's padding and drain", 4_800, paired.speech.size)
+        assertEquals("native onset/end exclude the segment's pre-roll and trailing silence", 4_800, paired.speech.size)
         assertArrayEquals(source.copyOfRange(24_000, 28_800), paired.speech, 0.0001f)
         assertTrue(PlaybackCrossCorrelator().isPlaybackBleed(paired.speech, paired.reference))
     }

@@ -154,7 +154,7 @@ class PlaybackBufferRecorder @Inject constructor(
      * Guards [buffer], [writePos], [filled] and [lastPositionMs].
      *
      * The class doc's "single writer" is true of the SUBMISSION ORDER, not of the thread: the tap
-     * collector runs on Main, [CloudAudioPlayer] writes from the sink's IO coroutine, the route
+     * collector runs on Main, [CloudAudioPlayer] writes from its own writer thread, the route
      * observer retires on Main, and [snapshot] is read from the ASR coroutine. [write] advances one
      * field at a time, so a reader sees a consistent cursor; [retire] is a MULTI-FIELD transition
      * (fill + copy + writePos + filled), so a reader interleaving it can size the window from one

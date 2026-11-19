@@ -48,8 +48,8 @@ class WebSocketCloudTurnTransportRefusalTest {
         override fun onTerminalReceived(requestId: String, origin: CloudTurnTransportObserver.TerminalOrigin, errorCode: String?) {
             events += "terminal:${origin.name}:$errorCode"
         }
-        override fun onConnectionFailed(requestId: String) {
-            events += "connection_failed"
+        override fun onConnectionFailed(requestId: String, stillNeeded: Boolean) {
+            events += if (stillNeeded) "connection_failed" else "connection_failed_after_end"
         }
     }
 
@@ -385,5 +385,125 @@ class WebSocketCloudTurnTransportRefusalTest {
         }
         assertTrue(events.last() is CloudRouteEvent.Error)
         job.cancel()
+    }
+
+    /**
+     * A socket that dies while the turn is still waiting for its answer is a CONNECTION FAILURE.
+     * Nothing has ended the turn and nothing has cancelled it, so the failure is news.
+     */
+    @Test
+    fun `socket failure before any terminal is reported as a connection failure`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, observer)
+
+        val job = launch { transport.exchange(frame()).collect { } }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
+        client.listener!!.onMessage(
+            client.socket!!,
+            """{"type":"connected","codec":"opus@48k","request_id":"rid","reservation_id":"res"}""",
+        )
+        // Mid-answer death: Connected arrived, no terminal ever did.
+        client.listener!!.onFailure(client.socket!!, java.io.IOException("socket closed"), null)
+        delay(200)
+        job.cancel()
+
+        assertTrue(
+            "a failure while the turn still needed the socket must be reported as one: ${observer.events}",
+            observer.events.contains("connection_failed"),
+        )
+        assertEquals(
+            "it must not be reported as a post-end teardown: ${observer.events}",
+            false,
+            observer.events.contains("connection_failed_after_end"),
+        )
+    }
+
+    /**
+     * A socket that dies AFTER the server's terminal is teardown, not a connection failure: the
+     * turn already has its answer and does not need the socket any more.
+     */
+    @Test
+    fun `socket failure after the server terminal is a teardown, not a connection failure`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, observer)
+
+        val job = launch { transport.exchange(frame()).collect { } }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
+        client.listener!!.onMessage(
+            client.socket!!,
+            """{"type":"connected","codec":"opus@48k","request_id":"rid","reservation_id":"res"}""",
+        )
+        client.listener!!.onMessage(
+            client.socket!!,
+            """{"type":"done","outcome":"completed","usage":{"input_tokens":42,"output_tokens":150,"speech":{"amount":null,"unit":"unavailable"}}}""",
+        )
+        delay(100)
+        // The close that follows a finished turn.
+        client.listener!!.onFailure(client.socket!!, java.io.IOException("socket closed"), null)
+        delay(200)
+        job.cancel()
+
+        assertTrue(
+            "the terminal must have been recorded first: ${observer.events}",
+            observer.events.contains("terminal:SERVER_DONE:done"),
+        )
+        assertTrue(
+            "a close after the terminal must be reported as teardown: ${observer.events}",
+            observer.events.contains("connection_failed_after_end"),
+        )
+        assertEquals(
+            "a finished turn must not be reported as having lost its connection: ${observer.events}",
+            false,
+            observer.events.contains("connection_failed"),
+        )
+    }
+
+    /**
+     * A socket that dies after the exchange was CANCELLED is teardown too: cancelling closes the
+     * socket, and that close coming back through the listener is the consequence of the
+     * cancellation, not a connection the turn lost.
+     */
+    @Test
+    fun `socket failure after the exchange was cancelled is a teardown`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, observer)
+
+        val job = launch { transport.exchange(frame()).collect { } }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
+        client.listener!!.onMessage(
+            client.socket!!,
+            """{"type":"connected","codec":"opus@48k","request_id":"rid","reservation_id":"res"}""",
+        )
+        // The collector goes away — the exchange is cancelled and closes its socket.
+        job.cancel()
+        delay(200)
+        // The close surfaces through the same listener.
+        client.listener!!.onFailure(client.socket!!, java.io.IOException("socket closed"), null)
+        delay(200)
+
+        assertTrue(
+            "a close after cancellation must be reported as teardown: ${observer.events}",
+            observer.events.contains("connection_failed_after_end"),
+        )
+        assertEquals(
+            "a cancelled turn must not be reported as having lost its connection: ${observer.events}",
+            false,
+            observer.events.contains("connection_failed"),
+        )
     }
 }

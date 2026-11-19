@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -38,6 +39,17 @@ class EarlyConnectionOpener(
     private var held: CloudTurnConnection? = null
 
     /**
+     * Bumped by every [shutdown]. A dial queued by [openForLater] captures the generation when it
+     * is requested and, when it finally runs, checks it under the lock: a dial whose generation has
+     * moved on was superseded by a shutdown and is dropped instead of dialling. The mutex orders the
+     * dial and the shutdown against each other, but it cannot stop a dial that STARTS after the
+     * shutdown finished -- on a multi-threaded dispatcher that ordering is real, and without the
+     * generation check such a dial would write `held` after the close, leaving a socket open behind
+     * a stopped session.
+     */
+    private val generation = AtomicLong(0L)
+
+    /**
      * Open a connection for [tag] and return the one now held for it.
      *
      * The same tag on an unspent, live connection keeps what is held: that is a resumption, and it
@@ -46,49 +58,74 @@ class EarlyConnectionOpener(
      */
     suspend fun openFor(tag: String): CloudTurnConnection = withContext(dispatcher) {
         lock.withLock {
-            val nowMs = now()
-            val current = held
-            // A DEAD handle is not a resumption. Liveness is part of the keep condition, so a socket
-            // that failed while the same utterance was still speaking is replaced here rather than
-            // handed back and refused later at take time -- which forfeited the early open this
-            // exists for and logged "resume" about a dead socket. Age is part of the keep condition
-            // too: an utterance that paused past [maxAgeMs] used to resume onto a socket the turn's
-            // staleness check then threw away, losing the dial this exists to spare on exactly the
-            // slow utterances. One read of the clock feeds both arms, so they judge age against the
-            // same instant.
-            if (current != null && current.ownerTag == tag && !current.isSpent && !current.isDead && !current.isStale(nowMs, maxAgeMs)) {
-                // Resumption: the same utterance speaking again keeps the connection it opened.
-                Timber.i("Early connection resume tag=%s", tag)
-                return@withLock current
-            }
-            if (current != null &&
-                (current.ownerTag != tag || current.isSpent || current.isDead || current.isStale(nowMs, maxAgeMs))
-            ) {
-                // Replacement closes the handle it displaces; take-time refusals close their own.
-                // A stale handle is discarded silently. This branch is the only place a held
-                // connection dies while its turn could still have taken it, so it says which tag it
-                // belonged to and why it went: otherwise the turn's later "does not match" or "none
-                // held" is the only trace, and the cause is lost.
-                Timber.i(
-                    "Early connection dial tag=%s replacing=%s reason=%s",
-                    tag,
-                    current.ownerTag,
-                    when {
-                        current.ownerTag != tag -> "other tag"
-                        current.isSpent -> "spent"
-                        current.isDead -> "dead"
-                        else -> "stale"
-                    },
-                )
-                current.close()
-                held = null
-            } else if (current == null) {
-                Timber.i("Early connection dial tag=%s replacing=none", tag)
-            }
-            val opened = open(tag, nowMs)
-            held = opened
-            opened
+            openLocked(tag)
         }
+    }
+
+    /**
+     * Like [openFor], but only if no [shutdown] has been requested since [expectedGeneration] was
+     * captured. Returns null -- without dialling -- when a shutdown superseded the request.
+     */
+    private suspend fun openForIfCurrent(tag: String, expectedGeneration: Long): CloudTurnConnection? =
+        withContext(dispatcher) {
+            lock.withLock {
+                if (generation.get() != expectedGeneration) {
+                    Timber.i(
+                        "Early connection dial tag=%s dropped: superseded by shutdown (generation %d != %d)",
+                        tag,
+                        expectedGeneration,
+                        generation.get(),
+                    )
+                    return@withLock null
+                }
+                openLocked(tag)
+            }
+        }
+
+    /** The dial-or-resume body. Callers hold [lock]. */
+    private suspend fun openLocked(tag: String): CloudTurnConnection {
+    val nowMs = now()
+        val current = held
+        // A DEAD handle is not a resumption. Liveness is part of the keep condition, so a socket
+        // that failed while the same utterance was still speaking is replaced here rather than
+        // handed back and refused later at take time -- which forfeited the early open this
+        // exists for and logged "resume" about a dead socket. Age is part of the keep condition
+        // too: an utterance that paused past [maxAgeMs] used to resume onto a socket the turn's
+        // staleness check then threw away, losing the dial this exists to spare on exactly the
+        // slow utterances. One read of the clock feeds both arms, so they judge age against the
+        // same instant.
+        if (current != null && current.ownerTag == tag && !current.isSpent && !current.isDead && !current.isStale(nowMs, maxAgeMs)) {
+            // Resumption: the same utterance speaking again keeps the connection it opened.
+            Timber.i("Early connection resume tag=%s", tag)
+            return current
+        }
+        if (current != null &&
+            (current.ownerTag != tag || current.isSpent || current.isDead || current.isStale(nowMs, maxAgeMs))
+        ) {
+            // Replacement closes the handle it displaces; take-time refusals close their own.
+            // A stale handle is discarded silently. This branch is the only place a held
+            // connection dies while its turn could still have taken it, so it says which tag it
+            // belonged to and why it went: otherwise the turn's later "does not match" or "none
+            // held" is the only trace, and the cause is lost.
+            Timber.i(
+                "Early connection dial tag=%s replacing=%s reason=%s",
+                tag,
+                current.ownerTag,
+                when {
+                    current.ownerTag != tag -> "other tag"
+                    current.isSpent -> "spent"
+                    current.isDead -> "dead"
+                    else -> "stale"
+                },
+            )
+            current.close()
+            held = null
+        } else if (current == null) {
+            Timber.i("Early connection dial tag=%s replacing=none", tag)
+        }
+        val opened = open(tag, nowMs)
+        held = opened
+        return opened
     }
 
     /**
@@ -149,6 +186,9 @@ class EarlyConnectionOpener(
     /** Close everything. Only for shutdown: a turn in flight already adopted its own connection. */
     suspend fun shutdown() = withContext(dispatcher) {
         lock.withLock {
+            // Supersede every dial still queued behind this: it would otherwise take the lock after
+            // this close, dial, and write `held` into a stopped session.
+            generation.incrementAndGet()
             held?.close()
             held = null
         }
@@ -160,9 +200,10 @@ class EarlyConnectionOpener(
      * The capture thread calls this and returns immediately: dialling must never block audio.
      */
     fun openForLater(tag: String) {
+        val requestedGeneration = generation.get()
         scope.launch {
             try {
-                openFor(tag)
+                openForIfCurrent(tag, requestedGeneration)
             } catch (t: Throwable) {
                 // An early connection is an optimisation. If it cannot be opened, the turn dials for
                 // itself and the user notices nothing.

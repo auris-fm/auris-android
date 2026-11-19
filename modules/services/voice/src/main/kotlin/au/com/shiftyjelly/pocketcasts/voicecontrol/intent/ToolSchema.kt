@@ -161,15 +161,16 @@ object ToolSchema {
             "description": "Basic playback controls: pause, resume, skip forward or backward, seek to a position, play next episode.",
             "parameters": {
               "action": {"type": "string", "enum": ["pause", "resume", "seek_relative", "seek_to", "next_episode"]},
-              "delta_seconds": {"type": "integer", "description": "Signed seek delta. Use with seek_relative; positive=forward, negative=backward. Omit when the utterance has no explicit duration — SlotRepair fills a signed ±30s default from forward/back wording."},
-              "position_seconds": {"type": "integer", "description": "Non-negative absolute episode position in seconds from the beginning. Use with seek_to; 0 means the beginning."}
+              "delta_seconds": {"type": "integer", "description": "Signed seek delta. Use with seek_relative; positive=forward, negative=backward. Omit when the utterance states no amount — a stated direction is carried as the `direction` param and never re-derived into a default delta (SlotRepair)."},
+              "direction": {"type": "string", "enum": ["forward", "backward"], "description": "Seek direction for seek_relative when the request states a direction but no amount; the app's default interval in that direction then applies. When delta_seconds is present and non-zero its sign carries the direction."},
+              "position_seconds": {"type": "integer", "description": "Signed absolute episode position in seconds; negative values are offsets back from the episode end."}
             }
           },
           {
             "name": "effects",
             "description": "Playback effects: speed, trim silence, volume boost.",
             "parameters": {
-              "action": {"type": "string", "enum": ["set_speed", "adjust_speed", "set_trim_mode", "set_volume_boost", "query"]},
+              "action": {"type": "string", "enum": ["set_speed", "adjust_speed", "set_trim_mode", "set_volume_boost", "query_effects"]},
               "speed": {"type": "number", "description": "Playback speed (0.5-5.0)."},
               "delta": {"type": "number", "description": "Speed delta. Positive = faster, negative = slower."},
               "mode": {"type": "string", "enum": ["off", "low", "medium", "high"], "description": "Trim silence mode."},

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
@@ -504,6 +505,39 @@ class LfmIntentRouterTest {
         assertTrue("expected a CloudRoute defer, got $intent", intent is VoiceIntent.CloudRoute)
         assertEquals("exactly one classify at the seam", 1, inference.classifyCount)
         assertEquals("generation must never run for an out-of-policy label", 0, inference.generateCount)
+    }
+
+    @Test
+    fun routingPolicy_isExactlyTheTwelveLfmPlusCloudActionsPlusRoute() {
+        // The local policy is a CONTRACT surface: exactly the 12 `lfm + cloud` actions plus
+        // cloud_route.route. Widening it requires a routing-mark decision, so this is an
+        // exact-set assertion, not a containment check.
+        val expected = setOf(
+            "playback" to "pause",
+            "playback" to "resume",
+            "playback" to "seek_relative",
+            "playback" to "seek_to",
+            "playback" to "next_episode",
+            "effects" to "set_speed",
+            "effects" to "adjust_speed",
+            "volume" to "set_volume",
+            "volume" to "adjust_volume",
+            "sleep" to "set",
+            "sleep" to "cancel",
+            "bookmark" to "add",
+            "cloud_route" to "route",
+        )
+        assertEquals(expected, LfmRoutingPolicy.locallySelectable)
+    }
+
+    @Test
+    fun mapper_stillMapsCloudOnlyActionsForCloudSelectedExecution() {
+        // The policy gates the LOCAL origin only. The shared mapper stays unrestricted, because
+        // cloud-selected execution must be able to run any action the cloud proposes.
+        assertEquals(
+            VoiceIntent.PlaybackQuery.CurrentPodcast,
+            ToolCallMapper().map(ToolCall(name = "playback_query", action = "current_podcast", params = emptyMap())),
+        )
     }
 
     private fun english(transcript: String) = IntentRoutingInput.english(transcript)

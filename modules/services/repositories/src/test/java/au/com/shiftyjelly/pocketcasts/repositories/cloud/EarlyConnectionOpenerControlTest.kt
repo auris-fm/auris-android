@@ -3,8 +3,10 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -251,7 +253,57 @@ class EarlyConnectionOpenerControlTest {
             !(second as SocketCloudTurnConnection).isDead,
         )
     }
-}
 
 /** `ExecutorService.asCoroutineDispatcher()` under a name that reads as what it is here. */
 private fun java.util.concurrent.ExecutorService.asCoroutineDispatcherSafe(): kotlinx.coroutines.CoroutineDispatcher = this.asCoroutineDispatcher()
+
+    /**
+     * A single-threaded owner dispatcher whose queued tasks run only when the test releases them,
+     * and in an order the test chooses. A real multi-threaded dispatcher can run a shutdown that
+     * was requested second before a dial that was requested first; this models exactly that
+     * reordering so the interleaving is pinned instead of hoped for.
+     */
+    private class GatedOwnerDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
+        private val queue = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+        val size: Int get() = queue.size
+
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            queue.add(block)
+        }
+
+        fun runTask(index: Int) {
+            val tasks = queue.toList()
+            assertTrue("expected a queued task at $index, have ${tasks.size}", index < tasks.size)
+            queue.remove(tasks[index])
+            tasks[index].run()
+        }
+    }
+
+    @Test
+    fun `a dial queued before a shutdown does not hold a socket after it`() = runTest {
+        // openForLater launches the dial onto the opener's owner; shutdown() may be requested a
+        // moment later and, on a multi-threaded dispatcher, finish while that dial is still queued.
+        // The dial then starts after the shutdown: if it still dials, it writes `held` after the
+        // close and the shutdown leaves a socket open. A dial queued before a shutdown is
+        // superseded by it and must be dropped.
+        val harness = Harness()
+        val dispatcher = GatedOwnerDispatcher()
+        val opener = harness.opener(this, dispatcher)
+
+        opener.openForLater("utt-1")
+        launch { opener.shutdown() }
+        runCurrent() // the shutdown coroutine hops to the owner dispatcher, queued behind the dial
+        assertEquals(2, dispatcher.size)
+
+        dispatcher.runTask(1) // the shutdown runs to completion before the dial starts
+        assertNull("nothing is held right after the shutdown", opener.peek())
+
+        dispatcher.runTask(0) // the queued dial now runs, after the shutdown
+        assertNull(
+            "a dial queued before a shutdown must not hold a socket after it",
+            opener.peek(),
+        )
+        assertTrue("no dial may run for a superseded request", harness.opens.get() == 0)
+    }
+
+}

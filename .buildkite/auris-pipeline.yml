@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/buildkite/pipeline-schema/main/schema.json
+---
+# Auris Android CI, mirroring what the repo's GitHub workflows run
+# (.github/workflows/voice-unit-tests.yml, android-test-compile.yml).
+# Runs on agents tagged `queue=auris-android`; the queue line below is the
+# single place to retarget the pipeline.
+
+agents:
+  queue: "auris-android"
+
+steps:
+  - label: "Voice module unit tests"
+    key: voice-unit-tests
+    command: timeout 3600 ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
+    timeout_in_minutes: 70
+    artifact_paths:
+      - "modules/services/voice/build/test-results/testDebugUnitTest/**"
+
+  - label: "Cloud transport unit tests"
+    key: cloud-transport-tests
+    command: timeout 3600 ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon
+    timeout_in_minutes: 70
+    artifact_paths:
+      - "modules/services/repositories/build/test-results/testDebugUnitTest/**"
+
+  - label: "androidTest compiles"
+    key: android-test-compile
+    command: timeout 3600 ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon
+    timeout_in_minutes: 70

@@ -25,6 +25,16 @@ class CloudFingerprintReferenceFetcherTest {
         override suspend fun currentToken(): String? = token
     }
 
+    /** Serves a stale token until refreshed, then a fresh one — the turn route's 401 posture. */
+    private class RefreshingTokenProvider :
+        au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+        var refreshes = 0
+        override suspend fun currentToken(): String = if (refreshes == 0) "stale-token" else "fresh-token"
+        override suspend fun refreshToken() {
+            refreshes++
+        }
+    }
+
     private fun compactV2Json(): String {
         val windows = CloudFingerprintParityData.signal16kMonoWindows
         val checkpoints = windows.mapIndexed { index, window -> encodeCheckpoint(window, index) }.joinToString(",")
@@ -109,6 +119,51 @@ class CloudFingerprintReferenceFetcherTest {
             assertEquals("/api/v1/episodes/ep_1/fingerprints?podcast_id=pod_1", request.path)
             // The SAME credential the turn route presents -- never the TOFU user_<uuid>.
             assertEquals("Bearer auris-access-token-1", request.getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `a 401 refreshes the token and retries the request exactly once`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse().setBody(compactV2Json()))
+        server.start()
+
+        try {
+            val tokens = RefreshingTokenProvider()
+            val fetcher = CloudFingerprintReferenceFetcher(tokens)
+            val matcher = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
+            }
+
+            assertNotNull("the retry with the replacement token must succeed", matcher)
+            assertEquals(2, server.requestCount)
+            assertEquals("Bearer stale-token", server.takeRequest().getHeader("Authorization"))
+            assertEquals("Bearer fresh-token", server.takeRequest().getHeader("Authorization"))
+            assertEquals("exactly one forced refresh", 1, tokens.refreshes)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `a second 401 gives up rather than looping`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse().setResponseCode(401))
+        server.start()
+
+        try {
+            val tokens = RefreshingTokenProvider()
+            val fetcher = CloudFingerprintReferenceFetcher(tokens)
+            val matcher = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
+            }
+            assertNull(matcher)
+            assertEquals("one retry, never a loop", 2, server.requestCount)
+            assertEquals(1, tokens.refreshes)
         } finally {
             server.shutdown()
         }

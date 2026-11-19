@@ -158,10 +158,6 @@ internal object CloudRouteEvents {
         (value is Number && value.toDouble().isFinite() && value.toDouble() in 0.0..Int.MAX_VALUE.toDouble() && value.toDouble() == value.toInt().toDouble())
 
     /**
-     * Return the JSON frame without its `type` discriminator so adapters that do not expect
-     * `type` can parse the remaining fields cleanly.
-     */
-    /**
      * Re-encode the JSON frame member by member (escaping strings as it goes) so adapters can
      * parse it. Every member is kept, including the `type` discriminator; adapters ignore members
      * they do not declare.

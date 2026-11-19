@@ -35,6 +35,15 @@ class AppOperationJournalStore(
     private val root: File,
     /** Retention bound: at most this many records; new operations are refused beyond it. */
     private val maxRecords: Int = 512,
+    /**
+     * Age bound for pruning, by record file mtime. Records only need to outlive their turn: the v1
+     * result wait is bounded at 15 seconds from issuance inside the admitted-turn deadline, and an
+     * operation id is turn-owned and never reused. Anything older than this bound is pruned before
+     * the capacity check so the journal can never fill up permanently; a pruned claim replays as a
+     * fresh execution exactly because its id cannot recur. Never prunes an unresolved record young
+     * enough to still be replayed.
+     */
+    private val retentionMs: Long = DEFAULT_RETENTION_MS,
 ) : AppOperationJournal.Store {
     val session: String = UUID.randomUUID().toString()
 
@@ -105,6 +114,7 @@ class AppOperationJournalStore(
     ): AppOperationJournal.ClaimResult = try {
         locked<AppOperationJournal.ClaimResult> {
             if (!root.exists() && !root.mkdirs()) return@locked AppOperationJournal.ClaimResult.CapacityExhausted
+            pruneLocked()
             val target = recordFile(claim)
             if (target.exists()) return@locked AppOperationJournal.ClaimResult.AlreadyClaimed
             // An operation id is bound to the turn that first claimed it. A different turn presenting
@@ -135,6 +145,24 @@ class AppOperationJournalStore(
      * under ANY owner/conversation/turn is the binding, and a different owner presenting the same id
      * must be refused rather than served a fresh claim under a key that merely hashes differently.
      */
+    /**
+     * Deletes records whose mtime is older than the retention bound. Best-effort: a file that
+     * cannot be deleted (or enumerated) is left for the next claim; a prune failure never changes
+     * a claim's outcome, and the capacity check after it still refuses when the journal really is
+     * full. Runs inside the same locked section as the create so pruning and admission serialize.
+     */
+    private fun pruneLocked() {
+        val cutoff = System.currentTimeMillis() - retentionMs
+        for (file in root.listFiles() ?: emptyArray()) {
+            if (!file.isFile || !file.name.endsWith(".json")) continue
+            if (file.lastModified() >= cutoff) continue
+            try {
+                file.delete()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun boundKeyLocked(operationId: String, ownKey: String): String? {
         // `listFiles()` returns null for a directory that cannot be enumerated -- I/O failure or
         // absence -- and both mean the set of existing bindings is unknown, which must not read as
@@ -145,10 +173,17 @@ class AppOperationJournalStore(
             // A record whose identity cannot be established refuses the claim. Specifically: a record
             // that will not parse, has no `operation_id`, or carries a malformed identity may BE the
             // binding for this operation id, and there is no safe way to decide that it is not.
+            // A record that will not PARSE is skipped, not fatal: one truncated file must not lock
+            // every later, unrelated claim out of the journal (it answers persistence_unavailable
+            // forever). Its own binding is still safe -- the target record file for a redelivery of
+            // the same key is answered AlreadyClaimed by the exclusive create before this scan --
+            // and anything past the age bound is removed by pruning anyway. A record that parses
+            // but is wrongly SHAPED (no operation id, no key) stays fatal: it may be the binding,
+            // and it is not safely decidable that it is not.
             val record = try {
                 JSONObject(JSONTokener(file.readText()))
             } catch (e: Exception) {
-                throw AppOperationJournal.CorruptStorageException("unreadable record ${file.name}: ${e.message}")
+                continue
             }
             val storedId = record.strictOrNull("operation_id")
                 ?: throw AppOperationJournal.CorruptStorageException("record ${file.name} without operation id")
@@ -345,6 +380,9 @@ class AppOperationJournalStore(
     private companion object {
         private val REASON_REGEX = Regex("[a-z][a-z0-9_]{0,127}")
         private const val LOCK_NAME = ".appops-root.lock"
+
+        /** Well past the v1 result wait (15 s) and any admitted-turn deadline. */
+        private const val DEFAULT_RETENTION_MS: Long = 24L * 60L * 60L * 1000L
 
         /** One monitor per canonical root path, shared by every store instance in this process. */
         private val rootLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()

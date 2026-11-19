@@ -28,6 +28,10 @@ import org.robolectric.RobolectricTestRunner
 class AppOperationJournalFileStoreTest {
     private lateinit var root: File
 
+    private companion object {
+        const val TWENTY_FOUR_HOURS_MS = 24L * 60L * 60L * 1000L
+    }
+
     private val claim = AppOperationJournal.Claim(
         owner = "user-1",
         conversation = "conv-1",
@@ -47,7 +51,49 @@ class AppOperationJournalFileStoreTest {
         root.deleteRecursively()
     }
 
-    private fun store(maxRecords: Int = 512) = AppOperationJournalStore(root, maxRecords = maxRecords)
+    private fun store(maxRecords: Int = 512, retentionMs: Long = TWENTY_FOUR_HOURS_MS) =
+        AppOperationJournalStore(root, maxRecords = maxRecords, retentionMs = retentionMs)
+
+    @Test
+    fun `records past the retention age are pruned before the capacity check`() {
+        val s = store(maxRecords = 2, retentionMs = 1_000L)
+        val a = claim.copy(turn = "t-a", operationId = "11111111-2222-3333-4444-555555555551")
+        val b = claim.copy(turn = "t-b", operationId = "11111111-2222-3333-4444-555555555552")
+        assertTrue(s.claimOperation(a, "d1") is AppOperationJournal.ClaimResult.Claimed)
+        assertTrue(s.claimOperation(b, "d1") is AppOperationJournal.ClaimResult.Claimed)
+        // Age every record past the retention bound, so the next claim must prune them.
+        val old = System.currentTimeMillis() - 10_000L
+        root.listFiles()!!.filter { it.name.endsWith(".json") }.forEach { it.setLastModified(old) }
+        // The cap is full with aged records: a NEW claim must still be admitted, not refused for
+        // the life of the install the way an unpruned journal would.
+        assertTrue(s.claimOperation(claim.copy(turn = "t-c", operationId = "11111111-2222-3333-4444-555555555553"), "d2") is AppOperationJournal.ClaimResult.Claimed)
+        // A pruned claim is gone: replaying it is a fresh execution, which the pruned record's
+        // absence makes safe because the operation id is turn-owned and never reused.
+        assertTrue(s.claimOperation(a.copy(turn = "t-a2"), "d1") is AppOperationJournal.ClaimResult.Claimed)
+    }
+
+    @Test
+    fun `a fresh cap-full journal still refuses without pruning`() {
+        val s = store(maxRecords = 2, retentionMs = 1_000L)
+        assertTrue(s.claimOperation(claim.copy(turn = "t-a", operationId = "11111111-2222-3333-4444-555555555551"), "d1") is AppOperationJournal.ClaimResult.Claimed)
+        assertTrue(s.claimOperation(claim.copy(turn = "t-b", operationId = "11111111-2222-3333-4444-555555555552"), "d1") is AppOperationJournal.ClaimResult.Claimed)
+        assertTrue(s.claimOperation(claim.copy(turn = "t-c", operationId = "11111111-2222-3333-4444-555555555553"), "d1") is AppOperationJournal.ClaimResult.CapacityExhausted)
+    }
+
+    @Test
+    fun `a corrupt record does not block an unrelated new claim`() {
+        File(root, "deadbeef.json").writeText("{ truncated")
+        val result = store().claimOperation(other, "d1")
+        assertTrue(result is AppOperationJournal.ClaimResult.Claimed)
+    }
+
+    @Test
+    fun `an existing record file still answers its own claim even when unreadable`() {
+        val s = store()
+        assertTrue(s.claimOperation(claim, "d1") is AppOperationJournal.ClaimResult.Claimed)
+        root.listFiles()!!.first { it.name.endsWith(".json") }.writeText("garbage")
+        assertEquals(AppOperationJournal.ClaimResult.AlreadyClaimed, s.claimOperation(claim, "d1"))
+    }
 
     @Test
     fun `two instances cannot both execute the same operation id`() {
@@ -272,16 +318,19 @@ class AppOperationJournalFileStoreTest {
     private val conflictingTurn = claim.copy(turn = "turn-2")
 
     @Test
-    fun `a corrupt prior record refuses a new turn instead of reading as unbound`() {
-        // The record for this operation id exists but cannot be parsed. Skipping it would look exactly
-        // like "nothing is bound to this id", and the second turn would execute. It must not.
+    fun `a corrupt prior record still binds its own key but not the whole journal`() {
+        // The record for this operation id exists but cannot be parsed. Redelivery of the SAME key
+        // still hits the existing record file and is answered AlreadyClaimed, so the unreadable
+        // record never reads as "unbound" for its own key. An UNRELATED id is admitted: one
+        // truncated file must not answer persistence_unavailable for the life of the install, and
+        // anything past the retention bound is pruned anyway.
         val s = store()
         AppOperationJournal.admit(claim, "d1", s)
         recordFile().writeText("{ this is not json")
-        // A DIFFERENT turn, same operation id: the binding it would collide with is the unreadable one.
-        val verdict = AppOperationJournal.admit(conflictingTurn, "d1", store())
-        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, verdict)
-        assertFalse(verdict is AppOperationJournal.Verdict.Execute)
+        // The SAME key: the unreadable record answers StorageCorrupt -- refused, never executed.
+        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, AppOperationJournal.admit(claim, "d1", store()))
+        // A new, unrelated id is NOT blocked by the unreadable record.
+        assertTrue(AppOperationJournal.admit(other, "d1", store()) is AppOperationJournal.Verdict.Execute)
     }
 
     @Test
@@ -303,12 +352,15 @@ class AppOperationJournalFileStoreTest {
     }
 
     @Test
-    fun `an unreadable record of another operation refuses too`() {
-        // The unreadable record cannot be shown to be unrelated, so no claim is safe against it.
+    fun `an unreadable record of another operation is skipped, not fatal`() {
+        // The unreadable record cannot be shown to be unrelated, so its own id cannot be answered
+        // from the scan; what protects against double execution is the durable record file itself,
+        // which its own redelivery hits first. What must NOT happen is one unreadable file locking
+        // every unrelated claim out of the journal forever.
         val s = store()
         AppOperationJournal.admit(other, "d1", s)
         recordFile().writeText("not json at all")
-        assertEquals(AppOperationJournal.Verdict.StorageCorrupt, AppOperationJournal.admit(claim, "d1", store()))
+        assertTrue(AppOperationJournal.admit(claim, "d1", store()) is AppOperationJournal.Verdict.Execute)
     }
 
     @Test

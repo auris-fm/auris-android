@@ -101,10 +101,3 @@ internal data class CloudRouteConnectedPayload(
     val codec: String,
     @Json(name = "reservation_id") val reservationId: String,
 )
-
-@JsonClass(generateAdapter = true)
-internal data class CloudRouteHttpErrorPayload(
-    val code: String? = null,
-    val message: String? = null,
-    val error: String? = null,
-)

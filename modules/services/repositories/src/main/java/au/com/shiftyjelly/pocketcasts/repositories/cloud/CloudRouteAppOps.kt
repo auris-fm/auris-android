@@ -8,8 +8,6 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
  * `cloud-assistant.md`, "App-operation protocol v1", committed `bf5fb219`).
  */
 internal object CloudRouteAppOps {
-    const val FIELD_OPERATION_ID = "operation_id"
-    const val FIELD_CAPABILITY_VERSION = "capability_version"
 
     /** The result frame's discriminator, sent back on the same authenticated socket. */
     const val RESULT_TYPE = "app_operation_result"

@@ -45,14 +45,11 @@ object AppOperationJournal {
         val turn: String,
         val operationId: String,
     ) {
-        // TURN- AND CONVERSATION-STABLE BY CONTRAST WITH THE METADATA. `conversation` and `turn` are
-        // carried on the record for diagnosis, but the KEY must not include them: a connection that
-        // dies mid-operation is redelivered on a NEW turn, quite possibly a NEW conversation, and
-        // the journal -- not the transport, not the conversation -- is what replays it. A key that
-        // included either would make every redelivery look like a fresh operation and execute twice.
-        // The operation id itself is the global identity: the same id under ANY owner or
-        // conversation is BoundElsewhere, and the digest binds the contents.
-        val key: String get() = "$owner\u0000$operationId"
+        // THE CONTRACT'S KEY (app-ops/1): owner, conversation, turn, operation id. v1 has no
+        // cross-turn redelivery -- the operation id belongs to its turn, and a transport loss
+        // settles `unknown` on the server -- so replay is a same-turn phenomenon and the key keeps
+        // every identity component.
+        val key: String get() = "$owner\u0000$conversation\u0000$turn\u0000$operationId"
     }
 
     /**

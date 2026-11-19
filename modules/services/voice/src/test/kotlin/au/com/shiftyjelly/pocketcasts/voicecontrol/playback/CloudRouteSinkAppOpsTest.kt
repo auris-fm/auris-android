@@ -93,10 +93,12 @@ class CloudRouteSinkAppOpsTest {
     }
 
     private class ScriptedTransport(
+        /** When set, every send is refused: models a socket that has died. */
+        private val sendRejected: java.util.concurrent.atomic.AtomicBoolean = java.util.concurrent.atomic.AtomicBoolean(false),
         private val script: suspend FlowCollector<CloudRouteEvent>.(send: (CloudTurnFrame) -> Boolean) -> Unit,
     ) : CloudTurnTransport {
         val sent = mutableListOf<CloudTurnFrame>()
-        var sendRejected = false
+
         var conversationId: String = "conv-1"
 
         override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = exchange(frame, null)
@@ -107,7 +109,7 @@ class CloudRouteSinkAppOpsTest {
         ): Flow<CloudRouteEvent> = flow {
             conversationId = (frame as CloudTurnFrame.Authenticate).conversationId
             val send: (CloudTurnFrame) -> Boolean = { result ->
-                if (sendRejected) {
+                if (sendRejected.get()) {
                     false
                 } else {
                     sent += result
@@ -215,44 +217,43 @@ class CloudRouteSinkAppOpsTest {
     }
 
     @Test
-    fun `mid-operation retirement replays from the journal without a second execution`() = kotlinx.coroutines.runBlocking {
+    fun `mid-operation retirement settles durably, runs once, and a same-turn redelivery replays`() = kotlinx.coroutines.runBlocking {
         val playback = CountingSink()
         playback.pauseGate = CompletableDeferred()
-        val first = ScriptedTransport { _ ->
+        // THE SOCKET DIES MID-EFFECT: set while the first copy is still executing, so nothing sent
+        // from that moment reaches the server.
+        val socketDead = java.util.concurrent.atomic.AtomicBoolean(false)
+        val transport = ScriptedTransport(sendRejected = socketDead) { send ->
+            // The server redelivers the SAME operation id in the SAME turn while the first copy is
+            // still in effect; then the connection dies.
             emit(opEvent())
-            // The connection dies while the effect is still in flight.
+            val duplicate = opEvent()
+            emit(duplicate)
             emit(CloudRouteEvent.Error(code = "connection_lost", message = ""))
+            Unit
         }
-        val sink = sink(playback, first)
-        val routeJob = launch { sink.route() }
-        withTimeout(10_000) { playback.pauseStarted.await() }
-
-        // Retire the first turn's socket: nothing it sends can reach the server any more.
-        first.sendRejected = true
+        // THE SOCKET DIES MID-EFFECT: a separate coroutine flips it while the first copy is still
+        // executing (the collector and the script are one coroutine, so the release must be external),
+        // and completes the effect with nothing able to send.
+        launch {
+            withTimeout(10_000) { playback.pauseStarted.await() }
+            socketDead.set(true)
+            playback.pauseGate?.complete(Unit)
+        }
         val journal = AppOperationJournalStore(root = tempDir)
-        val claim = AppOperationJournal.Claim(owner = OWNER, conversation = first.conversationId, turn = WIRE_ID, operationId = OP_ID)
-        withTimeout(10_000) {
-            while (journal.read(claim) == null) delay(10)
-        }
-        // The claim is durable. Release the effect; the answer cannot be delivered.
-        playback.pauseGate?.complete(Unit)
-        routeJob.join()
+        sink(playback, transport).route()
 
-        // REDELIVERY on a fresh turn: the journal answers; the effect does NOT run again.
-        val second = ScriptedTransport { _ ->
-            emit(opEvent())
-            emit(done())
-        }
-        // The redelivery arrives in the SAME conversation: the turn resumes the window, so the
-        // claim's conversation binding is stable across the turn boundary.
-        sink(playback, second).route(capturedOrigin = 42L, isLiveGraceTurn = true)
-
-        assertEquals("a redelivered operation must never execute twice", 1, playback.pauses)
-        val payload = resultFrameOf(second)
-        assertEquals(OP_ID, payload.getString("operation_id"))
-        // The effect SETTLED durably before the answer could be delivered, so the replay carries the
-        // recorded OBSERVED outcome, not an unknown: the journal, not the socket, is the record.
-        assertEquals("succeeded", payload.getString("outcome"))
+        assertEquals("the effect must have run exactly once", 1, playback.pauses)
+        val claim = AppOperationJournal.Claim(
+            owner = OWNER,
+            conversation = transport.conversationId,
+            turn = WIRE_ID,
+            operationId = OP_ID,
+        )
+        val record = journal.read(claim)
+        assertTrue("the claim must have settled durably despite the dead socket", record?.outcome == "succeeded")
+        // Both answers (the original and the replay) were attempted against the dead socket; the
+        // durable record -- not the send -- is what the server's transport loss settles against.
     }
 
     @Test

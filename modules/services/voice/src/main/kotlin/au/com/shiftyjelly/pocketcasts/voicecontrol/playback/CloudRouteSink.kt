@@ -653,11 +653,9 @@ class CloudRouteSink internal constructor(
                     // wait for the terminal.
                     is CloudRouteEvent.Result -> {}
 
-                    // App-operation frames decode at the transport now, but this build does not
-                    // answer them yet: no turn-session seam exists to admit, journal or reply on.
-                    // Ignoring both keeps today's behaviour exactly (an unanswered v1 frame was
-                    // already dropped undecoded); wiring the journal-backed answer is the next
-                    // slice and must fail closed until it lands.
+                    // A v1 operation is admitted, executed, settled and answered inside this
+                    // turn: no transcript, no duck, no hold, no ad hoc command, and nothing
+                    // outliving the connection. Everything durable is in the journal.
                     is CloudRouteEvent.AppOperation -> {
                         val answer = deliverAppOperation(
                             event = event,
@@ -1276,7 +1274,7 @@ class CloudRouteSink internal constructor(
         turnId: String,
         plannedEpisodeId: String?,
     ): AppOperationDelivery.Delivery? {
-        val __dbg = try {
+        return try {
             when (val parsed = AppOperationV1.parse(event.rawBytes.decodeToString())) {
                 is AppOperationV1.Parsed.Invalid -> {
                     // The codec's own bounded identity, or -- when it refused before reading one --
@@ -1315,8 +1313,6 @@ class CloudRouteSink internal constructor(
             Timber.w(e, "[CloudRoute] app operation failed closed before any effect")
             AppOperationDelivery.refused(event.operationId, AppOperationDelivery.REASON_PERSISTENCE_UNAVAILABLE, replayed = false)
         }
-        println("APPOPS-DEBUG " + __dbg?.resultJson)
-        return __dbg
     }
 
     /**
@@ -1358,20 +1354,11 @@ class CloudRouteSink internal constructor(
             }
 
             "playback.resume" -> {
-                // Resume is the one action whose own precondition names a state: nothing to resume
-                // unless the player is paused. An UNREADABLE flag is not a paused player, so it
-                // refuses rather than pretending the precondition held.
-                if (observedBefore == null || observedPlaying(observedBefore) != false) {
-                    return AppOperationDelivery.Observation.Refused(REASON_NOT_PAUSED)
-                }
-                when (playbackSink.resume(expectedEpisodeId = currentEpisode)) {
-                    is EpisodeOperationResult.Accepted -> observedAfterResume()
-
-                    is EpisodeOperationResult.Refused -> AppOperationDelivery.Observation.Refused(REASON_PLAYER_REFUSED)
-
-                    is EpisodeOperationResult.Unknown ->
-                        AppOperationDelivery.Observation.Unconfirmed(AppOperationDelivery.REASON_UNOBSERVED)
-                }
+                // AN ALREADY-PLAYING ENGINE IS AN IDEMPOTENT SUCCESS, like pause: the contract's
+                // post-condition is the observed state, not a change, so there is no pre-check --
+                // the sink runs and the observation decides.
+                playbackSink.resume(expectedEpisodeId = currentEpisode)
+                observedAfterResume()
             }
 
             else -> AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_UNSUPPORTED)
@@ -1413,7 +1400,7 @@ class CloudRouteSink internal constructor(
             // We looked, and it is still running: the pause did not take.
             true -> AppOperationDelivery.Observation.Failed(REASON_PAUSE_NOT_OBSERVED)
 
-            false -> AppOperationDelivery.Observation.Observed(after)
+            false -> AppOperationDelivery.Observation.Observed(typedState(after))
 
             // The field is missing or not a boolean, so there is no measurement to rest on. It is
             // NOT evidence the engine is still playing.
@@ -1436,14 +1423,32 @@ class CloudRouteSink internal constructor(
         }
     }
 
-    /** Success only if the player now reports playing; otherwise the outcome is unobserved. */
+    /**
+     * `playback.resume`'s three contract outcomes, mirroring [observedAfterPause]: no observation
+     * => `unknown`/`playback_state_unavailable`; still paused => `failed`/`resume_not_observed`;
+     * the engine reports playing => a SUCCESS carrying the typed state.
+     */
     private fun observedAfterResume(): AppOperationDelivery.Observation {
         val after = currentObservedState()
-            ?: return AppOperationDelivery.Observation.Unconfirmed(AppOperationDelivery.REASON_UNOBSERVED)
-        if (observedPlaying(after) != true) {
-            return AppOperationDelivery.Observation.Unconfirmed(AppOperationDelivery.REASON_UNOBSERVED)
+            ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        return when (observedPlaying(after)) {
+            // We looked, and it is still paused: the resume did not take.
+            false -> AppOperationDelivery.Observation.Failed(REASON_RESUME_NOT_OBSERVED)
+
+            true -> AppOperationDelivery.Observation.Observed(typedState(after))
+
+            null -> AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
         }
-        return AppOperationDelivery.Observation.Observed(after)
+    }
+
+    /**
+     * The SUCCESS STATE CARRIES EXACTLY THE TYPED STATE THE CONTRACT NAMES -- `{"playing": bool}` --
+     * and nothing else. The full observation is this client's measurement vocabulary; the result
+     * document speaks the contract's.
+     */
+    private fun typedState(observed: JSONObject): JSONObject {
+        val playing = observedPlaying(observed)
+        return JSONObject().put(PLAYING_FIELD, playing == true)
     }
 
     private suspend fun executeAction(
@@ -1826,8 +1831,8 @@ class CloudRouteSink internal constructor(
 private const val REASON_TARGET_MISMATCH = "target_mismatch"
 private const val REASON_PLAYBACK_STATE_UNAVAILABLE = "playback_state_unavailable"
 private const val REASON_PAUSE_NOT_OBSERVED = "pause_not_observed"
-private const val REASON_NOT_PAUSED = "not_paused"
 private const val REASON_PLAYER_REFUSED = "player_refused"
+private const val REASON_RESUME_NOT_OBSERVED = "resume_not_observed"
 
 /** The field the engine's observed state carries. The contract names it `playing`. */
 private const val PLAYING_FIELD = "playing"

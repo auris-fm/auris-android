@@ -637,6 +637,14 @@ class CloudRouteSink internal constructor(
                     // wait for the terminal.
                     is CloudRouteEvent.Result -> {}
 
+                    // App-operation frames decode at the transport now, but this build does not
+                    // answer them yet: no turn-session seam exists to admit, journal or reply on.
+                    // Ignoring both keeps today's behaviour exactly (an unanswered v1 frame was
+                    // already dropped undecoded); wiring the journal-backed answer is the next
+                    // slice and must fail closed until it lands.
+                    is CloudRouteEvent.AppOperation -> {}
+                    is CloudRouteEvent.MalformedAppOperation -> {}
+
                     is CloudRouteEvent.Connected -> {
                         // Handshake acknowledgement, and the frame that carries the codec the
                         // server negotiated. Propagate it so the player builds the right decoder

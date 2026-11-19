@@ -20,6 +20,58 @@ sealed class CloudRouteEvent {
         val turnId: String? = null,
     ) : CloudRouteEvent()
 
+    /**
+     * An app-operation request (core `cloud-assistant.md`, "App-operation protocol v1").
+     *
+     * Distinct from [Action] because the replay contract is defined over the ORIGINAL serialized
+     * bytes, which a decoded parameter map has already lost. A v1 frame never degrades into [Action]:
+     * the legacy playback stream and the deterministic hold carry neither identity field.
+     */
+    data class AppOperation(
+        val operationId: String,
+        val capabilityVersion: String,
+        val tool: String,
+        val action: String,
+        val params: Map<String, Any?>,
+        val precondition: Map<String, Any?>?,
+        /** The complete envelope exactly as delivered, for identity binding and digesting. */
+        val rawBytes: ByteArray,
+    ) : CloudRouteEvent() {
+        override fun equals(other: Any?): Boolean = this === other || (
+            other is AppOperation && operationId == other.operationId &&
+                capabilityVersion == other.capabilityVersion && tool == other.tool &&
+                action == other.action && params == other.params && precondition == other.precondition &&
+                rawBytes.contentEquals(other.rawBytes)
+            )
+
+        override fun hashCode(): Int {
+            var result = operationId.hashCode()
+            result = 31 * result + capabilityVersion.hashCode()
+            result = 31 * result + tool.hashCode()
+            result = 31 * result + action.hashCode()
+            result = 31 * result + params.hashCode()
+            result = 31 * result + (precondition?.hashCode() ?: 0)
+            result = 31 * result + rawBytes.contentHashCode()
+            return result
+        }
+
+        override fun toString(): String = "AppOperation(operationId=$operationId, tool=$tool, action=$action, bytes=${rawBytes.size})"
+    }
+
+    /**
+     * A frame that CLAIMS app-operation identity by either identity field but cannot be executed:
+     * malformed fields, oversize envelope, or an incomplete identity pair.
+     *
+     * Separate from [Error] so the sink can answer it — with the recovered operation id, when one is
+     * bounded and valid — instead of ending the turn. It is never a fallback to legacy playback.
+     */
+    class MalformedAppOperation(
+        val operationId: String?,
+        val rawBytes: ByteArray,
+    ) : CloudRouteEvent() {
+        override fun toString(): String = "MalformedAppOperation(operationId=$operationId, bytes=${rawBytes.size})"
+    }
+
     enum class Outcome {
         Completed,
         Interrupted,
@@ -56,12 +108,9 @@ sealed class CloudRouteEvent {
     data class Result(val results: CloudSearchResults) : CloudRouteEvent()
 
     /**
-     * The server's acknowledgement that this turn was ADMITTED, not merely that the socket upgraded.
-     * It is sent only once admission succeeds, and carries the codec negotiated for the binary audio
-     * path plus the reservation the turn's later accounting refers to
-     * (`{"type":"connected","codec":...,"reservation_id":...}`) — the only place the codec arrives,
-     * since the protocol has no separate `auth` frame. A refused turn therefore never sees this: it
-     * gets an `error` frame alone, so receiving it means the request is running.
+     * WebSocket handshake acknowledgement. It carries the codec the server negotiated for the
+     * binary audio path (`{"type":"connected","codec":...,"reservation_id":...}`), which is the
+     * only place that value arrives: the protocol has no separate `auth` frame.
      */
     data class Connected(val codec: String) : CloudRouteEvent()
 }

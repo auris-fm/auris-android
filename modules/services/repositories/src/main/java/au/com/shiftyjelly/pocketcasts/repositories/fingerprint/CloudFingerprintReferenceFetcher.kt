@@ -36,10 +36,27 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         // TOFU user_<uuid>: generating a reference is paid work, so it needs a verified token.
         // FAIL CLOSED: no usable token means no request at all.
         val token = tokenProvider.currentToken() ?: return null
-        return withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token) }
+        val first = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token) }
+        if (first !is Attempt.Unauthorized) return first.matcher
+        // The route says this token is bad, not merely old: force a replacement and repeat the
+        // request ONCE -- the turn route's posture. A second refusal gives up rather than looping.
+        tokenProvider.refreshToken()
+        val replacement = tokenProvider.currentToken() ?: return null
+        val second = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, replacement) }
+        return second.matcher
     }
 
-    private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String, podcastUuid: String, token: String): CloudReferenceMatcher? {
+    /** One request's outcome; a 401 is distinguishable so the caller can retry once. */
+    private sealed interface Attempt {
+        val matcher: CloudReferenceMatcher?
+
+        data class Done(override val matcher: CloudReferenceMatcher?) : Attempt
+        data object Unauthorized : Attempt {
+            override val matcher: CloudReferenceMatcher? get() = null
+        }
+    }
+
+    private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String, podcastUuid: String, token: String): Attempt {
         // podcast_id lets the server resolve uncached episodes through the public cache host,
         // which keys metadata by podcast + episode.
         val url = (baseUrl.trimEnd('/') + "/api/v1/episodes/" + episodeUuid + "/fingerprints")
@@ -47,7 +64,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
             ?.newBuilder()
             ?.addQueryParameter("podcast_id", podcastUuid)
             ?.build()
-            ?: return null
+            ?: return Attempt.Done(null)
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer " + token)
@@ -59,18 +76,22 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         call.timeout().timeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         return try {
             call.execute().use { response ->
-                if (!response.isSuccessful) {
-                    // Definitive statuses (e.g. 404 = no reference) are not
-                    // timeouts — log them as what they are.
-                    Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} for $episodeUuid")
-                    null
-                } else {
-                    buildMatcher(response.body.bytes())
+                when {
+                    response.code == 401 -> Attempt.Unauthorized
+
+                    !response.isSuccessful -> {
+                        // Definitive statuses (e.g. 404 = no reference) are not
+                        // timeouts — log them as what they are.
+                        Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} for $episodeUuid")
+                        Attempt.Done(null)
+                    }
+
+                    else -> Attempt.Done(buildMatcher(response.body.bytes()))
                 }
             }
         } catch (e: IOException) {
             Timber.w(e, "CloudFingerprintReferenceFetcher: fetch failed or timed out for $episodeUuid")
-            null
+            Attempt.Done(null)
         }
     }
 

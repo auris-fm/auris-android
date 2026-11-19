@@ -229,15 +229,16 @@ class AppOperationJournalTest {
      * different record key is not a different operation.
      */
     @Test
-    fun `an operation id redelivered to a different turn is refused rather than claimed afresh`() {
+    fun `an operation id redelivered to a different turn replays rather than executing afresh`() {
+        // The key is turn- and conversation-stable: a connection that dies mid-operation is
+        // redelivered on a NEW turn, and the journal -- not the transport -- is what replays it.
         val store = FakeStore()
         assertTrue(AppOperationJournal.admit(claim, "d1", store) is AppOperationJournal.Verdict.Execute)
         AppOperationJournal.settle(claim, "d1", AppOperationV1.OUTCOME_SUCCEEDED, null, JSONObject(), store)
 
-        assertEquals(
-            AppOperationJournal.Verdict.IdentityConflict,
-            AppOperationJournal.admit(claim.copy(turn = "turn-2"), "d1", store),
-        )
+        val replay = AppOperationJournal.admit(claim.copy(turn = "turn-2"), "d1", store)
+        assertTrue(replay is AppOperationJournal.Verdict.Replay)
+        assertEquals(AppOperationV1.OUTCOME_SUCCEEDED, (replay as AppOperationJournal.Verdict.Replay).outcome)
         assertEquals(1, store.records.size)
     }
 

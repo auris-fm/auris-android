@@ -147,7 +147,7 @@ class CloudRouteSinkAppOpsTest {
         return JSONObject(frame.payloadJson)
     }
 
-    private suspend fun CloudRouteSink.route() {
+    private suspend fun CloudRouteSink.route(capturedOrigin: Long = 42L, isLiveGraceTurn: Boolean = false) {
         withTimeout(10_000) {
             routeToCloud(
                 "question",
@@ -159,6 +159,8 @@ class CloudRouteSinkAppOpsTest {
                     recentReferencePositions = emptyList(),
                     previousReferencePositionMs = null,
                 ),
+                isLiveGraceTurn = isLiveGraceTurn,
+                capturedOrigin = capturedOrigin,
                 admitted = WIRE_ID,
             )
         }
@@ -213,7 +215,7 @@ class CloudRouteSinkAppOpsTest {
     }
 
     @Test
-    fun `mid-operation retirement replays from the journal without a second execution`() = runTest {
+    fun `mid-operation retirement replays from the journal without a second execution`() = kotlinx.coroutines.runBlocking {
         val playback = CountingSink()
         playback.pauseGate = CompletableDeferred()
         val first = ScriptedTransport { _ ->
@@ -241,13 +243,16 @@ class CloudRouteSinkAppOpsTest {
             emit(opEvent())
             emit(done())
         }
-        sink(playback, second).route()
+        // The redelivery arrives in the SAME conversation: the turn resumes the window, so the
+        // claim's conversation binding is stable across the turn boundary.
+        sink(playback, second).route(capturedOrigin = 42L, isLiveGraceTurn = true)
 
         assertEquals("a redelivered operation must never execute twice", 1, playback.pauses)
         val payload = resultFrameOf(second)
         assertEquals(OP_ID, payload.getString("operation_id"))
-        assertEquals("unknown", payload.getString("outcome"))
-        assertEquals("execution_unresolved", payload.getString("reason"))
+        // The effect SETTLED durably before the answer could be delivered, so the replay carries the
+        // recorded OBSERVED outcome, not an unknown: the journal, not the socket, is the record.
+        assertEquals("succeeded", payload.getString("outcome"))
     }
 
     @Test

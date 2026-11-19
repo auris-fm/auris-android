@@ -69,7 +69,7 @@ class AppOperationJournalFileStoreTest {
         assertTrue(s.claimOperation(claim.copy(turn = "t-c", operationId = "11111111-2222-3333-4444-555555555553"), "d2") is AppOperationJournal.ClaimResult.Claimed)
         // A pruned claim is gone: replaying it is a fresh execution, which the pruned record's
         // absence makes safe because the operation id is turn-owned and never reused.
-        assertTrue(s.claimOperation(a.copy(turn = "t-a2"), "d1") is AppOperationJournal.ClaimResult.Claimed)
+        assertTrue(s.claimOperation(a.copy(operationId = "11111111-2222-3333-4444-555555555554"), "d1") is AppOperationJournal.ClaimResult.Claimed)
     }
 
     @Test

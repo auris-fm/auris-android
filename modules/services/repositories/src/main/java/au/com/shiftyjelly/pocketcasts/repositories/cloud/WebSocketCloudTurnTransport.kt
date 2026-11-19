@@ -52,7 +52,12 @@ class WebSocketCloudTurnTransport(
         adopted.set(connection)
     }
 
-    override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
+    override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = exchange(frame, null)
+
+    override fun exchange(
+        frame: CloudTurnFrame,
+        onOpen: ((sendResult: (CloudTurnFrame) -> Boolean) -> Unit)?,
+    ): Flow<CloudRouteEvent> = callbackFlow {
         // Use a large bounded channel (4096 events) so the WebSocket listener can
         // buffer frames without silently dropping them. With an unbounded channel,
         // events would accumulate indefinitely if the collector is gone; with a
@@ -60,6 +65,34 @@ class WebSocketCloudTurnTransport(
         val channel = Channel<CloudRouteEvent>(4096)
 
         val offeredCodecs = (frame as CloudTurnFrame.Authenticate).codecs
+        // The live socket, for CLIENT-originated result frames. Set when the dialled socket opens
+        // and when an adopted connection is taken; a result send that finds nothing here (or a send
+        // that throws, or is rejected) returns FALSE, which the sink treats as "this connection
+        // cannot answer" -- the journal, not the socket, carries the claim from there.
+        val resultSocket = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        fun senderFor(send: (String) -> Boolean): (CloudTurnFrame) -> Boolean = { result ->
+            val json: String? = try {
+                result.toJson()
+            } catch (_: Exception) {
+                null
+            }
+            if (json == null) {
+                false
+            } else {
+                try {
+                    send(json)
+                } catch (_: Exception) {
+                    false
+                }
+            }
+        }
+        fun deliverResult(result: CloudTurnFrame): Boolean {
+            val socket = resultSocket.get() ?: return false
+            return senderFor { json -> socket.send(json) }(result)
+        }
+        fun offerResultSender() {
+            onOpen?.invoke { result -> deliverResult(result) }
+        }
         val negotiatedCodec = AtomicReference<String?>(null)
         // A socket failure is only news about a turn that is still waiting for one. These two
         // record the ways a turn stops waiting: the server sent its terminal, or the collector
@@ -128,7 +161,9 @@ class WebSocketCloudTurnTransport(
                     return
                 }
                 observer?.onSocketOpened(requestId)
+                resultSocket.set(webSocket)
                 sendAuthFrame(requestId) { json -> webSocket.send(json) }
+                offerResultSender()
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -268,6 +303,7 @@ class WebSocketCloudTurnTransport(
                             RawSocketEvent.Opened -> {
                                 observer?.onSocketOpened(frame.requestId)
                                 ensureAuthSent()
+                                onOpen?.invoke(senderFor { json -> connection.send(json) })
                             }
 
                             // Post-adoption binary is audio, not a protocol violation: same
@@ -306,6 +342,7 @@ class WebSocketCloudTurnTransport(
                 launch {
                     observer?.onSocketOpened(frame.requestId)
                     sendAuthFrame(frame.requestId) { json -> connection.send(json) }
+                    onOpen?.invoke(senderFor { json -> connection.send(json) })
                 }
             }
         }

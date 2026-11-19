@@ -21,6 +21,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationSupport
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
@@ -90,6 +91,12 @@ class CloudRouteSink internal constructor(
      * dials for itself.
      */
     private val earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
+    /**
+     * The journal-backed app-operation seam. The default stays [AppOperationSupport.Unwired]: no
+     * owner identity or journal root means a v1 operation refuses instead of executing, exactly as
+     * an unwired path must.
+     */
+    private val appOperationSupport: AppOperationSupport = AppOperationSupport.Unwired,
 ) : VoiceCloudRouteSink {
 
     init {

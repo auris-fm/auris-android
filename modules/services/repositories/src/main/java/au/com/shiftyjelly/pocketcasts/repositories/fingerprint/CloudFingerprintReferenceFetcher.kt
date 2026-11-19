@@ -8,6 +8,8 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
@@ -22,22 +24,33 @@ import timber.log.Timber
  */
 @Singleton
 class CloudFingerprintReferenceFetcher @Inject constructor(
-    private val cloudIdentity: CloudIdentity,
+    private val tokenProvider: CloudTokenProviding,
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    suspend fun fetchReference(baseUrl: String, episodeUuid: String): CloudReferenceMatcher? = withContext(Dispatchers.IO) {
-        fetchReferenceOnce(baseUrl, episodeUuid)
+    suspend fun fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String): CloudReferenceMatcher? {
+        // The SAME credential the turn route presents (config-gated routing provider), never the
+        // TOFU user_<uuid>: generating a reference is paid work, so it needs a verified token.
+        // FAIL CLOSED: no usable token means no request at all.
+        val token = tokenProvider.currentToken() ?: return null
+        return withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token) }
     }
 
-    private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String): CloudReferenceMatcher? {
-        val url = baseUrl.trimEnd('/') + "/api/v1/episodes/" + episodeUuid + "/fingerprints"
+    private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String, podcastUuid: String, token: String): CloudReferenceMatcher? {
+        // podcast_id lets the server resolve uncached episodes through the public cache host,
+        // which keys metadata by podcast + episode.
+        val url = (baseUrl.trimEnd('/') + "/api/v1/episodes/" + episodeUuid + "/fingerprints")
+            .toHttpUrlOrNull()
+            ?.newBuilder()
+            ?.addQueryParameter("podcast_id", podcastUuid)
+            ?.build()
+            ?: return null
         val request = Request.Builder()
             .url(url)
-            .header("Authorization", "Bearer " + cloudIdentity.userId())
+            .header("Authorization", "Bearer " + token)
             .build()
         // The whole fetch is blocking I/O, so a coroutine timeout would never
         // fire mid-call (and would only discard late successes). call.timeout

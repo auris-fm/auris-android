@@ -224,7 +224,7 @@ class AppOperationJournalFileStoreTest {
         File(root, ".appops-root.lock").mkdirs()
         val s = store()
         assertEquals(AppOperationJournal.Verdict.PersistenceUnavailable, AppOperationJournal.admit(claim, "d1", s))
-        assertFalse(s.claim(claim, "d1"))
+        assertFalse(s.claimOperation(claim, "d1") is AppOperationJournal.ClaimResult.Claimed)
         assertFalse(AppOperationJournal.settle(claim, "d1", AppOperationV1.OUTCOME_SUCCEEDED, null, JSONObject(), s))
         assertNull(s.read(claim))
         assertEquals(
@@ -279,7 +279,7 @@ class AppOperationJournalFileStoreTest {
         val owner = store()
         assertTrue(AppOperationJournal.admit(claim, "d1", owner) is AppOperationJournal.Verdict.Execute)
         val contents = recordFile().readText()
-        assertFalse(store().claim(claim, "d1"))
+        assertFalse(store().claimOperation(claim, "d1") is AppOperationJournal.ClaimResult.Claimed)
         assertEquals(contents, recordFile().readText())
     }
 

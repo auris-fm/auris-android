@@ -26,17 +26,9 @@ class AppOperationJournalTest {
         var capacity = true
         var corrupt = false
 
-        override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean {
-            if (claimFails) return false
-            if (records.containsKey(claim.key)) return false
-            if (!capacity) return false
-            records[claim.key] = AppOperationJournal.Record(contentsDigest, false, null, null, null)
-            return true
-        }
-
         override fun markInProgress(claim: AppOperationJournal.Claim): Boolean {
             val r = records[claim.key] ?: return false
-            records[claim.key] = AppOperationJournal.Record(r.contentsDigest, true, r.outcome, r.reason, r.state, session = "s1")
+            records[claim.key] = AppOperationJournal.Record(r.contentsDigest, true, r.outcome, r.reason, r.state)
             return true
         }
 
@@ -53,7 +45,7 @@ class AppOperationJournalTest {
                 // A settled result is immutable: neither outcome nor reason/state may be rewritten.
                 return r.outcome == outcome && r.reason == reason && r.state?.toString() == state?.toString()
             }
-            records[claim.key] = AppOperationJournal.Record(contentsDigest, false, outcome, reason, state, settledBy = "s1")
+            records[claim.key] = AppOperationJournal.Record(contentsDigest, false, outcome, reason, state)
             return true
         }
 

@@ -53,9 +53,6 @@ object AppOperationJournal {
      * same storage root; [storeOutcome] MUST refuse to rewrite an already settled result.
      */
     interface Store {
-        /** @return false when the key already exists or the durable write failed. */
-        fun claim(claim: Claim, contentsDigest: String): Boolean
-
         /** @return false when the record is missing, unreadable or the durable write failed. */
         fun markInProgress(claim: Claim): Boolean
 
@@ -99,8 +96,6 @@ object AppOperationJournal {
         val outcome: String?,
         val reason: String?,
         val state: JSONObject?,
-        val session: String? = null,
-        val settledBy: String? = null,
     )
 
     class CorruptStorageException(message: String) : Exception(message)

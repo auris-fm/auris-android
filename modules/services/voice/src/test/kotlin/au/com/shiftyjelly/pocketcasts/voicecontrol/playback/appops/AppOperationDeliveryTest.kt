@@ -52,10 +52,10 @@ class AppOperationDeliveryTest {
         var settleAttempts = 0
             private set
 
-        override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean {
-            if (record != null) return false
+        override fun claimOperation(claim: AppOperationJournal.Claim, contentsDigest: String): AppOperationJournal.ClaimResult {
+            if (record != null) return AppOperationJournal.ClaimResult.AlreadyClaimed
             record = AppOperationJournal.Record(contentsDigest, false, null, null, null)
-            return true
+            return AppOperationJournal.ClaimResult.Claimed
         }
 
         override fun markInProgress(claim: AppOperationJournal.Claim): Boolean {
@@ -79,11 +79,6 @@ class AppOperationDeliveryTest {
 
         override fun read(claim: AppOperationJournal.Claim): AppOperationJournal.Record? = record
 
-        override fun claimOperation(claim: AppOperationJournal.Claim, contentsDigest: String): AppOperationJournal.ClaimResult = if (claim(claim, contentsDigest)) {
-            AppOperationJournal.ClaimResult.Claimed
-        } else {
-            AppOperationJournal.ClaimResult.AlreadyClaimed
-        }
     }
 
     @Test
@@ -121,10 +116,10 @@ class AppOperationDeliveryTest {
         var record: AppOperationJournal.Record? = null
             private set
 
-        override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean {
-            if (record != null) return false
+        override fun claimOperation(claim: AppOperationJournal.Claim, contentsDigest: String): AppOperationJournal.ClaimResult {
+            if (record != null) return AppOperationJournal.ClaimResult.AlreadyClaimed
             record = AppOperationJournal.Record(contentsDigest, false, null, null, null)
-            return true
+            return AppOperationJournal.ClaimResult.Claimed
         }
 
         override fun markInProgress(claim: AppOperationJournal.Claim): Boolean {
@@ -143,11 +138,6 @@ class AppOperationDeliveryTest {
 
         override fun read(claim: AppOperationJournal.Claim): AppOperationJournal.Record? = record
 
-        override fun claimOperation(claim: AppOperationJournal.Claim, contentsDigest: String): AppOperationJournal.ClaimResult = if (claim(claim, contentsDigest)) {
-            AppOperationJournal.ClaimResult.Claimed
-        } else {
-            AppOperationJournal.ClaimResult.AlreadyClaimed
-        }
     }
 
     @Test
@@ -311,10 +301,10 @@ private object AppOperationJournalTestFakes {
         var record: AppOperationJournal.Record? = null
             private set
 
-        override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean {
-            if (record != null) return false
+        override fun claimOperation(claim: AppOperationJournal.Claim, contentsDigest: String): AppOperationJournal.ClaimResult {
+            if (record != null) return AppOperationJournal.ClaimResult.AlreadyClaimed
             record = AppOperationJournal.Record(contentsDigest, false, null, null, null)
-            return true
+            return AppOperationJournal.ClaimResult.Claimed
         }
 
         override fun markInProgress(claim: AppOperationJournal.Claim): Boolean {
@@ -338,10 +328,5 @@ private object AppOperationJournalTestFakes {
 
         override fun read(claim: AppOperationJournal.Claim): AppOperationJournal.Record? = record
 
-        override fun claimOperation(claim: AppOperationJournal.Claim, contentsDigest: String): AppOperationJournal.ClaimResult = if (claim(claim, contentsDigest)) {
-            AppOperationJournal.ClaimResult.Claimed
-        } else {
-            AppOperationJournal.ClaimResult.AlreadyClaimed
-        }
     }
 }

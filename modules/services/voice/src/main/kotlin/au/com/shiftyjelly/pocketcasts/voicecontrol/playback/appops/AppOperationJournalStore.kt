@@ -9,7 +9,6 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
-import java.util.UUID
 import org.json.JSONObject
 import org.json.JSONTokener
 
@@ -45,8 +44,6 @@ class AppOperationJournalStore(
      */
     private val retentionMs: Long = DEFAULT_RETENTION_MS,
 ) : AppOperationJournal.Store {
-    val session: String = UUID.randomUUID().toString()
-
     private fun <T> locked(block: () -> T): T = synchronized(rootLock(rootCanonicalPath())) {
         withRootLock { block() }
     }
@@ -97,8 +94,6 @@ class AppOperationJournalStore(
 
     private fun recordName(claim: AppOperationJournal.Claim): String = MessageDigest.getInstance("SHA-256").digest(claim.key.toByteArray(Charsets.UTF_8))
         .joinToString("") { "%02x".format(it) }
-
-    override fun claim(claim: AppOperationJournal.Claim, contentsDigest: String): Boolean = claimOperation(claim, contentsDigest) is AppOperationJournal.ClaimResult.Claimed
 
     /**
      * The exclusive create, the operation-id binding check and the capacity decision all inside ONE
@@ -201,7 +196,7 @@ class AppOperationJournalStore(
                 val target = recordFile(claim)
                 val obj = readObject(target) ?: return@locked false
                 requireIdentity(obj, claim)
-                obj.put("in_progress", true).put("session", session)
+                obj.put("in_progress", true)
                 replaceDurably(target, obj)
             } catch (_: Exception) {
                 false
@@ -231,7 +226,7 @@ class AppOperationJournalStore(
                         obj.strictOrNull("reason") == reason &&
                         jsonEquals(obj.optJSONObject("state"), state)
                 }
-                obj.put("in_progress", false).put("outcome", outcome).put("settled_by", session)
+                obj.put("in_progress", false).put("outcome", outcome)
                 if (reason != null) obj.put("reason", reason) else obj.remove("reason")
                 if (state != null) obj.put("state", JSONObject(state.toString())) else obj.remove("state")
                 replaceDurably(target, obj)

@@ -418,7 +418,7 @@ class VoiceLifecycleWiringTest {
     fun `a call starting stops capture with mic_capture_stopped (reason on_call) and a call ending allows capture again`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         val scope = CoroutineScope(Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
-        val service = VoiceControlService()
+        val service = VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }
         try {
             LifecycleLogCapture().use { log ->
                 val context = ApplicationProvider.getApplicationContext<Context>()

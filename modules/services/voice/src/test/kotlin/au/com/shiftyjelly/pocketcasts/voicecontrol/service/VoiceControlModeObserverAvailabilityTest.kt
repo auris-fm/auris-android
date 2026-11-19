@@ -216,10 +216,6 @@ class VoiceControlModeObserverAvailabilityTest {
         override fun setCommunicationDevice(deviceId: Int): Boolean = false
         override fun communicationDeviceId(): Int? = null
         override fun clearCommunicationDevice() = Unit
-        override fun audioMode(): Int = audioManager.mode
-        override fun setAudioMode(mode: Int) {
-            audioManager.mode = mode
-        }
 
         override fun deviceType(deviceId: Int): Int? =
             when {

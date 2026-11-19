@@ -12,6 +12,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -72,6 +73,37 @@ class RealServiceReleaseCountControlTest {
         )
         hiltRule.inject()
         controller = Robolectric.buildService(VoiceControlService::class.java).create()
+    }
+
+    /**
+     * The claim an idle stop makes for itself belongs to the teardown, not to any start: the start's
+     * session field stays null. The retry has to read the teardown's claim, or a held idle stop can
+     * never finish its release and every later start in the process is refused.
+     */
+    @Test(timeout = 60_000)
+    fun `an idle stop's held teardown records the session its retry must read`() = runBlocking {
+        RecognizerReleaseProbe.throwAfterEffect = true
+        try {
+            stopViaPlatform()
+            val service = controller.get()
+            val teardownSession = service.javaClass.getDeclaredField("teardownSession")
+                .apply { isAccessible = true }.get(service)
+            val startSession = service.javaClass.getDeclaredField("voiceSession")
+                .apply { isAccessible = true }.get(service)
+
+            assertNull("no start ran, so the start's session field must be empty", startSession)
+            assertNotNull(
+                "the idle stop's own claim must be recorded where the retry reads it",
+                teardownSession,
+            )
+            assertTrue(
+                "that claim must be the session the gate actually holds",
+                service.voiceSessionGate.holds(teardownSession as VoiceSessionGate.Session),
+            )
+        } finally {
+            RecognizerReleaseProbe.throwAfterEffect = false
+            Unit
+        }
     }
 
     @After

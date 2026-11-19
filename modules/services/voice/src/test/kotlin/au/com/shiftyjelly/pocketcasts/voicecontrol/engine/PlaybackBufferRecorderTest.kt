@@ -734,7 +734,7 @@ class PlaybackBufferRecorderTest {
 
     @Test
     fun `a DROPPED chunk does not leave a window that claims a span it does not cover`() {
-        // @reviewer's finding, taken to the path where it actually bites. The tap's flow is DROP_OLDEST
+        // The tap's flow is DROP_OLDEST
         // with 64 slots and this change made PlaybackBufferRecorder a second consumer, so `tryEmit` can
         // silently discard the OLDEST chunk -- the collector's stream then has a HOLE nothing announces.
         //

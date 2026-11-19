@@ -178,6 +178,48 @@ class RouteAcquisitionTest {
         assertEquals(1, platform.startCalls)
     }
 
+    // ── A refused open owns nothing to close ────────────────────────────
+
+    @Test
+    fun `a refused open leaves nothing to close`() = runTest {
+        // The platform could not open a stream at all: no device, so no stream exists. Closing one
+        // would reach a capture this attempt never opened — possibly the engine's live one.
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = -1
+        }
+
+        val result = acquisition(platform).acquire(
+            BluetoothCandidate(deviceId = 41, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+
+        assertEquals(AcquisitionResult.Failed(RouteAcquisition.REASON_FAILED), result)
+        assertEquals("nothing was opened, so nothing may be closed", 0, platform.closeCalls)
+        assertEquals(0, platform.startCalls)
+    }
+
+    @Test
+    fun `a stream opened on the wrong device is still closed exactly once`() = runTest {
+        // The other refusal: the open SUCCEEDED and returned a real device, but it is the built-in
+        // microphone. That stream exists and this attempt owns it, so release must close it — the
+        // refused-open fix must not turn this case into a leak.
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = 7
+            deviceTypes[7] = AudioDeviceInfo.TYPE_BUILTIN_MIC
+        }
+
+        val result = acquisition(platform).acquire(
+            BluetoothCandidate(deviceId = 7, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+
+        assertEquals(AcquisitionResult.Failed(RouteAcquisition.REASON_FAILED), result)
+        assertEquals("a real stream on the wrong device must be closed once", 1, platform.closeCalls)
+        assertEquals(0, platform.startCalls)
+    }
+
     // ── Stream confirmation is the final authority ──────────────────────
 
     @Test

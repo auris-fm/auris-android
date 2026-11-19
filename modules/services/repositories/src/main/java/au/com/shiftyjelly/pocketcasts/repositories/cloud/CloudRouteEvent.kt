@@ -56,9 +56,12 @@ sealed class CloudRouteEvent {
     data class Result(val results: CloudSearchResults) : CloudRouteEvent()
 
     /**
-     * WebSocket handshake acknowledgement. It carries the codec the server negotiated for the
-     * binary audio path (`{"type":"connected","codec":...,"reservation_id":...}`), which is the
-     * only place that value arrives: the protocol has no separate `auth` frame.
+     * The server's acknowledgement that this turn was ADMITTED, not merely that the socket upgraded.
+     * It is sent only once admission succeeds, and carries the codec negotiated for the binary audio
+     * path plus the reservation the turn's later accounting refers to
+     * (`{"type":"connected","codec":...,"reservation_id":...}`) — the only place the codec arrives,
+     * since the protocol has no separate `auth` frame. A refused turn therefore never sees this: it
+     * gets an `error` frame alone, so receiving it means the request is running.
      */
     data class Connected(val codec: String) : CloudRouteEvent()
 }

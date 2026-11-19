@@ -93,7 +93,7 @@ class CloudAudioPlayerLifecycleTest {
     @Test
     fun `permanent release stops the live playback and withdraws its route`() {
         val observer = RoutedOutputObserver()
-        val player = CloudAudioPlayer(RuntimeEnvironment.getApplication(), routedOutputObserver = observer)
+        val player = CloudAudioPlayer(RuntimeEnvironment.getApplication(), routedOutputObserver = observer, writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD)
         player.writeToSink = { _, _, _, count -> count }
         player.submitFrame(pcm(8_000))
         player.play()
@@ -168,6 +168,7 @@ class CloudAudioPlayerLifecycleTest {
     private fun player(recorder: PlaybackBufferRecorder) = CloudAudioPlayer(
         RuntimeEnvironment.getApplication(),
         playbackBufferRecorder = recorder,
+        writerExecutor = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.CALLER_THREAD,
     ).apply {
         writeToSink = { _, _, _, count -> count }
     }

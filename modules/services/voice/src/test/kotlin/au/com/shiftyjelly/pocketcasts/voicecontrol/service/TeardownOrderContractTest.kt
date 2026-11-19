@@ -352,7 +352,7 @@ class TeardownOrderContractTest {
         // retry released them again — a repeated media-session or renderer release is destructive.
         // The record must be written per kind, immediately after that kind confirms.
         val source = productionFileSource()
-        val body = source.substringAfter("private fun releaseResources(pending: List<String>) {")
+        val body = source.substringAfter("private fun releaseResources(")
             .substringBefore("\n    }")
         assertTrue(
             "releaseResources must record each kind as it confirms",

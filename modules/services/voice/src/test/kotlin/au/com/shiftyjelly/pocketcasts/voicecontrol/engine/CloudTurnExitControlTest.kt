@@ -119,7 +119,7 @@ class CloudTurnExitControlTest {
         val facts = mutableListOf<VoiceActionOutcome>()
         runCatching {
             runBlocking {
-                executor.execute(VoiceIntent.CloudRoute(request = "play", tier = VoiceIntent.CloudTier.Premium)) { facts += it }
+                executor.execute(VoiceIntent.CloudRoute(request = "play", tier = VoiceIntent.CloudTier.Premium), onOutcome = { facts += it })
             }
         }
         return facts

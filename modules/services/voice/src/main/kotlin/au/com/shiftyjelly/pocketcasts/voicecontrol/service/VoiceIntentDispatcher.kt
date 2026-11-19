@@ -1,10 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ExecutionOutcome
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -44,6 +46,8 @@ class VoiceIntentDispatcher @Inject constructor() {
         onCommandRecognized: (VoiceIntent) -> Unit,
         intent: VoiceIntent,
         invocationToken: VoiceAsrEngine.InvocationToken?,
+        // The utterance's admitted request id, forwarded so local actions mark the timing table.
+        timingRequestId: String? = null,
     ): Job? {
         val now = System.currentTimeMillis()
         val intentType = intent::class.simpleName ?: intent.toString()
@@ -59,6 +63,15 @@ class VoiceIntentDispatcher @Inject constructor() {
                 engine.reportExecutionResult(it, ExecutionOutcome.Refused)
                 engine.settleInvocation(it)
             }
+            // A debounced dispatch never reaches the executor, whose finally would finish the
+            // record — finish it here, or the registry keeps one live entry per dropped turn.
+            if (timingRequestId != null) {
+                TurnTimingRecord.finishFor(
+                    timingRequestId,
+                    cancelled = false,
+                    failed = true,
+                )
+            }
             return null
         }
         lastIntentType = intentType
@@ -73,11 +86,17 @@ class VoiceIntentDispatcher @Inject constructor() {
             }
         }
         return try {
+            val executorOwnsRecord = AtomicBoolean(false)
             scope.launch(Dispatchers.IO) {
                 try {
                     val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
                     val response = try {
-                        executor.execute(intent, outcome = turnOutcome, onOutcome = onOutcome)
+                        // The handoff, marked IMMEDIATELY before the call whose finally finishes the
+                        // record. Marking at the top of the body instead leaves a gap: a cancellation
+                        // between there and this call has an owner in name only, and the record stays
+                        // live. From this point the executor's finally runs on every exit.
+                        executorOwnsRecord.set(true)
+                        executor.execute(intent, outcome = turnOutcome, onOutcome = onOutcome, timingRequestId = timingRequestId)
                     } catch (t: kotlinx.coroutines.CancellationException) {
                         // Cancellation is NOT "the user cancelled" and NOT "the action did not
                         // happen": work may already have run. No fact is invented; the settle
@@ -97,6 +116,21 @@ class VoiceIntentDispatcher @Inject constructor() {
                 // cancelled BEFORE its body first runs (a launch finally does not).
                 job.invokeOnCompletion { _ ->
                     if (token != null) engine.settleInvocation(token)
+                    // A dispatch that never reached the executor has no other owner for its record:
+                    // the executor's finally is what finishes it on every exit once the call begins.
+                    // Until then -- cancelled before the body ran, or between the body's start and
+                    // the call -- this is the only place that can finish it. After the handoff the
+                    // executor decides, including the case where a sink took ownership and
+                    // deliberately finishes nothing, so the mark gates this rather than finishing on
+                    // every completion.
+                    if (timingRequestId != null && !executorOwnsRecord.get()) {
+                        TurnTimingRecord.finishFor(
+                            timingRequestId,
+                            // Nothing ran: no action was attempted and none failed.
+                            cancelled = true,
+                            failed = false,
+                        )
+                    }
                 }
             }
         } catch (t: Throwable) {

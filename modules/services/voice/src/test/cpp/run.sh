@@ -7,6 +7,7 @@
 # fetched.
 #
 # vad_handle_test covers the JNI VAD processor lifetime guard and needs only the production header.
+# vad_in_progress_test covers the partial-utterance snapshot M1 reads while speech is running.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 VOICE=$(cd "$HERE/../../.." && pwd)   # src/test/cpp -> the voice module
@@ -33,5 +34,11 @@ cmake -S "$HERE" -B "$BUILD" \
 cmake --build "$BUILD"
 "$BUILD/vad_segment_test"
 "$BUILD/vad_handle_test"
+"$BUILD/vad_in_progress_test"
 "$BUILD/jni_bridge_ownership_test"
 "$BUILD/vad_snapshot_carryover_test"
+"$BUILD/vad_segment_delivery_test"
+# ThreadSanitizer build of the same control. Not run by default: TSAN is unavailable on some hosts
+# (and aborts rather than skipping), so it is built and run explicitly:
+#   cmake --build <build> --target vad_segment_delivery_tsan_test
+#   <build>/vad_segment_delivery_tsan_test

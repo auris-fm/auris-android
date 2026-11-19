@@ -53,12 +53,12 @@ jobs:
     name: "Trigger the release build"
     needs: [voice-unit-tests, cloud-transport-tests, android-test-compile]
     runs-on: ubuntu-latest
+    env:
+      BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+      BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG }}
+      BUILDKITE_PIPELINE: ${{ vars.BUILDKITE_PIPELINE_ANDROID }}
     steps:
       - name: "Trigger the auris-android Buildkite pipeline"
-        env:
-          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
-          BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG }}
-          BUILDKITE_PIPELINE: ${{ vars.BUILDKITE_PIPELINE_ANDROID }}
         if: ${{ env.BUILDKITE_API_TOKEN != '' }}
         run: |
           curl -sSf -X POST \

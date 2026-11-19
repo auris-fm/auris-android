@@ -2,19 +2,17 @@
 ---
 # Auris Android release pipeline: builds the signed `fm.auris` AAB and uploads
 # it to Google Play's internal testing track. Runs on agents tagged
-# `queue=auris-android`, on main, after the GitHub test workflows pass (the
-# GitHub-side trigger job invokes this pipeline via the Buildkite API).
+# `queue=auris-android`, on main, after the GitHub test workflows pass: the
+# GitHub-side trigger job invokes this pipeline via the Buildkite API, which
+# must be the ONLY entry — the "build on push" webhook is off for this
+# pipeline in Buildkite's settings, so nothing bypasses the GitHub gate.
 #
-# The repo's gradle.properties defaults (10 GB Gradle heap, 4 GB Kotlin
-# compiler daemon, 8 workers) exceed an 8 GB CI machine, and a properties file
-# keeps the LAST value for a repeated key, so appending the caps overrides
-# them without editing the repo's lines. The daemon `-Xmx` values should be
-# confirmed in `ps` on the first run.
+# All step commands live in `.buildkite/commands/` (Buildkite interpolates
+# `$` in pipeline YAML at upload time, which would break the shell scripts).
 #
-# While the Play service-account key does not exist, the pipeline stops at the
-# signed AAB artifact. The upload step switches on once
-# `PLAY_SERVICE_ACCOUNT_JSON` is set, and signing once the keystore secrets
-# are; both are environment-gated, so the same definition serves both phases.
+# While the Play service-account key does not exist, the pipeline stops at
+# the release AAB artifact; signing switches on once the keystore secrets
+# exist. Both are environment-gated in the scripts.
 
 agents:
   queue: "auris-android"
@@ -23,35 +21,7 @@ steps:
   - label: "Release AAB"
     key: release-aab
     branches: "main"
-    command: |
-      printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
-      echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
-
-      # Version code: continue the repo's counter with this build's number so
-      # every beta upload is strictly higher than the last.
-      BASE=$(sed -n 's/^versionCode=//p' version.properties)
-      NEW=$((BASE + BUILDKITE_BUILD_NUMBER))
-      sed -i '' "s/^versionCode=.*/versionCode=$NEW/" version.properties
-      echo "versionCode $BASE -> $NEW"
-
-      # Signing (only once the upload keystore exists as agent secrets).
-      if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
-        echo "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 --decode > auris-upload.keystore
-        printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
-          "$PWD/auris-upload.keystore" \
-          "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
-          "$ANDROID_UPLOAD_KEY_ALIAS" \
-          "$ANDROID_UPLOAD_KEY_PASSWORD" > secret.properties
-      else
-        echo "--- no keystore secret yet: building an unsigned release AAB (dry run)"
-      fi
-
-      timeout 3600 ./gradlew :app:bundleRelease --no-daemon
-
-      AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
-      [ -n "$AAB" ] || { echo "no AAB produced"; exit 1; }
-      buildkite-agent artifact upload "$AAB"
-
+    command: .buildkite/commands/auris-release-aab.sh
     timeout_in_minutes: 70
     artifact_paths:
       - "app/build/outputs/bundle/release/*.aab"
@@ -60,18 +30,5 @@ steps:
     key: play-upload
     branches: "main"
     depends_on: [release-aab]
-    command: |
-      if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then
-        echo "--- PLAY_SERVICE_ACCOUNT_JSON not set: stopping at the signed AAB (dry run)"
-        exit 0
-      fi
-      echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
-      buildkite-agent artifact download "app/build/outputs/bundle/release/*.aab" .
-      bundle install --quiet
-      bundle exec fastlane supply \
-        --package_name fm.auris \
-        --track internal \
-        --aab app/build/outputs/bundle/release/*.aab \
-        --json_key google-upload-credentials.json
-      rm -f google-upload-credentials.json
+    command: .buildkite/commands/auris-play-upload.sh
     timeout_in_minutes: 30

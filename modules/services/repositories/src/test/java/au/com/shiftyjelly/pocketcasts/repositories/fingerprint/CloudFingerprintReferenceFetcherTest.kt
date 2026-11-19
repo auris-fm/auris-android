@@ -20,6 +20,11 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 class CloudFingerprintReferenceFetcherTest {
 
+    private class FixedTokenProvider(private val token: String?) :
+        au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+        override suspend fun currentToken(): String? = token
+    }
+
     private fun compactV2Json(): String {
         val windows = CloudFingerprintParityData.signal16kMonoWindows
         val checkpoints = windows.mapIndexed { index, window -> encodeCheckpoint(window, index) }.joinToString(",")
@@ -45,7 +50,7 @@ class CloudFingerprintReferenceFetcherTest {
 
     @Test
     fun `buildMatcher parses compact-v2 checkpoints with correct hashes`() {
-        val matcher = CloudFingerprintReferenceFetcher(CloudIdentity(RuntimeEnvironment.getApplication()))
+        val matcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
             .buildMatcher(compactV2Json().toByteArray())
 
         assertNotNull(matcher)
@@ -63,7 +68,7 @@ class CloudFingerprintReferenceFetcherTest {
 
     @Test
     fun `buildMatcher returns null for invalid payload`() {
-        val matcher = CloudFingerprintReferenceFetcher(CloudIdentity(RuntimeEnvironment.getApplication()))
+        val matcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
             .buildMatcher("not json".toByteArray())
         assertNull(matcher)
     }
@@ -80,28 +85,47 @@ class CloudFingerprintReferenceFetcherTest {
               "checkpoints": []
             }
         """.trimIndent()
-        val matcher = CloudFingerprintReferenceFetcher(CloudIdentity(RuntimeEnvironment.getApplication()))
+        val matcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
             .buildMatcher(json.toByteArray())
         assertNull(matcher)
     }
 
     @Test
-    fun `fetchReference hits the cloud endpoint with bearer auth and parses`() {
+    fun `fetchReference sends the Auris access token and the podcast id`() {
         val server = MockWebServer()
-        server.enqueue(MockResponse().setResponseCode(200).setBody(compactV2Json()))
+        server.enqueue(MockResponse().setBody(compactV2Json()))
         server.start()
 
         try {
-            val fetcher = CloudFingerprintReferenceFetcher(CloudIdentity(RuntimeEnvironment.getApplication()))
-            val matcher = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1") }
+            val fetcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("auris-access-token-1"))
+            val matcher = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
+            }
 
             assertNotNull(matcher)
             assertEquals(3, matcher!!.count)
 
             val request = server.takeRequest()
-            assertEquals("/api/v1/episodes/ep_1/fingerprints", request.path)
-            val auth = request.getHeader("Authorization")
-            assertTrue("Authorization must be Bearer user_…, was: $auth", auth?.startsWith("Bearer user_") == true)
+            assertEquals("/api/v1/episodes/ep_1/fingerprints?podcast_id=pod_1", request.path)
+            // The SAME credential the turn route presents -- never the TOFU user_<uuid>.
+            assertEquals("Bearer auris-access-token-1", request.getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `fetchReference fails closed without a token and never sends the request`() {
+        val server = MockWebServer()
+        server.start()
+
+        try {
+            val fetcher = CloudFingerprintReferenceFetcher(FixedTokenProvider(null))
+            val matcher = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
+            }
+            assertNull(matcher)
+            assertEquals("no request may leave without a credential", 0, server.requestCount)
         } finally {
             server.shutdown()
         }
@@ -114,8 +138,8 @@ class CloudFingerprintReferenceFetcherTest {
         server.start()
 
         try {
-            val fetcher = CloudFingerprintReferenceFetcher(CloudIdentity(RuntimeEnvironment.getApplication()))
-            val matcher = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_missing") }
+            val fetcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
+            val matcher = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_missing", "pod_1") }
             assertNull(matcher)
         } finally {
             server.shutdown()

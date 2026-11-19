@@ -67,21 +67,6 @@ class LfmIntentRouterTest {
     }
 
     @Test
-    fun dialogControl_routesThroughDialogManager() = runTest {
-        val inference = FakeLfmInference().apply {
-            classifyLabel = "dialog_control:begin"
-            generateResult =
-                "<|tool_call_start|>[dialog_control(action='begin', target_tool='bookmark', target_action='rename')]<|tool_call_end|>"
-        }
-        val diagnostics = mutableListOf<RouterStageDiagnostic>()
-        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
-
-        router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("rename my bookmark"), RECOGNITION_CONTEXT, admittedId).intent)
-        assertEquals(RouterStageDiagnostic.STAGE_MAPPER_DIALOG, diagnostics.single().failedStage)
-    }
-
-    @Test
     fun spanFailure_returnsNullWithoutGuessingTool() = runTest {
         val inference = FakeLfmInference().apply {
             tokenizeThrows = IllegalArgumentException("user utterance tokens not found in prompt")
@@ -438,6 +423,89 @@ class LfmIntentRouterTest {
         .digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
 
+    @Test
+    fun outOfPolicyLabel_defersToCloudInsteadOfExecutingLocally() = runTest {
+        // A cloud-only label from a stale or mis-trained artifact must never execute locally:
+        // the router seam converts it to a cloud defer, preserving the request text.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback_query:current_podcast"
+            generateResult = "<|tool_call_start|>[playback_query(action='current_podcast', title='MODEL AUTHORED')]<|tool_call_end|>"
+        }
+        val router = createRouter(inference)
+
+        router.ensureReady().getOrThrow()
+        val intent = router.recognize(english("what show is this"), RECOGNITION_CONTEXT, admittedId).intent
+        assertTrue("expected a CloudRoute defer, got $intent", intent is VoiceIntent.CloudRoute)
+        intent as VoiceIntent.CloudRoute
+        assertEquals("what show is this", intent.request)
+        assertEquals(VoiceIntent.CloudTier.Unknown, intent.tier)
+        assertEquals(VoiceIntent.CloudRouteOrigin.RoutingFailure, intent.origin)
+    }
+
+    @Test
+    fun outOfPolicyLabel_deferPreservesSourceTranscriptNotRoutingTranslation() = runTest {
+        // routerTranscript may be the English routing translation; the defer request must
+        // carry the immutable source transcript when one exists, never the translation and
+        // never a model-authored parameter.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "stats_query:queue_total"
+            generateResult = "<|tool_call_start|>[stats_query(action='queue_total', request='MODEL AUTHORED')]<|tool_call_end|>"
+        }
+        val router = createRouter(inference)
+        val input = IntentRoutingInput(
+            sourceTranscript = "队列里还有几集",
+            sourceLanguage = "zh",
+            routerTranscript = "how many episodes are queued",
+            translationKind = TranslationKind.BACKEND,
+        )
+
+        router.ensureReady().getOrThrow()
+        val intent = router.recognize(input, RECOGNITION_CONTEXT, admittedId).intent
+        assertTrue("expected a CloudRoute defer, got $intent", intent is VoiceIntent.CloudRoute)
+        assertEquals("队列里还有几集", (intent as VoiceIntent.CloudRoute).request)
+    }
+
+    @Test
+    fun dialogControlLabel_defersToCloudAsOutOfPolicy() = runTest {
+        // Contract ruling: dialog_control is internal and excluded from LFM output, so a MODEL
+        // label for it is out-of-policy and defers — this replaces the retired expectation that
+        // a dialog_control model label routes through the dialog manager. That retirement does
+        // NOT move dialog flows to the cloud generally: direct/internal dialog-manager controls
+        // are preserved and covered in VoiceDialogManagerTest (direct ToolCall dialog_control:
+        // begin/provide/confirm, history retention, completion/clearing), and the router's
+        // dialog branch for in-policy labels is unchanged.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "dialog_control:begin"
+            generateResult = "<|tool_call_start|>[dialog_control(action='begin', target_tool='bookmark', target_action='rename')]<|tool_call_end|>"
+        }
+        val router = createRouter(inference)
+
+        router.ensureReady().getOrThrow()
+        val intent = router.recognize(english("rename my bookmark"), RECOGNITION_CONTEXT, admittedId).intent
+        assertTrue("expected a CloudRoute defer, got $intent", intent is VoiceIntent.CloudRoute)
+        assertEquals("rename my bookmark", (intent as VoiceIntent.CloudRoute).request)
+    }
+
+    @Test
+    fun outOfPolicyLabel_neverReachesGenerationOrLocalExecution() = runTest {
+        // Observation, not just outcome: an out-of-policy label must invoke generation ZERO
+        // times — generation is the gate to slot repair, mapping, dialog resolution and local
+        // execution, so generateCount == 0 with classifyCount == 1 proves the label was
+        // rejected at the seam and nothing downstream of classification ran. generateResult
+        // containing invented params alone would not prove that.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "sleep:end_of_episode"
+            generateResult = "<|tool_call_start|>[sleep(action='end_of_episode')]<|tool_call_end|>"
+        }
+        val router = createRouter(inference)
+
+        router.ensureReady().getOrThrow()
+        val intent = router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent
+        assertTrue("expected a CloudRoute defer, got $intent", intent is VoiceIntent.CloudRoute)
+        assertEquals("exactly one classify at the seam", 1, inference.classifyCount)
+        assertEquals("generation must never run for an out-of-policy label", 0, inference.generateCount)
+    }
+
     private fun english(transcript: String) = IntentRoutingInput.english(transcript)
 
     private companion object {
@@ -460,6 +528,7 @@ internal class FakeLfmInference(
     var generateThrows: Throwable? = null
     var resetThrows: Throwable? = null
     var classifyCount = 0
+    var generateCount = 0
     var resetCount = 0
     val tokenizedTexts = mutableListOf<String>()
 
@@ -492,6 +561,7 @@ internal class FakeLfmInference(
 
     override fun generate(prefill: String, nPredict: Int): String? {
         onStep(7)
+        generateCount++
         generateThrows?.let { throw it }
         return generateResult
     }

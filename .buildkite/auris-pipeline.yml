@@ -4,6 +4,11 @@
 # (.github/workflows/voice-unit-tests.yml, android-test-compile.yml).
 # Runs on agents tagged `queue=auris-android`; the queue line below is the
 # single place to retarget the pipeline.
+#
+# Every step caps the JVMs before invoking Gradle: the repo's gradle.properties
+# defaults (10 GB Gradle heap, 4 GB Kotlin daemon, 8 workers) exceed an
+# 8 GB CI machine, and a properties file keeps the LAST value for a repeated
+# key, so appending the caps overrides them without editing the repo's lines.
 
 agents:
   queue: "auris-android"
@@ -11,19 +16,28 @@ agents:
 steps:
   - label: "Voice module unit tests"
     key: voice-unit-tests
-    command: timeout 3600 ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
+    command: |
+      printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
+      echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
+      timeout 3600 ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
     timeout_in_minutes: 70
     artifact_paths:
       - "modules/services/voice/build/test-results/testDebugUnitTest/**"
 
   - label: "Cloud transport unit tests"
     key: cloud-transport-tests
-    command: timeout 3600 ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon
+    command: |
+      printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
+      echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
+      timeout 3600 ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon
     timeout_in_minutes: 70
     artifact_paths:
       - "modules/services/repositories/build/test-results/testDebugUnitTest/**"
 
   - label: "androidTest compiles"
     key: android-test-compile
-    command: timeout 3600 ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon
+    command: |
+      printf '\norg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:ReservedCodeCacheSize=512m\nkotlin.daemon.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m\norg.gradle.workers.max=4\n' >> gradle.properties
+      echo "--- effective caps in gradle.properties"; tail -n 3 gradle.properties
+      timeout 3600 ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon
     timeout_in_minutes: 70

@@ -62,5 +62,6 @@ class StubVoiceExecutor(
         intent: VoiceIntent,
         outcome: VoicePlaybackIntentExecutor.TurnOutcome,
         onOutcome: ((VoiceActionOutcome) -> Unit)?,
+        timingRequestId: String?,
     ): VoiceResponse = executeBehavior(intent, outcome, onOutcome)
 }

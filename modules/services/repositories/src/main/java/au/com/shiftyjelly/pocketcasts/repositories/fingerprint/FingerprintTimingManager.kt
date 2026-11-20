@@ -75,9 +75,9 @@ class FingerprintTimingManager @Inject constructor(
     private val settings: Settings,
     private val dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>,
     private val pcmTap: FingerprintPcmTap,
-    private val cloudIdentity: CloudIdentity,
     private val cloudConfig: SharedPreferencesCloudConfig,
     private val cloudFetcher: CloudFingerprintReferenceFetcher,
+    private val cloudReferenceStore: CloudReferenceStore,
     private val decodePolicy: FingerprintDecodePolicy,
 ) {
 
@@ -86,6 +86,54 @@ class FingerprintTimingManager @Inject constructor(
         PLAYBACK,
         TRANSCRIPT_VIEW,
         BOOKMARK,
+    }
+
+    /**
+     * Resolves the cloud reference for one preparation (delta: fingerprint revalidation).
+     *
+     * - Fresh 200: decode, persist payload + new etag, use it.
+     * - 304 against the stored etag: keep and decode the stored payload.
+     * - Unavailable (offline, timeout, 503, a 401 that persists after the refresh): decode the
+     *   stored payload anyway — a failed revalidation must never drop alignment that a stored
+     *   reference still supports; only a 200 replaces it.
+     * - A 304 whose stored payload is missing or unusable: one unconditional refetch so a fresh
+     *   200 can replace the stale entry. Unavailable does NOT refetch -- offline, a 404 or a
+     *   persistent 401 stays a single request, not a second full attempt.
+     */
+    internal suspend fun resolveCloudMatcher(
+        cloudBaseUrl: String,
+        episodeUuid: String,
+        podcastUuid: String,
+    ): CloudReferenceMatcher? {
+        val stored = cloudReferenceStore.load(episodeUuid)
+        when (val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, stored?.etag)) {
+            is CloudFingerprintReferenceFetcher.Fetch.Fresh -> {
+                cloudReferenceStore.save(episodeUuid, fetched.payload, fetched.etag)
+                Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.matcher.count} checkpoints) for $episodeUuid")
+                return fetched.matcher
+            }
+            is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
+                stored?.let { cloudFetcher.buildMatcher(it.payload) }?.let {
+                    Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
+                    return it
+                }
+                // 304 but the stored payload is missing or corrupt: one unconditional refetch.
+                val refetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, null)
+                if (refetched is CloudFingerprintReferenceFetcher.Fetch.Fresh) {
+                    cloudReferenceStore.save(episodeUuid, refetched.payload, refetched.etag)
+                    Timber.d("FingerprintTimingManager: cloud reference refetched (${refetched.matcher.count} checkpoints) for $episodeUuid")
+                    return refetched.matcher
+                }
+            }
+            CloudFingerprintReferenceFetcher.Fetch.Unavailable ->
+                stored?.let { cloudFetcher.buildMatcher(it.payload) }?.let {
+                    Timber.d("FingerprintTimingManager: revalidation failed; keeping stored cloud reference for $episodeUuid")
+                    return it
+                }
+                // No refetch here: with nothing stored, offline / 404 / persistent 401 ends now.
+        }
+        Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
+        return null
     }
 
     sealed interface State {
@@ -816,15 +864,7 @@ class FingerprintTimingManager @Inject constructor(
         cloudMatcher = null
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
-            // Touch identity so the stable user id exists before the first fetch.
-            cloudIdentity.userId()
-            val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid)
-            if (fetched != null) {
-                cloudMatcher = fetched
-                Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.count} checkpoints) for $episodeUuid")
-            } else {
-                Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
-            }
+            cloudMatcher = resolveCloudMatcher(cloudBaseUrl, episodeUuid, podcastUuid)
         }
 
         // Try loading cached reference from disk. A reference cached while streaming is still valid

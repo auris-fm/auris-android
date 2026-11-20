@@ -136,11 +136,13 @@ class MixedFactsPersistControlTest {
             AuthorityDecision(collectionPermitted = true, fullRevocation = false)
         }
         private val retention = ContributionRetentionSink()
+        var admittedSeen = false
         private val observer = SegmentObserver(
             CollectionGate { true },
             retention,
             authority,
             issueAuthority = { IssuedAuthority("a@b.c", "epoch-1", "disclosure-1") },
+            onAdmittedForTest = { admittedSeen = true },
             handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live, measurement ->
                 scope.completeUnderOwner(context, onset, end, wake, provider, wakeMeasurement = measurement)
             },
@@ -159,7 +161,7 @@ class MixedFactsPersistControlTest {
             whenever(voiceAudioProcessor.startProcessing()).thenReturn(
                 flowOf(
                     VoiceSegmenterResult.SpeechStarted,
-                    VoiceSegmenterResult.SpeechContinuing,
+                    VoiceSegmenterResult.SpeechContinuing(utteranceGeneration = null),
                     VoiceSegmenterResult.SpeechEnded(listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000))),
                 ),
             )
@@ -188,9 +190,10 @@ class MixedFactsPersistControlTest {
                 listeningMode = ListeningMode.Continuous,
                 playbackBufferProvider = { au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackReference(FloatArray(0), 16000, null) },
                 micExposureProvider = { MicExposure.Exposed },
-                onIntent = { _, _ -> },
+                onIntent = { _, _, _ -> },
             )
             testScope.advanceUntilIdle()
+            println("MF-DEBUG snapshot=${retention.retainedSnapshot().size} admittedHook=$admittedSeen")
             assertNotNull("the turn must retain a capture", retainedCaptureId())
         }
 

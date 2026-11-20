@@ -52,6 +52,12 @@ class CloudAudioPlayer(
     // Publishes this player's observed output routing, so route-dependent decisions read where the audio
     // actually goes rather than what is merely available. Null in contexts with no route consumer.
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
+    // Where frames are written to the track. The default is a dedicated thread, so reading the connection
+    // never waits on a device write; a test passes [CALLER_THREAD] for deterministic, synchronous writes.
+    private val writerExecutor: java.util.concurrent.Executor = dedicatedWriter(),
+    // The most audio that may wait to be written. Reaching it fails the answer explicitly rather than
+    // dropping frames silently or blocking the receive path.
+    private val maxQueuedBytes: Int = MAX_QUEUED_BYTES,
 ) {
     /**
      * This stream's claim on the routed observation, taken when playback starts.
@@ -99,9 +105,78 @@ class CloudAudioPlayer(
      */
     var onPlaybackAudibleChanged: ((Boolean) -> Unit)? = null
 
+    /**
+     * Additional audible observers, so more than one consumer can watch the same fact (the DI
+     * module already owns the single-delegate property above). Invoked together with it.
+     */
+    private val audibleListeners = mutableListOf<(Boolean) -> Unit>()
+
+    fun addAudibleListener(listener: (Boolean) -> Unit) {
+        synchronized(audibleListeners) { audibleListeners += listener }
+    }
+
+    /**
+     * Observers of the turn's REAL first audible: the first presentation-evidence instant, the
+     * first [android.media.AudioTimestamp] whose framePosition is positive, reported with the
+     * timestamp's nanoTime (the track's CLOCK_MONOTONIC presentation base, the same base the
+     * timing table's clock uses). A submission-side stamp says frames were HANDED to the track,
+     * which can be seconds before the listener hears anything; this fires only when the track
+     * says it has actually presented. Once per playback run — reset at [play]/[stop].
+     */
+    private val firstAudibleListeners = mutableListOf<(Long) -> Unit>()
+
+    /** True once THIS run has reported first audible; reset when a run starts. */
+    // Atomic: the heartbeat and the stop-path sample run on different dispatchers, so both can
+    // pass a plain Boolean check; compareAndSet keeps first audible exactly once per run.
+    private val firstAudibleFired = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun addFirstAudibleListener(listener: (Long) -> Unit) {
+        synchronized(firstAudibleListeners) { firstAudibleListeners += listener }
+    }
+
+    private val writesInRun = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** One timed [AudioTrack.write]: its 1-based index within the run, bytes offered and call duration. */
+    data class WriteSample(val index: Int, val bytes: Int, val durationMs: Long)
+
+    /** Receives each sampled write; production also logs it. Null by default. */
+    var writeSampleListener: ((WriteSample) -> Unit)? = null
+
+    private val firstWriteListeners = mutableListOf<(Long) -> Unit>()
+
+    /**
+     * Latch for the run's first accepted write, reset in [startPlaybackRun] BEFORE any write of the
+     * run (play() drains the first frame before the heartbeat starts, so a reset there is too late),
+     * so each answer reports its own. Separate from first audible on purpose: this is the SUBMIT-side
+     * instant (the write returned, so the track holds the bytes), and the gap from it to first
+     * audible is the platform's own start-up.
+     */
+    private val firstWriteReported = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** [listener] receives the System.nanoTime at which the run's first accepted write returned. */
+    fun addFirstWriteListener(listener: (Long) -> Unit) {
+        synchronized(firstWriteListeners) { firstWriteListeners += listener }
+    }
+
+    private fun notifyFirstWrite(nanoTime: Long) {
+        synchronized(firstWriteListeners) { firstWriteListeners.toList() }.forEach { it(nanoTime) }
+    }
+
+    private fun notifyFirstAudible(nanoTime: Long) {
+        synchronized(firstAudibleListeners) { firstAudibleListeners.toList() }.forEach { it(nanoTime) }
+    }
+
+    private fun notifyAudible(audible: Boolean) {
+        onPlaybackAudibleChanged?.invoke(audible)
+        synchronized(audibleListeners) { audibleListeners.toList() }.forEach { it(audible) }
+    }
+
     /** Ticks the audible stamp while we are playing, so it cannot go stale mid-answer. */
     private var audibleHeartbeat: Job? = null
     private val frameBuffer = mutableListOf<ByteArray>()
+
+    /** Bytes in [frameBuffer], kept as a running total (under its monitor) so the receive path never rescans it. */
+    private var queuedBytes = 0
     private var playing = false
     private var paused = false
 
@@ -172,11 +247,7 @@ class CloudAudioPlayer(
     /** Re-create the [AudioTrack] and [MediaCodec] decoder to match the negotiated codec. */
     private fun rebuildTrackAndDecoder() {
         stop()
-        decodeCodec?.stop()
-        decodeCodec?.release()
-        decodeCodec = null
-        audioTrack?.release()
-        audioTrack = null
+        releaseTrackAndDecoder()
         ensureAudioTrack()
     }
 
@@ -222,6 +293,15 @@ class CloudAudioPlayer(
      */
     var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
 
+    /**
+     * How long the writer may go WITHOUT WRITING before a caller waiting on it calls it stalled; a
+     * test shortens it. A stall window, not a cap on the drain -- see [awaitWriterIdle].
+     */
+    internal var writerStallTimeoutMs: Long = WRITER_STALL_TIMEOUT_MS
+
+    /** Test seam: called once the detached track has been released, on whichever thread released it. */
+    internal var onTrackReleasedForTest: (() -> Unit)? = null
+
     init {
         ensureAudioTrack()
     }
@@ -234,12 +314,179 @@ class CloudAudioPlayer(
     fun submitFrame(bytes: ByteArray) {
         if (released) return
         synchronized(frameBuffer) {
+            // Refuse frames for an answer whose writer already failed: the drain returns on that flag,
+            // so there is nothing left to write them -- EXCEPT while the answer is still playable,
+            // because the flag is owned by the playback run and is not cleared until the next one
+            // starts: refusing then would swallow the next answer's frames before its first play().
+            // Silently, because the failure was reported when it happened and a second report would
+            // blame the queue cap for it.
+            if (audioWriteFailed && playing) return
+            if (queuedBytes + bytes.size > maxQueuedBytes) {
+                // The answer is over: report it once, and queue nothing more for it.
+                if (!audioWriteFailed) {
+                    Timber.w("[CloudAudio] write queue full at %d bytes; stopping answer", maxQueuedBytes)
+                    audioWriteFailed = true
+                    frameBuffer.clear()
+                    queuedBytes = 0
+                    onWriteFailure?.invoke(submittedSamples)
+                }
+                return
+            }
             frameBuffer.add(bytes)
+            queuedBytes += bytes.size
         }
-        // If we're already playing, try to drain immediately.
+        // If we're already playing, ask the writer to drain; the caller never waits on a device write.
         if (playing && !paused) {
-            drainFrames()
+            scheduleDrain()
         }
+    }
+
+    /** Queues a drain on the writer. Drains are idempotent: one that finds nothing queued returns at once. */
+    private fun scheduleDrain() {
+        try {
+            writerExecutor.execute { drainFrames() }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // The writer was shut down by release(); there is nothing left to write to.
+        }
+    }
+
+    /**
+     * Detaches the track and decoder and releases them on the writer, so the release runs after any write
+     * already in flight: releasing an AudioTrack or MediaCodec another thread is still inside is unsafe.
+     */
+    private fun releaseTrackAndDecoder() {
+        val track = audioTrack
+        val codec = decodeCodec
+        audioTrack = null
+        decodeCodec = null
+        val release = Runnable {
+            codec?.stop()
+            codec?.release()
+            track?.release()
+            onTrackReleasedForTest?.invoke()
+        }
+        try {
+            writerExecutor.execute(release)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            release.run()
+        }
+    }
+
+    /**
+     * How many frames the writer has accepted into the sink. Its monitor is the ONE lock under which
+     * a waiter reads progress and completion together, and under which the writer records a write,
+     * so the two can never be read from either side of a write.
+     *
+     * Progress means a frame reached the sink. A writer paused inside a single frame for longer than
+     * the stall window is reported as stalled: at the production window that is a genuine stall, not
+     * a healthy writer being misjudged.
+     */
+    private class WriterProgress {
+        var units: Int = 0
+    }
+
+    private val writerProgress = WriterProgress()
+
+    /**
+     * Waits up to [stallMs] for the writer to make progress OR for the wait to be over; true when
+     * either happened, false only when neither did for the whole window.
+     *
+     * [done] cannot be left out, and cannot be checked only between windows: a queue that is already
+     * empty at Done completes the barrier with NO further write, so a progress-only wait sits out its
+     * whole window and reports a finished short answer as cut short. That is every short answer, not
+     * a rare race. So it is checked ON EVERY POLL.
+     *
+     * It is read under the SAME lock as the progress count, which the writer also takes to record a
+     * write. Polling the barrier outside that lock would let the waiter read it in the gap after the
+     * last write advanced the counter but before the writer reached the barrier, and start a window
+     * whose starting count is already final -- no write will ever come again. One lock turns that gap
+     * into a decision instead of a guess.
+     */
+    private fun awaitProgressBlocking(stallMs: Long, done: () -> Boolean): Boolean {
+        val progress = writerProgress
+        val before: Int
+        synchronized(progress) { before = progress.units }
+        val deadline = System.nanoTime() + stallMs * 1_000_000L
+        while (true) {
+            // One decision, one lock: the wait is over, or the writer has accepted another frame.
+            synchronized(progress) {
+                if (done() || progress.units != before) return true
+            }
+            if (System.nanoTime() >= deadline) {
+                Timber.w("[CloudAudio] writer made no progress in %d ms", stallMs)
+                return false
+            }
+            Thread.sleep(5L)
+        }
+    }
+
+    private suspend fun awaitProgress(stallMs: Long, done: () -> Boolean): Boolean {
+        val progress = writerProgress
+        val before: Int
+        synchronized(progress) { before = progress.units }
+        val deadline = System.nanoTime() + stallMs * 1_000_000L
+        while (true) {
+            synchronized(progress) {
+                if (done() || progress.units != before) return true
+            }
+            if (System.nanoTime() >= deadline) {
+                Timber.w("[CloudAudio] writer made no progress in %d ms", stallMs)
+                return false
+            }
+            kotlinx.coroutines.delay(5L)
+        }
+    }
+
+    /**
+     * Suspends until every drain queued before this call has finished; false if the writer stalled.
+     *
+     * The timeout is a STALL window, not a cap on the drain: it is how long the writer may go WITHOUT
+     * WRITING anything before it is considered stuck. Timing the whole wait instead makes the answer's
+     * own length the failure condition -- a 30-second answer received in 3 seconds still has more than
+     * the window's worth of audio queued when the turn ends, is written perfectly steadily, and would
+     * be cut off with its tail discarded. Playback paces the writer, so only progress separates
+     * "still working" from "never coming back". Completion is checked on every poll too, so an
+     * already-empty queue ends the wait at once instead of sitting out a window.
+     */
+    private suspend fun awaitWriterIdle(): Boolean {
+        val idle = kotlinx.coroutines.CompletableDeferred<Unit>()
+        try {
+            writerExecutor.execute { idle.complete(Unit) }
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            return true
+        }
+        while (!idle.isCompleted) {
+            if (!awaitProgress(writerStallTimeoutMs, done = { idle.isCompleted })) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /**
+     * Blocks until every drain queued before this call has finished. False when the writer STALLED
+     * first. Never call while holding [frameBuffer].
+     *
+     * Waits on a barrier, but the barrier is not the thing being timed: the writer is PLAYBACK-PACED,
+     * so a long answer legitimately takes a long time to write, and timing the whole wait would call
+     * a steady backlog a stall and drop its tail. See [awaitProgressBlocking].
+     */
+    private fun awaitWriterIdleBlocking(): Boolean {
+        // Answers whether this barrier has run, under the same lock the writer's writes take, so that
+        // reading it can never happen in a gap that a later write will invalidate.
+        val barrier = java.util.concurrent.FutureTask<Unit> { }
+        try {
+            writerExecutor.execute(barrier)
+        } catch (e: java.util.concurrent.RejectedExecutionException) {
+            // Shut down: nothing is pending, so nothing was left undrained.
+            return true
+        }
+        while (!barrier.isDone) {
+            if (!awaitProgressBlocking(writerStallTimeoutMs, done = { barrier.isDone })) {
+                return false
+            }
+        }
+        return true
     }
 
     // Owned by one playback run, not by the lifetime of the reusable AudioTrack.
@@ -256,6 +503,8 @@ class CloudAudioPlayer(
         // exactly one frame -- playback resumed past the gap and the sink still appended the error
         // earcon after nearly the whole answer. Reset it here, where the run begins.
         audioWriteFailed = false
+        writesInRun.set(0)
+        firstWriteReported.set(false)
         resampler = ChunkResampler()
         answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
     }
@@ -273,14 +522,14 @@ class CloudAudioPlayer(
             if (paused) {
                 audioTrack?.play()
                 paused = false
-                drainFrames()
+                scheduleDrain()
                 Timber.i("[CloudAudio] resumed")
                 startAudibleHeartbeat()
             } else if (!playing) {
                 startPlaybackRun()
                 audioTrack?.play()
                 playing = true
-                drainFrames()
+                scheduleDrain()
                 Timber.i("[CloudAudio] started")
                 startAudibleHeartbeat()
             }
@@ -304,13 +553,20 @@ class CloudAudioPlayer(
      *
      * Use this on turn completion so the last audio frames land before the player
      * resets. Call [stop] when a turn is superseded and stale frames must not play.
+     *
+     * @return true when every frame queued before this call was written; false when the writer was
+     * still busy at the cap, so the queued tail was dropped and the answer was cut short. A timeout
+     * is never reported as a clean drain: the whole point of waiting is to know whether the tail
+     * landed, and a caller that cannot tell would record a truncated answer as a complete one.
      */
-    fun drainAndStop() {
-        if (released) return
-        synchronized(frameBuffer) {
-            drainFrames()
-        }
+    fun drainAndStop(): Boolean {
+        // stop() below discards the buffer, so the stall is evaluated before it, exactly as the
+        // suspending path does.
+        if (released) return true
+        scheduleDrain()
+        val drained = awaitWriterIdleBlocking()
         stop()
+        return drained
     }
 
     /** Whether the output is observed to have consumed everything submitted to it. */
@@ -338,10 +594,13 @@ class CloudAudioPlayer(
      */
     suspend fun drainAndAwaitCompletion(timeoutMs: Long = 10_000L): Completion {
         if (released) return Completion.Unknown
-        val submittedAtSubmitTime = synchronized(frameBuffer) {
-            drainFrames()
-            trackFrames
+        scheduleDrain()
+        if (!awaitWriterIdle()) {
+            // A stalled write: what was queued behind it is not written, so the answer is cut short.
+            stop()
+            return Completion.Unconsumed
         }
+        val submittedAtSubmitTime = synchronized(frameBuffer) { trackFrames }
         // Whether ANY observation was made while waiting: this is the distinction between Unknown
         // (the platform offered no head, so nothing was measured) and Unconsumed (the head reported
         // but never arrived). It must be taken DURING the wait -- after stop() the track reports a
@@ -390,7 +649,11 @@ class CloudAudioPlayer(
             val admission = answerAdmission
             answerAdmission = null
             frameBuffer.clear()
+            queuedBytes = 0
             if (playing) {
+                // Sample BEFORE stop(): a stopped track's timestamp can be stale or unavailable,
+                // and this stop may be the only sample point a short answer gets.
+                sampleFirstAudible()
                 audioTrack?.stop()
                 playing = false
                 paused = false
@@ -446,12 +709,23 @@ class CloudAudioPlayer(
         }
         observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
-        onPlaybackAudibleChanged?.invoke(true)
+        notifyAudible(true)
+        // A new run presents again: clear the previous run's latch so the next answer gets its
+        // own first-audible instant.
+        firstAudibleFired.set(false)
         audibleHeartbeat = heartbeatScope.launch {
+            // SAMPLE NOW, before the first tick: an answer shorter than the heartbeat interval
+            // can finish and stop the heartbeat before the first delay elapses, and would then
+            // never report a first audible at all. The tick below keeps sampling later frames.
+            sampleFirstAudible()
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
                 if (!isPlaying) break
-                onPlaybackAudibleChanged?.invoke(true)
+                notifyAudible(true)
+                // Presentation evidence rides the same tick: if the track has presented its
+                // first frame by now, this run's first audible is THAT instant, not the
+                // submission stamp above.
+                sampleFirstAudible()
             }
         }
     }
@@ -459,7 +733,28 @@ class CloudAudioPlayer(
     private fun stopAudibleHeartbeat() {
         audibleHeartbeat?.cancel()
         audibleHeartbeat = null
-        onPlaybackAudibleChanged?.invoke(false)
+        // LAST CHANCE: an answer that finished inside the first heartbeat interval presented
+        // between the ticks; sample on the way out so short answers still report first audible.
+        sampleFirstAudible()
+        notifyAudible(false)
+    }
+
+    /**
+     * Sample the track's presentation clock once and fire first audible on the first evidence.
+     * Idempotent: the [firstAudibleFired] latch makes every repeat call a no-op, so a sampled
+     * run reports first audible exactly once no matter how many paths sample it.
+     */
+    private fun sampleFirstAudible() {
+        // VALIDATE FIRST, latch second: the first sample right after play() usually finds no
+        // presentation yet, and latching before that check would make every later sample a
+        // no-op — losing first audible on every short turn. compareAndSet keeps the fire
+        // exactly once even when the heartbeat and the stop path sample together.
+        val ts = audioTrack?.let { track ->
+            readAudioTimestamp?.invoke(track) ?: android.media.AudioTimestamp().takeIf { track.getTimestamp(it) }
+        }
+        if (ts != null && ts.framePosition > 0 && firstAudibleFired.compareAndSet(false, true)) {
+            notifyFirstAudible(ts.nanoTime)
+        }
     }
 
     private val heartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -472,11 +767,8 @@ class CloudAudioPlayer(
         stop()
         released = true
         heartbeatScope.cancel()
-        decodeCodec?.stop()
-        decodeCodec?.release()
-        decodeCodec = null
-        audioTrack?.release()
-        audioTrack = null
+        releaseTrackAndDecoder()
+        (writerExecutor as? java.util.concurrent.ExecutorService)?.shutdown()
         Timber.i("[CloudAudio] released")
     }
 
@@ -510,9 +802,35 @@ class CloudAudioPlayer(
 
         audioTrack = track
         trackFrames = 0L
+        // The buffer bounds how far ahead the receive path can run, and the start threshold is how
+        // much must be written before the platform starts mixing, so both explain an early frame.
+        val startThreshold = if (android.os.Build.VERSION.SDK_INT >= 31) track.startThresholdInFrames.toString() else "n/a"
+        Timber.i(
+            "[CloudAudio] track buffer_frames=%d start_threshold_frames=%s min_buf_bytes=%d rate=%d",
+            track.bufferSizeInFrames,
+            startThreshold,
+            minBufSize,
+            currentSampleRate,
+        )
     }
 
+    /**
+     * Report how long a write took. A blocking write that sits on a track the platform stopped mixing
+     * holds the whole receive path and leaves no other trace, so the first writes of every run are
+     * reported with their size (the first one is the first frame's), and any write that is slow
+     * wherever it falls. Logging only.
+     */
+    private fun reportWriteTiming(bytes: Int, durationMs: Long) {
+        val index = writesInRun.incrementAndGet()
+        if (index > TIMED_WRITES_PER_RUN && durationMs < SLOW_WRITE_MS) return
+        val sample = WriteSample(index, bytes, durationMs)
+        Timber.i("[CloudAudio] write index=%d bytes=%d took_ms=%d", sample.index, sample.bytes, sample.durationMs)
+        writeSampleListener?.invoke(sample)
+    }
+
+    /** The write loop, on the writer thread. */
     private fun drainFrames() {
+        val progress = writerProgress
         val track = audioTrack ?: return
         if (!playing || paused) return
         val generation = trackGeneration
@@ -536,7 +854,9 @@ class CloudAudioPlayer(
                 } else {
                     previous
                 }
-                frameBuffer.removeAt(0) to current
+                val next = frameBuffer.removeAt(0)
+                queuedBytes -= next.size
+                next to current
             }
 
             // Decode if needed.
@@ -552,6 +872,7 @@ class CloudAudioPlayer(
                 var offset = 0
                 while (offset < pcmBytes.size) {
                     val writer = writeToSink
+                    val writeStartedNanos = System.nanoTime()
                     val written = if (writer != null) {
                         writer(track, pcmBytes, offset, pcmBytes.size - offset)
                     } else {
@@ -561,6 +882,16 @@ class CloudAudioPlayer(
                             pcmBytes.size - offset,
                             AudioTrack.WRITE_BLOCKING,
                         )
+                    }
+                    val writeReturnedNanos = System.nanoTime()
+                    reportWriteTiming(pcmBytes.size - offset, (writeReturnedNanos - writeStartedNanos) / 1_000_000L)
+                    if (written > 0 && firstWriteReported.compareAndSet(false, true)) {
+                        notifyFirstWrite(writeReturnedNanos)
+                    }
+                    if (written > 0) {
+                        // Under the lock the waiters read, so progress and completion are never seen
+                        // from either side of this write.
+                        synchronized(progress) { progress.units += 1 }
                     }
                     if (written <= 0) {
                         // An explicit failure rather than a silent drop: stop this answer and report
@@ -825,6 +1156,36 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /** Runs each task on the thread that submitted it: synchronous writes, for deterministic tests. */
+        val CALLER_THREAD: java.util.concurrent.Executor = java.util.concurrent.Executor { it.run() }
+
+        /** A single daemon thread, so frames are written in order and never on the receive path. */
+        internal fun dedicatedWriter(): java.util.concurrent.Executor = java.util.concurrent.Executors.newSingleThreadExecutor { task ->
+            Thread(task, "cloud-audio-writer").apply { isDaemon = true }
+        }
+
+        /**
+         * How long the writer may go without writing before it is treated as stalled.
+         *
+         * Ten seconds of NO PROGRESS is a stuck device write: a healthy track consumes the backlog at
+         * the rate the answer plays, well faster than that per frame. Elapsed time cannot serve here,
+         * because a long answer legitimately takes a long time to finish writing.
+         */
+        internal const val WRITER_STALL_TIMEOUT_MS = 10_000L
+
+        /**
+         * The most unwritten audio held. Receive is not throttled by playback, so this holds an
+         * answer's whole unplayed remainder; it exists to stop growth behind a writer that never returns,
+         * not to cap an answer. 64 MiB is about 22 minutes of 24 kHz mono s16le.
+         */
+        internal const val MAX_QUEUED_BYTES = 64 * 1024 * 1024
+
+        /** How many writes at the start of each run are timed regardless of how long they took. */
+        internal const val TIMED_WRITES_PER_RUN = 5
+
+        /** A write at or above this is reported wherever it falls in the run. */
+        internal const val SLOW_WRITE_MS = 250L
 
         /**
          * Resamples a stream of chunks while preserving phase and audio continuity across them.

@@ -57,6 +57,25 @@ target_compile_options(vad_segment_test PRIVATE -Wall -Wextra -O1 -g)
 
 target_link_libraries(vad_segment_test PRIVATE Threads::Threads)
 
+# The in-progress utterance snapshot: what the client can read while the user is still speaking.
+# Same shape as vad_segment_test, because both drive the real frame loop through a scripted capture.
+add_executable(vad_in_progress_test
+    VadInProgressSnapshotTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_in_progress_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+target_compile_options(vad_in_progress_test PRIVATE -Wall -Wextra -O1 -g)
+
+target_link_libraries(vad_in_progress_test PRIVATE Threads::Threads)
+
 # The JNI processor lifetime guard is header-only and templated on the processor type, so this
 # target needs only the production header — no Oboe, no JNI, no NativeVadProcessor.cpp.
 add_executable(vad_handle_test
@@ -90,6 +109,58 @@ target_include_directories(vad_snapshot_carryover_test PRIVATE
 target_compile_options(vad_snapshot_carryover_test PRIVATE -Wall -Wextra -O1 -g)
 
 target_link_libraries(vad_snapshot_carryover_test PRIVATE Threads::Threads)
+
+# Each queued end event must deliver its OWN segment. The producer builds the finished-segment copy
+# from the same snapshot members waitForEvent overwrites when it serves an end event, so the copy has
+# to happen under mSpeechMutex. Same shape as the carry-over target: no Oboe library, VAD externs
+# stubbed in the test file.
+add_executable(vad_segment_delivery_test
+    VadSegmentDeliveryTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_segment_delivery_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+target_compile_options(vad_segment_delivery_test PRIVATE -Wall -Wextra -O1 -g)
+
+target_link_libraries(vad_segment_delivery_test PRIVATE Threads::Threads)
+
+# The same control built with ThreadSanitizer, so the race question is answerable by anyone rather
+# than only by a hand-run command. TSAN reports an unsynchronised access pair from the vector's own
+# history, without needing the bad interleaving to occur.
+#
+# WHAT IT SHOWS TODAY: nothing, either with the segment copy inside mSpeechMutex or with it moved back
+# outside that scope -- including with a consumer busy for 30 ms after each delivery, so later
+# utterances complete while it is still on an older queued end event. The two versions differ exactly
+# as the fix intended: the copy of mSnapshotBuffer holds mSpeechMutex in this build, and did not before
+# it. The sanitizer reports no race in either, and this build's code does not explain that silence, so
+# it is not offered as evidence for the placement -- which stays verified against the source. TSAN does
+# report a deliberate race in a self-test on this toolchain, so the silence concerns this access pair
+# rather than the instrumentation.
+add_executable(vad_segment_delivery_tsan_test
+    VadSegmentDeliveryTest.cpp
+    ${CPP_DIR}/NativeVadProcessor.cpp
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
+)
+
+target_include_directories(vad_segment_delivery_tsan_test PRIVATE
+    ${SHIM_DIR}
+    ${CPP_DIR}
+    ${OBOE_INCLUDE}
+)
+
+# Sanitizer in BOTH compile and link, or the runtime is not instrumented.
+target_compile_options(vad_segment_delivery_tsan_test PRIVATE -Wall -Wextra -O1 -g -fsanitize=thread)
+target_link_options(vad_segment_delivery_tsan_test PRIVATE -fsanitize=thread)
+
+target_link_libraries(vad_segment_delivery_tsan_test PRIVATE Threads::Threads)
 
 # The capture/VAD start-ownership control compiles the REAL jni_bridge.cpp entry points together
 # with the real capture and processor translation units. JniBridgeHostPlatformStubs.cpp supplies

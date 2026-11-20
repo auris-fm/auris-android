@@ -268,9 +268,18 @@ class AndroidPlatformTtsEngine @Inject constructor(
                             completeOnce(false)
                         }
                         if (!continuation.isActive) {
-                            // A cancellation landed between registering the listener and the call, so stop
-                            // the queued synthesis rather than leaving it orphaned.
-                            engine.stop()
+                            // A cancellation landed while the platform call was in flight (a slow
+                            // synthesizeToFile outliving the synthesis deadline): the queued synthesis
+                            // must be stopped rather than left orphaned -- but ONLY while this
+                            // utterance still owns the engine. A successor may have claimed the
+                            // generation while the call was parked, and an unguarded stop here would
+                            // silence the successor's synthesis or playback (same boundary as the
+                            // cancellation handler above).
+                            synthesisLock.withLock {
+                                if (synthesisGeneration == mine) {
+                                    engine.stop()
+                                }
+                            }
                         }
                     }
                 }

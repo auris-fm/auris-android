@@ -24,6 +24,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.doNothing
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.spy
@@ -65,7 +66,7 @@ class VoiceControlServiceFeedbackLifecycleTest {
         }
     }
 
-    private suspend fun service(renderer: AudioFeedbackRenderer, reply: String): VoiceControlService = spy(VoiceControlService()).apply {
+    private suspend fun service(renderer: AudioFeedbackRenderer, reply: String): VoiceControlService = spy(VoiceControlService().also { it.voiceSessionGate = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceSessionGate() }).apply {
         audioFeedbackRenderer = renderer
         playbackBufferRecorder = mock<PlaybackBufferRecorder>()
         routeAcquisition = mock<RouteAcquisition>()

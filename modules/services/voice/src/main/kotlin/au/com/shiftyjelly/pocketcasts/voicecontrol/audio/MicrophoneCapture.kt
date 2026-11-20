@@ -73,16 +73,15 @@ class MicrophoneCapture @Inject constructor(
         fun diagnostics(): VadDiagnostics? {
             if (!BuildConfig.DEBUG) return null
             val values = OboeNative.nativeGetVadDiagnostics()
-            if (values.size < 8) return null
+            if (values.size < 7) return null
             return VadDiagnostics(
                 rms = values[0] / 1000.0,
                 score = values[1] / 1000.0f,
                 speechFrames = values[2].toInt(),
                 silentFrames = values[3].toInt(),
-                drainRemaining = values[4].toInt(),
-                gatePassed = values[5] == 1L,
-                isSpeech = values[6] == 1L,
-                speechActive = values[7] == 1L,
+                gatePassed = values[4] == 1L,
+                isSpeech = values[5] == 1L,
+                speechActive = values[6] == 1L,
             )
         }
 
@@ -98,7 +97,6 @@ class MicrophoneCapture @Inject constructor(
             val score: Float,
             val speechFrames: Int,
             val silentFrames: Int,
-            val drainRemaining: Int,
             val gatePassed: Boolean,
             val isSpeech: Boolean,
             val speechActive: Boolean,

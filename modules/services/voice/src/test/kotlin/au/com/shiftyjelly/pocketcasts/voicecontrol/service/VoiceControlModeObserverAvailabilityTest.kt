@@ -1130,16 +1130,17 @@ class VoiceControlModeObserverAvailabilityTest {
             settleUntil("observer has seen the final device identity", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
             }
-            // PIN THE ACQUISITION STATE THE CALLERS RELY ON: the attempt is OUT of flight here
-            // (empirically pinned: acq=false on every run). The staged shape is "no attempt in
-            // flight": after healing (bringScoUp), the restart/fallback start comes from the
-            // observer's route triggers, never from this attempt completing -- a live attempt
-            // would be an uncontrolled variable that could double-start on heal or fail and
-            // spend the staged restart. Its failure is also unreachable inside the wedge: the
-            // only trigger is the virtual timeout settleUntil never grants.
-            settleUntil("no acquisition attempt in flight", probe = { "acq=${getField(harness.service, "acquisitionJob") != null} " + harness.wedgeState() }) {
-                getField(harness.service, "acquisitionJob") == null
-            }
+            // PIN THE ACQUISITION STATE THE CALLERS RELY ON -- asserted, not waited: absence is
+            // the invariant at this point (the observer's route run resolved the held attempt
+            // when it committed the broadcast capture, before the clock freeze), so a wait here
+            // would only stall if a future poll were pending. After healing (bringScoUp), the
+            // restart/fallback start comes from the observer's route TRIGGERS, never from this
+            // attempt completing -- a live attempt would be an uncontrolled variable that could
+            // double-start on heal or fail and spend the staged restart.
+            org.junit.Assert.assertTrue(
+                "staged shape: no acquisition attempt may be in flight once the broadcast capture committed (state: " + harness.wedgeState() + ")",
+                getField(harness.service, "acquisitionJob") == null,
+            )
             // PIN THE ENGINE AS STARTED BEFORE THE CAPTURE DIES: onPipelineTerminated early-returns
             // when the engine generation is stale or the start was never committed, and then NO
             // restart is armed at all (pending=false, timer=null, credit untouched). attachCount>=1
@@ -1358,9 +1359,11 @@ assertEquals(
      * fresh wait after the clear must schedule a fresh bound, not inherit the expiry.
      */
     /**
-     * The held-confirmation shape, released INSIDE the bound: the route and acquisition
-     * emissions re-run the decision the normal way — one restart, the timer cancelled, and the
-     * bound never fires. This is the only test showing the bound stays silent when it should.
+     * The held-confirmation shape, released INSIDE the bound: the wedge stages NO live
+     * acquisition, so the restart the test exercises is driven by the observer's ROUTE
+     * TRIGGERS when the platform heals (bringScoUp) — one restart, the timer cancelled, and
+     * the bound never fires. This is the only test showing the bound stays silent when it
+     * should.
      */
     /**
      * The held-confirmation wedge, released inside the bound: the SCO selection completes while

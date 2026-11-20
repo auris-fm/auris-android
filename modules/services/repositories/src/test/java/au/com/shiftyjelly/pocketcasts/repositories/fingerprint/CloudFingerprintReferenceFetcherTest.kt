@@ -20,20 +20,45 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 class CloudFingerprintReferenceFetcherTest {
 
-    private class FixedTokenProvider(private val token: String?) :
-        au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
-        override suspend fun currentToken(): String? = token
+    /**
+     * A REAL AurisTokenProvider against a mock auth issuer. [credential] null models no signed-in
+     * account (fail closed); otherwise the issuer mints [access].
+     */
+    private fun providerFor(credential: String?, access: String, authServer: MockWebServer?):
+        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider {
+        authServer?.enqueue(mintResponse(access))
+        return au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+            clientProvider = {
+                authServer?.let {
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(it.url("/").toString().trimEnd('/'))
+                }
+            },
+            credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+                override fun credential(): String? = credential
+            },
+        )
     }
 
-    /** Serves a stale token until refreshed, then a fresh one — the turn route's 401 posture. */
-    private class RefreshingTokenProvider :
-        au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
-        var refreshes = 0
-        override suspend fun currentToken(): String = if (refreshes == 0) "stale-token" else "fresh-token"
-        override suspend fun refreshToken() {
-            refreshes++
+    /** An issuer that mints stale-token first, then fresh-token — the turn route's 401 posture. */
+    private fun refreshingProvider(authServer: MockWebServer):
+        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider {
+        val minted = java.util.concurrent.atomic.AtomicInteger(0)
+        authServer.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse =
+                mintResponse(if (minted.incrementAndGet() == 1) "stale-token" else "fresh-token")
         }
+        return au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+            clientProvider = {
+                au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(authServer.url("/").toString().trimEnd('/'))
+            },
+            credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+                override fun credential(): String = "session"
+            },
+        )
     }
+
+    private fun mintResponse(access: String): MockResponse = MockResponse().setResponseCode(200)
+        .setBody("""{"access_token":"$access","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}""")
 
     private fun compactV2Json(): String {
         val windows = CloudFingerprintParityData.signal16kMonoWindows
@@ -60,7 +85,7 @@ class CloudFingerprintReferenceFetcherTest {
 
     @Test
     fun `buildMatcher parses compact-v2 checkpoints with correct hashes`() {
-        val matcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
+        val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
             .buildMatcher(compactV2Json().toByteArray())
 
         assertNotNull(matcher)
@@ -78,7 +103,7 @@ class CloudFingerprintReferenceFetcherTest {
 
     @Test
     fun `buildMatcher returns null for invalid payload`() {
-        val matcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
+        val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
             .buildMatcher("not json".toByteArray())
         assertNull(matcher)
     }
@@ -95,7 +120,7 @@ class CloudFingerprintReferenceFetcherTest {
               "checkpoints": []
             }
         """.trimIndent()
-        val matcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
+        val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
             .buildMatcher(json.toByteArray())
         assertNull(matcher)
     }
@@ -107,7 +132,9 @@ class CloudFingerprintReferenceFetcherTest {
         server.start()
 
         try {
-            val fetcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("auris-access-token-1"))
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "auris-access-token-1", auth))
             val matcher = runBlocking {
                 fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
             }
@@ -119,6 +146,7 @@ class CloudFingerprintReferenceFetcherTest {
             assertEquals("/api/v1/episodes/ep_1/fingerprints?podcast_id=pod_1", request.path)
             // The SAME credential the turn route presents -- never the TOFU user_<uuid>.
             assertEquals("Bearer auris-access-token-1", request.getHeader("Authorization"))
+            auth.shutdown()
         } finally {
             server.shutdown()
         }
@@ -132,8 +160,9 @@ class CloudFingerprintReferenceFetcherTest {
         server.start()
 
         try {
-            val tokens = RefreshingTokenProvider()
-            val fetcher = CloudFingerprintReferenceFetcher(tokens)
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(refreshingProvider(auth))
             val matcher = runBlocking {
                 fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
             }
@@ -142,7 +171,8 @@ class CloudFingerprintReferenceFetcherTest {
             assertEquals(2, server.requestCount)
             assertEquals("Bearer stale-token", server.takeRequest().getHeader("Authorization"))
             assertEquals("Bearer fresh-token", server.takeRequest().getHeader("Authorization"))
-            assertEquals("exactly one forced refresh", 1, tokens.refreshes)
+            assertEquals("one initial mint plus exactly one forced refresh", 2, auth.requestCount)
+            auth.shutdown()
         } finally {
             server.shutdown()
         }
@@ -156,14 +186,16 @@ class CloudFingerprintReferenceFetcherTest {
         server.start()
 
         try {
-            val tokens = RefreshingTokenProvider()
-            val fetcher = CloudFingerprintReferenceFetcher(tokens)
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(refreshingProvider(auth))
             val matcher = runBlocking {
                 fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
             }
             assertNull(matcher)
             assertEquals("one retry, never a loop", 2, server.requestCount)
-            assertEquals(1, tokens.refreshes)
+            assertEquals(2, auth.requestCount)
+            auth.shutdown()
         } finally {
             server.shutdown()
         }
@@ -175,7 +207,7 @@ class CloudFingerprintReferenceFetcherTest {
         server.start()
 
         try {
-            val fetcher = CloudFingerprintReferenceFetcher(FixedTokenProvider(null))
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
             val matcher = runBlocking {
                 fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1")
             }
@@ -193,7 +225,7 @@ class CloudFingerprintReferenceFetcherTest {
         server.start()
 
         try {
-            val fetcher = CloudFingerprintReferenceFetcher(FixedTokenProvider("user_test"))
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
             val matcher = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_missing", "pod_1") }
             assertNull(matcher)
         } finally {

@@ -8,7 +8,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,7 +24,10 @@ import timber.log.Timber
  */
 @Singleton
 class CloudFingerprintReferenceFetcher @Inject constructor(
-    private val tokenProvider: CloudTokenProviding,
+    // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
+    // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
+    // route's verifier cannot accept that. No config flag may swap this bearer.
+    private val tokenProvider: AurisTokenProvider,
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -32,8 +35,8 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         .build()
 
     suspend fun fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String): CloudReferenceMatcher? {
-        // The SAME credential the turn route presents (config-gated routing provider), never the
-        // TOFU user_<uuid>: generating a reference is paid work, so it needs a verified token.
+        // The SAME credential the turn route presents, never the TOFU user_<uuid>: generating a
+        // reference is paid work, so it needs a verified token.
         // FAIL CLOSED: no usable token means no request at all.
         val token = tokenProvider.currentToken() ?: return null
         val first = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token) }

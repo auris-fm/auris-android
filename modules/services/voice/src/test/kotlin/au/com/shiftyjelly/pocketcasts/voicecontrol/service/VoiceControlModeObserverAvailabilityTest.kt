@@ -1658,20 +1658,31 @@ assertEquals(
         // it opened), or the stop may win and drop the late request. The contract under test is
         // the OUTCOME: the initial open MUST have happened, and once the stop and all queued
         // opener work have settled, NO connection from either tag is left open.
-        val barrier = getField(harness.service, "shutdownBarrier")
+        // HOLD the late dial on a test-side signal until SHUTDOWN HAS STARTED: the barrier's
+        // closed flag flips the instant teardown snapshots the owned jobs. Waiting on the test
+        // socket's CLOSE instead would deadlock by construction -- the opener's shutdown runs
+        // AFTER the barrier joins (VoiceControlService teardown), so a barrier-owned job that
+        // waits for that close waits for something that can only happen after its own join. The
+        // closed flag pins the dial INSIDE the teardown window without that trap.
+        val barrierObj = getField(harness.service, "shutdownBarrier")!!
+        val barrierClosed = barrierObj.javaClass.getDeclaredMethod("isClosed").apply { isAccessible = true }
         val lateDial = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            kotlinx.coroutines.withTimeoutOrNull(30_000) {
+                while (!(barrierClosed.invoke(barrierObj) as Boolean)) kotlinx.coroutines.yield()
+            }
             opener.openForLater("utt-stop-late")
             lateSubmitted.countDown()
         }
-        barrier!!.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
-            .invoke(barrier, listOf(lateDial))
+        barrierObj.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
+            .invoke(barrierObj, listOf(lateDial))
         try {
             opener.openForLater("utt-stop-test")
             // REQUIRE the initial open: generous wall-clock bound (a starved opener thread is a
             // host artifact), but expiry is a FAILURE, not a pass -- the test must not pass
             // without ever exercising the teardown against a live connection.
+            // The TEST tag specifically: a stray open from any other path must not satisfy this.
             val firstOpened = kotlinx.coroutines.withTimeoutOrNull(30_000) {
-                while (opened.isEmpty()) kotlinx.coroutines.yield()
+                while (opened.none { it.ownerTag == "utt-stop-test" }) kotlinx.coroutines.yield()
                 true
             } == true
             org.junit.Assert.assertTrue("fixture: the initial open must have run", firstOpened)

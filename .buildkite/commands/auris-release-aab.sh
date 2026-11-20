@@ -58,17 +58,36 @@ else
 fi
 printf '%s\n' "${AURIS_SECRET_PROPERTIES:-}" > secret.properties
 
-# Signing, only once the upload keystore exists as agent secrets. APPEND the
-# signing keys to secret.properties so the non-signing keys survive.
+# Signing inputs arrive under EITHER naming scheme:
+#   ANDROID_UPLOAD_KEYSTORE_B64 (+ _PASSWORD/_ALIAS/_KEY_PASSWORD)  -- base64
+#   UPLOAD_KEYSTORE_PATH        (+ _PASSWORD/_ALIAS/_KEY_PASSWORD)  -- file path
+# (the mini's hook exports the PATH form; #69 went green UNSIGNED because the
+# script only knew the B64 form). APPEND the signing keys to secret.properties
+# so the non-signing keys survive.
 if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
   echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keystore
+  SIGNING_STORE="$PWD/auris-upload.keystore"
+  SIGNING_STORE_PASSWORD="${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}"
+  SIGNING_ALIAS="${ANDROID_UPLOAD_KEY_ALIAS:-}"
+  SIGNING_KEY_PASSWORD="${ANDROID_UPLOAD_KEY_PASSWORD:-}"
+elif [ -n "${UPLOAD_KEYSTORE_PATH:-}" ]; then
+  SIGNING_STORE="$UPLOAD_KEYSTORE_PATH"
+  SIGNING_STORE_PASSWORD="${UPLOAD_KEYSTORE_PASSWORD:-}"
+  SIGNING_ALIAS="${UPLOAD_KEYSTORE_ALIAS:-}"
+  SIGNING_KEY_PASSWORD="${UPLOAD_KEYSTORE_KEY_PASSWORD:-}"
+fi
+if [ -n "${SIGNING_STORE:-}" ]; then
+  if [ ! -f "$SIGNING_STORE" ]; then
+    echo "--- signing keystore not found at the configured path" >&2
+    exit 1
+  fi
   printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
-    "$PWD/auris-upload.keystore" \
-    "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
-    "$ANDROID_UPLOAD_KEY_ALIAS" \
-    "$ANDROID_UPLOAD_KEY_PASSWORD" >> secret.properties
+    "$SIGNING_STORE" "$SIGNING_STORE_PASSWORD" "$SIGNING_ALIAS" "$SIGNING_KEY_PASSWORD" >> secret.properties
+elif [ "${AURIS_REQUIRE_SIGNING:-0}" = "1" ]; then
+  echo "--- AURIS_REQUIRE_SIGNING=1 but no keystore input is set: refusing to build unsigned" >&2
+  exit 1
 else
-  echo "--- no keystore secret yet: building an unsigned release AAB (dry run)"
+  echo "--- no keystore input: building an unsigned release AAB (dry run)"
 fi
 
 # Two Automattic-internal defaults are switched off for the Auris queue, by
@@ -85,6 +104,17 @@ tail -n 2 settings.gradle.kts
 # skipSentryProguardMappingUpload: CI=true enables the mapping upload, but the
 # release secrets carry no Sentry token here; same flag as assemble-release-apk.sh.
 ./gradlew :app:bundleRelease --no-daemon -PskipSentryProguardMappingUpload=true
+
+# Prove the outcome, not just the inputs: when signing was requested the
+# bundle must carry a certificate, and it must be THE upload certificate.
+# AURIS_UPLOAD_CERT_SHA256 pins the expected SHA-256 fingerprint (non-secret;
+# from upload-cert.pem / Google's reset). Unsigned or wrongly signed fails.
+if [ -n "${SIGNING_STORE:-}" ]; then
+  echo "--- Verifying bundle signature"
+  bash "$(dirname "$0")/auris-verify-bundle-signature.sh" \
+    app/build/outputs/bundle/release/app-release.aab \
+    "${AURIS_UPLOAD_CERT_SHA256:-}"
+fi
 
 AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
 [ -n "$AAB" ] || { echo "no AAB produced"; exit 1; }

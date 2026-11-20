@@ -22,6 +22,12 @@ if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then
   exit 0
 fi
 
+# Never upload an unsigned dry-run AAB: Play rejects it with a signature error.
+if [ -z "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
+  echo "--- ANDROID_UPLOAD_KEYSTORE_B64 not set: the AAB is unsigned, stopping (dry run)"
+  exit 0
+fi
+
 echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
 buildkite-agent artifact download "app/build/outputs/bundle/release/*.aab" .
 bundle install --quiet

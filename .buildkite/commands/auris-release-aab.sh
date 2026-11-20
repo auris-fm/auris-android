@@ -15,30 +15,45 @@ echo "--- effective caps in gradle.properties"
 tail -n 3 gradle.properties
 
 # Version code: continue the repo's counter with this build's number so every
-# beta upload is strictly higher than the last.
+# beta upload is strictly higher than the last. Portable in-place edit (BSD
+# and GNU sed both accept -i.bak); no `timeout` wrapper -- the step's own
+# 70-minute limit bounds the build, and stock macOS has no GNU timeout.
 BASE=$(sed -n 's/^versionCode=//p' version.properties)
 NEW=$((BASE + BUILDKITE_BUILD_NUMBER))
-sed -i '' "s/^versionCode=.*/versionCode=$NEW/" version.properties
+sed -i.bak "s/^versionCode=.*/versionCode=$NEW/" version.properties
+rm -f version.properties.bak
 echo "versionCode $BASE -> $NEW"
 
 cleanup() {
-  rm -f auris-upload.keystore secret.properties
+  rm -f auris-upload.keystore
 }
 trap cleanup EXIT
 
-# Signing, only once the upload keystore exists as agent secrets.
+echo "--- :closed_lock_with_key: Installing Secrets"
+# configure_apply decrypts .configure-files into google-services.json (the
+# google-services plugin aborts without it) and secret.properties (the
+# non-signing secrets: sentryAuthToken, develocityToken, ...). It needs the
+# repo's encryption key in the environment, as on the other CI queues.
+bundle install --quiet
+bundle exec fastlane run configure_apply
+
+# Signing, only once the upload keystore exists as agent secrets. APPEND the
+# signing keys to the secret.properties configure_apply wrote -- replacing it
+# would drop the non-signing secrets.
 if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
   echo "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 --decode > auris-upload.keystore
   printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
     "$PWD/auris-upload.keystore" \
     "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \
     "$ANDROID_UPLOAD_KEY_ALIAS" \
-    "$ANDROID_UPLOAD_KEY_PASSWORD" > secret.properties
+    "$ANDROID_UPLOAD_KEY_PASSWORD" >> secret.properties
 else
   echo "--- no keystore secret yet: building an unsigned release AAB (dry run)"
 fi
 
-timeout 3600 ./gradlew :app:bundleRelease --no-daemon
+# skipSentryProguardMappingUpload: CI=true enables the mapping upload, but the
+# release secrets carry no Sentry token here; same flag as assemble-release-apk.sh.
+./gradlew :app:bundleRelease --no-daemon -PskipSentryProguardMappingUpload=true
 
 AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
 [ -n "$AAB" ] || { echo "no AAB produced"; exit 1; }

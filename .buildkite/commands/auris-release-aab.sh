@@ -101,6 +101,5 @@ bash "$(dirname "$0")/auris-verify-bundle-signature.sh" \
   app/build/outputs/bundle/release/app-release.aab \
   "${AURIS_UPLOAD_CERT_SHA256:-}"
 
-AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
-[ -n "$AAB" ] || { echo "no AAB produced"; exit 1; }
-buildkite-agent artifact upload "$AAB"
+# Publish ONLY the verified bundle, and only after verification passed.
+buildkite-agent artifact upload app/build/outputs/bundle/release/app-release.aab

@@ -838,10 +838,33 @@ class VoiceControlModeObserverAvailabilityTest {
             // The SCO state broadcast arrives first: the route reads Headset and the observer
             // starts the stream itself, before the acquisition has observed selection.
             harness.scoPlatform.deliverScoUpBroadcast()
-            awaitState(
-                "capture up mid-acquisition",
-                probe = { "attach=${harness.hardware.attachCount} scoStarts=${harness.scoPlatform.scoStarts} " + harness.wedgeState() },
-            ) { harness.hardware.attachCount >= 1 }
+            // LOST-OR-LATE CLASSIFIER (spec): if the budget expires, keep waiting on the WALL
+            // CLOCK (no virtual-time grants) well past it. Attaching later proves timing/starva-
+            // tion (test fix: generous budget); never attaching proves the observer DROPS the
+            // SCO-up trigger under contention (product fix with a red test).
+            try {
+                awaitState(
+                    "capture up mid-acquisition",
+                    probe = { "attach=${harness.hardware.attachCount} scoStarts=${harness.scoPlatform.scoStarts} " + harness.wedgeState() },
+                ) { harness.hardware.attachCount >= 1 }
+            } catch (e: IllegalStateException) {
+                if (!e.message.orEmpty().contains("capture up mid-acquisition")) throw e
+                val deadline = System.currentTimeMillis() + 180_000
+                var attachedLate = false
+                while (System.currentTimeMillis() < deadline) {
+                    testScheduler.runCurrent()
+                    runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+                    Thread.sleep(20)
+                    if (harness.hardware.attachCount >= 1) {
+                        attachedLate = true
+                        break
+                    }
+                }
+                error(
+                    if (attachedLate) "CLASSIFIED: capture attaches LATE (starvation/timing, not a lost trigger)"
+                    else "CLASSIFIED: SCO-up trigger LOST -- observer never attached (product bug candidate)"
+                )
+            }
 
             // Selection completes; the acquisition returns Acquired through the reuse path.
             harness.scoPlatform.bringScoUp()
@@ -1064,6 +1087,14 @@ class VoiceControlModeObserverAvailabilityTest {
             }
             settleUntil("no acquisition attempt in flight", probe = { harness.wedgeState() }) {
                 getField(harness.service, "acquisitionJob") == null
+            }
+            // PIN THE ENGINE AS STARTED BEFORE THE CAPTURE DIES: onPipelineTerminated early-returns
+            // when the engine generation is stale or the start was never committed, and then NO
+            // restart is armed at all (pending=false, timer=null, credit untouched). attachCount>=1
+            // alone does not mean the start committed; waiting for engineStarted pins the shape so
+            // the termination takes the arming path the wedge exists to test.
+            settleUntil("capture committed", probe = { "engineStarted=${harness.engineStarted()} " + harness.wedgeState() }) {
+                harness.engineStarted()
             }
             // That capture self-ends; its owed restart waits on the never-confirmed acquisition.
             selfEndCapture(harness)

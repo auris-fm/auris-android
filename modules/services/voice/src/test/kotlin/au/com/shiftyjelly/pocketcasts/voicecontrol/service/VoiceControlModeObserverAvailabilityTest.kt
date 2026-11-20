@@ -830,12 +830,18 @@ class VoiceControlModeObserverAvailabilityTest {
             harness.awaitObserverInstalled()
             // The acquisition starts but selection never completes while the link is held down.
             harness.scoPlatform.holdScoDown = true
-            awaitState("acquisition started") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState(
+                "acquisition started",
+                probe = { "scoStarts=${harness.scoPlatform.scoStarts} " + harness.wedgeState() },
+            ) { harness.scoPlatform.scoStarts >= 1 }
 
             // The SCO state broadcast arrives first: the route reads Headset and the observer
             // starts the stream itself, before the acquisition has observed selection.
             harness.scoPlatform.deliverScoUpBroadcast()
-            awaitState("capture up mid-acquisition") { harness.hardware.attachCount >= 1 }
+            awaitState(
+                "capture up mid-acquisition",
+                probe = { "attach=${harness.hardware.attachCount} scoStarts=${harness.scoPlatform.scoStarts} " + harness.wedgeState() },
+            ) { harness.hardware.attachCount >= 1 }
 
             // Selection completes; the acquisition returns Acquired through the reuse path.
             harness.scoPlatform.bringScoUp()
@@ -1029,11 +1035,32 @@ class VoiceControlModeObserverAvailabilityTest {
             harness.awaitObserverInstalled()
             // The acquisition starts but selection never completes while the link is held down.
             harness.scoPlatform.holdScoDown = true
-            awaitState("acquisition started") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("acquisition started", probe = { "scoStarts=${harness.scoPlatform.scoStarts} " + harness.wedgeState() }) {
+                harness.scoPlatform.scoStarts >= 1
+            }
             // The SCO state broadcast arrives first: the route reads Headset and the observer starts
             // the stream itself, before the acquisition has observed selection. Held here.
             harness.scoPlatform.deliverScoUpBroadcast()
-            awaitState("capture up mid-acquisition") { harness.hardware.attachCount >= 1 }
+            awaitState("capture up mid-acquisition", probe = { "attach=${harness.hardware.attachCount} " + harness.wedgeState() }) {
+                harness.hardware.attachCount >= 1
+            }
+            // QUIESCE THE OBSERVER'S ASYNC ROUTE RUNS BEFORE STAGING THE PENDING RESTART: the
+            // observer clears a pending restart whenever its run processes a route trigger it had
+            // not yet recorded, and an in-flight acquisition failure spends it outright. On a
+            // loaded host those runs lag the capture by whole seconds, so without this settle the
+            // staged pending flag could be consumed before the bound test ever observes it (the
+            // captured wedgeState: pending=false timer=null with the capture already attached).
+            // Wait until the observer has recorded every trigger the wedge produced so far and no
+            // acquisition attempt is in flight, mirroring stagePendingRestart's staging hygiene.
+            awaitState("observer has seen gate allowed") {
+                (getField(harness.service, "lastGateAllowedSeenByObserver") as? Boolean) == true
+            }
+            awaitState("observer has seen the final device identity") {
+                (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
+            }
+            awaitState("no acquisition attempt in flight") {
+                getField(harness.service, "acquisitionJob") == null
+            }
             // That capture self-ends; its owed restart waits on the never-confirmed acquisition.
             selfEndCapture(harness)
             settleUntil("the restart waiting on re-confirmation", probe = { harness.wedgeState() }) {
@@ -1667,14 +1694,18 @@ assertEquals(
         val barrierObj = getField(harness.service, "shutdownBarrier")!!
         val barrierClosed = barrierObj.javaClass.getDeclaredMethod("isClosed").apply { isAccessible = true }
         val lateDial = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            kotlinx.coroutines.withTimeoutOrNull(30_000) {
+            val shutdownStarted = kotlinx.coroutines.withTimeoutOrNull(30_000) {
                 while (!(barrierClosed.invoke(barrierObj) as Boolean)) kotlinx.coroutines.yield()
-            }
+                true
+            } == true
+            // A dial submitted before shutdown ever started proves nothing: fail rather than run.
+            org.junit.Assert.assertTrue("fixture: shutdown never started", shutdownStarted)
             opener.openForLater("utt-stop-late")
             lateSubmitted.countDown()
         }
-        barrierObj.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
-            .invoke(barrierObj, listOf(lateDial))
+        val admitted = barrierObj.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
+            .invoke(barrierObj, listOf(lateDial)) as Boolean
+        org.junit.Assert.assertTrue("fixture: the barrier must have admitted the late job", admitted)
         try {
             opener.openForLater("utt-stop-test")
             // REQUIRE the initial open: generous wall-clock bound (a starved opener thread is a
@@ -1682,7 +1713,9 @@ assertEquals(
             // without ever exercising the teardown against a live connection.
             // The TEST tag specifically: a stray open from any other path must not satisfy this.
             val firstOpened = kotlinx.coroutines.withTimeoutOrNull(30_000) {
-                while (opened.none { it.ownerTag == "utt-stop-test" }) kotlinx.coroutines.yield()
+                while (synchronized(opened) { opened.toList() }.none { it.ownerTag == "utt-stop-test" }) {
+                    kotlinx.coroutines.yield()
+                }
                 true
             } == true
             org.junit.Assert.assertTrue("fixture: the initial open must have run", firstOpened)

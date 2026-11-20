@@ -51,6 +51,7 @@ class DriftFilterTest {
             pcmTap = FingerprintPcmTap(),
             cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
             cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
+            cloudReferenceStore = mock(CloudReferenceStore::class.java),
             decodePolicy = decodePolicy,
         )
     }

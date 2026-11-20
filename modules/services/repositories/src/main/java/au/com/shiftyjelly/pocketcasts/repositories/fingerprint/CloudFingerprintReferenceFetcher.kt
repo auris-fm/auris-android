@@ -34,32 +34,67 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    suspend fun fetchReference(baseUrl: String, episodeUuid: String, podcastUuid: String): CloudReferenceMatcher? {
+    /**
+     * Conditional fetch (delta: fingerprint revalidation). When [cachedEtag] is non-null it is
+     * sent as If-None-Match; the server answers 304 (stored reference still current) or 200
+     * (fresh payload with its new ETag). Every failure collapses to [Fetch.Unavailable] so the
+     * caller degrades exactly as before.
+     */
+    sealed interface Fetch {
+        /** A 200: new payload, decoded matcher, and the ETag to store for the next revalidation. */
+        data class Fresh(val matcher: CloudReferenceMatcher, val payload: ByteArray, val etag: String?) : Fetch
+
+        /** A 304 against [cachedEtag]: keep the stored payload; [etag] is the validated one. */
+        data class NotModified(val etag: String) : Fetch
+
+        /** Anything else: no token, network failure, non-success status, undecodable body. */
+        data object Unavailable : Fetch
+    }
+
+    suspend fun fetchReference(
+        baseUrl: String,
+        episodeUuid: String,
+        podcastUuid: String,
+        cachedEtag: String? = null,
+    ): Fetch {
         // The SAME credential the turn route presents, never the TOFU user_<uuid>: generating a
         // reference is paid work, so it needs a verified token.
         // FAIL CLOSED: no usable token means no request at all.
-        val token = tokenProvider.currentToken() ?: return null
-        val first = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token) }
-        if (first !is Attempt.Unauthorized) return first.matcher
+        val token = tokenProvider.currentToken() ?: return Fetch.Unavailable
+        val first = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token, cachedEtag) }
+        if (first !is Attempt.Unauthorized) return first.toFetch()
         // The route says this token is bad, not merely old: force a replacement and repeat the
-        // request ONCE -- the turn route's posture. A second refusal gives up rather than looping.
+        // request ONCE -- the turn route's posture, with the revalidation etag preserved.
+        // A second refusal gives up rather than looping.
         tokenProvider.refreshToken()
-        val replacement = tokenProvider.currentToken() ?: return null
-        val second = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, replacement) }
-        return second.matcher
+        val replacement = tokenProvider.currentToken() ?: return Fetch.Unavailable
+        val second = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, replacement, cachedEtag) }
+        return second.toFetch()
     }
 
     /** One request's outcome; a 401 is distinguishable so the caller can retry once. */
     private sealed interface Attempt {
-        val matcher: CloudReferenceMatcher?
-
-        data class Done(override val matcher: CloudReferenceMatcher?) : Attempt
-        data object Unauthorized : Attempt {
-            override val matcher: CloudReferenceMatcher? get() = null
-        }
+        /** matcher null = any non-304 non-401 outcome without a usable reference. */
+        data class Done(val matcher: CloudReferenceMatcher?, val payload: ByteArray?, val etag: String?) : Attempt
+        data class NotModified(val etag: String) : Attempt
+        data object Unauthorized : Attempt
     }
 
-    private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String, podcastUuid: String, token: String): Attempt {
+    private fun Attempt.toFetch(): Fetch {
+        if (this is Attempt.Done && matcher != null && payload != null) return Fetch.Fresh(matcher, payload, etag)
+        if (this is Attempt.NotModified) return Fetch.NotModified(etag)
+        return Fetch.Unavailable
+    }
+
+    private fun deadAttempt(): Attempt = Attempt.Done(null, null, null)
+
+    private fun fetchReferenceOnce(
+        baseUrl: String,
+        episodeUuid: String,
+        podcastUuid: String,
+        token: String,
+        cachedEtag: String?,
+    ): Attempt {
         // podcast_id lets the server resolve uncached episodes through the public cache host,
         // which keys metadata by podcast + episode.
         val url = (baseUrl.trimEnd('/') + "/api/v1/episodes/" + episodeUuid + "/fingerprints")
@@ -67,10 +102,11 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
             ?.newBuilder()
             ?.addQueryParameter("podcast_id", podcastUuid)
             ?.build()
-            ?: return Attempt.Done(null)
+            ?: return deadAttempt()
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer " + token)
+            .also { if (cachedEtag != null) it.header("If-None-Match", cachedEtag) }
             .build()
         // The whole fetch is blocking I/O, so a coroutine timeout would never
         // fire mid-call (and would only discard late successes). call.timeout
@@ -82,19 +118,34 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
                 when {
                     response.code == 401 -> Attempt.Unauthorized
 
+                    response.code == 304 -> {
+                        val etag = response.header("ETag") ?: cachedEtag
+                        if (etag == null) {
+                            // A 304 without any etag to validate against cannot be trusted.
+                            deadAttempt()
+                        } else {
+                            Attempt.NotModified(etag)
+                        }
+                    }
+
                     !response.isSuccessful -> {
                         // Definitive statuses (e.g. 404 = no reference) are not
                         // timeouts — log them as what they are.
                         Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} for $episodeUuid")
-                        Attempt.Done(null)
+                        deadAttempt()
                     }
 
-                    else -> Attempt.Done(buildMatcher(response.body.bytes()))
+                    else -> {
+                        val payload = response.body.bytes()
+                        val matcher = buildMatcher(payload)
+                        if (matcher == null) Attempt.Done(null, null, null)
+                        else Attempt.Done(matcher, payload, response.header("ETag"))
+                    }
                 }
             }
         } catch (e: IOException) {
             Timber.w(e, "CloudFingerprintReferenceFetcher: fetch failed or timed out for $episodeUuid")
-            Attempt.Done(null)
+            deadAttempt()
         }
     }
 

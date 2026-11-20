@@ -76,7 +76,7 @@ fi
 #   10.0.2.214; a later buildCache block with remote disabled replaces it.
 # - build scans: the CI branch publishes unauthenticated to Gradle's public
 #   server, which would expose our build environment; publishing forced off.
-printf '\nbuildCache { remote(HttpBuildCache) { enabled = false } }\ndevelocity { buildScan { publishing.onlyIf { false } } }\n' >> settings.gradle.kts
+printf '\nbuildCache { remote<HttpBuildCache> { isEnabled = false } }\ndevelocity { buildScan { publishing.onlyIf { false } } }\n' >> settings.gradle.kts
 echo "--- effective Auris CI overrides in settings.gradle.kts"
 tail -n 2 settings.gradle.kts
 

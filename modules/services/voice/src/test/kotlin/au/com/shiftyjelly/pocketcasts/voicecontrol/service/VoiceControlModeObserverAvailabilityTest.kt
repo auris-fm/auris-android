@@ -118,14 +118,16 @@ class VoiceControlModeObserverAvailabilityTest {
 
     @Before
     fun plantCaptureStopTree() {
-        timber.log.Timber.plant(object : timber.log.Timber.Tree() {
+        captureStopTree = object : timber.log.Timber.Tree() {
             override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
-                if (message.orEmpty().contains("mic_capture_stopped")) {
-                    stoppedLogs.add(message)
+                // ONLY the capture-failure stop counts: route-change and user-requested stops
+                // share the log line and must not release a fault-fixture wait.
+                if (message.orEmpty().contains("mic_capture_stopped: reasons=capture_failure")) {
                     captureStoppedLogCount.incrementAndGet()
                 }
             }
-        })
+        }
+        timber.log.Timber.plant(captureStopTree)
     }
 
     @Before
@@ -138,6 +140,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
     @After
     fun tearDown() {
+        if (this::captureStopTree.isInitialized) timber.log.Timber.uproot(captureStopTree)
         Dispatchers.resetMain()
     }
 
@@ -624,15 +627,15 @@ class VoiceControlModeObserverAvailabilityTest {
         // line means the death is fully processed before any test-side outcome wait begins
         // (the engine-started flag can flip false and true again within one restart, so it is
         // not a sampleable edge).
-        awaitState(
-            "termination processed",
-            probe = { "stopped=$captureStoppedLogCount " + harness.wedgeState() },
-        ) { captureStoppedLogCount.get() > before }
+        // settleUntil, NOT awaitState: no virtual time while the callback is in flight. The
+        // capture-failure log identifies the callback; the caller's assertions verify the
+        // recovery outcome.
+        settleUntil("termination processed") { captureStoppedLogCount.get() > before }
     }
 
-    /** Ordered count of mic_capture_stopped logs the fault fixture has processed so far. */
+    /** Ordered count of capture-failure stops the fault fixture has processed so far. */
     private val captureStoppedLogCount = java.util.concurrent.atomic.AtomicInteger(0)
-    private val stoppedLogs = java.util.Collections.synchronizedList(mutableListOf<String>())
+    private lateinit var captureStopTree: timber.log.Timber.Tree
 
 
     @Test
@@ -673,8 +676,10 @@ class VoiceControlModeObserverAvailabilityTest {
             harness.awaitObserverInstalled()
             awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
-            endCaptureByFault(harness)
+            // Arm the failure BEFORE the fault: the observer may begin the restart as soon as
+            // the death is processed, and a failure armed after that races it.
             harness.scoPlatform.establish = false
+            endCaptureByFault(harness)
             awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
                 !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
@@ -708,8 +713,9 @@ class VoiceControlModeObserverAvailabilityTest {
 
             // The restart's acquisition will succeed, but the engine start fails (the VAD
             // attach never happens): the withheld path through startEngine == false.
-            endCaptureByFault(harness)
+            // Arm the failure BEFORE the fault (same race as the acquisition-failure control).
             harness.hardware.capturing = false
+            endCaptureByFault(harness)
             awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
                 !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }

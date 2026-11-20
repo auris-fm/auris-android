@@ -40,8 +40,10 @@ steps:
 
   - label: "Upload to Play internal track"
     key: play-upload
-    # Uploads only ever run from main: a hand-started branch build can exercise
-    # signing, but never uploads, even with PLAY_UPLOAD=1 and the key present.
+    # Uploads only ever run from main, like the AAB step: no branch build runs
+    # either step. The runner's hook additionally refuses any checkout not
+    # reachable from origin/main before exporting credentials (a hand-started
+    # build can label any SHA "main").
     branches: "main"
     depends_on: [release-aab]
     command: .buildkite/commands/auris-play-upload.sh

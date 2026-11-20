@@ -1130,17 +1130,6 @@ class VoiceControlModeObserverAvailabilityTest {
             settleUntil("observer has seen the final device identity", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
             }
-            // PIN THE ACQUISITION STATE THE CALLERS RELY ON -- asserted, not waited: absence is
-            // the invariant at this point (the observer's route run resolved the held attempt
-            // when it committed the broadcast capture, before the clock freeze), so a wait here
-            // would only stall if a future poll were pending. After healing (bringScoUp), the
-            // restart/fallback start comes from the observer's route TRIGGERS, never from this
-            // attempt completing -- a live attempt would be an uncontrolled variable that could
-            // double-start on heal or fail and spend the staged restart.
-            org.junit.Assert.assertTrue(
-                "staged shape: no acquisition attempt may be in flight once the broadcast capture committed (state: " + harness.wedgeState() + ")",
-                getField(harness.service, "acquisitionJob") == null,
-            )
             // PIN THE ENGINE AS STARTED BEFORE THE CAPTURE DIES: onPipelineTerminated early-returns
             // when the engine generation is stale or the start was never committed, and then NO
             // restart is armed at all (pending=false, timer=null, credit untouched). attachCount>=1
@@ -1149,6 +1138,15 @@ class VoiceControlModeObserverAvailabilityTest {
             settleUntil("capture committed", probe = { "engineStarted=${harness.engineStarted()} " + harness.wedgeState() }) {
                 harness.engineStarted()
             }
+            // ASSERT THE ACQUISITION ABSENCE AFTER THE COMMIT: absence is the invariant once the
+            // broadcast capture has committed (the observer's route run resolved the held attempt
+            // before the clock freeze), so this asserts rather than waits -- a wait could only
+            // stall on a future poll. After healing (bringScoUp), the restart/fallback start
+            // comes from the observer's route TRIGGERS, never from this attempt completing.
+            org.junit.Assert.assertTrue(
+                "staged shape: no acquisition attempt may be in flight once the capture committed (state: " + harness.wedgeState() + ")",
+                getField(harness.service, "acquisitionJob") == null,
+            )
             // That capture self-ends; its owed restart waits on the never-confirmed acquisition.
             endCaptureByFault(harness)
             settleUntil("the restart waiting on re-confirmation", probe = { harness.wedgeState() }) {

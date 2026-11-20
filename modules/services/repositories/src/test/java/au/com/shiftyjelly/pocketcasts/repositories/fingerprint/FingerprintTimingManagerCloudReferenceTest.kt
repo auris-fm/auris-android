@@ -104,8 +104,54 @@ class FingerprintTimingManagerCloudReferenceTest {
     }
 
     @Test
-    fun `a failure with no stored reference stays unavailable`() = runBlocking {
-        assertNull(manager.resolveCloudMatcher("https://offline.invalid", "ep_none", "pod_1"))
+    fun `a failure with no stored reference stays unavailable after exactly one fetch`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(503))
+        server.start()
+
+        try {
+            val playbackManager = mock(PlaybackManager::class.java)
+            whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
+            val auth = MockWebServer()
+            auth.enqueue(MockResponse().setResponseCode(200).setBody(
+                """{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}"""
+            ))
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(
+                au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+                    clientProvider = {
+                        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(auth.url("/").toString().trimEnd('/'))
+                    },
+                    credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+                        override fun credential(): String = "session"
+                    },
+                ),
+            )
+            val managerWithServer = FingerprintTimingManager(
+                playbackManager = playbackManager,
+                referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
+                eventHorizon = mock(EventHorizon::class.java),
+                context = mock(Context::class.java),
+                chapterManager = Lazy { mock(ChapterManager::class.java) },
+                settings = mock(Settings::class.java),
+                dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
+                pcmTap = FingerprintPcmTap(),
+                cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
+                cloudFetcher = fetcher,
+                cloudReferenceStore = store,
+                decodePolicy = mock(FingerprintDecodePolicy::class.java),
+            )
+
+            val matcher = runBlocking {
+                managerWithServer.resolveCloudMatcher(server.url("/").toString().trimEnd('/'), "ep_none", "pod_1")
+            }
+
+            assertNull(matcher)
+            assertEquals("Unavailable must not fire a second attempt", 1, server.requestCount)
+            auth.shutdown()
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test

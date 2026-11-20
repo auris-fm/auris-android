@@ -58,37 +58,22 @@ else
 fi
 printf '%s\n' "${AURIS_SECRET_PROPERTIES:-}" > secret.properties
 
-# Signing inputs arrive under EITHER naming scheme:
-#   ANDROID_UPLOAD_KEYSTORE_B64 (+ _PASSWORD/_ALIAS/_KEY_PASSWORD)  -- base64
-#   UPLOAD_KEYSTORE_PATH        (+ _PASSWORD/_ALIAS/_KEY_PASSWORD)  -- file path
-# (the mini's hook exports the PATH form; #69 went green UNSIGNED because the
-# script only knew the B64 form). APPEND the signing keys to secret.properties
-# so the non-signing keys survive.
-if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
-  echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keystore
-  SIGNING_STORE="$PWD/auris-upload.keystore"
-  SIGNING_STORE_PASSWORD="${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}"
-  SIGNING_ALIAS="${ANDROID_UPLOAD_KEY_ALIAS:-}"
-  SIGNING_KEY_PASSWORD="${ANDROID_UPLOAD_KEY_PASSWORD:-}"
-elif [ -n "${UPLOAD_KEYSTORE_PATH:-}" ]; then
-  SIGNING_STORE="$UPLOAD_KEYSTORE_PATH"
-  SIGNING_STORE_PASSWORD="${UPLOAD_KEYSTORE_PASSWORD:-}"
-  SIGNING_ALIAS="${UPLOAD_KEYSTORE_ALIAS:-}"
-  SIGNING_KEY_PASSWORD="${UPLOAD_KEYSTORE_KEY_PASSWORD:-}"
-fi
-if [ -n "${SIGNING_STORE:-}" ]; then
-  if [ ! -f "$SIGNING_STORE" ]; then
-    echo "--- signing keystore not found at the configured path" >&2
-    exit 1
-  fi
-  printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
-    "$SIGNING_STORE" "$SIGNING_STORE_PASSWORD" "$SIGNING_ALIAS" "$SIGNING_KEY_PASSWORD" >> secret.properties
-elif [ "${AURIS_REQUIRE_SIGNING:-0}" = "1" ]; then
-  echo "--- AURIS_REQUIRE_SIGNING=1 but no keystore input is set: refusing to build unsigned" >&2
+# Signing is UNCONDITIONAL in this pipeline (AURIS_REQUIRE_SIGNING=1 in the
+# YAML): one naming scheme, ANDROID_UPLOAD_KEYSTORE_B64 (+ _PASSWORD/_ALIAS/
+# _KEY_PASSWORD), exactly what the mini's hook exports. #69 went green
+# UNSIGNED because two naming schemes existed and neither side matched; a
+# missing keystore now fails the step instead of falling back to unsigned.
+# APPEND the signing keys to secret.properties so the non-signing keys survive.
+if [ -z "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
+  echo "--- ANDROID_UPLOAD_KEYSTORE_B64 not set: this pipeline only builds signed releases" >&2
   exit 1
-else
-  echo "--- no keystore input: building an unsigned release AAB (dry run)"
 fi
+echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keystore
+printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
+  "$PWD/auris-upload.keystore" \
+  "${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}" \
+  "${ANDROID_UPLOAD_KEY_ALIAS:-}" \
+  "${ANDROID_UPLOAD_KEY_PASSWORD:-}" >> secret.properties
 
 # Two Automattic-internal defaults are switched off for the Auris queue, by
 # appending to the checked-out settings file (last configuration wins, same
@@ -111,12 +96,10 @@ tail -n 2 settings.gradle.kts
 # Google's upload-key reset); non-secret, so it lives here. An env override
 # exists only for deliberate key rotation. Unsigned or wrongly signed fails.
 AURIS_UPLOAD_CERT_SHA256="${AURIS_UPLOAD_CERT_SHA256:-16:89:BD:A2:5A:0B:47:DB:6D:F4:7F:B1:C2:E7:BD:E0:4F:5C:A3:C2:0D:E2:CA:91:AE:52:1A:DB:30:C5:B3:91}"
-if [ -n "${SIGNING_STORE:-}" ]; then
-  echo "--- Verifying bundle signature"
-  bash "$(dirname "$0")/auris-verify-bundle-signature.sh" \
-    app/build/outputs/bundle/release/app-release.aab \
-    "${AURIS_UPLOAD_CERT_SHA256:-}"
-fi
+echo "--- Verifying bundle signature"
+bash "$(dirname "$0")/auris-verify-bundle-signature.sh" \
+  app/build/outputs/bundle/release/app-release.aab \
+  "${AURIS_UPLOAD_CERT_SHA256:-}"
 
 AAB=$(find app/build/outputs/bundle/release -name '*.aab' | head -1)
 [ -n "$AAB" ] || { echo "no AAB produced"; exit 1; }

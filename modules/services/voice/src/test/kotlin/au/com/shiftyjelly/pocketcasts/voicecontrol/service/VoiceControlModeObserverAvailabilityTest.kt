@@ -1347,39 +1347,15 @@ assertEquals(
     }
 
     /**
-     * The expired flag must never outlive the pending restart it belongs to: after the bound has
-     * expired and a trigger has cleared the restart, the flag and timer are gone, so a LATER
-     * pending restart can only come back through its own re-confirmation — never through a stale
-     * bypass.
-     */
-    /**
-     * The flag lifetime, one level down: once the bound has expired and the pending restart is
-     * cleared, the expired flag and the timer must be gone with it, so a LATER pending restart
-     * can only come back through its own re-confirmation — never through a stale bypass. And a
-     * fresh wait after the clear must schedule a fresh bound, not inherit the expiry.
-     */
-    /**
-     * The held-confirmation shape, released INSIDE the bound: the wedge stages NO live
-     * acquisition, so the restart the test exercises is driven by the observer's ROUTE
-     * TRIGGERS when the platform heals (bringScoUp) — one restart, the timer cancelled, and
-     * the bound never fires. This is the only test showing the bound stays silent when it
-     * should.
-     */
-    /**
-     * The held-confirmation wedge, released inside the bound: the SCO selection completes while
-     * the restart still waits. A same-set route emission (the debounced device-list callback,
-     * the field shape) re-runs the decision but must not start anything early or reset the
-     * bound — and once the bound expires, the fallback starts exactly once on the now-healthy
-     * surface.
-     */
-    /**
-     * The confirmation arriving INSIDE the bound must restart the mic the normal way. Held
-     * shape: the route already reads Headset (the staging broadcast fixed it before the capture
-     * died), so when the held selection completes the confirmed publish carries an UNCHANGED
-     * value and re-runs nothing by itself — the acquisition success path must wake the
-     * observer, which then spends the restart on the confirmed stream: exactly one start, the
-     * timer cancelled, no expiry WARN, and advancing past the bound changes nothing. A same-set
-     * refresh alone, before the heal, must start nothing.
+     * The confirmation arriving INSIDE the bound must restart the mic the normal way. The wedge
+     * stages NO live acquisition: the route already reads Headset (the staging broadcast fixed it
+     * before the capture died), and the restart the test exercises is driven by the observer's
+     * ROUTE TRIGGERS when the platform heals (bringScoUp) -- a same-set refresh alone, before the
+     * heal, must start nothing and must not reset the bound. On heal: exactly one start, the
+     * timer cancelled, no expiry WARN, and advancing past the bound changes nothing. (Related,
+     * covered by neighbours: once the bound has expired and a trigger clears the restart, the
+     * expired flag and timer are gone with it, so a LATER pending restart can only come back
+     * through its own re-confirmation -- never through a stale bypass.)
      */
     @Test
     fun `a confirmation inside the bound re-confirms the restart the normal way`() = runBlocking {

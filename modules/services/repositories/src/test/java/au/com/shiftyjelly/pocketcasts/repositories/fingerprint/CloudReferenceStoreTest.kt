@@ -51,6 +51,29 @@ class CloudReferenceStoreTest {
 
 
     @Test
+    fun `the byte cap prunes oldest entries first`() {
+
+        kotlinx.coroutines.runBlocking {
+        val dir = java.io.File(RuntimeEnvironment.getApplication().cacheDir, "fingerprint_cloud_refs")
+        // 40 payloads x 8 MB = 320 MB, above the 300 MB total-bytes cap, while the entry count
+        // (40) is far below its own cap: only the byte bound can explain the pruning. The final
+        // save's prune must bring the total back under the cap, dropping the OLDEST first.
+        val bigSize = 8 * 1024 * 1024
+        val count = 40
+        val big = ByteArray(bigSize)
+        repeat(count) { i -> store().save("ep_big_$i", big, "\"v$i\"") }
+        // After the last save, the total must be back under the cap and the OLDEST are gone.
+        val remaining = dir.listFiles { f -> f.name.endsWith(".payload") }!!.sortedBy { it.name }
+        val totalBytes = remaining.sumOf { it.length() }
+        assertTrue(
+            "the byte cap must hold ($totalBytes bytes across ${remaining.size} entries)",
+            totalBytes <= 300L * 1024 * 1024,
+        )
+        assertTrue("the oldest entries must have been pruned first", !java.io.File(dir, "ep_big_0.payload").exists())
+        assertTrue("the newest entry must survive", java.io.File(dir, "ep_big_${count - 1}.payload").exists())
+        }
+    }
+
     fun `entries are keyed per episode`() {
         kotlinx.coroutines.runBlocking {
         val store = store()

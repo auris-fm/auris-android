@@ -74,24 +74,40 @@ class FileCloudReferenceStore @Inject constructor(
     }
 
     companion object {
-        // Same bound as FingerprintReferenceRetriever's reference cache: the store must not grow
-        // with the number of episodes ever prepared. Oldest entries (by lastModified) go first.
+        // Two bounds. ENTRY: the store must not grow with the number of episodes ever prepared.
+        // BYTES: a single uncompressed v2 reference can be ~100 MB for a long episode, so the
+        // count cap alone could hold gigabytes in cacheDir. Total bytes are bounded regardless
+        // of how large each generation's references are (a smaller v3 simply fits more episodes).
         private const val MAX_ENTRIES = 20
+        private const val MAX_TOTAL_BYTES = 300L * 1024 * 1024
     }
 
-    /** Drops the oldest entries beyond the fixed cap. Best effort: pruning failures are cache noise. */
+    /**
+     * Drops the oldest entries (by lastModified) until both caps hold. Best effort: pruning
+     * failures are cache noise and never fail the fetch that produced the payload.
+     */
     private fun prune() {
         runCatching {
             val entries = dir().listFiles { f -> f.name.endsWith(".payload") } ?: return
-            if (entries.size <= MAX_ENTRIES) return
-            entries.sortedBy { it.lastModified() }
-                .take(entries.size - MAX_ENTRIES)
-                .forEach { payload ->
-                    runCatching {
-                        payload.delete()
-                        etagFile(payload.name.removeSuffix(".payload")).delete()
+            val totalBytes = entries.sumOf { it.length() }
+            val drop = entries.sortedBy { it.lastModified() }.let { sorted ->
+                val overCount = sorted.size - MAX_ENTRIES
+                var bytes = totalBytes
+                var dropCount = 0
+                for ((index, payload) in sorted.withIndex()) {
+                    if (index < overCount || bytes > MAX_TOTAL_BYTES) {
+                        bytes -= payload.length()
+                        dropCount++
                     }
                 }
+                sorted.take(dropCount)
+            }
+            drop.forEach { payload ->
+                runCatching {
+                    payload.delete()
+                    etagFile(payload.name.removeSuffix(".payload")).delete()
+                }
+            }
         }
     }
 }

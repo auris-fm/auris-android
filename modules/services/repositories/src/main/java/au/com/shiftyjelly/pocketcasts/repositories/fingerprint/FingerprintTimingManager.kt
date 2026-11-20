@@ -75,7 +75,6 @@ class FingerprintTimingManager @Inject constructor(
     private val settings: Settings,
     private val dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>,
     private val pcmTap: FingerprintPcmTap,
-    private val cloudIdentity: CloudIdentity,
     private val cloudConfig: SharedPreferencesCloudConfig,
     private val cloudFetcher: CloudFingerprintReferenceFetcher,
     private val decodePolicy: FingerprintDecodePolicy,
@@ -816,9 +815,7 @@ class FingerprintTimingManager @Inject constructor(
         cloudMatcher = null
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
-            // Touch identity so the stable user id exists before the first fetch.
-            cloudIdentity.userId()
-            val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid)
+            val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid)
             if (fetched != null) {
                 cloudMatcher = fetched
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.count} checkpoints) for $episodeUuid")

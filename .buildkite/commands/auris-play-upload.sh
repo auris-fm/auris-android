@@ -31,10 +31,10 @@ fi
 # Owner-only permissions for the service-account key.
 umask 077
 echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
-buildkite-agent artifact download "app/build/outputs/bundle/release/*.aab" .
+buildkite-agent artifact download "app/build/outputs/bundle/release/app-release.aab" .
 bundle install --quiet
 bundle exec fastlane supply \
   --package_name fm.auris \
   --track internal \
-  --aab app/build/outputs/bundle/release/*.aab \
+  --aab app/build/outputs/bundle/release/app-release.aab \
   --json_key google-upload-credentials.json

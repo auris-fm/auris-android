@@ -40,8 +40,10 @@ steps:
       # pinned upload certificate.
       AURIS_REQUIRE_SIGNING: "1"
     timeout_in_minutes: 70
+    # Exactly the verified bundle -- a wildcard could publish a stale .aab
+    # that was never signature-checked.
     artifact_paths:
-      - "app/build/outputs/bundle/release/*.aab"
+      - "app/build/outputs/bundle/release/app-release.aab"
 
   - label: "Upload to Play internal track"
     key: play-upload

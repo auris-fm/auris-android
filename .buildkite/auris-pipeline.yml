@@ -14,6 +14,11 @@
 # service-account key present. PLAY_UPLOAD stays off (default) until the
 # upload-key reset is approved on Play; signing itself is secret-gated in
 # the scripts.
+#
+# Dry runs: a build started by hand on any branch other than main runs the
+# same steps (the branch filter below admits non-main branches), so the
+# pipeline can be exercised before it merges. The GitHub trigger job remains
+# the only AUTOMATIC entry, and it only ever fires for refs/heads/main.
 
 agents:
   queue: "auris-android"
@@ -21,7 +26,7 @@ agents:
 steps:
   - label: "Release AAB"
     key: release-aab
-    branches: "main"
+    branches: "!refs/tags/*"
     command: .buildkite/commands/auris-release-aab.sh
     timeout_in_minutes: 70
     artifact_paths:
@@ -29,7 +34,7 @@ steps:
 
   - label: "Upload to Play internal track"
     key: play-upload
-    branches: "main"
+    branches: "!refs/tags/*"
     depends_on: [release-aab]
     command: .buildkite/commands/auris-play-upload.sh
     timeout_in_minutes: 30

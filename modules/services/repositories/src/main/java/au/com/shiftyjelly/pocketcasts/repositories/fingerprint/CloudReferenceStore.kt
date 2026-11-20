@@ -5,6 +5,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** The stored cloud reference for one episode: payload bytes plus the ETag to revalidate with. */
 data class CachedCloudReference(val payload: ByteArray, val etag: String)
@@ -19,8 +21,8 @@ data class CachedCloudReference(val payload: ByteArray, val etag: String)
  * on the main preparation path); it is written and streamed back as bytes.
  */
 interface CloudReferenceStore {
-    fun load(episodeUuid: String): CachedCloudReference?
-    fun save(episodeUuid: String, payload: ByteArray, etag: String?)
+    suspend fun load(episodeUuid: String): CachedCloudReference?
+    suspend fun save(episodeUuid: String, payload: ByteArray, etag: String?)
 }
 
 @Singleton
@@ -31,7 +33,16 @@ class FileCloudReferenceStore @Inject constructor(
     private fun payloadFile(episodeUuid: String): File = File(dir(), "$episodeUuid.payload")
     private fun etagFile(episodeUuid: String): File = File(dir(), "$episodeUuid.etag")
 
-    override fun load(episodeUuid: String): CachedCloudReference? {
+    // Multi-megabyte reads/writes must not sit on the caller's (Default) dispatcher.
+    override suspend fun load(episodeUuid: String): CachedCloudReference? = withContext(Dispatchers.IO) {
+        loadBlocking(episodeUuid)
+    }
+
+    private suspend fun saveBlocking(episodeUuid: String, payload: ByteArray, etag: String?): Unit = withContext(Dispatchers.IO) {
+        saveInternal(episodeUuid, payload, etag)
+    }
+
+    private fun loadBlocking(episodeUuid: String): CachedCloudReference? {
         val payloadFile = payloadFile(episodeUuid)
         val etagFile = etagFile(episodeUuid)
         if (!payloadFile.exists() || !etagFile.exists()) return null
@@ -46,7 +57,9 @@ class FileCloudReferenceStore @Inject constructor(
         }
     }
 
-    override fun save(episodeUuid: String, payload: ByteArray, etag: String?) {
+    override suspend fun save(episodeUuid: String, payload: ByteArray, etag: String?) = saveBlocking(episodeUuid, payload, etag)
+
+    private fun saveInternal(episodeUuid: String, payload: ByteArray, etag: String?) {
         if (etag == null) return // Without an ETag there is nothing to revalidate with later.
         try {
             // Payload first, etag last: a crash between the two leaves no etag sidecar, and
@@ -55,6 +68,30 @@ class FileCloudReferenceStore @Inject constructor(
             etagFile(episodeUuid).writeText(etag)
         } catch (e: Exception) {
             // Cache-write failure must never fail the fetch that produced the payload.
+            return
+        }
+        prune()
+    }
+
+    companion object {
+        // Same bound as FingerprintReferenceRetriever's reference cache: the store must not grow
+        // with the number of episodes ever prepared. Oldest entries (by lastModified) go first.
+        private const val MAX_ENTRIES = 20
+    }
+
+    /** Drops the oldest entries beyond the fixed cap. Best effort: pruning failures are cache noise. */
+    private fun prune() {
+        runCatching {
+            val entries = dir().listFiles { f -> f.name.endsWith(".payload") } ?: return
+            if (entries.size <= MAX_ENTRIES) return
+            entries.sortedBy { it.lastModified() }
+                .take(entries.size - MAX_ENTRIES)
+                .forEach { payload ->
+                    runCatching {
+                        payload.delete()
+                        etagFile(payload.name.removeSuffix(".payload")).delete()
+                    }
+                }
         }
     }
 }

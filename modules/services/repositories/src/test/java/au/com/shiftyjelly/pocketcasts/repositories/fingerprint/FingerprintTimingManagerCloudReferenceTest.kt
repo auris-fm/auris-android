@@ -94,6 +94,7 @@ class FingerprintTimingManagerCloudReferenceTest {
 
     @Test
     fun `a failed revalidation keeps the stored reference instead of dropping alignment`() = runBlocking {
+        kotlinx.coroutines.runBlocking {
         store.save("ep_keep", compactV2Payload(), "\"v1\"")
 
         // No credential -> fetchReference is Unavailable without touching the network.
@@ -101,10 +102,13 @@ class FingerprintTimingManagerCloudReferenceTest {
 
         assertNotNull("a failed revalidation must keep the stored reference", matcher)
         assertEquals(3, matcher!!.count)
+        }
     }
+
 
     @Test
     fun `a failure with no stored reference stays unavailable after exactly one fetch`() {
+        kotlinx.coroutines.runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(503))
         server.start()
@@ -152,10 +156,13 @@ class FingerprintTimingManagerCloudReferenceTest {
         } finally {
             server.shutdown()
         }
+        }
     }
+
 
     @Test
     fun `a 304 against an unusable stored payload retries once without the etag`() {
+        kotlinx.coroutines.runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"stale\""))
         server.enqueue(MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"fresh\""))
@@ -212,5 +219,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         } finally {
             server.shutdown()
         }
+        }
     }
+
 }

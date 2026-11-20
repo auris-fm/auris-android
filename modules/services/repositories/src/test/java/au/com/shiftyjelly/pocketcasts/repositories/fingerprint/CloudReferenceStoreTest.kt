@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -54,5 +55,36 @@ class CloudReferenceStoreTest {
         val store = store()
         store.save("ep_c", byteArrayOf(7), null)
         assertNull(store.load("ep_c"))
+    }
+
+    @Test
+    fun `the payload is stored as raw bytes with an etag sidecar`() {
+        val store = store()
+        store.save("ep_raw", byteArrayOf(1, 2, 3, 123), "\"v9\"")
+        val dir = java.io.File(RuntimeEnvironment.getApplication().cacheDir, "fingerprint_cloud_refs")
+        val payloadFile = java.io.File(dir, "ep_raw.payload")
+        assertTrue("payload must be a raw-bytes file, not base64 text", payloadFile.exists())
+        assertArrayEquals(byteArrayOf(1, 2, 3, 123), payloadFile.readBytes())
+        val etagFile = java.io.File(dir, "ep_raw.etag")
+        assertTrue(etagFile.exists())
+        assertEquals("\"v9\"", etagFile.readText())
+    }
+
+    @Test
+    fun `a large payload round-trips without text buffering`() {
+        val store = store()
+        val payload = ByteArray(5 shl 20) { (it % 123).toByte() }
+        store.save("ep_big", payload, "\"big\"")
+        val cached = store.load("ep_big")
+        assertEquals("\"big\"", cached!!.etag)
+        assertArrayEquals(payload, cached.payload)
+    }
+
+    @Test
+    fun `a missing etag sidecar loads null`() {
+        val dir = java.io.File(RuntimeEnvironment.getApplication().cacheDir, "fingerprint_cloud_refs")
+        dir.mkdirs()
+        java.io.File(dir, "ep_orphan.payload").writeBytes(byteArrayOf(1))
+        assertNull(store().load("ep_orphan"))
     }
 }

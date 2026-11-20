@@ -1,0 +1,69 @@
+# TEMPORARY, removed before merge. Proves on a hosted runner that the hand-off the weekly
+# security audit uses keeps a report out of the public job logs and out of the artifact a
+# stranger can download. It moves a harmless report between two jobs with the same commands
+# as security-audit.yml.
+name: Hand-off log test
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/handoff-log-test.yml
+
+permissions: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Encrypt a harmless report for the next job
+        env:
+          HANDOFF_KEY: ${{ secrets.SECURITY_AUDIT_HANDOFF_KEY }}
+        run: |
+          set -o pipefail
+          if [ -z "$HANDOFF_KEY" ]; then
+            echo "::error::The repository secret SECURITY_AUDIT_HANDOFF_KEY must be configured."
+            exit 1
+          fi
+          mkdir handoff
+          # Derived, so that the text to look for in the logs is not in this file.
+          marker="benign-$(printf '%s' "$GITHUB_RUN_ID" | sha256sum | cut -c1-24)"
+          printf '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"test","rules":[]}},"results":[{"ruleId":"%s"}]}]}\n' "$marker" > handoff/semgrep.sarif
+          # Larger than one environment variable may be, to show the file has no such limit.
+          head -c 300000 /dev/urandom | base64 > handoff/padding.txt
+          tar -C handoff -cf - . | gzip -9 \
+            | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:HANDOFF_KEY \
+            > "$RUNNER_TEMP/security-audit-results.enc"
+          echo "$(wc -c < "$RUNNER_TEMP/security-audit-results.enc") bytes"
+
+      - name: Hand the encrypted results to the publishing job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: security-audit-results
+          path: ${{ runner.temp }}/security-audit-results.enc
+          if-no-files-found: error
+          retention-days: 1
+
+  receive:
+    needs: send
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Fetch the encrypted results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: security-audit-results
+          path: ${{ runner.temp }}/handoff
+
+      - name: Decrypt the results
+        env:
+          HANDOFF_KEY: ${{ secrets.SECURITY_AUDIT_HANDOFF_KEY }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/security-audit"
+          openssl enc -d -aes-256-cbc -pbkdf2 -pass env:HANDOFF_KEY \
+            -in "$RUNNER_TEMP/handoff/security-audit-results.enc" | gunzip \
+            | tar -C "$RUNNER_TEMP/security-audit" -xf -
+          marker="benign-$(printf '%s' "$GITHUB_RUN_ID" | sha256sum | cut -c1-24)"
+          grep -q "$marker" "$RUNNER_TEMP/security-audit/semgrep.sarif"
+          echo "The report arrived intact, with $(wc -c < "$RUNNER_TEMP/security-audit/padding.txt") bytes of padding."

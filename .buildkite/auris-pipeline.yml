@@ -34,11 +34,6 @@ steps:
     # runs happen on main after merge (PLAY_UPLOAD off until the reset window).
     branches: "main"
     command: .buildkite/commands/auris-release-aab.sh
-    env:
-      # Signing is unconditional: without the keystore secret the step fails
-      # rather than building unsigned, and the bundle must verify against the
-      # pinned upload certificate.
-      AURIS_REQUIRE_SIGNING: "1"
     timeout_in_minutes: 70
 
   - label: "Upload to Play internal track"

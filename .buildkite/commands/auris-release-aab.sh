@@ -24,8 +24,11 @@ sed -i.bak "s/^versionCode=.*/versionCode=$NEW/" version.properties
 rm -f version.properties.bak
 echo "versionCode $BASE -> $NEW"
 
+# Both generated signing files go on success AND failure: the keystore and
+# the secret.properties configure_apply wrote (it carries the appended
+# signing passwords once the signing branch runs).
 cleanup() {
-  rm -f auris-upload.keystore
+  rm -f auris-upload.keystore secret.properties
 }
 trap cleanup EXIT
 

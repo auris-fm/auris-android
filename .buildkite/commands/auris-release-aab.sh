@@ -44,9 +44,10 @@ echo "--- :closed_lock_with_key: Installing Auris secrets"
 #   AURIS_SECRET_PROPERTIES         the non-signing keys the release reads
 #                                   (see PR 92's key inventory; most may be
 #                                   empty for Auris)
-# BOTH inputs are REQUIRED: without the JSON the step fails here (the
-# google-services plugin would abort anyway), and signing below is
-# unconditional -- there is no unsigned path in this pipeline.
+# The ENFORCED inputs are the google-services JSON (missing -> fail here;
+# the plugin would abort anyway) and the keystore below (signing is
+# unconditional -- no unsigned path). AURIS_SECRET_PROPERTIES may be unset:
+# it then writes an empty file and every non-signing key has a default.
 # Owner-only permissions for every generated secret file (reviewer: umask 022
 # would leave them 0644 while the build runs).
 umask 077

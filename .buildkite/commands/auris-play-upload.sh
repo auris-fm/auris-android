@@ -44,3 +44,10 @@ bundle exec fastlane supply \
   --track internal \
   --aab app/build/outputs/bundle/release/app-release.aab \
   --json_key google-upload-credentials.json
+
+# Record what was uploaded so the R2 step fetches exactly this version's
+# Play-signed APK (version.properties carries the bumped versionCode).
+UPLOADED_VC="$(sed -n 's/^versionCode=//p' version.properties | head -1)"
+[ -n "$UPLOADED_VC" ] || { echo "FAIL: no versionCode in version.properties after upload" >&2; exit 1; }
+buildkite-agent meta-data set uploaded-version-code "$UPLOADED_VC"
+echo "--- Uploaded versionCode $UPLOADED_VC recorded for the R2 step"

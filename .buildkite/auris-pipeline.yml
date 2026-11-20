@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/buildkite/pipeline-schema/main/schema.json
+---
+# Auris Android release pipeline: builds the signed `fm.auris` AAB and uploads
+# it to Google Play's internal testing track. Runs on agents tagged
+# `queue=auris-android`, on main, after the GitHub test workflows pass: the
+# GitHub-side trigger job invokes this pipeline via the Buildkite API, which
+# must be the ONLY entry — the "build on push" webhook is off for this
+# pipeline in Buildkite's settings, so nothing bypasses the GitHub gate.
+#
+# All step commands live in `.buildkite/commands/` (Buildkite interpolates
+# `$` in pipeline YAML at upload time, which would break the shell scripts).
+#
+# The upload runs only with PLAY_UPLOAD=1 set on the pipeline AND the
+# service-account key present. PLAY_UPLOAD stays off (default) until the
+# upload-key reset is approved on Play; signing itself is secret-gated in
+# the scripts.
+#
+# Both steps are main-only: a hand-started build on any other branch would
+# run that branch's copy of the scripts with the signing and Play credentials
+# in the environment, so unmerged code must never reach them. The first dry
+# run happens on main right after merge, with PLAY_UPLOAD off. The GitHub
+# trigger job remains the only AUTOMATIC entry, and it only ever fires for
+# refs/heads/main.
+
+agents:
+  queue: "auris-android"
+
+steps:
+  - label: "Release AAB"
+    key: release-aab
+    # main only: a hand-started build on any other branch would execute THAT
+    # branch's copy of this script with the upload keystore and Play service
+    # account in its environment -- unmerged code must never see them. Dry
+    # runs happen on main after merge (PLAY_UPLOAD off until the reset window).
+    branches: "main"
+    command: .buildkite/commands/auris-release-aab.sh
+    timeout_in_minutes: 70
+
+  - label: "Upload to Play internal track"
+    key: play-upload
+    # Uploads only ever run from main, like the AAB step: no branch build runs
+    # either step. The runner's hook additionally refuses any checkout not
+    # reachable from origin/main before exporting credentials (a hand-started
+    # build can label any SHA "main").
+    branches: "main"
+    depends_on: [release-aab]
+    command: .buildkite/commands/auris-play-upload.sh
+    timeout_in_minutes: 30

@@ -1,9 +1,11 @@
 #!/bin/bash -eu
 
-# Play internal-track upload for the auris-android pipeline. The upload runs
-# only when PLAY_UPLOAD=1 AND the service-account key exists; anything else is
-# a dry run that stops at the signed AAB. PLAY_UPLOAD is set on the pipeline
-# (default off) so the upload stays off during the upload-key reset window.
+# Play internal-track upload for the auris-android pipeline. Only
+# PLAY_UPLOAD != 1 is a dry run that stops at the signed AAB. With
+# PLAY_UPLOAD=1 the step UPLOADS: a missing service-account key fails it, and
+# the downloaded bundle must verify against the pinned upload certificate.
+# PLAY_UPLOAD is set on the pipeline (default off) so the upload stays off
+# during the upload-key reset window.
 
 cd "$(dirname "$0")/../.."
 

@@ -45,6 +45,9 @@ echo "--- :closed_lock_with_key: Installing Auris secrets"
 # Both are optional for an unsigned dry run ONLY if the google-services plugin
 # can be satisfied; without the JSON the build aborts, so the dry run needs at
 # least the fm.auris google-services.json.
+# Owner-only permissions for every generated secret file (reviewer: umask 022
+# would leave them 0644 while the build runs).
+umask 077
 if [ -n "${AURIS_GOOGLE_SERVICES_JSON_B64:-}" ]; then
   echo "$AURIS_GOOGLE_SERVICES_JSON_B64" | base64 --decode > app/google-services.json
 else
@@ -65,6 +68,17 @@ if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
 else
   echo "--- no keystore secret yet: building an unsigned release AAB (dry run)"
 fi
+
+# Two Automattic-internal defaults are switched off for the Auris queue, by
+# appending to the checked-out settings file (last configuration wins, same
+# pattern as the gradle.properties caps above; the repo's own lines stay):
+# - remote build cache: the CI branch points at Automattic's internal
+#   10.0.2.214; a later buildCache block with remote disabled replaces it.
+# - build scans: the CI branch publishes unauthenticated to Gradle's public
+#   server, which would expose our build environment; publishing forced off.
+printf '\nbuildCache { remote(HttpBuildCache) { enabled = false } }\ndevelocity { buildScan { publishing.onlyIf { false } } }\n' >> settings.gradle.kts
+echo "--- effective Auris CI overrides in settings.gradle.kts"
+tail -n 2 settings.gradle.kts
 
 # skipSentryProguardMappingUpload: CI=true enables the mapping upload, but the
 # release secrets carry no Sentry token here; same flag as assemble-release-apk.sh.

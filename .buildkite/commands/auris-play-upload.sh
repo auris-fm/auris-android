@@ -28,6 +28,8 @@ if [ -z "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
   exit 0
 fi
 
+# Owner-only permissions for the service-account key.
+umask 077
 echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
 buildkite-agent artifact download "app/build/outputs/bundle/release/*.aab" .
 bundle install --quiet

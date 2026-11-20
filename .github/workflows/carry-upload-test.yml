@@ -1,0 +1,146 @@
+# Temporary: checks against GitHub itself that a result the weekly scan could not check
+# keeps its alert, and its dismissal, when the script republishes it. It uploads four made-up
+# results for README.md under a category of its own on this branch, never on the default
+# branch, and deletes them again. Removed before this pull request merges.
+name: Security audit carry upload test (temporary)
+
+on:
+  push:
+    branches: [guru-security-audit-carry]
+
+permissions: {}
+
+env:
+  TOOL: Semgrep%20OSS
+
+jobs:
+  carry-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      # Into a subdirectory, so that the upload action finds no source next to the results,
+      # as in the weekly publish job, and cannot make fingerprints of its own.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: src
+          persist-credentials: false
+
+      - name: Write the first results
+        run: |
+          mkdir -p "$RUNNER_TEMP/first" "$RUNNER_TEMP/fake-bin"
+          result() { # line fingerprint-or-empty
+            local fingerprint=""
+            if [ -n "$2" ]; then fingerprint=$(printf ',"partialFingerprints":{"primaryLocationLineHash":"%s"}' "$2"); fi
+            printf '{"ruleId":"carry-test-rule","level":"warning","message":{"text":"A made-up finding for a test."},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"README.md"},"region":{"startLine":%s,"startColumn":1,"endLine":%s,"endColumn":2}}}]%s}' "$1" "$1" "$fingerprint"
+          }
+          sarif() {
+            printf '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","rules":[{"id":"carry-test-rule","name":"carry-test-rule","shortDescription":{"text":"A made-up rule for a test."},"defaultConfiguration":{"level":"warning"}}]}},"results":[%s]}]}\n' "$1"
+          }
+          # A, B and C have fingerprints. E has none, as everything published so far.
+          sarif "$(result 1 aaaaaaaa_0),$(result 3 bbbbbbbb_0),$(result 5 cccccccc_0),$(result 7 "")" \
+            > "$RUNNER_TEMP/first/semgrep.sarif"
+          # What the second scan reports before giving up on README.md: A one line further
+          # down, D where B was with another fingerprint, and E with a fingerprint.
+          {
+            echo "FAKE_RESULTS=$(result 2 aaaaaaaa_0),$(result 3 dddddddd_0),$(result 7 eeeeeeee_0)"
+            echo 'FAKE_ERRORS={"type":"Timeout","level":"warn","message":"gave up","path":"README.md"}'
+          } >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/fake-bin/semgrep" << 'SEMGREP'
+          #!/usr/bin/env bash
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --sarif-output) sarif=$2 ;;
+              --json-output) json=$2 ;;
+            esac
+            shift
+          done
+          printf '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","rules":[{"id":"carry-test-rule","name":"carry-test-rule","shortDescription":{"text":"A made-up rule for a test."},"defaultConfiguration":{"level":"warning"}}]}},"results":[%s]}]}\n' "$FAKE_RESULTS" > "$sarif"
+          printf '{"results":[],"errors":[%s]}\n' "$FAKE_ERRORS" > "$json"
+          SEMGREP
+          chmod +x "$RUNNER_TEMP/fake-bin/semgrep"
+
+      - name: Upload the first results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/first/semgrep.sarif
+          category: carry-test
+
+      - name: List the alerts and dismiss B
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          alerts() {
+            gh api --paginate "repos/$GITHUB_REPOSITORY/code-scanning/alerts?ref=$GITHUB_REF&tool_name=$TOOL&per_page=100" \
+              --jq '.[] | select(.rule.id == "carry-test-rule")
+                    | "alert \(.number) \(.state) \(.dismissed_reason // "-") line \(.most_recent_instance.location.start_line)"' | sort
+          }
+          alerts
+          b=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/alerts?ref=$GITHUB_REF&tool_name=$TOOL&per_page=100" \
+            --jq '.[] | select(.rule.id == "carry-test-rule" and .most_recent_instance.location.start_line == 3) | .number')
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/code-scanning/alerts/$b" \
+            -f state=dismissed -f dismissed_reason="used in tests" --jq '"dismissed alert \(.number)"'
+
+      # As the weekly scan job does, for this branch and the test's category.
+      - name: Fetch the results that were published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS: ${{ runner.temp }}/previous.sarif
+        run: |
+          set -o pipefail
+          id=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses?ref=$GITHUB_REF&tool_name=$TOOL&per_page=100" \
+            --jq '[.[] | select(.category == "carry-test")][0].id')
+          gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses/$id" -H "Accept: application/sarif+json" > "$PREVIOUS"
+          echo "as GitHub returns them:"
+          jq -c '.runs[].results[] | {line: .locations[0].physicalLocation.region.startLine, fingerprints: .partialFingerprints, alert: .properties["github/alertNumber"]}' "$PREVIOUS"
+
+      - name: Scan again, not finishing README.md
+        working-directory: src
+        env:
+          AUDIT_OUT: ${{ runner.temp }}/second
+          AUDIT_SCANNERS: code
+          AUDIT_PREVIOUS_SARIF: ${{ runner.temp }}/previous.sarif
+        run: |
+          PATH="$RUNNER_TEMP/fake-bin:$PATH" .github/scripts/security-audit.sh full
+          echo "to publish:"
+          jq -c '.runs[].results[] | {line: .locations[0].physicalLocation.region.startLine, fingerprints: .partialFingerprints}' "$AUDIT_OUT/semgrep.sarif"
+
+      - name: Upload the second results
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/second/semgrep.sarif
+          category: carry-test
+
+      - name: List the alerts again
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/code-scanning/alerts?ref=$GITHUB_REF&tool_name=$TOOL&per_page=100" \
+            --jq '.[] | select(.rule.id == "carry-test-rule")
+                  | "alert \(.number) \(.state) \(.dismissed_reason // "-") line \(.most_recent_instance.location.start_line)"' | sort
+          id=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses?ref=$GITHUB_REF&tool_name=$TOOL&per_page=100" \
+            --jq '[.[] | select(.category == "carry-test")][0].id')
+          echo "the second analysis as GitHub returns it:"
+          gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses/$id" -H "Accept: application/sarif+json" \
+            | jq -c '.runs[].results[] | {line: .locations[0].physicalLocation.region.startLine, fingerprints: .partialFingerprints, alert: .properties["github/alertNumber"]}'
+
+      - name: Delete the test's analyses
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The newest analysis of a set is the one that can be deleted; repeat until none is left.
+          for _ in 1 2 3 4 5 6; do
+            id=$(gh api "repos/$GITHUB_REPOSITORY/code-scanning/analyses?ref=$GITHUB_REF&tool_name=$TOOL&per_page=100" \
+              --jq '[.[] | select(.category == "carry-test" and .deletable)][0].id // empty' 2> /dev/null || true)
+            [ -n "$id" ] || break
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/code-scanning/analyses/$id?confirm_delete=true" --jq '"deleted analysis"' || break
+          done
+          echo "alerts left for the test rule:"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/code-scanning/alerts?tool_name=$TOOL&per_page=100" \
+            --jq '.[] | select(.rule.id == "carry-test-rule") | "alert \(.number) \(.state)"' 2> /dev/null | sort || true

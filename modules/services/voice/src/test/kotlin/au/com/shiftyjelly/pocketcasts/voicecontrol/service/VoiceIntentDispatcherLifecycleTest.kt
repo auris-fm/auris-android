@@ -240,36 +240,45 @@ class VoiceIntentDispatcherLifecycleTest {
         Unit
     }
 
-    @Test
-    fun `a dispatch cancelled before its body runs leaves no live timing record`() {
-        // The executor's finally is what normally finishes the record. A launch cancelled BEFORE
-        // its body first executes never reaches it, so without an owner in invokeOnCompletion the
-        // registry keeps one live entry per such turn -- and a superseded turn is cancelled
-        // routinely.
-        // The cleanup handler settles the invocation BEFORE it finishes the record. Blocking that
-        // settle on a latch the test holds pins the handler between "started" and "finished", so
-        // the assertions below run while the record is provably still owed. Blocking only when
-        // called OFF the test thread: if the job finished before invokeOnCompletion was registered,
-        // the handler runs inline inside dispatch() and the blocked-state check could never happen.
-        val handlerStarted = java.util.concurrent.CountDownLatch(1)
-        val releaseHandler = java.util.concurrent.CountDownLatch(1)
-        val ranOnTestThread = java.util.concurrent.atomic.AtomicBoolean(false)
-        val testThreadId = Thread.currentThread().threadId()
+    /**
+     * The two completion interleavings, FORCED one test each (@spec 5fd4864e): whether the cleanup
+     * handler runs inline on the dispatching thread or asynchronously is decided by whether the
+     * job completed before invokeOnCompletion registered. A single test that accepts whichever
+     * shape occurs can pass without ever checking the other, so each shape gets its own test with
+     * its own deterministic arrangement. BOTH assert the contract: the invocation settles exactly
+     * once and no live timing record remains.
+     */
+    private class CleanupProbe(private val testThreadId: Long) {
+        val started = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val settleCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        var inline = false
+            private set
+
+        fun answer(): Boolean {
+            settleCalls.incrementAndGet()
+            if (Thread.currentThread().threadId() == testThreadId) {
+                // INLINE shape: registration happened after completion; the handler runs inside
+                // dispatch(). Nothing may block here -- dispatch() itself is on this thread.
+                inline = true
+            } else {
+                // ASYNC shape: park between settle and finish so the test can observe the owed
+                // record while the handler is provably mid-flight.
+                started.countDown()
+                release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            }
+            return true
+        }
+    }
+
+    private fun runCleanupShape(
+        id: String,
+        forceInline: Boolean,
+    ) {
+        val probe = CleanupProbe(Thread.currentThread().threadId())
         val engine = engine()
         org.mockito.kotlin.whenever(engine.settleInvocation(org.mockito.kotlin.any()))
-            .thenAnswer {
-                if (Thread.currentThread().threadId() == testThreadId) {
-                    ranOnTestThread.set(true)
-                } else {
-                    handlerStarted.countDown()
-                    releaseHandler.await(10, java.util.concurrent.TimeUnit.SECONDS)
-                }
-                true
-            }
-        val id = "wire-cancelled-before-body"
-        // A publish wait with a bound, registered as the sink: the deterministic replacement for
-        // join(), which can return before the completion handlers have run. The sink completes
-        // only on THIS record's message, so a straggler from another test cannot satisfy it.
+            .thenAnswer { probe.answer() }
         val published = CompletableDeferred<Unit>()
         val previousSink = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink
         au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = { _, message ->
@@ -281,9 +290,21 @@ class VoiceIntentDispatcherLifecycleTest {
             record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
 
-            // Already-cancelled scope: the body never gets to run.
+            // FORCED INTERLEAVING via the launch dispatcher's queue, not luck:
+            // - INLINE: an already-cancelled scope whose dispatcher RUNS the launch task eagerly on
+            //   this thread. The coroutine completes (cancelled before body) inside scope.launch,
+            //   strictly before .also registers invokeOnCompletion -- the handler must run inline.
+            // - ASYNC: an already-cancelled scope whose dispatcher QUEUES the task without running
+            //   it. Registration happens first; releasing the queue afterwards completes the job on
+            //   another thread, so the handler runs there, parked on the probe's latch.
+            val queued = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+            val eager = object : kotlinx.coroutines.CoroutineDispatcher() {
+                override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                    if (forceInline) block.run() else queued.add(block)
+                }
+            }
             val cancelled = CoroutineScope(
-                kotlinx.coroutines.SupervisorJob().apply { cancel() } + Dispatchers.Default,
+                kotlinx.coroutines.SupervisorJob().apply { cancel() } + eager,
             )
             val job = d.dispatch(
                 scope = cancelled,
@@ -294,26 +315,32 @@ class VoiceIntentDispatcherLifecycleTest {
                 intent = VoiceIntent.Playback.Pause,
                 invocationToken = token(),
                 timingRequestId = id,
+                launchDispatcher = eager,
             )
             assertNotNull("a dispatch still returns its job", job)
 
-            // The handler must be observed running OFF the test thread and then blocked. If it ran
-            // inline instead, this setup cannot prove anything about join() ordering — fail loudly.
-            org.junit.Assert.assertTrue(
-                "the cleanup handler must start on another thread within 10s (inline on test thread: " +
-                    ranOnTestThread.get() + ")",
-                handlerStarted.await(10, java.util.concurrent.TimeUnit.SECONDS),
-            )
-            org.junit.Assert.assertFalse(
-                "while the handler is blocked the record must not be published yet",
-                published.isCompleted,
-            )
-            org.junit.Assert.assertTrue(
-                "while the cleanup handler is blocked the record must still be live",
-                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
-            )
-
-            releaseHandler.countDown()
+            if (forceInline) {
+                assertTrue("the forced-inline shape must have run the handler inline", probe.inline)
+            } else {
+                // Complete the job on ANOTHER thread, after registration.
+                val runner = Thread { queued.forEach { it.run() } }
+                runner.start()
+                assertTrue(
+                    "the async handler must start off the test thread",
+                    probe.started.await(10, java.util.concurrent.TimeUnit.SECONDS),
+                )
+                assertFalse("the forced-async shape must not have run inline", probe.inline)
+                org.junit.Assert.assertFalse(
+                    "while the handler is blocked the record must not be published yet",
+                    published.isCompleted,
+                )
+                org.junit.Assert.assertTrue(
+                    "while the cleanup handler is blocked the record must still be live",
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
+                )
+                probe.release.countDown()
+                runner.join(10_000)
+            }
             runBlocking {
                 withTimeout(10_000) {
                     withContext(Dispatchers.Default) { published.await() }
@@ -323,11 +350,20 @@ class VoiceIntentDispatcherLifecycleTest {
                 "after the handler finished its work the record must be finished",
                 au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
             )
+            assertEquals("the invocation must settle exactly once", 1, probe.settleCalls.get())
         } finally {
-            // Release the handler FIRST so a failed assertion cannot leave it parked for 10 s,
-            // then restore the default sink so later tests in this JVM publish where they expect.
-            releaseHandler.countDown()
+            probe.release.countDown()
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = previousSink
         }
+    }
+
+    @Test
+    fun `cancelled before registration - cleanup runs inline and leaves no live timing record`() {
+        runCleanupShape(id = "wire-cleanup-inline", forceInline = true)
+    }
+
+    @Test
+    fun `registered before completion - cleanup runs async and leaves no live timing record`() {
+        runCleanupShape(id = "wire-cleanup-async", forceInline = false)
     }
 }

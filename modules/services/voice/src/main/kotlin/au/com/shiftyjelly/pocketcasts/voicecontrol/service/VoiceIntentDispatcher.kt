@@ -48,6 +48,23 @@ class VoiceIntentDispatcher @Inject constructor() {
         invocationToken: VoiceAsrEngine.InvocationToken?,
         // The utterance's admitted request id, forwarded so local actions mark the timing table.
         timingRequestId: String? = null,
+    ): Job? = dispatch(scope, engine, executor, render, onCommandRecognized, intent, invocationToken, timingRequestId, Dispatchers.IO)
+
+    /**
+     * Test seam: the launch context is a parameter so a control can FORCE the two completion
+     * interleavings (cancelled-before-registration vs registered-before-completion) instead of
+     * racing the host's load for them. Production always takes the [Dispatchers.IO] form above.
+     */
+    internal fun dispatch(
+        scope: CoroutineScope,
+        engine: VoiceAsrEngine,
+        executor: VoicePlaybackIntentExecutor,
+        render: (VoiceIntent, au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse) -> Unit,
+        onCommandRecognized: (VoiceIntent) -> Unit,
+        intent: VoiceIntent,
+        invocationToken: VoiceAsrEngine.InvocationToken?,
+        timingRequestId: String?,
+        launchDispatcher: kotlinx.coroutines.CoroutineDispatcher,
     ): Job? {
         val now = System.currentTimeMillis()
         val intentType = intent::class.simpleName ?: intent.toString()
@@ -87,7 +104,7 @@ class VoiceIntentDispatcher @Inject constructor() {
         }
         return try {
             val executorOwnsRecord = AtomicBoolean(false)
-            scope.launch(Dispatchers.IO) {
+            scope.launch(launchDispatcher) {
                 try {
                     val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
                     val response = try {

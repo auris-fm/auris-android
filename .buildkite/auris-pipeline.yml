@@ -10,9 +10,10 @@
 # All step commands live in `.buildkite/commands/` (Buildkite interpolates
 # `$` in pipeline YAML at upload time, which would break the shell scripts).
 #
-# While the Play service-account key does not exist, the pipeline stops at
-# the release AAB artifact; signing switches on once the keystore secrets
-# exist. Both are environment-gated in the scripts.
+# The upload runs only with PLAY_UPLOAD=1 set on the pipeline AND the
+# service-account key present. PLAY_UPLOAD stays off (default) until the
+# upload-key reset is approved on Play; signing itself is secret-gated in
+# the scripts.
 
 agents:
   queue: "auris-android"

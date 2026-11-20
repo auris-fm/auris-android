@@ -25,6 +25,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: bash .buildkite/scripts/trigger-release.test.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: bash .buildkite/scripts/keystore-decode.test.sh
 
   voice-unit-tests:
     name: "voice:testDebugUnitTest"

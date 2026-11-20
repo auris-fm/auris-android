@@ -28,21 +28,33 @@ echo "versionCode $BASE -> $NEW"
 # the secret.properties configure_apply wrote (it carries the appended
 # signing passwords once the signing branch runs).
 cleanup() {
-  rm -f auris-upload.keystore secret.properties
+  rm -f auris-upload.keystore secret.properties app/google-services.json
 }
 trap cleanup EXIT
 
-echo "--- :closed_lock_with_key: Installing Secrets"
-# configure_apply decrypts .configure-files into google-services.json (the
-# google-services plugin aborts without it) and secret.properties (the
-# non-signing secrets: sentryAuthToken, develocityToken, ...). It needs the
-# repo's encryption key in the environment, as on the other CI queues.
-bundle install --quiet
-bundle exec fastlane run configure_apply
+echo "--- :closed_lock_with_key: Installing Auris secrets"
+# NOT configure_apply: .configure-files holds Automattic's pocketcasts-android
+# secrets (their Firebase config is for their package, and we have no key for
+# it). The release takes Auris's OWN inputs from agent secrets:
+#   AURIS_GOOGLE_SERVICES_JSON_B64  google-services.json for package fm.auris
+#                                   (auris-fm Firebase project; the release app
+#                                   must be registered there first)
+#   AURIS_SECRET_PROPERTIES         the non-signing keys the release reads
+#                                   (see PR 92's key inventory; most may be
+#                                   empty for Auris)
+# Both are optional for an unsigned dry run ONLY if the google-services plugin
+# can be satisfied; without the JSON the build aborts, so the dry run needs at
+# least the fm.auris google-services.json.
+if [ -n "${AURIS_GOOGLE_SERVICES_JSON_B64:-}" ]; then
+  echo "$AURIS_GOOGLE_SERVICES_JSON_B64" | base64 --decode > app/google-services.json
+else
+  echo "--- AURIS_GOOGLE_SERVICES_JSON_B64 not set: the google-services plugin will abort" >&2
+  exit 1
+fi
+printf '%s\n' "${AURIS_SECRET_PROPERTIES:-}" > secret.properties
 
 # Signing, only once the upload keystore exists as agent secrets. APPEND the
-# signing keys to the secret.properties configure_apply wrote -- replacing it
-# would drop the non-signing secrets.
+# signing keys to secret.properties so the non-signing keys survive.
 if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
   echo "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 --decode > auris-upload.keystore
   printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \

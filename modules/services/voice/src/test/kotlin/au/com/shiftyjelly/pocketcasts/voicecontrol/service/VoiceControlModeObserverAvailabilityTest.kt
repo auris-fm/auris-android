@@ -46,6 +46,7 @@ import java.lang.reflect.Field
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -1633,8 +1634,13 @@ assertEquals(
         // staleness check discards it.
         val opened = java.util.Collections.synchronizedList(mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.SocketCloudTurnConnection>())
         val lateSubmitted = java.util.concurrent.CountDownLatch(1)
+        // ONE dedicated opener thread: every task the opener queues runs on it in submission
+        // order, so a probe submitted after the fact deterministically DRAINS all queued opener
+        // work before the assertions -- no yield-and-hope.
+        val openerExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val openerDispatcher = openerExecutor.asCoroutineDispatcher()
         val opener = au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener(
-            dispatcher = kotlinx.coroutines.Dispatchers.IO,
+            dispatcher = openerDispatcher,
             open = { tag, nowMs ->
                 au.com.shiftyjelly.pocketcasts.repositories.cloud.SocketCloudTurnConnection(tag, nowMs).also { opened += it }
             },
@@ -1647,11 +1653,11 @@ assertEquals(
         )
         setField(harness.service, "earlyConnectionOpener", opener)
         // A BARRIER-OWNED JOB THAT DIALS LATE: registered with the shutdown barrier before the
-        // stop, so the teardown owes it a join. BOTH orders are legitimate shutdown outcomes: if
-        // the dial's queued work takes the opener before the stop advances the generation, the
-        // stop closes what it opened; if the stop wins, the late request is correctly dropped.
-        // The contract under test is the OUTCOME: once the stop and all queued opener work have
-        // settled, NO connection from either tag is left open.
+        // stop, so the teardown owes it a join. BOTH orders are legitimate shutdown outcomes: the
+        // dial may take the opener before the stop advances the generation (the stop closes what
+        // it opened), or the stop may win and drop the late request. The contract under test is
+        // the OUTCOME: the initial open MUST have happened, and once the stop and all queued
+        // opener work have settled, NO connection from either tag is left open.
         val barrier = getField(harness.service, "shutdownBarrier")
         val lateDial = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             opener.openForLater("utt-stop-late")
@@ -1661,31 +1667,34 @@ assertEquals(
             .invoke(barrier, listOf(lateDial))
         try {
             opener.openForLater("utt-stop-test")
-            // GENEROUS wall-clock bound: on a loaded host the opener's IO scope can be starved
-            // well past a short bound -- a fixture-wait artifact, not a product signal. The wait
-            // itself proves the test's dial landed; whether the socket is STILL open here is not
-            // asserted: the service's own session churn (an observer route run under load) may
-            // legitimately replace or close the pre-opened socket before we stop, and the contract
-            // under test is the OUTCOME after the stop, not this fixture's intermediate state.
-            kotlinx.coroutines.withTimeoutOrNull(30_000) {
+            // REQUIRE the initial open: generous wall-clock bound (a starved opener thread is a
+            // host artifact), but expiry is a FAILURE, not a pass -- the test must not pass
+            // without ever exercising the teardown against a live connection.
+            val firstOpened = kotlinx.coroutines.withTimeoutOrNull(30_000) {
                 while (opened.isEmpty()) kotlinx.coroutines.yield()
-            }
+                true
+            } == true
+            org.junit.Assert.assertTrue("fixture: the initial open must have run", firstOpened)
             harness.stop()
-            // PROVE the late request was submitted, then let the opener's queue drain fully.
+            // PROVE the late request was submitted and joined, then DRAIN the opener's actual
+            // queue: the probe task runs only after every opener job already queued on the single
+            // executor thread has finished.
             assertTrue("fixture: the late dial must have been submitted", lateSubmitted.await(10, java.util.concurrent.TimeUnit.SECONDS))
             lateDial.join()
-            kotlinx.coroutines.withTimeoutOrNull(10_000) {
-                while (opened.size < 2 && !lateDial.isCompleted) kotlinx.coroutines.yield()
+            runCatching {
+                openerExecutor.submit { }.get(30, java.util.concurrent.TimeUnit.SECONDS)
+            }.onFailure {
+                org.junit.Assert.fail("fixture: the opener queue never drained: $it")
             }
-            // Give a queued-but-not-yet-run open a real chance to land before judging the outcome.
-            kotlinx.coroutines.withTimeoutOrNull(2_000) { kotlinx.coroutines.yield() }
             org.junit.Assert.assertTrue(
                 "a stopped session must not keep any pre-opened socket open (state: " +
                     opened.joinToString { it.ownerTag + (if (it.isClosed) ":closed" else ":OPEN") } + ")",
-                opened.all { it.isClosed },
+                opened.isNotEmpty() && opened.all { it.isClosed },
             )
         } finally {
             harness.stop()
+            openerDispatcher.close()
+            openerExecutor.shutdownNow()
         }
     }
 

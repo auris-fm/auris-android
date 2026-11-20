@@ -19,6 +19,13 @@ on:
     # ever fire for commits actually on main.
 
 jobs:
+  trigger-script-controls:
+    name: "Trigger script controls"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash .buildkite/scripts/trigger-release.test.sh
+
   voice-unit-tests:
     name: "voice:testDebugUnitTest"
     runs-on: ubuntu-latest

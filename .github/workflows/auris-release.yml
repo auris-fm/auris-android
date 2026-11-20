@@ -65,14 +65,10 @@ jobs:
       BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG }}
       BUILDKITE_PIPELINE: ${{ vars.BUILDKITE_PIPELINE_ANDROID }}
     steps:
+      - uses: actions/checkout@v7
       - name: "Trigger the auris-android Buildkite pipeline"
         if: ${{ env.BUILDKITE_API_TOKEN != '' }}
-        run: |
-          curl -sSf -X POST \
-            "https://api.buildkite.com/v2/organizations/${BUILDKITE_ORG}/pipelines/${BUILDKITE_PIPELINE}/builds" \
-            -H "Authorization: Bearer ${BUILDKITE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"commit\": \"${GITHUB_SHA}\", \"branch\": \"main\", \"message\": \"Release build for ${GITHUB_SHA}\"}"
+        run: bash .buildkite/scripts/trigger-release.sh
       - name: "No API token yet"
         if: ${{ env.BUILDKITE_API_TOKEN == '' }}
         run: echo "BUILDKITE_API_TOKEN not set — release not triggered (dry-run mode)"

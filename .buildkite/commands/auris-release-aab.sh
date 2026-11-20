@@ -44,9 +44,9 @@ echo "--- :closed_lock_with_key: Installing Auris secrets"
 #   AURIS_SECRET_PROPERTIES         the non-signing keys the release reads
 #                                   (see PR 92's key inventory; most may be
 #                                   empty for Auris)
-# Both are optional for an unsigned dry run ONLY if the google-services plugin
-# can be satisfied; without the JSON the build aborts, so the dry run needs at
-# least the fm.auris google-services.json.
+# BOTH inputs are REQUIRED: without the JSON the step fails here (the
+# google-services plugin would abort anyway), and signing below is
+# unconditional -- there is no unsigned path in this pipeline.
 # Owner-only permissions for every generated secret file (reviewer: umask 022
 # would leave them 0644 while the build runs).
 umask 077
@@ -58,9 +58,9 @@ else
 fi
 printf '%s\n' "${AURIS_SECRET_PROPERTIES:-}" > secret.properties
 
-# Signing is UNCONDITIONAL in this pipeline (AURIS_REQUIRE_SIGNING=1 in the
-# YAML): one naming scheme, ANDROID_UPLOAD_KEYSTORE_B64 (+ _PASSWORD/_ALIAS/
-# _KEY_PASSWORD), exactly what the mini's hook exports. #69 went green
+# Signing is UNCONDITIONAL in this pipeline: one naming scheme,
+# ANDROID_UPLOAD_KEYSTORE_B64 (+ _PASSWORD/_ALIAS/_KEY_PASSWORD), exactly
+# what the mini's hook exports. #69 went green
 # UNSIGNED because two naming schemes existed and neither side matched; a
 # missing keystore now fails the step instead of falling back to unsigned.
 # APPEND the signing keys to secret.properties so the non-signing keys survive.

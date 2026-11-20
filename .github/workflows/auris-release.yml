@@ -5,12 +5,18 @@ name: "Auris Android release"
 # build and the Play internal-track upload). Until BUILDKITE_API_TOKEN exists
 # as a secret, the trigger step is skipped: the tests still run, the release
 # does not. The release pipeline itself also stops at the signed AAB until its
-# store secrets exist, so this workflow never ships anything unexpected.
+# store secrets exist, so this workflow never ships anything unexpected. The
+# trigger job only runs on refs/heads/main: a workflow_dispatch on any other
+# ref runs the checks but never labels a commit as main for Buildkite. The
+# upload itself needs PLAY_UPLOAD=1 on the pipeline (off by default; the
+# switch is turned on only after Google approves the upload-key reset).
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    # workflow_dispatch can select any ref; the release trigger below must only
+    # ever fire for commits actually on main.
 
 jobs:
   voice-unit-tests:
@@ -52,6 +58,7 @@ jobs:
   trigger-release:
     name: "Trigger the release build"
     needs: [voice-unit-tests, cloud-transport-tests, android-test-compile]
+    if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     env:
       BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}

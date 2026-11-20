@@ -107,8 +107,10 @@ tail -n 2 settings.gradle.kts
 
 # Prove the outcome, not just the inputs: when signing was requested the
 # bundle must carry a certificate, and it must be THE upload certificate.
-# AURIS_UPLOAD_CERT_SHA256 pins the expected SHA-256 fingerprint (non-secret;
-# from upload-cert.pem / Google's reset). Unsigned or wrongly signed fails.
+# The pin is the public upload cert's SHA-256 (from upload-cert.pem, matches
+# Google's upload-key reset); non-secret, so it lives here. An env override
+# exists only for deliberate key rotation. Unsigned or wrongly signed fails.
+AURIS_UPLOAD_CERT_SHA256="${AURIS_UPLOAD_CERT_SHA256:-16:89:BD:A2:5A:0B:47:DB:6D:F4:7F:B1:C2:E7:BD:E0:4F:5C:A3:C2:0D:E2:CA:91:AE:52:1A:DB:30:C5:B3:91}"
 if [ -n "${SIGNING_STORE:-}" ]; then
   echo "--- Verifying bundle signature"
   bash "$(dirname "$0")/auris-verify-bundle-signature.sh" \

@@ -1130,9 +1130,14 @@ class VoiceControlModeObserverAvailabilityTest {
             settleUntil("observer has seen the final device identity", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
             }
-            settleUntil("no acquisition attempt in flight", probe = { harness.wedgeState() }) {
-                getField(harness.service, "acquisitionJob") == null
-            }
+            // NOTE: no "acquisition not in flight" wait here, deliberately. An in-flight attempt
+            // can only spend the staged restart through its FAILURE, and inside the wedge the
+            // only failure trigger is the acquisition's own virtual timeout -- which settleUntil
+            // never grants. The real-time budget cannot elapse during a sub-second test, and the
+            // observer-trigger waits above have already recorded every route event that could
+            // resolve the attempt. So by this point the attempt is out of flight (its job cleared
+            // when the observer's route run committed the broadcast capture), and a wait here
+            // would pin nothing.
             // PIN THE ENGINE AS STARTED BEFORE THE CAPTURE DIES: onPipelineTerminated early-returns
             // when the engine generation is stale or the start was never committed, and then NO
             // restart is armed at all (pending=false, timer=null, credit untouched). attachCount>=1
@@ -1817,11 +1822,16 @@ assertEquals(
                 opened.isNotEmpty() && opened.all { it.isClosed },
             )
         } finally {
-            // Cleanup always runs, even if the stop itself throws: the executor's worker is
-            // non-daemon and would otherwise outlive the test JVM.
-            runCatching { harness.stop() }
-            runCatching { openerDispatcher.close() }
-            runCatching { openerExecutor.shutdownNow() }
+            // The late dial lives OUTSIDE the service scope: a refused barrier registration
+            // leaves it with no join owner, so it is cancelled and joined here unconditionally.
+            lateDial.cancel()
+            lateDial.join()
+            // Unwrapped, like every other test's finally: a stop failure is a real failure and
+            // must surface. The executor's worker is non-daemon, so the close/shutdown run
+            // unconditionally after it.
+            harness.stop()
+            openerDispatcher.close()
+            openerExecutor.shutdownNow()
         }
     }
 

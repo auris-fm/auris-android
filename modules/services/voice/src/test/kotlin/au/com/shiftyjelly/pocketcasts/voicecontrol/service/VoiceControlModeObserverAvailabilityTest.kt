@@ -1130,14 +1130,16 @@ class VoiceControlModeObserverAvailabilityTest {
             settleUntil("observer has seen the final device identity", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
             }
-            // NOTE: no "acquisition not in flight" wait here, deliberately. An in-flight attempt
-            // can only spend the staged restart through its FAILURE, and inside the wedge the
-            // only failure trigger is the acquisition's own virtual timeout -- which settleUntil
-            // never grants. The real-time budget cannot elapse during a sub-second test, and the
-            // observer-trigger waits above have already recorded every route event that could
-            // resolve the attempt. So by this point the attempt is out of flight (its job cleared
-            // when the observer's route run committed the broadcast capture), and a wait here
-            // would pin nothing.
+            // PIN THE ACQUISITION STATE THE CALLERS RELY ON: the attempt is OUT of flight here
+            // (empirically pinned: acq=false on every run). The staged shape is "no attempt in
+            // flight": after healing (bringScoUp), the restart/fallback start comes from the
+            // observer's route triggers, never from this attempt completing -- a live attempt
+            // would be an uncontrolled variable that could double-start on heal or fail and
+            // spend the staged restart. Its failure is also unreachable inside the wedge: the
+            // only trigger is the virtual timeout settleUntil never grants.
+            settleUntil("no acquisition attempt in flight", probe = { "acq=${getField(harness.service, "acquisitionJob") != null} " + harness.wedgeState() }) {
+                getField(harness.service, "acquisitionJob") == null
+            }
             // PIN THE ENGINE AS STARTED BEFORE THE CAPTURE DIES: onPipelineTerminated early-returns
             // when the engine generation is stale or the start was never committed, and then NO
             // restart is armed at all (pending=false, timer=null, credit untouched). attachCount>=1
@@ -1826,12 +1828,15 @@ assertEquals(
             // leaves it with no join owner, so it is cancelled and joined here unconditionally.
             lateDial.cancel()
             lateDial.join()
-            // Unwrapped, like every other test's finally: a stop failure is a real failure and
-            // must surface. The executor's worker is non-daemon, so the close/shutdown run
-            // unconditionally after it.
-            harness.stop()
-            openerDispatcher.close()
-            openerExecutor.shutdownNow()
+            try {
+                // Unwrapped, like every other test's finally: a stop failure is a real failure
+                // and must surface.
+                harness.stop()
+            } finally {
+                // The executor's worker is non-daemon: it is released even when the stop throws.
+                openerDispatcher.close()
+                openerExecutor.shutdownNow()
+            }
         }
     }
 

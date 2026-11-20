@@ -14,6 +14,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -190,9 +191,20 @@ class VoiceSharingSettingsViewModelTest {
 
         try {
             setProjection(enrolledProjection())
-            val watch = kotlinx.coroutines.CoroutineScope(mainDispatcher).launch(Dispatchers.Unconfined) {
+            // The watch must ALREADY be collecting on the main executor before any emission can
+            // reach it: an Unconfined collector observes on whatever thread resumes it, and under
+            // load the launching coroutine itself can start on the Test worker -- recording the
+            // OBSERVER's start thread, not the publisher's. Pin the start with a latch so every
+            // recorded write is a real production-shaped emission.
+            // Subscribe on the main executor and WAIT for the subscription to exist: the first
+            // collect suspension is registered synchronously at flow start, so once this launch
+            // has begun on sharing-main, every later emission resumes the collector there.
+            val watchStarted = java.util.concurrent.CountDownLatch(1)
+            val watch = kotlinx.coroutines.CoroutineScope(mainDispatcher).launch {
+                watchStarted.countDown()
                 vm.state.drop(1).collect { writes += Thread.currentThread().name }
             }.also { extraJobs += it }
+            assertTrue("the watch must start on main before emissions", watchStarted.await(10, java.util.concurrent.TimeUnit.SECONDS))
             val issued = java.util.concurrent.CountDownLatch(1)
             kotlinx.coroutines.CoroutineScope(mainDispatcher).launch {
                 vm.withdraw()

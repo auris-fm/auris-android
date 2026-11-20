@@ -15,11 +15,12 @@
 # upload-key reset is approved on Play; signing itself is secret-gated in
 # the scripts.
 #
-# Dry runs: a build started by hand on any branch other than main runs the
-# AAB step (its filter admits non-main branches), so signing can be exercised
-# before the pipeline merges. The Play step stays main-only: a branch build
-# never uploads, whatever PLAY_UPLOAD says. The GitHub trigger job remains
-# the only AUTOMATIC entry, and it only ever fires for refs/heads/main.
+# Both steps are main-only: a hand-started build on any other branch would
+# run that branch's copy of the scripts with the signing and Play credentials
+# in the environment, so unmerged code must never reach them. The first dry
+# run happens on main right after merge, with PLAY_UPLOAD off. The GitHub
+# trigger job remains the only AUTOMATIC entry, and it only ever fires for
+# refs/heads/main.
 
 agents:
   queue: "auris-android"
@@ -27,7 +28,11 @@ agents:
 steps:
   - label: "Release AAB"
     key: release-aab
-    branches: "!refs/tags/*"
+    # main only: a hand-started build on any other branch would execute THAT
+    # branch's copy of this script with the upload keystore and Play service
+    # account in its environment -- unmerged code must never see them. Dry
+    # runs happen on main after merge (PLAY_UPLOAD off until the reset window).
+    branches: "main"
     command: .buildkite/commands/auris-release-aab.sh
     timeout_in_minutes: 70
     artifact_paths:

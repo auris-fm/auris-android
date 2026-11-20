@@ -24,9 +24,11 @@ sed -i.bak "s/^versionCode=.*/versionCode=$NEW/" version.properties
 rm -f version.properties.bak
 echo "versionCode $BASE -> $NEW"
 
-# Both generated signing files go on success AND failure: the keystore and
-# the secret.properties configure_apply wrote (it carries the appended
-# signing passwords once the signing branch runs).
+# Every generated secret file goes on success AND failure: the keystore, the
+# secret.properties this script writes from AURIS_SECRET_PROPERTIES (it carries
+# the appended signing passwords once the signing branch runs), and the
+# Auris google-services.json. NOT configure_apply -- that path is deliberately
+# gone (Automattic's secrets are for their package).
 cleanup() {
   rm -f auris-upload.keystore secret.properties app/google-services.json
 }
@@ -49,7 +51,7 @@ echo "--- :closed_lock_with_key: Installing Auris secrets"
 # would leave them 0644 while the build runs).
 umask 077
 if [ -n "${AURIS_GOOGLE_SERVICES_JSON_B64:-}" ]; then
-  echo "$AURIS_GOOGLE_SERVICES_JSON_B64" | base64 --decode > app/google-services.json
+  echo "$AURIS_GOOGLE_SERVICES_JSON_B64" | openssl base64 -d -A > app/google-services.json
 else
   echo "--- AURIS_GOOGLE_SERVICES_JSON_B64 not set: the google-services plugin will abort" >&2
   exit 1
@@ -59,7 +61,7 @@ printf '%s\n' "${AURIS_SECRET_PROPERTIES:-}" > secret.properties
 # Signing, only once the upload keystore exists as agent secrets. APPEND the
 # signing keys to secret.properties so the non-signing keys survive.
 if [ -n "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
-  echo "$ANDROID_UPLOAD_KEYSTORE_B64" | base64 --decode > auris-upload.keystore
+  echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keystore
   printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
     "$PWD/auris-upload.keystore" \
     "$ANDROID_UPLOAD_KEYSTORE_PASSWORD" \

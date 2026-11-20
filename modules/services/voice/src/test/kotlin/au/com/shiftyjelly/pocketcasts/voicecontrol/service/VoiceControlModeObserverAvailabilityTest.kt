@@ -117,6 +117,18 @@ class VoiceControlModeObserverAvailabilityTest {
     private lateinit var testScheduler: TestCoroutineScheduler
 
     @Before
+    fun plantCaptureStopTree() {
+        timber.log.Timber.plant(object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                if (message.orEmpty().contains("mic_capture_stopped")) {
+                    stoppedLogs.add(message)
+                    captureStoppedLogCount.incrementAndGet()
+                }
+            }
+        })
+    }
+
+    @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -257,6 +269,13 @@ class VoiceControlModeObserverAvailabilityTest {
     private class FakeHardware(private val scoReady: () -> Boolean) : CaptureHardware {
         var capturing = false
 
+        /** When set, waitForVadEvent reports the native VAD FAULT (-2): the engine's own
+         *  death path -- the capture stream faults, the processing job fails, and the ENGINE
+         *  invokes its real onTerminated callback. Fixtures never call service handlers
+         *  reflectively: they can only hand in a generation production would never produce. */
+        @Volatile
+        var faultVad = false
+
         /** When set, the VAD attach always fails: simulates a start that never comes up. */
         var failVadAttach = false
         var attachCount = 0
@@ -297,6 +316,12 @@ class VoiceControlModeObserverAvailabilityTest {
         override fun isCapturing() = capturing
 
         override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int {
+            // ONE-SHOT: exactly the capture that is polling when the fault is armed dies; the
+            // automatic restart gets clean polls from its first event wait on.
+            if (faultVad) {
+                faultVad = false
+                return -2
+            }
             val deadline = System.currentTimeMillis() + timeoutMs
             while (capturing && System.currentTimeMillis() < deadline) {
                 Thread.sleep(5)
@@ -570,6 +595,7 @@ class VoiceControlModeObserverAvailabilityTest {
         val service: VoiceControlService,
         val monitor: AndroidAudioRouteMonitor,
         val hardware: FakeHardware,
+
         val scoPlatform: FakeScoPlatform,
         val policy: ListeningModePolicy,
         val microphoneCapture: MicrophoneCapture,
@@ -582,19 +608,32 @@ class VoiceControlModeObserverAvailabilityTest {
             .getDeclaredMethod("isStarted").apply { isAccessible = true }
             .invoke(getField(service, "engineStart")) as Boolean
 
-    private suspend fun selfEndCapture(harness: Harness) {
-        val engineStart = getField(harness.service, "engineStart")!!
-        val generation = engineStart.javaClass.getDeclaredMethod("generation").apply { isAccessible = true }
-            .invoke(engineStart) as Int
-        val method = harness.service.javaClass.getDeclaredMethod(
-            "onPipelineTerminated",
-            Int::class.javaPrimitiveType,
-        )
-        method.isAccessible = true
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-            method.invoke(harness.service, generation)
-        }
+    /**
+     * End the capture the way production dies: the capture stream FAULTS (FakeHardware reports
+     * the native VAD fault), the engine's processing job fails, and the ENGINE calls its own
+     * `onTerminated` -- dispatched through `serviceScope.launch(Dispatchers.Main)` with the
+     * generation the engine itself captured at start. The service handler is never invoked
+     * reflectively by a fixture.
+     */
+    private suspend fun endCaptureByFault(harness: Harness) {
+        val before = captureStoppedLogCount.get()
+        harness.hardware.faultVad = true
+        // Deterministic, not a timed beat: the fault is consumed by the poll loop within one
+        // poll interval (<=500ms real), then the engine's own onTerminated dispatches to the
+        // service handler, which logs mic_capture_stopped for the death. Awaiting THAT log
+        // line means the death is fully processed before any test-side outcome wait begins
+        // (the engine-started flag can flip false and true again within one restart, so it is
+        // not a sampleable edge).
+        awaitState(
+            "termination processed",
+            probe = { "stopped=$captureStoppedLogCount " + harness.wedgeState() },
+        ) { captureStoppedLogCount.get() > before }
     }
+
+    /** Ordered count of mic_capture_stopped logs the fault fixture has processed so far. */
+    private val captureStoppedLogCount = java.util.concurrent.atomic.AtomicInteger(0)
+    private val stoppedLogs = java.util.Collections.synchronizedList(mutableListOf<String>())
+
 
     @Test
     fun `a headset capture that ends by itself re-acquires and restarts exactly once`() = runBlocking {
@@ -610,7 +649,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
             // Capture ends on its own (pipeline termination, no user change): exactly one
             // automatic restart — re-acquire plus engine start.
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState("capture restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 2 }
             assertEquals(
                 "exactly one automatic restart re-acquired the headset",
@@ -634,7 +673,7 @@ class VoiceControlModeObserverAvailabilityTest {
             harness.awaitObserverInstalled()
             awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             harness.scoPlatform.establish = false
             awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
@@ -669,7 +708,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
             // The restart's acquisition will succeed, but the engine start fails (the VAD
             // attach never happens): the withheld path through startEngine == false.
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             harness.hardware.capturing = false
             awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
@@ -695,7 +734,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
             // First self-end: one restart (the acquire/release churn this causes is not a
             // trigger and must not re-arm anything).
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState("capture restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 2 }
             val scoStartsAfterRestart = harness.scoPlatform.scoStarts
             Thread.sleep(300)
@@ -703,7 +742,7 @@ class VoiceControlModeObserverAvailabilityTest {
 
             // The restarted capture dies fast again: withheld, and the churn of the second
             // release must not bring it back.
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState("restarts withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
                 !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
@@ -799,7 +838,7 @@ class VoiceControlModeObserverAvailabilityTest {
             val scoBeforeEnd = harness.scoPlatform.scoStarts
             val attaches = harness.hardware.attachCount
 
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState("restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= attaches + 1 }
             assertEquals(
                 "the restart followed a fresh acquisition",
@@ -876,7 +915,7 @@ class VoiceControlModeObserverAvailabilityTest {
             // Self-end: the restart must wait for a FRESH acquisition (one more SCO start),
             // not spend on the just-released routing. The platform answers SCO normally now.
             harness.scoPlatform.holdScoDown = false
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState("restarted after the reacquire", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= attaches + 1 }
             assertEquals(
                 "the restart followed a fresh acquisition",
@@ -942,10 +981,10 @@ class VoiceControlModeObserverAvailabilityTest {
             // The wired capture ends by itself: one restart at once (its stream was its own,
             // not an acquisition's), then the fast second death withholds.
             withheldLogs[0] = 0
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState("wired capture restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 3 }
             awaitState("restart committed", probe = { harness.wedgeState() }) { harness.engineStarted() }
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             awaitState(
                 "withheld",
                 probe = {
@@ -1097,7 +1136,7 @@ class VoiceControlModeObserverAvailabilityTest {
                 harness.engineStarted()
             }
             // That capture self-ends; its owed restart waits on the never-confirmed acquisition.
-            selfEndCapture(harness)
+            endCaptureByFault(harness)
             settleUntil("the restart waiting on re-confirmation", probe = { harness.wedgeState() }) {
                 getField(harness.service, "pendingAutomaticRestart") == true &&
                     (getField(harness.service, "reconfirmationTimer") as? kotlinx.coroutines.Job)?.isActive == true
@@ -1526,7 +1565,7 @@ assertEquals(
                                     "captureStartedAtMs",
                                     android.os.SystemClock.elapsedRealtime() - 61_000L,
                                 )
-                                selfEndCapture(harness)
+                                endCaptureByFault(harness)
                                 awaitState("$case: restarted", probe = { harness.wedgeState() }) {
                                     harness.hardware.attachCount >= attaches + 1 + it
                                 }
@@ -1534,7 +1573,7 @@ assertEquals(
                         }
 
                         "fastDeath" -> {
-                            selfEndCapture(harness)
+                            endCaptureByFault(harness)
                             awaitState("$case: restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= attaches + 1 }
                             // The restart's engine start commits after the VAD attach; wait
                             // for it, or the next self-end below would early-return on a not-
@@ -1544,7 +1583,7 @@ assertEquals(
                             // Count only this explicit death: the harness's fake capture has
                             // its own lifecycle noise outside the test's actions.
                             withheldLogs[0] = 0
-                            selfEndCapture(harness)
+                            endCaptureByFault(harness)
                             awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
                                 !(budget.javaClass.getDeclaredField("restartAvailable")
@@ -1568,7 +1607,7 @@ assertEquals(
                             // Restart path A: the restart's acquisition fails.
                             harness.scoPlatform.establish = false
                             withheldLogs[0] = 0
-                            selfEndCapture(harness)
+                            endCaptureByFault(harness)
                             // The budget flips before the withheld log is written (the
                             // spend happens at the attempt); wait for BOTH.
                             awaitState("$case: withheld", probe = { harness.wedgeState() }) {
@@ -1585,7 +1624,7 @@ assertEquals(
                             // the engine start fails — the VAD attach never happens.
                             harness.hardware.failVadAttach = true
                             withheldLogs[0] = 0
-                            selfEndCapture(harness)
+                            endCaptureByFault(harness)
                             // The budget flips before the withheld log is written (the
                             // spend happens at the attempt); wait for BOTH.
                             awaitState("$case: withheld", probe = { harness.wedgeState() }) {

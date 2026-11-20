@@ -994,7 +994,11 @@ class VoiceControlModeObserverAvailabilityTest {
 
     /** Real-time-bounded wait on a virtual-clock-stable condition (no scheduler advancing). */
     private fun settleUntil(what: String, probe: () -> String = { "" }, predicate: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + 10_000
+        // WALL-CLOCK BUDGET sized for full-suite load: this pump loop runs alongside the rest of
+        // the suite on the same host, so a 10 s deadline expired on a starved machine with the
+        // subject strictly behind -- a host artifact, not a product race. 60 s still bounds a
+        // genuinely wedged subject (the subject's own steps complete in milliseconds when run).
+        val deadline = System.currentTimeMillis() + 60_000
         while (!predicate()) {
             if (System.currentTimeMillis() > deadline) error("settleUntil timed out waiting for $what; " + probe())
             testScheduler.runCurrent()

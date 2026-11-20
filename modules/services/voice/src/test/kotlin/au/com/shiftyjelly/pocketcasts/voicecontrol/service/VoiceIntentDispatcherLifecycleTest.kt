@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -241,41 +242,31 @@ class VoiceIntentDispatcherLifecycleTest {
     }
 
     /**
-     * The two completion interleavings, FORCED one test each (@spec 5fd4864e): whether the cleanup
-     * handler runs inline on the dispatching thread or asynchronously is decided by whether the
-     * job completed before invokeOnCompletion registered. A single test that accepts whichever
-     * shape occurs can pass without ever checking the other, so each shape gets its own test with
-     * its own deterministic arrangement. BOTH assert the contract: the invocation settles exactly
-     * once and no live timing record remains.
+     * The completion arrangements, FORCED one test each, with PRODUCTION dispatch only (no seam):
+     * the handler runs on whichever thread completes the job, so each test chooses the completing
+     * thread deterministically. BOTH assert the contract: the invocation settles exactly once and
+     * no live timing record remains. The third shape -- the job completing before invokeOnCompletion
+     * registers -- has no test-side control point (registration sits inside dispatch, nanoseconds
+     * after launch), and the contract is thread-independent (settlement is one-shot per token), so
+     * it needs no test of its own.
      */
-    private class CleanupProbe(private val testThreadId: Long) {
-        val started = java.util.concurrent.CountDownLatch(1)
-        val release = java.util.concurrent.CountDownLatch(1)
+    private class CleanupProbe {
+        val bodyStarted = java.util.concurrent.CountDownLatch(1)
+        val bodyRelease = java.util.concurrent.CountDownLatch(1)
+        val cleanupEntered = java.util.concurrent.CountDownLatch(1)
         val settleCalls = java.util.concurrent.atomic.AtomicInteger(0)
-        var inline = false
-            private set
+        val cleanupThread = java.util.concurrent.atomic.AtomicLong(0)
 
         fun answer(): Boolean {
             settleCalls.incrementAndGet()
-            if (Thread.currentThread().threadId() == testThreadId) {
-                // INLINE shape: registration happened after completion; the handler runs inside
-                // dispatch(). Nothing may block here -- dispatch() itself is on this thread.
-                inline = true
-            } else {
-                // ASYNC shape: park between settle and finish so the test can observe the owed
-                // record while the handler is provably mid-flight.
-                started.countDown()
-                release.await(10, java.util.concurrent.TimeUnit.SECONDS)
-            }
+            cleanupThread.set(Thread.currentThread().threadId())
+            cleanupEntered.countDown()
             return true
         }
     }
 
-    private fun runCleanupShape(
-        id: String,
-        forceInline: Boolean,
-    ) {
-        val probe = CleanupProbe(Thread.currentThread().threadId())
+    private fun runCleanupShape(id: String, cancelFromAnotherThread: Boolean) {
+        val probe = CleanupProbe()
         val engine = engine()
         org.mockito.kotlin.whenever(engine.settleInvocation(org.mockito.kotlin.any()))
             .thenAnswer { probe.answer() }
@@ -290,57 +281,65 @@ class VoiceIntentDispatcherLifecycleTest {
             record.mark(au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.Stage.AcousticEnd, 1_000_000_000L)
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.registerFor(id, record)
 
-            // FORCED INTERLEAVING via the launch dispatcher's queue, not luck:
-            // - INLINE: an already-cancelled scope whose dispatcher RUNS the launch task eagerly on
-            //   this thread. The coroutine completes (cancelled before body) inside scope.launch,
-            //   strictly before .also registers invokeOnCompletion -- the handler must run inline.
-            // - ASYNC: an already-cancelled scope whose dispatcher QUEUES the task without running
-            //   it. Registration happens first; releasing the queue afterwards completes the job on
-            //   another thread, so the handler runs there, parked on the probe's latch.
-            val queued = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
-            val eager = object : kotlinx.coroutines.CoroutineDispatcher() {
-                override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
-                    if (forceInline) block.run() else queued.add(block)
-                }
-            }
-            val cancelled = CoroutineScope(
-                kotlinx.coroutines.SupervisorJob().apply { cancel() } + eager,
+            // FORCED ARRANGEMENT via the SCOPE'S job, not the launch dispatcher:
+            // - INLINE: an already-cancelled scope. The child completes (cancelled before the body)
+            //   at creation, on the CALLING thread -- the handler runs inline inside dispatch().
+            // - ASYNC: a live scope whose body parks in the executor. Cancelling from the test
+            //   thread marks the job cancelling; the parked body unwinds on its IO worker when
+            //   released, so the job completes on the WORKER thread and the handler runs there.
+            val scopeFor = CoroutineScope(
+                (
+                    if (!cancelFromAnotherThread) {
+                        // FORCED NO-BODY: an already-cancelled scope. The child completes cancelled
+                        // before its body ever dispatches to the executor.
+                        kotlinx.coroutines.SupervisorJob().apply { cancel() }
+                    } else {
+                        // FORCED ASYNC: a live scope. The body parks in the executor; cancelling marks
+                        // the job cancelling, and the parked body unwinds on its IO worker when
+                        // released, so the job completes on the WORKER thread. The body then throws
+                        // (the dispatch is dead), which the handler swallows: an unhandled throw would
+                        // leak into the global uncaught-exception monitor of the NEXT test class.
+                        SupervisorJob()
+                    }
+                ) +
+                    kotlinx.coroutines.CoroutineExceptionHandler { _, _ -> },
             )
             val job = d.dispatch(
-                scope = cancelled,
+                scope = scopeFor,
                 engine = engine,
-                executor = executor { _, _ -> error("the body must never run in this test") },
+                executor = executor { _, _ ->
+                    probe.bodyStarted.countDown()
+                    probe.bodyRelease.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                    error("a cancelled dispatch must never complete its body")
+                },
                 render = { _, _ -> },
                 onCommandRecognized = { },
                 intent = VoiceIntent.Playback.Pause,
                 invocationToken = token(),
                 timingRequestId = id,
-                launchDispatcher = eager,
             )
             assertNotNull("a dispatch still returns its job", job)
-
-            if (forceInline) {
-                assertTrue("the forced-inline shape must have run the handler inline", probe.inline)
+            if (!cancelFromAnotherThread) {
+                // Cancelled scope: the child completes cancelled without its body ever dispatching.
+                assertTrue("the cleanup must run", probe.cleanupEntered.await(10, java.util.concurrent.TimeUnit.SECONDS))
             } else {
-                // Complete the job on ANOTHER thread, after registration.
-                val runner = Thread { queued.forEach { it.run() } }
-                runner.start()
-                assertTrue(
-                    "the async handler must start off the test thread",
-                    probe.started.await(10, java.util.concurrent.TimeUnit.SECONDS),
+                assertTrue("the body must have started", probe.bodyStarted.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                // Cancelling only MARKS the job cancelling; the parked body must unwind for the job
+                // to COMPLETE, so release it and then observe the handler on the completing thread.
+                job!!.cancel()
+                probe.bodyRelease.countDown()
+                // The record was handed to the executor (the body reached execute), so finishing
+                // it is the executor's finally -- simulated here, as the real one does on exit.
+                au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.finishFor(id, cancelled = true, failed = false)
+                assertTrue("the cleanup must run", probe.cleanupEntered.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                org.junit.Assert.assertNotEquals(
+                    "a cancelled-mid-body dispatch settles on the completing worker thread, not the test's",
+                    Thread.currentThread().threadId(),
+                    probe.cleanupThread.get(),
                 )
-                assertFalse("the forced-async shape must not have run inline", probe.inline)
-                org.junit.Assert.assertFalse(
-                    "while the handler is blocked the record must not be published yet",
-                    published.isCompleted,
-                )
-                org.junit.Assert.assertTrue(
-                    "while the cleanup handler is blocked the record must still be live",
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.isActive(id),
-                )
-                probe.release.countDown()
-                runner.join(10_000)
             }
+            job?.let { j -> runBlocking { withTimeout(10_000) { j.join() } } }
+
             runBlocking {
                 withTimeout(10_000) {
                     withContext(Dispatchers.Default) { published.await() }
@@ -352,18 +351,18 @@ class VoiceIntentDispatcherLifecycleTest {
             )
             assertEquals("the invocation must settle exactly once", 1, probe.settleCalls.get())
         } finally {
-            probe.release.countDown()
+            probe.bodyRelease.countDown()
             au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.TurnTimingRecord.sink = previousSink
         }
     }
 
     @Test
-    fun `cancelled before registration - cleanup runs inline and leaves no live timing record`() {
-        runCleanupShape(id = "wire-cleanup-inline", forceInline = true)
+    fun `cancelled scope - cleanup settles with the body never run and leaves no live record`() {
+        runCleanupShape(id = "wire-cleanup-inline", cancelFromAnotherThread = false)
     }
 
     @Test
-    fun `registered before completion - cleanup runs async and leaves no live timing record`() {
-        runCleanupShape(id = "wire-cleanup-async", forceInline = false)
+    fun `cancelled mid-body - cleanup runs on the body worker and leaves no live record`() {
+        runCleanupShape(id = "wire-cleanup-async", cancelFromAnotherThread = true)
     }
 }

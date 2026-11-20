@@ -980,6 +980,96 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `an old utterance timing out after its successor started must not stop the successor`() {
+        // THE REAL TIMEOUT PATH, forced end to end: the OLD utterance parks inside the platform's
+        // synthesizeToFile past its synthesis deadline; its successor starts, claims the engine,
+        // completes, and is PLAYING when the old timeout lands. The old cancellation handler is
+        // generation-guarded and must skip; and when the old body then continues past queueing and
+        // sees its cancelled continuation, the queued-synthesis stop there must be guarded the
+        // same way -- otherwise it fires engine.stop() unconditionally and silences the successor.
+        lateinit var fakeRef: FakeSynthesizer
+        val oldParked = java.util.concurrent.CountDownLatch(1)
+        val oldRelease = java.util.concurrent.CountDownLatch(1)
+        val (wired, fake, _) = engineWithFakeSynthesizer(onSynthesize = { id ->
+            if (fakeRef.synthesizeCount == 1) {
+                // OLD: park INSIDE synthesizeToFile so it cannot complete before its deadline.
+                oldParked.countDown()
+                oldRelease.await(20, java.util.concurrent.TimeUnit.SECONDS)
+            } else {
+                // SUCCESSOR: complete normally via the per-utterance callback.
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    fakeRef.listener?.onDone(id)
+                }
+            }
+        })
+        fakeRef = fake
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+        wired.synthesisWaitMs = 1_000
+        val newEntered = java.util.concurrent.CountDownLatch(1)
+        val newRelease = java.util.concurrent.CountDownLatch(1)
+        val successorTrack = java.util.concurrent.atomic.AtomicReference<android.media.AudioTrack>()
+        wired.writeToSink = { track, _, _, count ->
+            successorTrack.set(track)
+            newEntered.countDown()
+            newRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            count
+        }
+        val scope = CoroutineScope(Dispatchers.Default)
+        val startedAt = System.nanoTime()
+        val old = scope.launch { wired.speak("old", "en") }
+        // speak() hops to the main looper before reaching synthesis; pump while waiting for the park.
+        assertTrue("old must be parked mid-synthesis", (0 until 100).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            oldParked.count == 0L
+        })
+
+        // Successor starts while the old is still parked: it claims the generation, synthesizes,
+        // and reaches playback.
+        val successor = scope.launch { wired.speak("successor", "en") }
+        assertTrue("successor synthesis must queue", (0 until 100).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount >= 2
+        })
+        // The resumption after onDone is itself a main-looper task: pump until the write runs.
+        assertTrue("successor write must enter", (0 until 100).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            newEntered.count == 0L
+        })
+        assertEquals("successor must be playing", android.media.AudioTrack.PLAYSTATE_PLAYING, successorTrack.get().playState)
+
+        // THE REAL DEADLINE: wait out the old utterance's synthesis deadline BEFORE releasing the
+        // platform call, so the old body resumes past queueing with an already-cancelled
+        // continuation -- exactly the state a slow platform leaves behind.
+        val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+        if (elapsedMs < wired.synthesisWaitMs + 200) {
+            Thread.sleep(wired.synthesisWaitMs + 200 - elapsedMs)
+        }
+        oldRelease.countDown()
+        val oldReturned = runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                old.join()
+                true
+            }
+        } == true
+        assertTrue("the timed-out old utterance must return", oldReturned)
+
+        val stops = fake.stopCalls
+        val successorStillPlaying = successorTrack.get().playState
+        newRelease.countDown()
+        scope.cancel()
+        runBlocking { kotlinx.coroutines.withTimeoutOrNull(3000) { successor.join() } }
+        wired.release()
+        assertEquals("a timed-out utterance whose successor owns the engine must not stop it", 0, stops)
+        assertEquals("the successor's audio must survive the old timeout", android.media.AudioTrack.PLAYSTATE_PLAYING, successorStillPlaying)
+    }
+
+
+    @Test
     fun `reviewer cancellation stops old blocked track and preserves actual successor`() {
         val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)

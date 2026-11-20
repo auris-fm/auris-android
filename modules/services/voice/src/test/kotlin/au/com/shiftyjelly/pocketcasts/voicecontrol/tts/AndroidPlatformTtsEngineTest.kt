@@ -895,7 +895,19 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `reviewer old render exit preserves actual successor output`() {
-        val (wired, fake, _) = engineWithFakeSynthesizer()
+        // DETERMINISTIC synthesis completion (hardening): the shared fake's listener/id fields are
+        // overwritten by each new speak(), so firing onDone(lastUtteranceId) after a count poll can
+        // complete the WRONG utterance under load -- the old one then hits its synthesis timeout,
+        // and its cancellation cleanup stops the engine while it still owns the generation,
+        // silencing the successor (stopCalls=1). Completing each utterance from its OWN
+        // onSynthesize callback captures the id at queueing time, before any successor overwrites it.
+        lateinit var fakeRef: FakeSynthesizer
+        val (wired, fake, _) = engineWithFakeSynthesizer(onSynthesize = { id ->
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                fakeRef.listener?.onDone(id)
+            }
+        })
+        fakeRef = fake
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -932,7 +944,12 @@ class AndroidPlatformTtsEngineTest {
                     fake.synthesizeCount >= targetCount
                 },
             )
-            fake.listener?.onDone(fake.lastUtteranceId)
+            // Completion arrives via the per-utterance callback; pump the looper so it lands.
+            (0 until 250).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                fake.synthesizeCount >= targetCount
+            }
             return job
         }
         val old = start("old", 1)

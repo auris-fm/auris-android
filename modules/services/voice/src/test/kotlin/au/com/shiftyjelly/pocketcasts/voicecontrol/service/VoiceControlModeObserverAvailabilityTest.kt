@@ -605,13 +605,13 @@ class VoiceControlModeObserverAvailabilityTest {
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
             val scoStartsAfterFirst = harness.scoPlatform.scoStarts
 
             // Capture ends on its own (pipeline termination, no user change): exactly one
             // automatic restart — re-acquire plus engine start.
             selfEndCapture(harness)
-            awaitState("capture restarted") { harness.hardware.attachCount >= 2 }
+            awaitState("capture restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 2 }
             assertEquals(
                 "exactly one automatic restart re-acquired the headset",
                 scoStartsAfterFirst + 1,
@@ -632,11 +632,11 @@ class VoiceControlModeObserverAvailabilityTest {
         val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L)
         try {
             harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
             selfEndCapture(harness)
             harness.scoPlatform.establish = false
-            awaitState("restart withheld") {
+            awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
                 !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
                     .get(budget) as Boolean)
@@ -665,13 +665,13 @@ class VoiceControlModeObserverAvailabilityTest {
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
             // The restart's acquisition will succeed, but the engine start fails (the VAD
             // attach never happens): the withheld path through startEngine == false.
             selfEndCapture(harness)
             harness.hardware.capturing = false
-            awaitState("restart withheld") {
+            awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
                 !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
                     .get(budget) as Boolean)
@@ -690,13 +690,13 @@ class VoiceControlModeObserverAvailabilityTest {
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
             val scoStartsAfterFirst = harness.scoPlatform.scoStarts
 
             // First self-end: one restart (the acquire/release churn this causes is not a
             // trigger and must not re-arm anything).
             selfEndCapture(harness)
-            awaitState("capture restarted") { harness.hardware.attachCount >= 2 }
+            awaitState("capture restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 2 }
             val scoStartsAfterRestart = harness.scoPlatform.scoStarts
             Thread.sleep(300)
             testScheduler.advanceTimeBy(300.milliseconds)
@@ -704,7 +704,7 @@ class VoiceControlModeObserverAvailabilityTest {
             // The restarted capture dies fast again: withheld, and the churn of the second
             // release must not bring it back.
             selfEndCapture(harness)
-            awaitState("restarts withheld") {
+            awaitState("restarts withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
                 !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
                     .get(budget) as Boolean)
@@ -722,7 +722,7 @@ class VoiceControlModeObserverAvailabilityTest {
             setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
             setInputDevices()
             harness.monitor.onDevicesChanged()
-            awaitState("devices removed observed") {
+            awaitState("devices removed observed", probe = { harness.wedgeState() }) {
                 harness.monitor.availability.value == AudioRoute.Speaker
             }
             setAirPodsConnected()
@@ -730,7 +730,7 @@ class VoiceControlModeObserverAvailabilityTest {
             // The add's debounced refresh drives the observer; settle it before asserting.
             Thread.sleep(500)
             testScheduler.advanceTimeBy(500.milliseconds)
-            awaitState("capture back up after the real trigger") {
+            awaitState("capture back up after the real trigger", probe = { harness.wedgeState() }) {
                 harness.hardware.attachCount >= 3
             }
         } finally {
@@ -794,13 +794,13 @@ class VoiceControlModeObserverAvailabilityTest {
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
-            awaitState("capture committed") { harness.engineStarted() }
+            awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
+            awaitState("capture committed", probe = { harness.wedgeState() }) { harness.engineStarted() }
             val scoBeforeEnd = harness.scoPlatform.scoStarts
             val attaches = harness.hardware.attachCount
 
             selfEndCapture(harness)
-            awaitState("restarted") { harness.hardware.attachCount >= attaches + 1 }
+            awaitState("restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= attaches + 1 }
             assertEquals(
                 "the restart followed a fresh acquisition",
                 scoBeforeEnd + 1,
@@ -845,8 +845,8 @@ class VoiceControlModeObserverAvailabilityTest {
 
             // Selection completes; the acquisition returns Acquired through the reuse path.
             harness.scoPlatform.bringScoUp()
-            awaitState("acquisition settled") { harness.monitor.route.value == AudioRoute.Headset(true) }
-            awaitState("capture committed") { harness.engineStarted() }
+            awaitState("acquisition settled", probe = { harness.wedgeState() }) { harness.monitor.route.value == AudioRoute.Headset(true) }
+            awaitState("capture committed", probe = { harness.wedgeState() }) { harness.engineStarted() }
             val scoBeforeEnd = harness.scoPlatform.scoStarts
             val attaches = harness.hardware.attachCount
 
@@ -854,7 +854,7 @@ class VoiceControlModeObserverAvailabilityTest {
             // not spend on the just-released routing. The platform answers SCO normally now.
             harness.scoPlatform.holdScoDown = false
             selfEndCapture(harness)
-            awaitState("restarted after the reacquire") { harness.hardware.attachCount >= attaches + 1 }
+            awaitState("restarted after the reacquire", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= attaches + 1 }
             assertEquals(
                 "the restart followed a fresh acquisition",
                 scoBeforeEnd + 1,
@@ -887,7 +887,7 @@ class VoiceControlModeObserverAvailabilityTest {
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("AirPods capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("AirPods capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
             // The user switches headsets: AirPods go away, and another headset connects
             // already selected (the link is up before voice control re-evaluates). The device
@@ -895,7 +895,7 @@ class VoiceControlModeObserverAvailabilityTest {
             setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
             setInputDevices()
             harness.monitor.onDevicesChanged()
-            awaitState("AirPods capture torn down") { harness.hardware.vadStopCount >= 1 }
+            awaitState("AirPods capture torn down", probe = { harness.wedgeState() }) { harness.hardware.vadStopCount >= 1 }
             // STAGE THE NEW HEADSET IN ONE STEP. Two separate list writes give the observer a
             // transient intermediate identity (speaker output with the SCO input already seeded);
             // seen after a capture death, such a flap would count as a fresh device trigger,
@@ -905,13 +905,13 @@ class VoiceControlModeObserverAvailabilityTest {
             setInputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
             harness.scoPlatform.seedAlreadySelectedInput()
             harness.monitor.onDevicesChanged()
-            awaitState("wired capture up") { harness.hardware.attachCount >= 2 }
-            awaitState("wired capture committed") { harness.engineStarted() }
+            awaitState("wired capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 2 }
+            awaitState("wired capture committed", probe = { harness.wedgeState() }) { harness.engineStarted() }
             // The observer must have OBSERVED the final identity before the deaths begin: the
             // identity comparison runs inside the observer, so a staged change it has not yet
             // seen would fire as a trigger between a death and its restart, however it was
             // staged. (8|7|0 is A2DP output + SCO input pair, the settled signature here.)
-            awaitState("final device identity observed") {
+            awaitState("final device identity observed", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastConnectedDeviceIdentity") as String) == "8|7|0"
             }
 
@@ -920,8 +920,8 @@ class VoiceControlModeObserverAvailabilityTest {
             // not an acquisition's), then the fast second death withholds.
             withheldLogs[0] = 0
             selfEndCapture(harness)
-            awaitState("wired capture restarted") { harness.hardware.attachCount >= 3 }
-            awaitState("restart committed") { harness.engineStarted() }
+            awaitState("wired capture restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 3 }
+            awaitState("restart committed", probe = { harness.wedgeState() }) { harness.engineStarted() }
             selfEndCapture(harness)
             awaitState(
                 "withheld",
@@ -1050,15 +1050,19 @@ class VoiceControlModeObserverAvailabilityTest {
             // loaded host those runs lag the capture by whole seconds, so without this settle the
             // staged pending flag could be consumed before the bound test ever observes it (the
             // captured wedgeState: pending=false timer=null with the capture already attached).
-            // Wait until the observer has recorded every trigger the wedge produced so far and no
-            // acquisition attempt is in flight, mirroring stagePendingRestart's staging hygiene.
-            awaitState("observer has seen gate allowed") {
+            // CRITICAL: these waits use settleUntil, NOT awaitState -- awaitState advances the
+            // shared scheduler, and inside the wedge the SCO link is held DOWN, so granted
+            // virtual time can expire the acquisition's own timeout and change the very shape
+            // the wedge stages (the heldWedge contract: no virtual time past the staging).
+            // Wait until the observer has recorded every trigger the wedge produced so far and
+            // no acquisition attempt is in flight, mirroring stagePendingRestart's hygiene.
+            settleUntil("observer has seen gate allowed", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastGateAllowedSeenByObserver") as? Boolean) == true
             }
-            awaitState("observer has seen the final device identity") {
+            settleUntil("observer has seen the final device identity", probe = { harness.wedgeState() }) {
                 (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
             }
-            awaitState("no acquisition attempt in flight") {
+            settleUntil("no acquisition attempt in flight", probe = { harness.wedgeState() }) {
                 getField(harness.service, "acquisitionJob") == null
             }
             // That capture self-ends; its owed restart waits on the never-confirmed acquisition.
@@ -1084,10 +1088,10 @@ class VoiceControlModeObserverAvailabilityTest {
      * the acquisition-wait shape and fails if one settle pass clears the flag.
      */
     private suspend fun stagePendingRestart(harness: Harness) {
-        awaitState("observer has seen gate allowed") {
+        awaitState("observer has seen gate allowed", probe = { harness.wedgeState() }) {
             (getField(harness.service, "lastGateAllowedSeenByObserver") as? Boolean) == true
         }
-        awaitState("observer has seen the final device identity") {
+        awaitState("observer has seen the final device identity", probe = { harness.wedgeState() }) {
             (getField(harness.service, "lastConnectedDeviceIdentity") as? String) == "8|7|0"
         }
         // STAGE THE ACQUISITION-WAIT SHAPE THE BOUND EXISTS FOR: a restart owed by a capture
@@ -1098,13 +1102,13 @@ class VoiceControlModeObserverAvailabilityTest {
         // models condition to ready when it finishes, which re-runs the observer; a run landing
         // after the staging would spend the restart through beginAutomaticRestart's expired
         // bypass. Wait until the start job has completed before staging anything.
-        awaitState("the service start job has finished") {
+        awaitState("the service start job has finished", probe = { harness.wedgeState() }) {
             (getField(harness.service, "startInFlightJob") as? kotlinx.coroutines.Job)?.isCompleted == true
         }
         // QUIESCE ANY IN-FLIGHT ACQUISITION NEXT: an attempt started against the initial route
         // spends the pending restart when it fails (acquireCandidate's Failed branch), which
         // would wipe the staged state. Wait until no attempt is running before staging.
-        awaitState("no acquisition attempt in flight") {
+        awaitState("no acquisition attempt in flight", probe = { harness.wedgeState() }) {
             getField(harness.service, "acquisitionJob") == null
         }
         val acquisition = getField(harness.service, "routeAcquisition")!!
@@ -1141,7 +1145,7 @@ class VoiceControlModeObserverAvailabilityTest {
             harness.awaitObserverInstalled()
             // Stage the wait state the observer's start branch reaches: a granted restart that
             // is waiting on re-confirmation, on a gate that is Allowed.
-            awaitState("gate allowed") { (getField(harness.service, "gate") as au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate).state.value.allowed }
+            awaitState("gate allowed", probe = { harness.wedgeState() }) { (getField(harness.service, "gate") as au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate).state.value.allowed }
             stagePendingRestart(harness)
             val schedule = harness.service.javaClass.getDeclaredMethod("scheduleReconfirmationBoundTimer")
                 .apply { isAccessible = true }
@@ -1470,7 +1474,7 @@ assertEquals(
                         assertEquals("builtin: no withheld logs", 0, withheldLogs[0])
                         continue
                     }
-                    awaitState("$case: capture up") { harness.hardware.attachCount >= 1 }
+                    awaitState("$case: capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
                     // Let the initial start's route flips and debounces land, so the self-end
                     // below races nothing.
                     Thread.sleep(500)
@@ -1492,7 +1496,7 @@ assertEquals(
                                     android.os.SystemClock.elapsedRealtime() - 61_000L,
                                 )
                                 selfEndCapture(harness)
-                                awaitState("$case: restarted") {
+                                awaitState("$case: restarted", probe = { harness.wedgeState() }) {
                                     harness.hardware.attachCount >= attaches + 1 + it
                                 }
                             }
@@ -1500,17 +1504,17 @@ assertEquals(
 
                         "fastDeath" -> {
                             selfEndCapture(harness)
-                            awaitState("$case: restarted") { harness.hardware.attachCount >= attaches + 1 }
+                            awaitState("$case: restarted", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= attaches + 1 }
                             // The restart's engine start commits after the VAD attach; wait
                             // for it, or the next self-end below would early-return on a not-
                             // yet-started engine.
-                            awaitState("$case: restart committed") { harness.engineStarted() }
+                            awaitState("$case: restart committed", probe = { harness.wedgeState() }) { harness.engineStarted() }
                             // The restarted capture dies fast: withheld, exactly one log.
                             // Count only this explicit death: the harness's fake capture has
                             // its own lifecycle noise outside the test's actions.
                             withheldLogs[0] = 0
                             selfEndCapture(harness)
-                            awaitState("$case: withheld") {
+                            awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
                                 !(budget.javaClass.getDeclaredField("restartAvailable")
                                     .apply { isAccessible = true }.get(budget) as Boolean)
@@ -1536,7 +1540,7 @@ assertEquals(
                             selfEndCapture(harness)
                             // The budget flips before the withheld log is written (the
                             // spend happens at the attempt); wait for BOTH.
-                            awaitState("$case: withheld") {
+                            awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
                                 !(budget.javaClass.getDeclaredField("restartAvailable")
                                     .apply { isAccessible = true }.get(budget) as Boolean) &&
@@ -1553,7 +1557,7 @@ assertEquals(
                             selfEndCapture(harness)
                             // The budget flips before the withheld log is written (the
                             // spend happens at the attempt); wait for BOTH.
-                            awaitState("$case: withheld") {
+                            awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
                                 !(budget.javaClass.getDeclaredField("restartAvailable")
                                     .apply { isAccessible = true }.get(budget) as Boolean) &&
@@ -1763,6 +1767,7 @@ assertEquals(
         val budgetMs = 60_000L
         val deadline = System.currentTimeMillis() + budgetMs
         var settled = false
+        var lastAdmission: VoiceSessionGate.Admission? = null
         while (System.currentTimeMillis() < deadline) {
             testScheduler.runCurrent()
             testScheduler.advanceTimeBy(25.milliseconds)
@@ -1773,9 +1778,14 @@ assertEquals(
                 gate.release(admission.session)
                 settled = true
                 break
+            } else {
+                lastAdmission = admission
             }
         }
-        check(settled) { "the voice session was still held ${budgetMs}ms after onDestroy" }
+        check(settled) {
+            "the voice session was still held ${budgetMs}ms after onDestroy; " +
+                "lastAdmission=$lastAdmission"
+        }
     }
 
     // ---- tests ---------------------------------------------------------------
@@ -1791,7 +1801,7 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("speaker-only steady state") { harness.monitor.availability.value == AudioRoute.Speaker }
+            awaitState("speaker-only steady state", probe = { harness.wedgeState() }) { harness.monitor.availability.value == AudioRoute.Speaker }
             assertEquals("no candidate, no acquisition", 0, harness.scoPlatform.scoStarts)
             assertEquals("no capture", 0, harness.hardware.attachCount)
 
@@ -1799,7 +1809,7 @@ assertEquals(
             // candidate; the observer must re-run and acquire.
             setAirPodsConnected()
             harness.monitor.onDevicesChanged()
-            awaitState("VAD attach after headset arrival") { harness.hardware.attachCount >= 1 }
+            awaitState("VAD attach after headset arrival", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
             assertEquals(AudioRoute.Headset(true), harness.monitor.route.value)
             assertTrue("acquisition must have opened SCO", harness.scoPlatform.scoStarts >= 1)
         } finally {
@@ -1816,20 +1826,20 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("first capture") { harness.hardware.attachCount >= 1 }
+            awaitState("first capture", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
             val firstAttach = harness.hardware.attachCount
 
             // BT off: devices vanish; capture stops (EligibilityOff).
             setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
             setInputDevices()
             harness.monitor.onDevicesChanged()
-            awaitState("capture torn down after headset loss") { harness.hardware.vadStopCount >= 1 }
-            awaitState("availability back to speaker") { harness.monitor.availability.value == AudioRoute.Speaker }
+            awaitState("capture torn down after headset loss", probe = { harness.wedgeState() }) { harness.hardware.vadStopCount >= 1 }
+            awaitState("availability back to speaker", probe = { harness.wedgeState() }) { harness.monitor.availability.value == AudioRoute.Speaker }
 
             // BT on again: the AirPods reconnect mid-session. Capture MUST resume.
             setAirPodsConnected()
             harness.monitor.onDevicesChanged()
-            awaitState("capture resumed after headset reconnect") { harness.hardware.attachCount > firstAttach }
+            awaitState("capture resumed after headset reconnect", probe = { harness.wedgeState() }) { harness.hardware.attachCount > firstAttach }
             assertTrue("the resumed capture acquired the headset again", harness.scoPlatform.scoStarts >= 2)
         } finally {
             harness.stop()
@@ -1845,7 +1855,7 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("first capture") { harness.hardware.attachCount >= 1 }
+            awaitState("first capture", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
             val scoStartsBefore = harness.scoPlatform.scoStarts
 
             // Availability changes (wired headphones output, no mic input -> NoMic), but no
@@ -1853,7 +1863,7 @@ assertEquals(
             setOutputDevices(AudioDeviceInfo.TYPE_WIRED_HEADPHONES)
             setInputDevices(AudioDeviceInfo.TYPE_WIRED_HEADPHONES)
             harness.monitor.onDevicesChanged()
-            awaitState("availability moved off the candidate") {
+            awaitState("availability moved off the candidate", probe = { harness.wedgeState() }) {
                 harness.monitor.availability.value is AudioRoute.Headset &&
                     !(harness.monitor.availability.value as AudioRoute.Headset).hasMicrophone
             }
@@ -1880,8 +1890,8 @@ assertEquals(
         try {
             harness.awaitObserverInstalled()
             // The platform never establishes SCO in this test, so acquisition FAILS (timeout).
-            awaitState("first failed acquisition") { harness.scoPlatform.scoStarts >= 1 }
-            awaitState("failed attempt recorded") {
+            awaitState("first failed acquisition", probe = { harness.wedgeState() }) { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("failed attempt recorded", probe = { harness.wedgeState() }) {
                 val failedAvailability = getField(harness.service, "failedAttemptAvailability")
                 failedAvailability != null
             }
@@ -1894,7 +1904,7 @@ assertEquals(
             @Suppress("UNCHECKED_CAST")
             val restartSignal = getField(harness.service, "captureRestartSignal") as MutableStateFlow<Long>
             restartSignal.value = restartSignal.value + 1L
-            awaitState("re-evaluation observed") { true }
+            awaitState("re-evaluation observed", probe = { harness.wedgeState() }) { true }
             Thread.sleep(400)
             testScheduler.advanceTimeBy(400.milliseconds)
             assertEquals(
@@ -1907,10 +1917,10 @@ assertEquals(
             setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
             setInputDevices()
             harness.monitor.onDevicesChanged()
-            awaitState("availability back to speaker") { harness.monitor.availability.value == AudioRoute.Speaker }
+            awaitState("availability back to speaker", probe = { harness.wedgeState() }) { harness.monitor.availability.value == AudioRoute.Speaker }
             setAirPodsConnected()
             harness.monitor.onDevicesChanged()
-            awaitState("retry after the trigger surface moved") {
+            awaitState("retry after the trigger surface moved", probe = { harness.wedgeState() }) {
                 harness.scoPlatform.scoStarts > scoStartsAfterFailure
             }
         } finally {
@@ -1927,17 +1937,17 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("first capture") { harness.hardware.attachCount >= 1 }
+            awaitState("first capture", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
             // Merlin's sequence, twice: BT off (capture stops), BT on (capture resumes).
             repeat(2) {
                 setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
                 setInputDevices()
                 harness.monitor.onDevicesChanged()
-                awaitState("capture down (cycle)") { harness.hardware.vadStopCount >= it + 1 }
+                awaitState("capture down (cycle)", probe = { harness.wedgeState() }) { harness.hardware.vadStopCount >= it + 1 }
                 setAirPodsConnected()
                 harness.monitor.onDevicesChanged()
-                awaitState("capture back up (cycle)") { harness.hardware.attachCount >= it + 2 }
+                awaitState("capture back up (cycle)", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= it + 2 }
             }
 
             val budget = getField(harness.service, "captureRestartBudget")!!
@@ -1961,8 +1971,8 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
         try {
             harness.awaitObserverInstalled()
-            awaitState("first failed acquisition") { harness.scoPlatform.scoStarts >= 1 }
-            awaitState("failed attempt recorded") {
+            awaitState("first failed acquisition", probe = { harness.wedgeState() }) { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("failed attempt recorded", probe = { harness.wedgeState() }) {
                 getField(harness.service, "failedAttemptAvailability") != null
             }
             val scoStartsAfterFailure = harness.scoPlatform.scoStarts
@@ -1970,10 +1980,10 @@ assertEquals(
             // A BLOCKER CLEARS: the overall gate goes Blocked -> Allowed. That is a new trigger
             // for any blocker, so exactly one more attempt runs.
             otherAppRule.block("other_app_playing")
-            awaitState("gate blocked observed") { !gateAllowedNow(harness) }
+            awaitState("gate blocked observed", probe = { harness.wedgeState() }) { !gateAllowedNow(harness) }
             otherAppRule.allow()
-            awaitState("gate allowed again") { gateAllowedNow(harness) }
-            awaitState("retry after the blocker cleared") {
+            awaitState("gate allowed again", probe = { harness.wedgeState() }) { gateAllowedNow(harness) }
+            awaitState("retry after the blocker cleared", probe = { harness.wedgeState() }) {
                 harness.scoPlatform.scoStarts > scoStartsAfterFailure
             }
             val retryCount = harness.scoPlatform.scoStarts
@@ -2000,8 +2010,8 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 400L, scoEstablishes = false)
         try {
             harness.awaitObserverInstalled()
-            awaitState("first failed acquisition") { harness.scoPlatform.scoStarts >= 1 }
-            awaitState("failed attempt recorded") {
+            awaitState("first failed acquisition", probe = { harness.wedgeState() }) { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("failed attempt recorded", probe = { harness.wedgeState() }) {
                 getField(harness.service, "failedAttemptAvailability") != null
             }
 
@@ -2010,10 +2020,10 @@ assertEquals(
             // trigger and exactly ONE new attempt must run.
             otherAppRule.block("other_app_playing")
             harness.scoPlatform.scoStarts = 0
-            awaitState("gate blocked observed") { !gateAllowedNow(harness) }
+            awaitState("gate blocked observed", probe = { harness.wedgeState() }) { !gateAllowedNow(harness) }
             otherAppRule.allow()
-            awaitState("gate allowed again") { gateAllowedNow(harness) }
-            awaitState("exactly one new attempt after the abandoned one") {
+            awaitState("gate allowed again", probe = { harness.wedgeState() }) { gateAllowedNow(harness) }
+            awaitState("exactly one new attempt after the abandoned one", probe = { harness.wedgeState() }) {
                 harness.scoPlatform.scoStarts >= 1
             }
             val attemptsAfter = harness.scoPlatform.scoStarts
@@ -2038,7 +2048,7 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 600L, scoEstablishes = false)
         try {
             harness.awaitObserverInstalled()
-            awaitState("attempt in flight") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("attempt in flight", probe = { harness.wedgeState() }) { harness.scoPlatform.scoStarts >= 1 }
             // Gate blocks and clears WHILE the attempt is in flight: both emissions are
             // consumed by the in-flight guard (rule 2's coalescing). Nothing changes after
             // the attempt ends, so the only path to a retry is the coalesced re-evaluation.
@@ -2047,10 +2057,10 @@ assertEquals(
             val attemptsSoFar = harness.scoPlatform.scoStarts
             // The failure unwinds, and the coalesced trigger's re-evaluation fires a second
             // attempt WITHOUT any new emission after the block/allow pair.
-            awaitState("coalesced attempt after the failure") {
+            awaitState("coalesced attempt after the failure", probe = { harness.wedgeState() }) {
                 harness.scoPlatform.scoStarts > attemptsSoFar
             }
-            awaitState("attempt ended") {
+            awaitState("attempt ended", probe = { harness.wedgeState() }) {
                 getField(harness.service, "acquisitionJob") == null &&
                     getField(harness.service, "gateBlockedDuringAttempt") == false
             }
@@ -2076,14 +2086,14 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule, acquisitionTimeoutMs = 600L, scoEstablishes = false)
         try {
             harness.awaitObserverInstalled()
-            awaitState("attempt in flight") { harness.scoPlatform.scoStarts >= 1 }
+            awaitState("attempt in flight", probe = { harness.wedgeState() }) { harness.scoPlatform.scoStarts >= 1 }
             // Setting SCO up perturbs the OBSERVED route while the attempt runs: simulate that
             // by re-announcing the same devices (route re-emits, availability unchanged, gate
             // Allowed throughout). One attempt in total: the failure records the unchanged
             // surface, and the finally re-run is skipped.
             setAirPodsConnected()
             harness.monitor.onDevicesChanged()
-            awaitState("attempt ended") { getField(harness.service, "acquisitionJob") == null }
+            awaitState("attempt ended", probe = { harness.wedgeState() }) { getField(harness.service, "acquisitionJob") == null }
             val attemptsSoFar = harness.scoPlatform.scoStarts
             Thread.sleep(300)
             testScheduler.advanceTimeBy(300.milliseconds)
@@ -2106,7 +2116,7 @@ assertEquals(
         val harness = startService(modelsReady, otherAppRule, foregroundRule)
         try {
             harness.awaitObserverInstalled()
-            awaitState("capture up") { harness.hardware.attachCount >= 1 }
+            awaitState("capture up", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 1 }
 
             val budget = getField(harness.service, "captureRestartBudget")!!
             val restartAvailable = {
@@ -2122,7 +2132,7 @@ assertEquals(
             @Suppress("UNCHECKED_CAST")
             val restartSignal = getField(harness.service, "captureRestartSignal") as MutableStateFlow<Long>
             restartSignal.value = restartSignal.value + 1L
-            awaitState("churn observed") { true }
+            awaitState("churn observed", probe = { harness.wedgeState() }) { true }
             Thread.sleep(200)
             testScheduler.advanceTimeBy(200.milliseconds)
             assertFalse(
@@ -2134,10 +2144,10 @@ assertEquals(
             setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
             setInputDevices()
             harness.monitor.onDevicesChanged()
-            awaitState("capture down") { harness.hardware.vadStopCount >= 1 }
+            awaitState("capture down", probe = { harness.wedgeState() }) { harness.hardware.vadStopCount >= 1 }
             setAirPodsConnected()
             harness.monitor.onDevicesChanged()
-            awaitState("capture back up after the real trigger") { harness.hardware.attachCount >= 2 }
+            awaitState("capture back up after the real trigger", probe = { harness.wedgeState() }) { harness.hardware.attachCount >= 2 }
             assertTrue("a real device trigger re-arms the budget", restartAvailable())
         } finally {
             harness.stop()

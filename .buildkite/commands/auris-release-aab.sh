@@ -25,9 +25,9 @@ rm -f version.properties.bak
 echo "versionCode $BASE -> $NEW"
 
 # Every generated secret file goes on success AND failure: the keystore, the
-# secret.properties this script writes from AURIS_SECRET_PROPERTIES (it carries
-# the appended signing passwords once the signing branch runs), and the
-# Auris google-services.json. NOT configure_apply -- that path is deliberately
+# secret.properties this script writes from AURIS_SECRET_PROPERTIES with the
+# signing passwords appended (signing is unconditional), and the Auris
+# google-services.json. NOT configure_apply -- that path is deliberately
 # gone (Automattic's secrets are for their package).
 cleanup() {
   rm -f auris-upload.keystore secret.properties app/google-services.json

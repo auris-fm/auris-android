@@ -16,8 +16,9 @@
 # the scripts.
 #
 # Dry runs: a build started by hand on any branch other than main runs the
-# same steps (the branch filter below admits non-main branches), so the
-# pipeline can be exercised before it merges. The GitHub trigger job remains
+# AAB step (its filter admits non-main branches), so signing can be exercised
+# before the pipeline merges. The Play step stays main-only: a branch build
+# never uploads, whatever PLAY_UPLOAD says. The GitHub trigger job remains
 # the only AUTOMATIC entry, and it only ever fires for refs/heads/main.
 
 agents:
@@ -34,7 +35,9 @@ steps:
 
   - label: "Upload to Play internal track"
     key: play-upload
-    branches: "!refs/tags/*"
+    # Uploads only ever run from main: a hand-started branch build can exercise
+    # signing, but never uploads, even with PLAY_UPLOAD=1 and the key present.
+    branches: "main"
     depends_on: [release-aab]
     command: .buildkite/commands/auris-play-upload.sh
     timeout_in_minutes: 30

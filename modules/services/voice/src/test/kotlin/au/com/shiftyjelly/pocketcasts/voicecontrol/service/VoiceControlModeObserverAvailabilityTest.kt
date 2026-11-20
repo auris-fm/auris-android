@@ -402,14 +402,24 @@ class VoiceControlModeObserverAvailabilityTest {
                 // much simulated time the subject has actually been given.
                 val startedAtMs = testScheduler.currentTime
                 var last = ""
+                // PROGRESS-GATED virtual time (hardening): advancing the clock on a fixed cadence
+                // let virtual time outrun the subject's REAL background work under CPU starvation --
+                // the budget expired while the subject was strictly behind, which reads as a product
+                // race and is not one. A step of virtual time is granted only after the host has
+                // actually pumped (real sleep + main-looper task + yield), so simulated time tracks
+                // work done, not wall-clock cadence. The real-time stall bound below still catches a
+                // genuinely wedged harness.
                 while (!predicate()) {
                     val waitedMs = testScheduler.currentTime - startedAtMs
                     if (waitedMs >= WAIT_BUDGET_MS) {
                         startProbe(last)
                         error("timed out waiting for $what after ${waitedMs}ms of simulated time; last=$last")
                     }
+                    // Let the subject's real threads run BEFORE granting the next virtual step.
+                    Thread.sleep(10)
+                    runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+                    kotlinx.coroutines.yield()
                     testScheduler.advanceTimeBy(WAIT_STEP_MS.milliseconds)
-                    kotlinx.coroutines.delay(WAIT_STEP_MS)
                     last = probe()
                 }
                 outcome.complete(Result.success(Unit))
@@ -427,7 +437,6 @@ class VoiceControlModeObserverAvailabilityTest {
                     error("harness pump stalled waiting for $what after ${PUMP_BUDGET_MS}ms of real time")
                 }
                 testScheduler.runCurrent()
-                testScheduler.advanceTimeBy(WAIT_STEP_MS.milliseconds)
                 runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
                 Thread.sleep(10)
                 kotlinx.coroutines.yield()

@@ -77,6 +77,7 @@ class FingerprintTimingManager @Inject constructor(
     private val pcmTap: FingerprintPcmTap,
     private val cloudConfig: SharedPreferencesCloudConfig,
     private val cloudFetcher: CloudFingerprintReferenceFetcher,
+    private val cloudReferenceStore: CloudReferenceStore,
     private val decodePolicy: FingerprintDecodePolicy,
 ) {
 
@@ -815,12 +816,26 @@ class FingerprintTimingManager @Inject constructor(
         cloudMatcher = null
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
-            val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid)
-            if (fetched != null) {
-                cloudMatcher = fetched
-                Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.count} checkpoints) for $episodeUuid")
-            } else {
-                Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
+            // ETag revalidation (delta: fingerprint revalidation): send the stored etag; a 304
+            // keeps the stored payload (decoded here), a 200 replaces both payload and etag.
+            val stored = cloudReferenceStore.load(episodeUuid)
+            when (val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, stored?.etag)) {
+                is CloudFingerprintReferenceFetcher.Fetch.Fresh -> {
+                    cloudMatcher = fetched.matcher
+                    cloudReferenceStore.save(episodeUuid, fetched.payload, fetched.etag)
+                    Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.matcher.count} checkpoints) for $episodeUuid")
+                }
+                is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
+                    val cachedMatcher = stored?.let { cloudFetcher.buildMatcher(it.payload) }
+                    if (cachedMatcher != null) {
+                        cloudMatcher = cachedMatcher
+                        Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
+                    } else {
+                        Timber.d("FingerprintTimingManager: 304 but stored payload unusable for $episodeUuid")
+                    }
+                }
+                CloudFingerprintReferenceFetcher.Fetch.Unavailable ->
+                    Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
             }
         }
 

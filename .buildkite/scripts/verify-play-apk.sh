@@ -22,15 +22,20 @@ if ! "$APKSIGNER" verify "$APK" >/dev/null 2>&1; then
   echo "FAIL: APK signature does not verify (unsigned or tampered): $APK" >&2
   exit 1
 fi
-CERT_LINE="$("$APKSIGNER" verify --print-certs "$APK" | grep 'SHA-256 digest' | head -1)" || {
-  echo "FAIL: no signer certificate found" >&2; exit 1;
-}
-ACTUAL="$(printf '%s' "$CERT_LINE" | awk '{print $NF}')"
+# With a key-rotation chain apksigner prints one certificate per signer,
+# OLDEST first and the CURRENT (newest) signer LAST. The pin is the current
+# app-signing key, so compare against the LAST reported digest. All digests
+# are printed for the log.
+CERT_DIGESTS="$("$APKSIGNER" verify --print-certs "$APK" | grep 'certificate SHA-256 digest' | awk '{print $NF}')"
+[ -n "$CERT_DIGESTS" ] || { echo "FAIL: no signer certificate found" >&2; exit 1; }
+echo "APK signer SHA-256 chain (oldest to newest):"
+printf '  %s\n' $CERT_DIGESTS
+ACTUAL="$(printf '%s\n' "$CERT_DIGESTS" | tail -1)"
 norm() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d ':'; }
-echo "APK signer SHA-256: $ACTUAL"
 if [ "$(norm "$ACTUAL")" != "$(norm "$PLAY_SHA256")" ]; then
-  echo "FAIL: APK signed with the WRONG certificate (expected Play app-signing key)" >&2
+  echo "FAIL: APK's newest signer is NOT the pinned Play app-signing key" >&2
   echo "  expected: $PLAY_SHA256" >&2
+  echo "  actual:   $ACTUAL" >&2
   exit 1
 fi
 

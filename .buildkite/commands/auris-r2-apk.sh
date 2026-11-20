@@ -16,6 +16,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
+# Play app-signing certificate pin (public; from Play Console's App signing
+# page for fm.auris). Env override only for deliberate key rotation. If a real
+# run fails on this pin, nothing is published -- correct the pin from the
+# actual APK's certificate, never loosen the check.
+AURIS_PLAY_APP_SIGNING_SHA256="${AURIS_PLAY_APP_SIGNING_SHA256:-8C:9F:5B:68:3E:BC:0B:F6:87:B6:5A:B7:EA:70:D6:F0:3D:DC:E1:6F:91:7C:49:66:F7:AC:D6:60:B0:0F:BD:E9}"
+
 R2_ENDPOINT="https://f8823ef2e78cfe210b4554177000e4da.r2.cloudflarestorage.com"
 R2_BUCKET="auris-download"
 PUBLIC_BASE="https://download.auris.fm"

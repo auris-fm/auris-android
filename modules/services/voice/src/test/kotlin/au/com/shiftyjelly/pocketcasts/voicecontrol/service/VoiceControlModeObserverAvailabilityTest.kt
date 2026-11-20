@@ -1149,7 +1149,8 @@ class VoiceControlModeObserverAvailabilityTest {
             }
             return harness
         } catch (t: Throwable) {
-            harness.stop()
+            // The stop's own failure must not REPLACE the setup error that wedged the helper.
+            runCatching { harness.stop() }.onFailure { stopT -> t.addSuppressed(stopT) }
             throw t
         }
     }
@@ -1783,10 +1784,10 @@ assertEquals(
             opener.openForLater("utt-stop-late")
             lateSubmitted.countDown()
         }
-        val admitted = barrierObj.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
-            .invoke(barrierObj, listOf(lateDial)) as Boolean
-        org.junit.Assert.assertTrue("fixture: the barrier must have admitted the late job", admitted)
         try {
+            val admitted = barrierObj.javaClass.getDeclaredMethod("beginStart", List::class.java).apply { isAccessible = true }
+                .invoke(barrierObj, listOf(lateDial)) as Boolean
+            org.junit.Assert.assertTrue("fixture: the barrier must have admitted the late job", admitted)
             opener.openForLater("utt-stop-test")
             // REQUIRE the initial open: generous wall-clock bound (a starved opener thread is a
             // host artifact), but expiry is a FAILURE, not a pass -- the test must not pass
@@ -1816,9 +1817,11 @@ assertEquals(
                 opened.isNotEmpty() && opened.all { it.isClosed },
             )
         } finally {
-            harness.stop()
-            openerDispatcher.close()
-            openerExecutor.shutdownNow()
+            // Cleanup always runs, even if the stop itself throws: the executor's worker is
+            // non-daemon and would otherwise outlive the test JVM.
+            runCatching { harness.stop() }
+            runCatching { openerDispatcher.close() }
+            runCatching { openerExecutor.shutdownNow() }
         }
     }
 

@@ -87,6 +87,10 @@ object FingerprintConstants {
      * the server is still doing and loses the reference for that episode. The fetch runs off the
      * play path, so waiting is cheap; this sits above the ceiling, leaving room for the server's
      * own 503 to arrive and be read as an answer rather than as a cancellation.
+     *
+     * "Off the play path" is literal: the acquisition runs CONCURRENTLY with transcript preparation,
+     * so a long wait here never delays alignment the device can already do. Only a branch that has
+     * no transcript reference at all waits for this answer, and it has nothing else to offer.
      */
     const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 150_000L
 

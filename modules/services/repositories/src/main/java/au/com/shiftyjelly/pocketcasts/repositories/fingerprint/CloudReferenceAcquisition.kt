@@ -41,7 +41,11 @@ internal class CloudReferenceAcquisition(
         /** A usable matcher, freshly fetched, revalidated, or restored from the store. */
         data class Ready(val matcher: CloudReferenceMatcher) : Outcome
 
-        /** The server definitively has no reference for this episode (403/404). */
+        /**
+         * The server definitively has no reference for this episode (403/404) AND the device holds
+         * no usable stored copy. A stored payload that still decodes is [Ready] instead: upstream
+         * eviction must not drop alignment the device can already do.
+         */
         data object DefinitiveMiss : Outcome
 
         /** Transient: offline, timeout, 5xx, unusable token. The next play or resume may retry. */
@@ -91,7 +95,8 @@ internal class CloudReferenceAcquisition(
                             Outcome.Ready(refetched.matcher)
                         }
 
-                        // The refetch gets the SAME classification as a first fetch.
+                        // The refetch gets the SAME classification as a first fetch. The stored
+                        // payload was already found unusable above, so there is nothing to keep.
                         refetched is CloudFingerprintReferenceFetcher.Fetch.NotAvailable -> Outcome.DefinitiveMiss
 
                         else -> Outcome.Retryable
@@ -99,7 +104,17 @@ internal class CloudReferenceAcquisition(
                 }
             }
 
-            CloudFingerprintReferenceFetcher.Fetch.NotAvailable -> Outcome.DefinitiveMiss
+            CloudFingerprintReferenceFetcher.Fetch.NotAvailable -> {
+                // The server no longer has a copy, but the device may still hold a usable one.
+                // Eviction upstream is not a reason to drop alignment we can already do.
+                val kept = stored?.let { fetcher.buildMatcher(it.payload) }
+                if (kept != null) {
+                    Timber.d("FingerprintTimingManager: server has no reference; keeping stored cloud reference for $episodeUuid")
+                    Outcome.Ready(kept)
+                } else {
+                    Outcome.DefinitiveMiss
+                }
+            }
 
             CloudFingerprintReferenceFetcher.Fetch.Unavailable -> {
                 val kept = stored?.let { fetcher.buildMatcher(it.payload) }

@@ -117,6 +117,64 @@ class FingerprintTimingManager @Inject constructor(
         return acquisition.acquire()
     }
 
+    /**
+     * Puts an in-hand cloud matcher to work. Must be called under [mutex].
+     *
+     * Called from whichever happens SECOND: the cloud answer landing, or the transcript preparation
+     * finishing. Only then is it known whether the transcript side produced an alignment of its own.
+     */
+    private fun adoptCloudMatcher(gen: Long, episodeUuid: String) {
+        if (cloudMatcher == null) return
+        val audioSource = currentAudioFilePath
+        // Only when NOTHING is collecting AND no transcript alignment is in hand. A mapping loaded
+        // from cache leaves generationJob null while its matcher and entries are live and the state
+        // is Active; restarting collection there would throw away a working alignment to chase a
+        // reference we already have. The cache can also load with NO entries (all pruned), which is
+        // exactly the case that must still start collection — hence the entries check rather than
+        // "a cache was loaded".
+        val transcriptAlignmentInHand = currentMatcher != null || snapshotPlaybackToReference.isNotEmpty()
+        // While the transcript preparation is still running it may be about to load a cached
+        // mapping. Starting cloud-only collection now would replace it for the whole playback.
+        val transcriptStillDeciding = transcriptPreparationJob?.isActive == true
+        if (generationJob == null && audioSource != null && !transcriptAlignmentInHand && !transcriptStillDeciding) {
+            // Nothing was collecting PCM (the transcript reference was missing), so a matcher alone
+            // would align nothing.
+            Timber.d("FingerprintTimingManager: cloud-only alignment for $episodeUuid")
+            currentReferenceData = null
+            currentReferenceFilePath = null
+            currentMatcher = null
+            _stateFlow.value = State.Preparing
+            startTapCollection(gen, null)
+        } else if (generationJob != null && cloudFingerprinter == null) {
+            // Attaching to a collector that is ALREADY running. Its first sample is the NEXT one
+            // fed, whose position only the feeding loop knows — the frontier here is the last
+            // COMPLETED window, a full window behind. Leave the origin unset; the feeder stamps it.
+            cloudFingerprinter = CloudFingerprinter()
+            cloudStreamStartSec = Double.NaN
+        }
+    }
+
+    /** After the transcript preparation has decided, give an already-arrived cloud answer its collector. */
+    private suspend fun applyPendingCloudReference(gen: Long, episodeUuid: String) {
+        mutex.withLock {
+            if (gen != generation || currentEpisodeUuid != episodeUuid) return
+            adoptCloudMatcher(gen, episodeUuid)
+        }
+    }
+
+    /**
+     * Waits for the concurrent cloud attempt, but ONLY where its answer decides what happens next
+     * (no transcript reference, undecodable reference, no checkpoints). Everywhere else the
+     * transcript preparation proceeds without it.
+     */
+    private suspend fun awaitCloudAttempt(gen: Long, episodeUuid: String) {
+        val job = mutex.withLock {
+            cloudAcquisition?.takeIf { it.generation == gen && it.episodeUuid == episodeUuid }
+                ?.let { cloudAcquisitionJob }
+        }
+        job?.join()
+    }
+
     sealed interface State {
         data object Idle : State
         data object Preparing : State
@@ -136,6 +194,16 @@ class FingerprintTimingManager @Inject constructor(
      * entitlement that changes, must be fetchable on the next launch.
      */
     private var cloudAcquisition: CloudReferenceAcquisition? = null
+
+    /** The concurrent acquisition's job, so a branch that NEEDS its answer can wait for it. */
+    private var cloudAcquisitionJob: Job? = null
+
+    /**
+     * The transcript preparation itself. A cloud reference landing while this is still running must
+     * not start cloud-only collection: the transcript side may be about to load a cached mapping,
+     * and replacing it would cost the alignment for the whole playback.
+     */
+    private var transcriptPreparationJob: Job? = null
     private val definitiveCloudMisses = mutableSetOf<String>()
 
     /**
@@ -152,6 +220,11 @@ class FingerprintTimingManager @Inject constructor(
         outcome: CloudReferenceAcquisition.Outcome,
     ) {
         mutex.withLock {
+            // A definitive answer is per EPISODE for the whole process, not per generation: record
+            // it even when this outcome is otherwise stale, or A -> B -> A would ask about A again.
+            if (outcome is CloudReferenceAcquisition.Outcome.DefinitiveMiss) {
+                definitiveCloudMisses += episodeUuid
+            }
             if (gen != generation || currentEpisodeUuid != episodeUuid) {
                 // A stop or an episode switch happened while this fetch was in flight: drop the
                 // result rather than installing another episode's reference. The matcher holds
@@ -162,39 +235,11 @@ class FingerprintTimingManager @Inject constructor(
             when (outcome) {
                 is CloudReferenceAcquisition.Outcome.Ready -> {
                     cloudMatcher = outcome.matcher
-                    val audioSource = currentAudioFilePath
-                    // Only when NOTHING is collecting AND no transcript alignment is in hand. A
-                    // mapping loaded from cache leaves generationJob null while its matcher and
-                    // entries are live and the state is Active; restarting collection there would
-                    // throw away a working alignment to chase a reference we already have. Note
-                    // that the cache can also load with NO entries (all pruned), which is exactly
-                    // the case that must still start collection — hence the entries check rather
-                    // than "a cache was loaded".
-                    val transcriptAlignmentInHand = currentMatcher != null || snapshotPlaybackToReference.isNotEmpty()
-                    if (generationJob == null && audioSource != null && !transcriptAlignmentInHand) {
-                        // Nothing was collecting PCM (the transcript reference was missing), so a
-                        // matcher alone would align nothing. Start cloud-only collection here,
-                        // under the lock we already hold — startCloudOnly takes it itself.
-                        Timber.d("FingerprintTimingManager: cloud-only alignment after reference retry for $episodeUuid")
-                        currentReferenceData = null
-                        currentReferenceFilePath = null
-                        currentMatcher = null
-                        _stateFlow.value = State.Preparing
-                        startTapCollection(gen, null)
-                    } else if (cloudFingerprinter == null) {
-                        // Attaching to a collector that is ALREADY running: this fingerprinter's
-                        // first sample is the NEXT chunk, not the start of the tap stream. Its
-                        // windows are relative to its own first sample, so they must be placed at
-                        // the position that sample occupies — using the stream's start would put
-                        // every cloud anchor early by the elapsed playback time.
-                        cloudFingerprinter = CloudFingerprinter()
-                        cloudStreamStartSec = tapFrontierSec
-                    }
+                    adoptCloudMatcher(gen, episodeUuid)
                 }
 
-                CloudReferenceAcquisition.Outcome.DefinitiveMiss -> {
-                    definitiveCloudMisses += episodeUuid
-                }
+                // Already recorded above, before the staleness check.
+                CloudReferenceAcquisition.Outcome.DefinitiveMiss -> Unit
 
                 CloudReferenceAcquisition.Outcome.Retryable -> Unit
             }
@@ -302,6 +347,7 @@ class FingerprintTimingManager @Inject constructor(
      * the visible state to Preparing, and main's transcript-retry rule reads `state is Failed` — so
      * without this record a successful cloud retry would silently end the transcript's retries.
      */
+    @Volatile
     private var transcriptFailure: Throwable? = null
     private var cloudFirstMappingLogged = false
     private var hasReachedActive = false
@@ -415,7 +461,14 @@ class FingerprintTimingManager @Inject constructor(
             // Abort if a newer stop()/prepare() has started since we acquired the lock.
             if (gen != generation) return@launch
             startDownloadCompletionObserver(episodeUuid)
-            prepareForEpisode(gen, episodeUuid, podcastUuid, audioSource, sharedCacheKey, episode.isDownloaded, episode.duration, trigger)
+            val preparation = scope.launch {
+                prepareForEpisode(gen, episodeUuid, podcastUuid, audioSource, sharedCacheKey, episode.isDownloaded, episode.duration, trigger)
+            }
+            mutex.withLock { if (gen == generation) transcriptPreparationJob = preparation }
+            preparation.join()
+            // The transcript side has decided. If it found nothing to align and the cloud answer
+            // arrived in the meantime, that answer still needs a collector to feed it.
+            applyPendingCloudReference(gen, episodeUuid)
         }
     }
 
@@ -885,6 +938,9 @@ class FingerprintTimingManager @Inject constructor(
         cloudFirstMappingLogged = false
         // The attempt belongs to the generation being torn down; the definitive-miss record does
         // NOT — it is per episode for the whole process, so A → B → A never asks again about A.
+        cloudAcquisitionJob?.cancel()
+        cloudAcquisitionJob = null
+        transcriptPreparationJob = null
         cloudAcquisition = null
         activeEpisodeUuid = null
         hasReachedActive = false
@@ -988,8 +1044,14 @@ class FingerprintTimingManager @Inject constructor(
             // reference, and asking on every play would be a request per playback for nothing.
             Timber.d("FingerprintTimingManager: cloud reference known absent for $episodeUuid, not asking again")
         } else if (cloudBaseUrl.isNotBlank()) {
-            val outcome = acquireCloudReference(gen, cloudBaseUrl, episodeUuid, podcastUuid)
-            applyCloudOutcome(gen, episodeUuid, outcome)
+            // CONCURRENT with the transcript preparation below, never in front of it. The cloud
+            // download can take the whole call budget; making the transcript wait for it would
+            // delay alignment the device may already have cached. The outcome is applied when it
+            // lands, and only if this generation is still current.
+            cloudAcquisitionJob = scope.launch {
+                val outcome = acquireCloudReference(gen, cloudBaseUrl, episodeUuid, podcastUuid)
+                applyCloudOutcome(gen, episodeUuid, outcome)
+            }
         } else {
             Timber.d("FingerprintTimingManager: cloud alignment off — no gateway URL (cutover inactive) for $episodeUuid")
         }
@@ -1022,6 +1084,9 @@ class FingerprintTimingManager @Inject constructor(
             is FingerprintReferenceRetriever.FetchResult.Success -> fetchResult.data
 
             is FingerprintReferenceRetriever.FetchResult.NotFound -> {
+                // The cloud fetch runs concurrently, so "no matcher yet" is not "no cloud
+                // reference": settle the attempt before deciding this episode cannot align.
+                awaitCloudAttempt(gen, episodeUuid)
                 if (cloudMatcher == null) {
                     markUnavailable(reason = "no_reference", isStreaming = !isDownloaded, episodeUuid = episodeUuid)
                     Timber.d("FingerprintTimingManager: no reference available for $episodeUuid")
@@ -1043,6 +1108,7 @@ class FingerprintTimingManager @Inject constructor(
 
         val reference = ReferenceFingerprint.decode(referenceData)
         if (reference == null) {
+            awaitCloudAttempt(gen, episodeUuid)
             if (cloudMatcher == null) {
                 markUnavailable(reason = "reference_decode_failed", isStreaming = !isDownloaded, episodeUuid = episodeUuid)
                 Timber.d("FingerprintTimingManager: failed to decode reference for $episodeUuid")
@@ -1070,6 +1136,7 @@ class FingerprintTimingManager @Inject constructor(
     ) {
         val matcher = buildMatcher(reference)
         if (matcher == null) {
+            awaitCloudAttempt(gen, episodeUuid)
             if (cloudMatcher == null) {
                 markUnavailable(reason = "no_checkpoints", isStreaming = currentIsStreaming, episodeUuid = episodeUuid)
                 Timber.d("FingerprintTimingManager: no usable checkpoints for $episodeUuid")
@@ -1225,6 +1292,10 @@ class FingerprintTimingManager @Inject constructor(
                     }
                     cloudFingerprinter?.let { cloudFp ->
                         if (samples.isNotEmpty()) {
+                            // The origin is the position of THIS chunk when it is the first one this
+                            // fingerprinter sees — including a mid-stream attach, where the stream
+                            // started long before the reference arrived.
+                            if (cloudStreamStartSec.isNaN()) cloudStreamStartSec = chunk.positionSec
                             cloudFp.pushSamples(samples.toFloatArray(), chunk.channelCount, chunk.sampleRate)
                             val cloudWindows = cloudFp.drainWindows()
                             if (cloudWindows.isNotEmpty()) {
@@ -1341,7 +1412,7 @@ class FingerprintTimingManager @Inject constructor(
                 if (cloudTail.isNotEmpty()) {
                     mutex.withLock {
                         if (gen != generation) throw CancellationException("Fingerprint tap superseded")
-                        processCloudMatches(cloudTail, streamStartSec)
+                        processCloudMatches(cloudTail, cloudOriginSec(streamStartSec))
                     }
                 }
             }
@@ -1657,12 +1728,18 @@ class FingerprintTimingManager @Inject constructor(
                             }
                         }
                         cloudFingerprinter?.let { cloudFp ->
+                            // Same rule as the tap: the origin is where THIS buffer sits in media
+                            // time, taken from the decoder's own presentation timestamp. A
+                            // fingerprinter attached mid-decode starts here, not at startOffset.
+                            if (cloudStreamStartSec.isNaN()) {
+                                cloudStreamStartSec = bufferInfo.presentationTimeUs / 1_000_000.0
+                            }
                             cloudFp.pushSamples(samples.toFloatArray(), stream.channelCount, stream.sampleRate)
                             val cloudWindows = cloudFp.drainWindows()
                             if (cloudWindows.isNotEmpty()) {
                                 mutex.withLock {
                                     if (gen != generation) throw CancellationException("Fingerprint stream superseded")
-                                    processCloudMatches(cloudWindows, startOffset)
+                                    processCloudMatches(cloudWindows, cloudOriginSec(startOffset))
                                 }
                             }
                         }

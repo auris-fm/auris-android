@@ -18,7 +18,10 @@ import java.util.Base64
 import java.util.Date
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -31,6 +34,8 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
@@ -163,6 +168,118 @@ class FingerprintTimingManagerCloudReferenceTest {
               "checkpoints": [$checkpoints]
             }
         """.trimIndent().toByteArray()
+    }
+
+    /**
+     * Reviewer's blocking case: the server evicting its copy (403/404) says nothing about the
+     * payload the device already holds. Dropping a stored reference that still decodes would lose
+     * alignment the phone can already do, for a reason entirely upstream.
+     */
+    /**
+     * A reference with a SINGLE checkpoint carrying the parity signal's hashes. With one checkpoint
+     * there is no runner-up, so a perfect match clears the dominance rule and the anchor commits —
+     * which makes its playback time observable. (The three-checkpoint parity payload ties every
+     * window with its runner-up, so nothing ever commits from it.)
+     */
+    private fun singleCheckpointPayload(timestampSec: Int): ByteArray {
+        val hashes = CloudFingerprintParityData.signal16kMonoWindows[0]
+        val buffer = ByteBuffer.allocate(hashes.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        for (hash in hashes) buffer.putInt((hash and 0xFFFFFFFFL).toInt())
+        return """
+            {
+              "format": "fingerprint-compact-v2",
+              "total_duration": 2146.0,
+              "checkpoint_interval": 1,
+              "checkpoint_duration": 8,
+              "timestamp_quantum": 1,
+              "checkpoints": [[$timestampSec, "${Base64.getEncoder().encodeToString(buffer.array())}"]]
+            }
+        """.trimIndent().toByteArray()
+    }
+
+    @Test
+    fun `a definitive miss keeps a stored reference that still decodes`() = runBlocking {
+        store.save("ep_evicted", compactV2Payload(), "\"v1\"")
+        val fetcher = object : CloudFingerprintReferenceFetcher(noCredentialProvider()) {
+            override suspend fun fetchReference(
+                baseUrl: String,
+                episodeUuid: String,
+                podcastUuid: String,
+                cachedEtag: String?,
+            ): Fetch = Fetch.NotAvailable
+        }
+
+        val outcome = acquireOnce("https://cloud.invalid", "ep_evicted", fetcher)
+
+        assertTrue(
+            "upstream eviction must not drop a usable stored reference",
+            outcome is CloudReferenceAcquisition.Outcome.Ready,
+        )
+        assertEquals(3, (outcome as CloudReferenceAcquisition.Outcome.Ready).matcher.count)
+    }
+
+    /** With nothing stored, the same 404 is still definitive — the rule above must not soften it. */
+    @Test
+    fun `a definitive miss with nothing stored stays definitive`() = runBlocking {
+        val fetcher = object : CloudFingerprintReferenceFetcher(noCredentialProvider()) {
+            override suspend fun fetchReference(
+                baseUrl: String,
+                episodeUuid: String,
+                podcastUuid: String,
+                cachedEtag: String?,
+            ): Fetch = Fetch.NotAvailable
+        }
+
+        assertEquals(
+            CloudReferenceAcquisition.Outcome.DefinitiveMiss,
+            acquireOnce("https://cloud.invalid", "ep_nothing", fetcher),
+        )
+    }
+
+    /**
+     * Reviewer's blocking case: the cloud download can take the whole call budget. Transcript
+     * preparation must not sit behind it — an episode whose transcript reference is already cached
+     * should be aligning while the cloud bytes are still arriving.
+     *
+     * The cloud answer is held open indefinitely; the transcript side must reach its own state
+     * without it. No timing assumption beyond "the answer has not been given".
+     */
+    @Test
+    fun `transcript preparation does not wait for the cloud download`() {
+        val fetcher = onDemandFetcher()
+        val retriever = mock(FingerprintReferenceRetriever::class.java)
+        val transcriptAsked = CompletableDeferred<Unit>()
+        runBlocking {
+            whenever(retriever.loadCachedReference(anyOrNull())).thenReturn(null)
+            whenever(retriever.loadReferenceData(anyOrNull())).thenReturn(null)
+            whenever(retriever.fetchReferenceData(any(), any(), any())).thenAnswer {
+                transcriptAsked.complete(Unit)
+                FingerprintReferenceRetriever.FetchResult.NotFound
+            }
+        }
+        val h = harness(
+            referenceResponses = emptyList(),
+            fetcherOverride = fetcher,
+            retrieverOverride = retriever,
+            cloudBaseUrl = "https://cloud.invalid",
+        )
+        try {
+            h.play()
+            awaitCalls(fetcher, 1)
+
+            // The cloud answer is deliberately NEVER completed. The transcript reference fetch must
+            // still happen: before this fix the whole transcript preparation sat behind the cloud
+            // download, so this would never be asked until the cloud call budget expired.
+            runBlocking {
+                withTimeout(10_000) { transcriptAsked.await() }
+            }
+
+            fetcher.gate(h.episodeUuid).complete(fetcher.fresh(compactV2Payload()))
+            awaitSettled(h)
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
     }
 
     @Test
@@ -298,6 +415,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         retrieverOverride: FingerprintReferenceRetriever? = null,
         localAudio: File? = null,
         cachedTranscriptReference: ByteArray? = null,
+        cloudBaseUrl: String? = null,
     ): Harness {
         enableSyncedTranscripts()
         val episodeUuid = "ep_huberman"
@@ -343,7 +461,7 @@ class FingerprintTimingManagerCloudReferenceTest {
 
         val cloudConfig = mock(SharedPreferencesCloudConfig::class.java)
         whenever(cloudConfig.baseUrl()).thenReturn(
-            if (retrieverOverride != null) "" else referenceServer.url("/").toString().trimEnd('/'),
+            cloudBaseUrl ?: if (retrieverOverride != null) "" else referenceServer.url("/").toString().trimEnd('/'),
         )
 
         val settings = mock(Settings::class.java)
@@ -428,6 +546,59 @@ class FingerprintTimingManagerCloudReferenceTest {
             val buffer = ByteBuffer.allocate(samples.size * 4).order(ByteOrder.nativeOrder())
             buffer.asFloatBuffer().put(samples)
             h.tap.onPcm(buffer, format)
+        }
+    }
+
+    /**
+     * Silence from media time [startSec], one second per chunk, paced so the tap's collector keeps
+     * up. An unpaced burst overflows the shared flow (DROP_OLDEST) and most chunks never arrive.
+     */
+    private fun playSilenceAt(h: Harness, startSec: Int, seconds: Int, paceMs: Long) {
+        val sampleRate = 16000
+        val format = androidx.media3.common.audio.AudioProcessor.AudioFormat(
+            sampleRate,
+            1,
+            androidx.media3.common.C.ENCODING_PCM_FLOAT,
+        )
+        for (offset in 0 until seconds) {
+            h.tap.onSinkBuffer((startSec + offset) * 1_000_000L)
+            val buffer = ByteBuffer.allocate(sampleRate * 4).order(ByteOrder.nativeOrder())
+            buffer.asFloatBuffer().put(FloatArray(sampleRate))
+            h.tap.onPcm(buffer, format)
+            Thread.sleep(paceMs)
+        }
+    }
+
+    /**
+     * Feeds the parity signal continuously from media time [startSec] for [seconds], one second per
+     * chunk. Unlike [playInto] the signal repeats throughout, so windows complete and match.
+     */
+    private fun playSignalAt(h: Harness, startSec: Int, seconds: Int, paceMs: Long = 20L) {
+        val sampleRate = 16000
+        val format = androidx.media3.common.audio.AudioProcessor.AudioFormat(
+            sampleRate,
+            1,
+            androidx.media3.common.C.ENCODING_PCM_FLOAT,
+        )
+        // ONE continuous waveform: the phase carries across chunk boundaries, so the audio is the
+        // same signal the parity fixture was generated from. Restarting the phase each second would
+        // make every chunk a different signal and nothing would match past the first window.
+        var sampleIndex = 0L
+        for (offset in 0 until seconds) {
+            h.tap.onSinkBuffer((startSec + offset) * 1_000_000L)
+            val samples = FloatArray(sampleRate) {
+                val t = (sampleIndex++).toDouble() / sampleRate
+                var v = 0.0
+                v += 0.5 * kotlin.math.sin(2.0 * Math.PI * 440.0 * t + 0.0)
+                v += 0.3 * kotlin.math.sin(2.0 * Math.PI * 1000.0 * t + 0.5)
+                v += 0.2 * kotlin.math.sin(2.0 * Math.PI * 2500.0 * t + 1.2)
+                v += 0.1 * kotlin.math.sin(2.0 * Math.PI * 880.0 * t + 0.0)
+                v.toFloat()
+            }
+            val buffer = ByteBuffer.allocate(samples.size * 4).order(ByteOrder.nativeOrder())
+            buffer.asFloatBuffer().put(samples)
+            h.tap.onPcm(buffer, format)
+            Thread.sleep(paceMs)
         }
     }
 
@@ -785,52 +956,53 @@ class FingerprintTimingManagerCloudReferenceTest {
     }
 
     /**
-     * Reviewer's blocking case: a cloud reference that arrives while a collector is already running
-     * attaches a fingerprinter MID-STREAM. Its windows are relative to its own first sample, so they
-     * must be placed at the position that sample occupies — using the stream's start would put every
-     * cloud anchor early by the elapsed playback time.
+     * The cloud fingerprinter's origin is the media position of the FIRST sample it is fed, and the
+     * anchor it produces is that origin plus the window's own timestamp.
      *
-     * Driven through the real play path with the collector already collecting: the tap delivers a
-     * hundred seconds of audio FIRST, so the stream's start and the moment the reference arrives are
-     * far apart. The reference must still be adopted, and the manager must keep collecting for the
-     * episode it was prepared for.
+     * The stream starts at media time 60 s (a listener joining mid-episode) and carries the parity
+     * signal from its first sample. The reference's single checkpoint sits at reference time 0 with
+     * that signal's hashes, so the committed anchor must be at 60 s — the media position of the audio
+     * that matched. An origin left at 0 would put it near 0 s; an origin taken from the last completed
+     * window would put it a window off.
+     *
+     * A single checkpoint means a perfect match has no runner-up, so the dominance rule passes and
+     * the anchor commits. (The three-checkpoint parity payload ties every window with its runner-up
+     * and nothing commits from it.)
+     *
+     * HARNESS LIMIT: this covers the origin stamped when a stream starts. The OTHER stamp — the one
+     * for a fingerprinter attached to an already-running TRANSCRIPT collector — cannot be reached in
+     * a JVM unit test, because a transcript collector needs `buildMatcher`, which loads the native
+     * uniffi library. Both stamps write the same field from the same kind of value (the position of
+     * the chunk being fed); the mutation check for this one is setting the stream-start stamp to 0.
      */
     @Test
-    fun `a cloud reference arriving mid-stream is adopted by the running collector`() {
-        val fetcher = onDemandFetcher()
+    fun `the cloud fingerprinter anchors at the media position of the audio it fingerprinted`() {
         val h = harness(
-            referenceResponses = emptyList(),
-            fetcherOverride = fetcher,
+            referenceResponses = listOf(
+                MockResponse()
+                    .setBody(singleCheckpointPayload(timestampSec = 0).toString(Charsets.UTF_8))
+                    .setHeader("ETag", "\"v1\""),
+            ),
             cachedTranscriptReference = emptyTranscriptReference(),
         )
         try {
             h.play()
-            awaitCalls(fetcher, 1)
+            assertEquals(1, awaitRequests(h, 1))
             awaitSettled(h)
 
-            // A collector is running with no matcher (cloud reference still outstanding). Give it
-            // a hundred seconds of audio, so the fingerprinter is attached long after t=0.
-            playInto(h, startSec = 0, seconds = 100)
-            awaitIdle(300)
+            // The signal from the stream's very first sample, at media time 60 s. No silence: a
+            // silent window has few distinct hashes, which inflates the min-distinct score and
+            // produces spurious matches.
+            playSignalAt(h, startSec = 60, seconds = 16, paceMs = 15L)
+            awaitIdle(800)
 
-            fetcher.gate(h.episodeUuid).complete(fetcher.fresh(compactV2Payload()))
-            awaitSettled(h)
-
-            assertNotNull("the mid-stream reference must be stored", runBlocking { store.load(h.episodeUuid) })
-            assertNotEquals(
-                "the reference must be adopted, not discarded as stale",
-                FingerprintTimingManager.State.Idle,
-                h.manager.state,
-            )
-
-            // Audio after the attach is what the new fingerprinter consumes; it must keep flowing
-            // without resetting the episode the manager is prepared for.
-            playInto(h, startSec = 100, seconds = 20)
-            awaitIdle(300)
-            assertNotEquals(
-                "collection must continue after a mid-stream attach",
-                FingerprintTimingManager.State.Idle,
-                h.manager.state,
+            val anchors = h.manager.mappingSnapshot.map { it.playbackTime }
+            assertTrue("the signal must produce an anchor", anchors.isNotEmpty())
+            assertEquals(
+                "the anchor must sit at the media position of the matching audio",
+                60.0,
+                anchors.min(),
+                1.0,
             )
         } finally {
             h.referenceServer.shutdown()

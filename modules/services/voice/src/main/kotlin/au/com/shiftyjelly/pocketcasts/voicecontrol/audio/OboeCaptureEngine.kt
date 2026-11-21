@@ -154,6 +154,9 @@ interface CaptureHardware {
 
     /** See [OboeNative.nativeGetSpeechEndStreamPosition]. */
     fun getSpeechEndStreamPosition(): Long
+
+    /** See [OboeNative.nativeGetFramesConsumed]. */
+    fun getFramesConsumed(): Long
 }
 
 /** The production [CaptureHardware], delegating to the JNI bridge. */
@@ -174,6 +177,7 @@ class OboeCaptureHardware : CaptureHardware {
     override fun setEarlyWakeCutoff(samples: Int) = OboeNative.nativeSetEarlyWakeCutoff(samples)
     override fun getSpeechEndSample(): Int = OboeNative.nativeGetSpeechEndSample()
     override fun getSpeechEndStreamPosition(): Long = OboeNative.nativeGetSpeechEndStreamPosition()
+    override fun getFramesConsumed(): Long = OboeNative.nativeGetFramesConsumed()
 }
 
 /** Configuration constants shared between Kotlin capture loop and native code. */
@@ -181,6 +185,20 @@ internal object OboeConfig {
     const val SAMPLE_RATE_HZ = 16_000
     const val CHANNELS = 1
     const val FRAMES_PER_POLL = 1024 // 64ms at 16kHz
+
+    /**
+     * How long capture may run without the native VAD consuming a single frame before the stream is
+     * treated as dead. The VAD consumes a frame every 64 ms of audio, so this is roughly 3.6 s of
+     * expected work; a stream that delivers nothing for that long is not merely quiet, it is not
+     * delivering at all — silence still reaches the VAD, only a dead or disconnected stream does not.
+     */
+    const val STARVED_AFTER_MS = 2_300L
+
+    /**
+     * How often the liveness check reads the consumed-frame counter while no event arrives. Bounds
+     * how long a dead stream can look healthy to a little over [STARVED_AFTER_MS].
+     */
+    const val LIVENESS_POLL_MS = 500L
 }
 
 /**
@@ -236,11 +254,19 @@ internal class OboeCaptureEngine(
      */
     fun captureEvents(): Flow<VoiceSegmenterResult> = flow {
         try {
+            // Liveness: a stream can stay "running" while delivering nothing at all — an AirPods mic
+            // route that closed, an AAudio disconnect the platform did not report. Silence still
+            // reaches the VAD (it consumes a frame every 64 ms whatever the input), so a consumed
+            // count that does not move while events keep timing out means the stream is starved, not
+            // quiet. Its end is surfaced as the same termination a stopped stream produces, so the
+            // service's existing restart path is what reacts; nothing new is started here.
+            var framesAtLastLivenessCheck = hardware.getFramesConsumed()
+            var msSinceFramesMoved = 0L
             while (currentCoroutineContext().isActive && !disposed) {
                 // Every event carries the generation of the utterance it belongs to, read by the
                 // native pop under the same lock that installed its payload.
                 val generationOut = LongArray(1)
-                when (val event = hardware.waitForVadEvent(500, generationOut)) {
+                when (val event = hardware.waitForVadEvent(OboeConfig.LIVENESS_POLL_MS.toInt(), generationOut)) {
                     1 -> emit(VoiceSegmenterResult.SpeechStarted)
 
                     // The early-wake cutoff: the in-progress utterance passed the wake window's
@@ -311,7 +337,27 @@ internal class OboeCaptureEngine(
                         }
                     }
 
-                    0 -> { /* timeout */ }
+                    // Nothing to report: the VAD saw no event in this window. Check liveness on the
+                    // same cadence, since a starved stream produces no event at all and would
+                    // otherwise wait here forever while the app believes it is listening.
+                    0 -> {
+                        val consumed = hardware.getFramesConsumed()
+                        if (consumed > framesAtLastLivenessCheck) {
+                            framesAtLastLivenessCheck = consumed
+                            msSinceFramesMoved = 0
+                        } else {
+                            msSinceFramesMoved += OboeConfig.LIVENESS_POLL_MS
+                            if (msSinceFramesMoved >= OboeConfig.STARVED_AFTER_MS) {
+                                Timber.e(
+                                    "[VoiceCapture] mic_stream_starved: no frames consumed for %d ms; ending capture",
+                                    msSinceFramesMoved,
+                                )
+                                // End the collection the same way a stopped stream does; the
+                                // service's restart budget and recovery path decide what happens.
+                                break
+                            }
+                        }
+                    }
 
                     // An ordinary end: the stream was stopped.
                     -1 -> break

@@ -262,7 +262,9 @@ class VoiceControlModeObserverAvailabilityTest {
 
         override fun openInputStream(): Int = microphoneCapture.openStreamForAcquisition()
         override fun startInputStream(): Boolean = microphoneCapture.startAcquiredStream()
-        override fun closeInputStream() = microphoneCapture.closeAcquiredStream()
+                override fun openStreamGeneration(): Long? = microphoneCapture.openStreamGeneration
+
+override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquiredStream(generation)
     }
 
     private class FakeHardware(private val scoReady: () -> Boolean) : CaptureHardware {
@@ -337,6 +339,8 @@ class VoiceControlModeObserverAvailabilityTest {
         override fun getSpeechOnsetSample() = 0
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
+        override fun getFramesConsumed(): Long = if (capturing) consumedFrames else 0L
+        var consumedFrames = 0L
     }
 
     private class FakeRule(

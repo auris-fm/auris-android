@@ -243,6 +243,14 @@ class VoiceControlService : Service() {
     // observer run attempts again. A failure while the gate is not Allowed records nothing:
     // that attempt was abandoned by a blocker, and the blocker clearing is itself the trigger.
     private var failedAttemptAvailability: AudioRoute? = null
+
+    /**
+     * Set when a surface other than the one a failed attempt was recorded against has been offered
+     * since that failure. The record describes the situation only while its surface has been
+     * continuously offered: once a different surface has been seen, a later return to the recorded
+     * answer is a new situation, not the failed one.
+     */
+    private var failedAttemptSurfaceLeft = false
     /** The skip log fires once per recorded failure, not on every observer run that re-checks it. */
     private var failedAttemptSkipLogged = false
     // Set only when the GATE was Blocked during the attempt (rule 2's coalescing, narrowed to
@@ -329,6 +337,7 @@ class VoiceControlService : Service() {
             return START_NOT_STICKY
         }
         // ONE START AUTHORITY: this platform path starts through the seam, not around it.
+        watchOfferedSurface()
         lifecycle.start()
         return START_NOT_STICKY
     }
@@ -414,6 +423,22 @@ class VoiceControlService : Service() {
             startPipeline = { startVoiceControl() },
             stopPipeline = { stopVoiceControl() },
         )
+    }
+
+    /**
+     * A failed attempt's record names the surface it was tried on. Watching availability alone (not
+     * the mode combine) means a route leaving that surface is noticed even when the mode never visits
+     * Off, so a later return to the same answer is recognised as a new situation rather than the
+     * failed one.
+     */
+    private fun watchOfferedSurface() {
+        serviceScope.launch(Dispatchers.Main.immediate) {
+            audioRouteMonitor.availability.collect { offered ->
+                if (failedAttemptAvailability != null && offered != failedAttemptAvailability) {
+                    failedAttemptSurfaceLeft = true
+                }
+            }
+        }
     }
 
     /** Returns true when a start was accepted; false when one is already running or in flight. */
@@ -1176,6 +1201,16 @@ class VoiceControlService : Service() {
      */
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
+        // The record refuses a retry only while the surface it names is still the one being
+        // offered. A route that left it and came back has crossed an event the recorded failure says
+        // nothing about, and the user's devices need not have changed at all — a SCO link dropping
+        // and returning leaves the enumerated set identical. Without this the refusal outlives the
+        // situation it describes and capture stays off while a usable microphone is available again.
+        if (failedAttemptAvailability != null && failedAttemptSurfaceLeft) {
+            failedAttemptAvailability = null
+            failedAttemptSkipLogged = false
+            failedAttemptSurfaceLeft = false
+        }
         if (failedAttemptAvailability != null &&
             audioRouteMonitor.availability.value == failedAttemptAvailability
         ) {
@@ -1253,6 +1288,7 @@ class VoiceControlService : Service() {
                         if (gateState.allowed && !gateBlockedDuringAttempt) {
                             failedAttemptAvailability = attemptAvailability
                             failedAttemptSkipLogged = false
+                            failedAttemptSurfaceLeft = false
                         }
                         if (spendingRestart) {
                             captureRestartBudget.onAutomaticRestart()

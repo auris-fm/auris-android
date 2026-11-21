@@ -28,15 +28,29 @@ class H(http.server.BaseHTTPRequestHandler):
                                "env": {"DUMMY_SECRET": "canary-do-not-log-9f3e"}}).encode()
             self.send_response(201)
         else:
-            body = json.dumps({"message": "Validation failed: branch is not allowed",
-                               "env": {"DUMMY_SECRET": "canary-do-not-log-9f3e"}}).encode()
-            self.send_response(422)
+            if MODE == 'err':
+                # Credential embedded INSIDE the message value: the fixed
+                # diagnostic must not echo any of it.
+                body = json.dumps({"message": "Validation failed: token canary-do-not-log-9f3e rejected",
+                                   "env": {"DUMMY_SECRET": "canary-do-not-log-9f3e"}}).encode()
+                self.send_response(422)
+            else:
+                body = json.dumps({"message": {"nested": "canary-do-not-log-9f3e"}}).encode()
+                self.send_response(500)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *a): pass
 # OS picks the port; print it once bound so the caller never guesses.
-srv = http.server.HTTPServer(('127.0.0.1', 0), H)
+# bind_and_activate=False + explicit bind avoids HTTPServer.server_bind's
+# getfqdn() reverse lookup, which can stall on some hosts.
+class NoFqdnServer(http.server.HTTPServer):
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = '127.0.0.1'
+        self.server_port = self.server_address[1]
+srv = NoFqdnServer(('127.0.0.1', 0), H)
 print(srv.server_address[1], flush=True)
 srv.serve_forever()
 PY
@@ -88,11 +102,19 @@ fi
 
 run_case err
 check "422 fails" 1 "$CODE" "422" "$OUT"
-check "422 prints API error body" 1 "$CODE" "Validation failed" "$OUT"
+check "422 prints fixed validation diagnostic" 1 "$CODE" "request validation failed" "$OUT"
 if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
-  FAIL=$((FAIL+1)); echo "FAIL: failure log leaks echoed env secret"
+  FAIL=$((FAIL+1)); echo "FAIL: failure log leaks credential from message/env"
 else
-  PASS=$((PASS+1)); echo "ok: failure log keeps echoed env secret out"
+  PASS=$((PASS+1)); echo "ok: failure log keeps message/env credential out"
+fi
+
+run_case struct
+check "structured error fails" 1 "$CODE" "500" "$OUT"
+if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
+  FAIL=$((FAIL+1)); echo "FAIL: structured-error log leaks nested credential"
+else
+  PASS=$((PASS+1)); echo "ok: structured error prints status only"
 fi
 
 echo "$PASS passed, $FAIL failed"

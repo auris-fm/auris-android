@@ -34,14 +34,32 @@ PY
   exit 0
 fi
 
+# Fixed diagnostics only: an unchecked message/error value could itself
+# carry credentials (or be a structured object). Known validation errors
+# get a fixed sentence; anything else gets just the HTTP status.
 python3 - "$BODY_FILE" "$HTTP_CODE" <<'PY' >&2
 import json, sys
 code = sys.argv[2]
+KNOWN = {
+    "Validation failed": "request validation failed (commit/branch/message rejected)",
+    "Unauthorized": "API token rejected",
+    "Forbidden": "API token lacks permission for this pipeline",
+    "Not Found": "organization or pipeline not found",
+}
+diag = None
 try:
     b = json.load(open(sys.argv[1]))
-    msg = b.get("message") or b.get("error") or "(no message field)"
+    msg = b.get("message")
+    if isinstance(msg, str):
+        for prefix, fixed in KNOWN.items():
+            if msg.startswith(prefix):
+                diag = fixed
+                break
 except Exception:
-    msg = "(response not JSON; body withheld)"
-print(f"Buildkite API returned HTTP {code}: {msg}")
+    pass
+if diag:
+    print(f"Buildkite API returned HTTP {code}: {diag}")
+else:
+    print(f"Buildkite API returned HTTP {code} (response withheld; see Buildkite UI)")
 PY
 exit 1

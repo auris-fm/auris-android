@@ -50,7 +50,10 @@ class CloudTurnRoute(
      */
     private val earlyConnections: EarlyConnectionOpener? = null,
 ) {
-    fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = flow {
+    fun route(
+        turn: CloudRouteTurn,
+        onOpen: ((sendResult: (CloudTurnFrame) -> Boolean) -> Unit)? = null,
+    ): Flow<CloudRouteEvent> = flow {
         // Fail closed, and fail loudly: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
@@ -103,7 +106,7 @@ class CloudTurnRoute(
         }
         // Everything the socket reports is the turn's outcome — including a refused upgrade, which
         // arrives as `connection_lost` and ends the turn rather than being retried elsewhere.
-        emitAll(socket.exchange(frame))
+        emitAll(socket.exchange(frame, onOpen))
     }
 
     companion object {

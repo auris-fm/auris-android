@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
@@ -21,7 +22,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationDelivery
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationJournal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationSupport
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.appops.AppOperationV1
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import org.json.JSONObject
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -90,6 +96,12 @@ class CloudRouteSink internal constructor(
      * dials for itself.
      */
     private val earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
+    /**
+     * The journal-backed app-operation seam. The default stays [AppOperationSupport.Unwired]: no
+     * owner identity or journal root means a v1 operation refuses instead of executing, exactly as
+     * an unwired path must.
+     */
+    private val appOperationSupport: AppOperationSupport = AppOperationSupport.Unwired,
 ) : VoiceCloudRouteSink {
 
     init {
@@ -588,7 +600,11 @@ class CloudRouteSink internal constructor(
             // From here until the turn ends, FIRST AUDIBLE belongs to this request.
             myTimingRequestId = turn.requestId
             activeTimingRequestId.set(turn.requestId)
-            val events = openRoute(turn)
+            // The CLIENT-originated result sender, handed over when the connection can carry
+            // frames. Null before the open and never after it cannot deliver: a v1 answer whose
+            // send returns false has its durable claim replayed by a redelivery instead.
+            var resultSend: ((CloudTurnFrame) -> Boolean)? = null
+            val events = openRoute(turn, onOpen = { resultSend = it })
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
             // to restore it. Taken under the same mutex as registration so a predecessor's
@@ -636,6 +652,47 @@ class CloudRouteSink internal constructor(
                     // capability is advertised, so the server should not send one. Ignore it and
                     // wait for the terminal.
                     is CloudRouteEvent.Result -> {}
+
+                    // A v1 operation is admitted, executed, settled and answered inside this
+                    // turn: no transcript, no duck, no hold, no ad hoc command, and nothing
+                    // outliving the connection. Everything durable is in the journal.
+                    is CloudRouteEvent.AppOperation -> {
+                        val answer = deliverAppOperation(
+                            event = event,
+                            conversationId = turn.conversationId,
+                            turnId = turn.requestId,
+                            plannedEpisodeId = context.episodeId,
+                        )
+                                                if (answer != null) {
+                            resultSend?.invoke(
+                                CloudTurnFrame.AppOperationResult(
+                                    requestId = turn.requestId,
+                                    operationId = event.operationId,
+                                    payloadJson = answer.resultJson,
+                                ),
+                            )
+                        }
+                    }
+
+                    is CloudRouteEvent.MalformedAppOperation -> {
+                        // Decoding failed at the transport, so the codec never saw it: refuse with
+                        // the identity the frame presence recovered, without any effect.
+                        // An UNRECOVERABLE identity cannot be answered at all: a result frame
+                        // must name its operation, so with no id the refusal stays unsent.
+                        val operationId: String? = event.operationId
+                        val answer: AppOperationDelivery.Delivery? = operationId?.let {
+                            AppOperationDelivery.refused(it, AppOperationDelivery.REASON_INVALID_REQUEST, replayed = false)
+                        }
+                        if (operationId != null && answer != null) {
+                            resultSend?.invoke(
+                                CloudTurnFrame.AppOperationResult(
+                                    requestId = turn.requestId,
+                                    operationId = operationId,
+                                    payloadJson = answer.resultJson,
+                                ),
+                            )
+                        }
+                    }
 
                     is CloudRouteEvent.Connected -> {
                         // Handshake acknowledgement, and the frame that carries the codec the
@@ -1030,7 +1087,10 @@ class CloudRouteSink internal constructor(
         ActionOutcome.Confirmed -> CloudRouteActionOutcome.Confirmed
     }
 
-    private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
+    private fun openRoute(
+        turn: CloudRouteTurn,
+        onOpen: ((sendResult: (CloudTurnFrame) -> Boolean) -> Unit)?,
+    ): Flow<CloudRouteEvent> {
         // Production runs over the WebSocket only (cloud-assistant.md, owner's ruling): a refused
         // upgrade fails the turn visibly rather than falling back, so a completed turn is evidence
         // the negotiated path served it. The choice lives in one place rather than beside a second
@@ -1091,7 +1151,7 @@ class CloudRouteSink internal constructor(
             transport = transport,
             observer = transportObserver,
             earlyConnections = earlyConnectionOpener,
-        ).route(turn)
+        ).route(turn, onOpen)
     }
 
     /**
@@ -1198,6 +1258,199 @@ class CloudRouteSink internal constructor(
     }
 
     /** Returns true only when an action was actually performed: an ignored action is not a delivery. */
+    /**
+     * The one route from a v1 frame to an answer. The codec is the authority on identity, bounds
+     * and required fields; an operation it rejects is refused with its recoverable id rather than
+     * dropped, and an operation with no owner or no journal refuses rather than releasing an
+     * effect nothing could account for later.
+     *
+     * A fault HERE is a PRE-EFFECT admission failure: nothing has been executed, so `refused` is
+     * truthful and the id stays claimable. Faults AFTER the effect has run are handled inside
+     * [AppOperationDelivery.deliver], which knows the boundary and answers `unknown`.
+     */
+    private suspend fun deliverAppOperation(
+        event: CloudRouteEvent.AppOperation,
+        conversationId: String,
+        turnId: String,
+        plannedEpisodeId: String?,
+    ): AppOperationDelivery.Delivery? {
+        return try {
+            when (val parsed = AppOperationV1.parse(event.rawBytes.decodeToString())) {
+                is AppOperationV1.Parsed.Invalid -> {
+                    // The codec's own bounded identity, or -- when it refused before reading one --
+                    // the identity the socket recovered from field presence. Both are validated ids.
+                    val operationId = parsed.operationId ?: event.operationId
+                    AppOperationDelivery.refused(operationId, AppOperationDelivery.REASON_INVALID_REQUEST, replayed = false)
+                }
+
+                is AppOperationV1.Parsed.Valid -> {
+                    val owner = appOperationSupport.owner()
+                    if (owner == null || conversationId.isBlank()) {
+                        // No stable account or no conversation bound to this turn: executing would
+                        // produce an effect this device could never answer for later. ABSENT IS
+                        // REFUSED, never stood in for by an invented identity.
+                        AppOperationDelivery.refused(parsed.request.operationId, AppOperationDelivery.REASON_PERSISTENCE_UNAVAILABLE, replayed = false)
+                    } else {
+                        val claim = AppOperationJournal.Claim(
+                            owner = owner,
+                            conversation = conversationId,
+                            turn = turnId,
+                            operationId = parsed.request.operationId,
+                        )
+                        AppOperationDelivery.deliver(
+                            request = parsed.request,
+                            claim = claim,
+                            store = appOperationSupport.store(),
+                        ) {
+                            observeAppOperation(parsed.request, plannedEpisodeId)
+                        }
+                    }
+                }
+            }
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: Exception) {
+            Timber.w(e, "[CloudRoute] app operation failed closed before any effect")
+            AppOperationDelivery.refused(event.operationId, AppOperationDelivery.REASON_PERSISTENCE_UNAVAILABLE, replayed = false)
+        }
+    }
+
+    /**
+     * The journal-protected adapter to the existing executor: the only place an app operation may
+     * cause an effect.
+     *
+     * Supported actions are the two whose resulting state can be READ BACK. An action that is not
+     * in [SUPPORTED_APP_OPERATIONS] refuses without touching playback, and an action whose result
+     * cannot be observed settles `unknown` rather than success -- a dispatched command is not an
+     * observed outcome.
+     */
+    private suspend fun observeAppOperation(
+        request: AppOperationV1.Request,
+        plannedEpisodeId: String?,
+    ): AppOperationDelivery.Observation {
+        val action = request.tool + "." + request.action
+        if (action !in SUPPORTED_APP_OPERATIONS) {
+            return AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_UNSUPPORTED)
+        }
+        // THE PRECONDITION IS CHECKED IMMEDIATELY BEFORE THE EFFECT, against state read now. Not
+        // earlier: a check performed when the frame arrived says nothing about the player a moment
+        // before the mutation, and the selection can change in between.
+        val claimedEpisode = claimedTargetEpisode(request)
+        val observedBefore = currentObservedState()
+        val currentEpisode = observedBefore?.optString("episode_id")?.takeIf { it.isNotBlank() }
+        if (claimedEpisode != null && claimedEpisode != currentEpisode) {
+            // The request targets an episode that is not the one playing: operate on nothing rather
+            // than on a different recording than the one asked for.
+            return AppOperationDelivery.Observation.Refused(REASON_TARGET_MISMATCH)
+        }
+        return when (action) {
+            "playback.pause" -> {
+                // AN ALREADY-PAUSED PLAYER IS AN IDEMPOTENT SUCCESS, not a refusal: the contract's
+                // post-condition is the observed state, not a change. Pausing something already
+                // paused still satisfies it, so there is no pre-check -- the sink runs and the
+                // observation decides.
+                playbackSink.pause()
+                observedAfterPause()
+            }
+
+            "playback.resume" -> {
+                // AN ALREADY-PLAYING ENGINE IS AN IDEMPOTENT SUCCESS, like pause: the contract's
+                // post-condition is the observed state, not a change, so there is no pre-check --
+                // the sink runs and the observation decides.
+                playbackSink.resume(expectedEpisodeId = currentEpisode)
+                observedAfterResume()
+            }
+
+            else -> AppOperationDelivery.Observation.Refused(AppOperationDelivery.REASON_UNSUPPORTED)
+        }
+    }
+
+    /** The episode this request claims to act on, or null when it names none. */
+    private fun claimedTargetEpisode(request: AppOperationV1.Request): String? {
+        val params = request.params
+        val claimed = params.optString("episode_id").takeIf { it.isNotBlank() }
+            ?: request.precondition?.optString("episode_id")?.takeIf { it.isNotBlank() }
+        return claimed
+    }
+
+    /**
+     * Player state read NOW, or null when it cannot be read.
+     *
+     * Null is not "nothing is playing": an unreadable state means no observation was made, and a
+     * caller that treats it as evidence is claiming a measurement it never took.
+     */
+    private fun currentObservedState(): JSONObject? = try {
+        playbackContextProvider.currentObservedState()
+    } catch (e: Exception) {
+        Timber.w(e, "[CloudRoute] observed state unavailable")
+        null
+    }
+
+    /**
+     * `playback.pause`'s three contract outcomes. No observation available =>
+     * `unknown`/`playback_state_unavailable`. Still playing => `failed`/`pause_not_observed`.
+     * Otherwise the engine reports paused and this is a SUCCESS carrying that observed state. The
+     * three are distinguished here because only this function sees the observation; folding them
+     * into one `Unconfirmed` would report a failed pause as an unknown one.
+     */
+    private fun observedAfterPause(): AppOperationDelivery.Observation {
+        val after = currentObservedState()
+            ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        return when (observedPlaying(after)) {
+            // We looked, and it is still running: the pause did not take.
+            true -> AppOperationDelivery.Observation.Failed(REASON_PAUSE_NOT_OBSERVED)
+
+            false -> AppOperationDelivery.Observation.Observed(typedState(after))
+
+            // The field is missing or not a boolean, so there is no measurement to rest on. It is
+            // NOT evidence the engine is still playing.
+            null -> AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        }
+    }
+
+    /**
+     * The observed `playing` flag, or null when the observation does not carry one.
+     *
+     * Strict on purpose: `optBoolean(key)` answers false for an ABSENT key and for one of the wrong
+     * type, which would turn "we could not tell" into "the engine is paused" -- a fabricated
+     * measurement. Only a real JSON boolean is an observation.
+     */
+    private fun observedPlaying(state: JSONObject): Boolean? {
+        if (!state.has(PLAYING_FIELD)) return null
+        return when (val value = state.opt(PLAYING_FIELD)) {
+            is Boolean -> value
+            else -> null
+        }
+    }
+
+    /**
+     * `playback.resume`'s three contract outcomes, mirroring [observedAfterPause]: no observation
+     * => `unknown`/`playback_state_unavailable`; still paused => `failed`/`resume_not_observed`;
+     * the engine reports playing => a SUCCESS carrying the typed state.
+     */
+    private fun observedAfterResume(): AppOperationDelivery.Observation {
+        val after = currentObservedState()
+            ?: return AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        return when (observedPlaying(after)) {
+            // We looked, and it is still paused: the resume did not take.
+            false -> AppOperationDelivery.Observation.Failed(REASON_RESUME_NOT_OBSERVED)
+
+            true -> AppOperationDelivery.Observation.Observed(typedState(after))
+
+            null -> AppOperationDelivery.Observation.Unconfirmed(REASON_PLAYBACK_STATE_UNAVAILABLE)
+        }
+    }
+
+    /**
+     * The SUCCESS STATE CARRIES EXACTLY THE TYPED STATE THE CONTRACT NAMES -- `{"playing": bool}` --
+     * and nothing else. The full observation is this client's measurement vocabulary; the result
+     * document speaks the contract's.
+     */
+    private fun typedState(observed: JSONObject): JSONObject {
+        val playing = observedPlaying(observed)
+        return JSONObject().put(PLAYING_FIELD, playing == true)
+    }
+
     private suspend fun executeAction(
         tool: String,
         action: String,
@@ -1570,3 +1823,22 @@ class CloudRouteSink internal constructor(
         }
     }
 }
+
+/*
+ * Refusal reasons this client can state from what it observed, with no invented wire vocabulary:
+ * each says what was seen ("not playing", "player refused"), not a guess at a server code.
+ */
+private const val REASON_TARGET_MISMATCH = "target_mismatch"
+private const val REASON_PLAYBACK_STATE_UNAVAILABLE = "playback_state_unavailable"
+private const val REASON_PAUSE_NOT_OBSERVED = "pause_not_observed"
+private const val REASON_PLAYER_REFUSED = "player_refused"
+private const val REASON_RESUME_NOT_OBSERVED = "resume_not_observed"
+
+/** The field the engine's observed state carries. The contract names it `playing`. */
+private const val PLAYING_FIELD = "playing"
+
+/**
+ * The only actions this client executes from a v1 operation: the two whose resulting state can be
+ * READ BACK from the player. Anything else refuses before any effect is released.
+ */
+private val SUPPORTED_APP_OPERATIONS = setOf("playback.pause", "playback.resume")

@@ -246,7 +246,6 @@ class FingerprintTimingManagerCloudReferenceTest {
 
     private fun harness(
         referenceResponses: List<MockResponse>,
-        transcriptPayload: ByteArray? = null,
         onEpisode: (String) -> Unit = {},
     ): Harness {
         enableSyncedTranscripts()
@@ -297,13 +296,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         val referenceRetriever = mock(FingerprintReferenceRetriever::class.java)
         runBlocking {
             whenever(referenceRetriever.fetchReferenceData(any(), any(), any()))
-                .thenReturn(
-                    if (transcriptPayload != null) {
-                        FingerprintReferenceRetriever.FetchResult.Success(transcriptPayload)
-                    } else {
-                        FingerprintReferenceRetriever.FetchResult.NotFound
-                    },
-                )
+                .thenReturn(FingerprintReferenceRetriever.FetchResult.NotFound)
             whenever(referenceRetriever.loadCachedReference(any())).thenReturn(null)
             whenever(referenceRetriever.loadReferenceData(any())).thenReturn(null)
         }
@@ -437,14 +430,15 @@ class FingerprintTimingManagerCloudReferenceTest {
                 MockResponse().setResponseCode(503),
                 MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
             ),
-            transcriptPayload = compactV2Payload(),
         )
         try {
             h.play()
             assertEquals(1, awaitRequests(h, 1))
             awaitCloudState(h, CloudReferenceAcquisition.Status.Failed)
 
-            // A real transcript alignment, as the tap would have produced it.
+            // A committed transcript alignment, as the tap produces it: a real mapping the user
+            // can seek with. (The native CheckpointMatcher cannot load in a JVM unit test, so the
+            // mapping is seeded through the manager's own seam rather than by decoding.)
             h.manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 12.0, referenceTime = 12.0))
             assertEquals(12_000, h.manager.playbackTimeMs(12.0))
 

@@ -106,8 +106,13 @@ class CloudFingerprinter {
         0.5 - 0.5 * cos(2.0 * PI * i / (fftSize - 1))
     }
 
-    private val windows = mutableListOf<Window>()
-    private var consumedWindows = 0
+    // Only the UNDRAINED tail is retained (delta: fingerprint OOM). Keeping
+    // every emitted window for the session accumulated ~1 window/s of audio,
+    // each with thousands of hashes — hundreds of MB over a long episode,
+    // which filled the 512 MB heap. Every consumer matches windows exactly
+    // once at drain time; nothing reads old windows later (a late reference
+    // gets a fresh CloudFingerprinter), so drained windows are released.
+    private val windows = ArrayDeque<Window>()
     private var nextWindowStartSec = 0
     private var finished = false
 
@@ -142,17 +147,18 @@ class CloudFingerprinter {
         return drainWindows()
     }
 
-    /** Windows emitted so far (a window is only emitted once its tail lookahead is available). */
-    fun windowsSoFar(): List<Window> = windows
+    /** Windows emitted but not yet drained (a window is only emitted once its tail lookahead is available). */
+    fun windowsSoFar(): List<Window> = windows.toList()
 
     /**
-     * Returns the windows emitted since the last call to this method. The
-     * caller feeds PCM in chunks and drains windows after each push; finished
-     * windows are tracked so the same window is not returned twice.
+     * Returns the windows emitted since the last call to this method and
+     * RELEASES them. The caller feeds PCM in chunks and drains windows after
+     * each push; each window is returned exactly once.
      */
     fun drainWindows(): List<Window> {
-        val emitted = windows.drop(consumedWindows)
-        consumedWindows = windows.size
+        if (windows.isEmpty()) return emptyList()
+        val emitted = windows.toList()
+        windows.clear()
         return emitted
     }
 

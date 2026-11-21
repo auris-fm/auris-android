@@ -1,0 +1,86 @@
+name: "Auris Android release"
+
+# On main, run the same checks the PR workflows run, and once they are green,
+# trigger the Android release pipeline on the Buildkite agent (the signed-AAB
+# build and the Play internal-track upload). Until BUILDKITE_API_TOKEN exists
+# as a secret, the trigger step is skipped: the tests still run, the release
+# does not. The release pipeline itself also stops at the signed AAB until its
+# store secrets exist, so this workflow never ships anything unexpected. The
+# trigger job only runs on refs/heads/main: a workflow_dispatch on any other
+# ref runs the checks but never labels a commit as main for Buildkite. The
+# upload itself needs PLAY_UPLOAD=1 on the pipeline (off by default; the
+# switch is turned on only after Google approves the upload-key reset).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    # workflow_dispatch can select any ref; the release trigger below must only
+    # ever fire for commits actually on main.
+
+jobs:
+  trigger-script-controls:
+    name: "Trigger script controls"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash .buildkite/scripts/trigger-release.test.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: bash .buildkite/scripts/keystore-decode.test.sh
+
+  voice-unit-tests:
+    name: "voice:testDebugUnitTest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
+
+  cloud-transport-tests:
+    name: "repositories:cloud transport tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon
+
+  android-test-compile:
+    name: "androidTest compiles"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon
+
+  trigger-release:
+    name: "Trigger the release build"
+    needs: [trigger-script-controls, voice-unit-tests, cloud-transport-tests, android-test-compile]
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    env:
+      BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+      BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG }}
+      BUILDKITE_PIPELINE: ${{ vars.BUILDKITE_PIPELINE_ANDROID }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: "Trigger the auris-android Buildkite pipeline"
+        if: ${{ env.BUILDKITE_API_TOKEN != '' }}
+        run: bash .buildkite/scripts/trigger-release.sh
+      - name: "No API token yet"
+        if: ${{ env.BUILDKITE_API_TOKEN == '' }}
+        run: echo "BUILDKITE_API_TOKEN not set — release not triggered (dry-run mode)"

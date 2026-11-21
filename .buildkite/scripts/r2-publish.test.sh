@@ -106,8 +106,17 @@ chmod +x "$WORK/bin/buildkite-agent"
 # Mock bundle exec ruby fetcher: copies the fixture APK into place.
 cat > "$WORK/bin/bundle" <<'MOCK'
 #!/bin/bash
-# bundle exec ruby fetch-play-apk.rb <key> <vc> <out> <pin>
-cp "$MOCK_APK" "$6"
+# Require `bundle install` before any `bundle exec` (checkout-local
+# vendor/bundle must be prepared in THIS step, like the Play step).
+if [ "$1" = install ]; then touch "$MOCK_BUNDLE_INSTALLED"; exit 0; fi
+if [ "$1 $2" = "exec ruby" ]; then
+  if [ ! -f "$MOCK_BUNDLE_INSTALLED" ]; then
+    echo "FAIL: bundle exec without bundle install" >&2
+    exit 1
+  fi
+  cp "$MOCK_APK" "$6"
+fi
+exit 0
 MOCK
 chmod +x "$WORK/bin/bundle"
 
@@ -121,6 +130,7 @@ export PATH="$WORK/bin:$PATH"
 export MOCK_STORE="$WORK/store" MOCK_META="$WORK/meta" MOCK_SECRETS="$WORK/secrets"
 export MOCK_LOG="$WORK/rclone.log" MOCK_APK="$WORK/apk.bin" MOCK_ARTIFACTS="$WORK/artifacts"
 export MOCK_CURL_ARGV="$WORK/curl-argv" MOCK_CURL_STDIN="$WORK/curl-stdin"
+export MOCK_BUNDLE_INSTALLED="$WORK/bundle-installed"
 mkdir -p "$MOCK_ARTIFACTS"
 printf 'id' > "$MOCK_SECRETS/R2_APK_ACCESS_KEY_ID"
 printf 'secret' > "$MOCK_SECRETS/R2_APK_SECRET_ACCESS_KEY"
@@ -188,6 +198,12 @@ grep -q '"versionCode": "not-a-number"' "$MOCK_STORE/auris-download/apk/latest.j
 check "malformed case leaves aliases untouched" ok "$r"
 printf 'not json at all' > "$MOCK_STORE/auris-download/apk/latest.json"
 run_r2; check "non-JSON latest.json fails closed" 1 "$?"
+printf '{"versionCode": true}' > "$MOCK_STORE/auris-download/apk/latest.json"
+run_r2; check "boolean versionCode fails closed" 1 "$?"
+printf '{"versionCode": 99999999999999999999}' > "$MOCK_STORE/auris-download/apk/latest.json"
+run_r2; check "out-of-range versionCode fails closed" 1 "$?"
+printf '{"versionCode": 0}' > "$MOCK_STORE/auris-download/apk/latest.json"
+run_r2; check "zero versionCode fails closed" 1 "$?"
 # restore sane state for later controls
 printf '{"versionCode": 9522}' > "$MOCK_STORE/auris-download/apk/latest.json"
 
@@ -216,7 +232,11 @@ MOCK
 # ruby fetches -- extend it to succeed for fastlane too.
 cat > "$WORK/bin/bundle" <<'MOCK'
 #!/bin/bash
-if [ "$2" = ruby ]; then cp "$MOCK_APK" "$6"; fi
+if [ "$1" = install ]; then touch "$MOCK_BUNDLE_INSTALLED"; exit 0; fi
+if [ "$1 $2" = "exec ruby" ]; then
+  [ -f "$MOCK_BUNDLE_INSTALLED" ] || { echo "FAIL: exec without install" >&2; exit 1; }
+  cp "$MOCK_APK" "$6"
+fi
 exit 0
 MOCK
 chmod +x "$WORK/bin/bundle"

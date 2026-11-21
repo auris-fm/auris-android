@@ -30,6 +30,7 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: bash .buildkite/scripts/keystore-decode.test.sh
+      - run: bash .buildkite/scripts/r2-publish.test.sh
 
   voice-unit-tests:
     name: "voice:testDebugUnitTest"

@@ -55,6 +55,9 @@ fi
 echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
 
 echo "--- :android: Fetching Play's signed universal APK (versionCode $UPLOADED_VERSION_CODE)"
+# This step has its own checkout; Bundler is configured for checkout-local
+# vendor/bundle, so prepare the bundle here exactly as the Play step does.
+bundle install --quiet
 bundle exec ruby .buildkite/scripts/fetch-play-apk.rb \
   google-upload-credentials.json "$UPLOADED_VERSION_CODE" play-universal.apk \
   "$AURIS_PLAY_APP_SIGNING_SHA256"
@@ -142,8 +145,13 @@ if [ -n "$ALIAS_LIST" ]; then
 import json, sys
 try:
     vc = json.load(sys.stdin)["versionCode"]
-    if not isinstance(vc, int):
+    # bool is a subclass of int in Python -- reject it explicitly. Play
+    # version codes are positive and must fit the platform range; an
+    # out-of-range value could break the Bash comparison and fall through.
+    if isinstance(vc, bool) or not isinstance(vc, int):
         raise ValueError("versionCode not an integer")
+    if not (0 < vc <= 2100000000):
+        raise ValueError("versionCode out of range")
     print(vc)
 except Exception:
     sys.exit(1)

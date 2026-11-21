@@ -22,10 +22,14 @@ class H(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         self.rfile.read(length)
         if MODE == 'ok':
-            body = json.dumps({"number": 70, "web_url": "https://buildkite.com/x/y/builds/70"}).encode()
+            # The response echoes pipeline env with a dummy secret: the
+            # trigger must NEVER print it (allowlisted metadata only).
+            body = json.dumps({"number": 70, "web_url": "https://buildkite.com/x/y/builds/70",
+                               "env": {"DUMMY_SECRET": "canary-do-not-log-9f3e"}}).encode()
             self.send_response(201)
         else:
-            body = json.dumps({"message": "Validation failed: branch is not allowed"}).encode()
+            body = json.dumps({"message": "Validation failed: branch is not allowed",
+                               "env": {"DUMMY_SECRET": "canary-do-not-log-9f3e"}}).encode()
             self.send_response(422)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -76,10 +80,20 @@ except OSError:
 
 run_case ok
 check "success prints build info" 0 "$CODE" "builds/70" "$OUT"
+if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
+  FAIL=$((FAIL+1)); echo "FAIL: success log leaks echoed env secret"
+else
+  PASS=$((PASS+1)); echo "ok: echoed env secret stays out of the log"
+fi
 
 run_case err
 check "422 fails" 1 "$CODE" "422" "$OUT"
 check "422 prints API error body" 1 "$CODE" "Validation failed" "$OUT"
+if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
+  FAIL=$((FAIL+1)); echo "FAIL: failure log leaks echoed env secret"
+else
+  PASS=$((PASS+1)); echo "ok: failure log keeps echoed env secret out"
+fi
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

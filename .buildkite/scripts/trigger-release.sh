@@ -15,12 +15,33 @@ HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' -X POST \
   -H "Content-Type: application/json" \
   -d "{\"commit\": \"${GITHUB_SHA}\", \"branch\": \"main\", \"message\": \"Release build for ${GITHUB_SHA}\"}")
 
+# Never log the raw API response: a build object can echo pipeline env
+# (including secrets). Success prints allowlisted metadata only; failure
+# prints the API's validation message, which is the diagnostic we need.
 if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-  echo "Buildkite build created (HTTP $HTTP_CODE):"
-  cat "$BODY_FILE"
+  python3 - "$BODY_FILE" "$HTTP_CODE" <<'PY'
+import json, sys
+try:
+    b = json.load(open(sys.argv[1]))
+except Exception:
+    print(f"Buildkite build created (HTTP {sys.argv[2]}); response not JSON")
+    sys.exit(0)
+print(f"Buildkite build created (HTTP {sys.argv[2]}):")
+for k in ("number", "web_url", "state", "commit", "branch"):
+    if k in b:
+        print(f"  {k}: {b[k]}")
+PY
   exit 0
 fi
 
-echo "Buildkite API returned HTTP $HTTP_CODE; response body:" >&2
-cat "$BODY_FILE" >&2
+python3 - "$BODY_FILE" "$HTTP_CODE" <<'PY' >&2
+import json, sys
+code = sys.argv[2]
+try:
+    b = json.load(open(sys.argv[1]))
+    msg = b.get("message") or b.get("error") or "(no message field)"
+except Exception:
+    msg = "(response not JSON; body withheld)"
+print(f"Buildkite API returned HTTP {code}: {msg}")
+PY
 exit 1

@@ -73,8 +73,9 @@ echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keysto
 # Validate the decoded keystore BEFORE Gradle: a still-encoded, double-encoded
 # or truncated secret otherwise fails 10 minutes later inside signReleaseBundle
 # (#70). keytool -list opens it with the store password; no contents printed.
-if ! keytool -list -keystore auris-upload.keystore \
-    -storepass "${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}" >/dev/null 2>&1; then
+if ! ANDROID_UPLOAD_KEYSTORE_PASSWORD="${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}" \
+    keytool -list -keystore auris-upload.keystore \
+    -storepass:env ANDROID_UPLOAD_KEYSTORE_PASSWORD >/dev/null 2>&1; then
   echo "--- decoded keystore is not a valid keystore (still encoded, double-encoded, truncated, or wrong store password)" >&2
   exit 1
 fi

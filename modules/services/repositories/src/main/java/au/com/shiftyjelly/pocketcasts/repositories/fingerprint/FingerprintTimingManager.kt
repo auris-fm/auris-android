@@ -109,7 +109,6 @@ class FingerprintTimingManager @Inject constructor(
         when (val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, stored?.etag)) {
             is CloudFingerprintReferenceFetcher.Fetch.Fresh -> {
                 cloudReferenceStore.save(episodeUuid, fetched.payload, fetched.etag)
-                Timber.d("FingerprintTimingManager: cloud reference cached (${fetched.payload.size} bytes) for $episodeUuid")
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.matcher.count} checkpoints) for $episodeUuid")
                 return fetched.matcher
             }
@@ -122,7 +121,6 @@ class FingerprintTimingManager @Inject constructor(
                 val refetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, null)
                 if (refetched is CloudFingerprintReferenceFetcher.Fetch.Fresh) {
                     cloudReferenceStore.save(episodeUuid, refetched.payload, refetched.etag)
-                    Timber.d("FingerprintTimingManager: cloud reference cached (${refetched.payload.size} bytes) for $episodeUuid")
                     Timber.d("FingerprintTimingManager: cloud reference refetched (${refetched.matcher.count} checkpoints) for $episodeUuid")
                     return refetched.matcher
                 }
@@ -233,7 +231,6 @@ class FingerprintTimingManager @Inject constructor(
     // Independent of the transcript-sync Rust matcher above.
     private var cloudMatcher: CloudReferenceMatcher? = null
     private var cloudFingerprinter: CloudFingerprinter? = null
-    private var cloudFirstMatchLogged = false
     private var hasReachedActive = false
     private var hasTrackedFailure = false
 
@@ -770,7 +767,6 @@ class FingerprintTimingManager @Inject constructor(
         currentMatcher = null
         cloudMatcher = null
         cloudFingerprinter = null
-        cloudFirstMatchLogged = false
         activeEpisodeUuid = null
         hasReachedActive = false
         hasTrackedFailure = false
@@ -1619,13 +1615,6 @@ class FingerprintTimingManager @Inject constructor(
                 continue
             }
 
-            if (!cloudFirstMatchLogged) {
-                cloudFirstMatchLogged = true
-                Timber.d(
-                    "FingerprintTimingManager: first cloud match — playback %.1fs, reference %.1fs, score %.2f",
-                    absolutePlaybackTime, best.timestampSeconds, best.score,
-                )
-            }
             val candidate = TimeMappingEntry(
                 playbackTime = absolutePlaybackTime,
                 referenceTime = best.timestampSeconds.toDouble(),

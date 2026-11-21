@@ -56,7 +56,8 @@ echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
 
 echo "--- :android: Fetching Play's signed universal APK (versionCode $UPLOADED_VERSION_CODE)"
 bundle exec ruby .buildkite/scripts/fetch-play-apk.rb \
-  google-upload-credentials.json "$UPLOADED_VERSION_CODE" play-universal.apk
+  google-upload-credentials.json "$UPLOADED_VERSION_CODE" play-universal.apk \
+  "$AURIS_PLAY_APP_SIGNING_SHA256"
 
 echo "--- Verifying Play signature pin + versionCode"
 bash .buildkite/scripts/verify-play-apk.sh \
@@ -78,14 +79,42 @@ export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
 export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
 
 echo "--- Publishing to r2:${R2_BUCKET}/apk/"
-# 1. Versioned file, immutable. NEVER overwrite an existing one.
-if rclone lsf "r2:${R2_BUCKET}/${VERSIONED_KEY}" 2>/dev/null | grep -q .; then
-  echo "FAIL: ${VERSIONED_KEY} already exists; refusing to overwrite a published version" >&2
-  exit 1
+# 1. Versioned file, immutable, via an ATOMIC create-only write (S3
+# If-None-Match: *). A lookup-then-upload race lets two jobs both see
+# "absent"; the conditional PUT makes exactly one win. A retry after a
+# partial publish resumes ONLY if the existing object is byte-identical.
+publish_versioned() {
+  if rclone copyto play-universal.apk "r2:${R2_BUCKET}/${VERSIONED_KEY}" \
+      --s3-use-multipart-etag=false \
+      --header-upload "If-None-Match: *" \
+      --header-upload "Content-Type: application/vnd.android.package-archive" \
+      --header-upload "Cache-Control: public, max-age=31536000, immutable" 2>/tmp/r2-cond.err; then
+    return 0
+  fi
+  # Precondition failed => object exists. Resume only if byte-identical.
+  if grep -qi "precondition\|412" /tmp/r2-cond.err; then
+    EXISTING_SHA="$(rclone cat "r2:${R2_BUCKET}/${VERSIONED_KEY}" 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+    if [ "$EXISTING_SHA" = "$SHA256" ]; then
+      echo "--- ${VERSIONED_KEY} already published with identical bytes; resuming aliases"
+      return 0
+    fi
+    echo "FAIL: ${VERSIONED_KEY} exists with DIFFERENT bytes; refusing to overwrite" >&2
+    return 1
+  fi
+  cat /tmp/r2-cond.err >&2
+  return 1
+}
+publish_versioned || exit 1
+rm -f /tmp/r2-cond.err
+
+# Alias guard: an older run finishing late must not move latest.* backwards.
+CURRENT_VC="$(rclone cat "r2:${R2_BUCKET}/apk/latest.json" 2>/dev/null \
+  | sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+if [ -n "$CURRENT_VC" ] && [ "$CURRENT_VC" -gt "$UPLOADED_VERSION_CODE" ]; then
+  echo "--- latest.json already at newer versionCode $CURRENT_VC; leaving aliases untouched"
+  echo "--- Published: ${URL}"
+  exit 0
 fi
-rclone copyto play-universal.apk "r2:${R2_BUCKET}/${VERSIONED_KEY}" \
-  --header-upload "Content-Type: application/vnd.android.package-archive" \
-  --header-upload "Cache-Control: public, max-age=31536000, immutable"
 
 # 2. latest.json (short cache).
 cat > latest.json <<JSON

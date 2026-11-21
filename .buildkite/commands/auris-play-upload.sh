@@ -46,8 +46,13 @@ bundle exec fastlane supply \
   --json_key google-upload-credentials.json
 
 # Record what was uploaded so the R2 step fetches exactly this version's
-# Play-signed APK (version.properties carries the bumped versionCode).
-UPLOADED_VC="$(sed -n 's/^versionCode=//p' version.properties | head -1)"
-[ -n "$UPLOADED_VC" ] || { echo "FAIL: no versionCode in version.properties after upload" >&2; exit 1; }
+# Play-signed APK. The version comes from the artifact the BUILD step
+# carried (built-version-code.txt), NOT this checkout's version.properties:
+# a fresh checkout still has the base version, not the bumped one.
+buildkite-agent artifact download built-version-code.txt .
+UPLOADED_VC="$(head -1 built-version-code.txt | tr -d '[:space:]')"
+case "$UPLOADED_VC" in
+  ''|*[!0-9]*) echo "FAIL: carried built-version-code is not a number: '$UPLOADED_VC'" >&2; exit 1 ;;
+esac
 buildkite-agent meta-data set uploaded-version-code "$UPLOADED_VC"
 echo "--- Uploaded versionCode $UPLOADED_VC recorded for the R2 step"

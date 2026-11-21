@@ -79,8 +79,16 @@ object FingerprintConstants {
     /** Timeout for the reference fetch of an on-demand resolve; short because reference files are small. */
     const val ON_DEMAND_FETCH_TIMEOUT_MS = 3_000L
 
-    /** Budget for the cloud reference fingerprint download (cloud-ingestion.md). */
-    const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 10_000L
+    /**
+     * Budget for the cloud reference fingerprint download.
+     *
+     * `/fingerprints` GENERATES the reference on a miss and holds the request for it: the server's
+     * own ceiling is 120 s (cloud-ingestion.md), so a client that gives up sooner throws away work
+     * the server is still doing and loses the reference for that episode. The fetch runs off the
+     * play path, so waiting is cheap; this sits above the ceiling, leaving room for the server's
+     * own 503 to arrive and be read as an answer rather than as a cancellation.
+     */
+    const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 150_000L
 
     /** Budget for the decode of an on-demand resolve; opening a remote source alone can take seconds. */
     const val ON_DEMAND_DECODE_TIMEOUT_MS = 8_000L

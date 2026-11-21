@@ -93,12 +93,16 @@ class FingerprintTimingManager @Inject constructor(
      *
      * - Fresh 200: decode, persist payload + new etag, use it.
      * - 304 against the stored etag: keep and decode the stored payload.
-     * - Unavailable (offline, timeout, 503, a 401 that persists after the refresh): decode the
-     *   stored payload anyway — a failed revalidation must never drop alignment that a stored
-     *   reference still supports; only a 200 replaces it.
+     * - Unavailable (offline, timeout, 5xx, no token, a 401 that persists after the refresh):
+     *   decode the stored payload anyway — a failed revalidation must never drop alignment that
+     *   a stored reference still supports; only a 200 replaces it. With nothing stored, this
+     *   preparation ends here but the EPISODE stays retryable: the next play, resume or turn
+     *   asks again (see [isRetryablePreparation]).
+     * - NotAvailable (a definitive 403 or 404): nothing to decode, and the episode is recorded as
+     *   a definitive miss so later preparations do not ask again.
      * - A 304 whose stored payload is missing or unusable: one unconditional refetch so a fresh
-     *   200 can replace the stale entry. Unavailable does NOT refetch -- offline, a 404 or a
-     *   persistent 401 stays a single request, not a second full attempt.
+     *   200 can replace the stale entry. A transient failure does NOT refetch -- each
+     *   preparation makes one attempt, and the retry that counts happens on the next one.
      */
     internal suspend fun resolveCloudMatcher(
         cloudBaseUrl: String,
@@ -112,6 +116,7 @@ class FingerprintTimingManager @Inject constructor(
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.matcher.count} checkpoints) for $episodeUuid")
                 return fetched.matcher
             }
+
             is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
                 stored?.let { cloudFetcher.buildMatcher(it.payload) }?.let {
                     Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
@@ -125,14 +130,24 @@ class FingerprintTimingManager @Inject constructor(
                     return refetched.matcher
                 }
             }
+
+            CloudFingerprintReferenceFetcher.Fetch.NotAvailable -> {
+                // Definitive: the server has no reference for this episode, so this preparation
+                // has nothing to decode and no reason to ask again (see isTerminalCloudFailure).
+                Timber.d("FingerprintTimingManager: no cloud reference for $episodeUuid (definitive 403/404)")
+                definitiveCloudMisses += episodeUuid
+                return null
+            }
+
             CloudFingerprintReferenceFetcher.Fetch.Unavailable ->
                 stored?.let { cloudFetcher.buildMatcher(it.payload) }?.let {
                     Timber.d("FingerprintTimingManager: revalidation failed; keeping stored cloud reference for $episodeUuid")
                     return it
                 }
-                // No refetch here: with nothing stored, offline / 404 / persistent 401 ends now.
+            // No refetch here: this preparation made its one attempt. With nothing stored the
+            // episode stays RETRYABLE, so the next play, resume or turn asks again.
         }
-        Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
+        Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid (retryable)")
         return null
     }
 
@@ -143,6 +158,13 @@ class FingerprintTimingManager @Inject constructor(
         data class Failed(val error: Throwable, val episodeUuid: String?) : State
         data class Unavailable(val episodeUuid: String?) : State
     }
+
+    /**
+     * Episodes the server has definitively told us it has no reference for (403/404). Kept apart
+     * from [State] because the state describes PREPARATION — a failure there is usually transient
+     * and must stay retryable — while this is a fact about the episode's catalogue entry.
+     */
+    private val definitiveCloudMisses = mutableSetOf<String>()
 
     data class TimeMappingEntry(
         val playbackTime: Double,
@@ -286,9 +308,13 @@ class FingerprintTimingManager @Inject constructor(
         scope.launch {
             val gen: Long
             mutex.withLock {
-                // Already prepared for this episode — reuse existing state. A failed preparation may
-                // retry when the user opens the transcript, since the failure could be transient.
-                val retryableFailure = trigger == PrepareTrigger.TRANSCRIPT_VIEW && state is State.Failed
+                // Already prepared for this episode — reuse existing state. A failed preparation is
+                // RETRYABLE unless the failure was definitive: the next play, resume, turn or
+                // transcript view asks again rather than losing alignment for the whole session.
+                val retryableFailure = isRetryablePreparation(
+                    state = state,
+                    definitiveMiss = currentEpisodeUuid in definitiveCloudMisses,
+                )
                 if (currentEpisodeUuid == episodeUuid && state !is State.Idle && !retryableFailure) {
                     if (trigger == PrepareTrigger.TRANSCRIPT_VIEW) {
                         currentTrigger = trigger
@@ -865,7 +891,11 @@ class FingerprintTimingManager @Inject constructor(
         // independently of the transcript-sync reference below.
         cloudMatcher = null
         val cloudBaseUrl = cloudConfig.baseUrl()
-        if (cloudBaseUrl.isNotBlank()) {
+        if (cloudBaseUrl.isNotBlank() && episodeUuid in definitiveCloudMisses) {
+            // One definitive answer per episode is enough: the server already said it has no
+            // reference, and asking on every play would be a request per playback for nothing.
+            Timber.d("FingerprintTimingManager: cloud reference known absent for $episodeUuid, not asking again")
+        } else if (cloudBaseUrl.isNotBlank()) {
             cloudMatcher = resolveCloudMatcher(cloudBaseUrl, episodeUuid, podcastUuid)
         } else {
             Timber.d("FingerprintTimingManager: cloud alignment off — no gateway URL (cutover inactive) for $episodeUuid")
@@ -1631,7 +1661,9 @@ class FingerprintTimingManager @Inject constructor(
                 cloudFirstMappingLogged = true
                 Timber.d(
                     "FingerprintTimingManager: first cloud mapping committed — playback %.1fs, reference %.1fs, score %.2f",
-                    absolutePlaybackTime, best.timestampSeconds, best.score,
+                    absolutePlaybackTime,
+                    best.timestampSeconds,
+                    best.score,
                 )
             }
         }
@@ -1766,6 +1798,26 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     companion object {
+        /**
+         * Whether a preparation already under way for this episode may be started again.
+         *
+         * A transient failure (offline, timeout, 5xx, a token that was not usable yet) must be
+         * retryable: the next play, resume, turn or transcript view asks again, rather than the
+         * episode losing its alignment for the rest of the session. Only a definitive answer from
+         * the server — a 403 or 404, recorded per episode — ends the attempts.
+         */
+        internal fun isRetryablePreparation(
+            state: State,
+            definitiveMiss: Boolean = false,
+        ): Boolean = when (state) {
+            is State.Failed -> true
+            is State.Unavailable -> !definitiveMiss
+            else -> false
+        }
+
+        /** A definitive 403/404; every other failure may resolve itself on a later attempt. */
+        internal fun isTerminalCloudFailure(fetched: CloudFingerprintReferenceFetcher.Fetch): Boolean = fetched is CloudFingerprintReferenceFetcher.Fetch.NotAvailable
+
         /** Core eager-pass gate (assumes the platform check already passed). */
         internal fun computeEager(
             hasGeneratedChapters: Boolean,

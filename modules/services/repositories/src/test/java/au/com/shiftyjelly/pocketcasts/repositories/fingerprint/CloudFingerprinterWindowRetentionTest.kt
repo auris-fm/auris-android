@@ -88,12 +88,19 @@ class CloudFingerprinterWindowRetentionTest {
         checkNotNull(first) { "expected at least one emitted window" }
         val ref = java.lang.ref.WeakReference(first)
         first = null
-        repeat(5) {
+        // System.gc() is a hint: retry a bounded number of cycles so a green
+        // run never depends on one GC pass (spec fcb5f73f). A retaining list
+        // fails every cycle, so the red control stays deterministic.
+        var cleared = false
+        for (attempt in 0 until 20) {
             System.gc()
             Thread.sleep(50)
-            if (ref.get() == null) return@repeat
+            if (ref.get() == null) {
+                cleared = true
+                break
+            }
         }
-        assertTrue("fingerprinter still retains a drained window after GC — session history is unbounded", ref.get() == null)
+        assertTrue("fingerprinter still retains a drained window after 20 GC cycles — session history is unbounded", cleared)
     }
 
     @Test

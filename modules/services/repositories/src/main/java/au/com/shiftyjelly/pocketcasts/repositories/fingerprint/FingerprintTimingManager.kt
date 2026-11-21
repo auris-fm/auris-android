@@ -869,6 +869,8 @@ class FingerprintTimingManager @Inject constructor(
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
             cloudMatcher = resolveCloudMatcher(cloudBaseUrl, episodeUuid, podcastUuid)
+        } else {
+            Timber.d("FingerprintTimingManager: cloud alignment off — no gateway URL (cutover inactive) for $episodeUuid")
         }
 
         // Try loading cached reference from disk. A reference cached while streaming is still valid

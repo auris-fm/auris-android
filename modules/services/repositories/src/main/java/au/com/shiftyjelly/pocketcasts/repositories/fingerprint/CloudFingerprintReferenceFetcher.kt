@@ -60,14 +60,21 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         // The SAME credential the turn route presents, never the TOFU user_<uuid>: generating a
         // reference is paid work, so it needs a verified token.
         // FAIL CLOSED: no usable token means no request at all.
-        val token = tokenProvider.currentToken() ?: return Fetch.Unavailable
+        val token = tokenProvider.currentToken() ?: run {
+            Timber.d("CloudFingerprintReferenceFetcher: skipped fetch — no verified token for $episodeUuid")
+            return Fetch.Unavailable
+        }
         val first = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, token, cachedEtag) }
         if (first !is Attempt.Unauthorized) return first.toFetch()
         // The route says this token is bad, not merely old: force a replacement and repeat the
         // request ONCE -- the turn route's posture, with the revalidation etag preserved.
         // A second refusal gives up rather than looping.
+        Timber.d("CloudFingerprintReferenceFetcher: 401, refreshing token once for $episodeUuid")
         tokenProvider.refreshToken()
-        val replacement = tokenProvider.currentToken() ?: return Fetch.Unavailable
+        val replacement = tokenProvider.currentToken() ?: run {
+            Timber.d("CloudFingerprintReferenceFetcher: skipped retry — no replacement token for $episodeUuid")
+            return Fetch.Unavailable
+        }
         val second = withContext(Dispatchers.IO) { fetchReferenceOnce(baseUrl, episodeUuid, podcastUuid, replacement, cachedEtag) }
         return second.toFetch()
     }
@@ -102,7 +109,10 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
             ?.newBuilder()
             ?.addQueryParameter("podcast_id", podcastUuid)
             ?.build()
-            ?: return deadAttempt()
+            ?: run {
+                Timber.w("CloudFingerprintReferenceFetcher: skipped fetch — unparseable base URL for $episodeUuid")
+                return deadAttempt()
+            }
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer " + token)
@@ -116,12 +126,16 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         return try {
             call.execute().use { response ->
                 when {
-                    response.code == 401 -> Attempt.Unauthorized
+                    response.code == 401 -> {
+                        Timber.w("CloudFingerprintReferenceFetcher: status 401 for $episodeUuid")
+                        Attempt.Unauthorized
+                    }
 
                     response.code == 304 -> {
                         val etag = response.header("ETag") ?: cachedEtag
                         if (etag == null) {
                             // A 304 without any etag to validate against cannot be trusted.
+                            Timber.w("CloudFingerprintReferenceFetcher: 304 without ETag, unusable for $episodeUuid")
                             deadAttempt()
                         } else {
                             Timber.d("CloudFingerprintReferenceFetcher: 304 not modified for $episodeUuid")

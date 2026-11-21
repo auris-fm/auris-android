@@ -135,7 +135,7 @@ class FingerprintTimingManager @Inject constructor(
                 // Definitive: the server has no reference for this episode, so this preparation
                 // has nothing to decode and no reason to ask again (see isTerminalCloudFailure).
                 Timber.d("FingerprintTimingManager: no cloud reference for $episodeUuid (definitive 403/404)")
-                definitiveCloudMisses += episodeUuid
+                recordDefinitiveCloudMiss(episodeUuid)
                 return null
             }
 
@@ -160,11 +160,24 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     /**
-     * Episodes the server has definitively told us it has no reference for (403/404). Kept apart
-     * from [State] because the state describes PREPARATION — a failure there is usually transient
-     * and must stay retryable — while this is a fact about the episode's catalogue entry.
+     * Episodes the server has definitively told us it has no reference for (403/404), for THIS
+     * PROCESS only. Kept apart from [State] because the state describes PREPARATION — a failure
+     * there is usually transient and must stay retryable — while this is what the server said
+     * about the episode.
+     *
+     * SESSION-SCOPED ON PURPOSE: never persisted. A reference that gets generated later, or an
+     * entitlement that changes, must be fetchable again on the next launch; a durable record here
+     * would be a permanent "this episode has no alignment" the server could never correct.
      */
     private val definitiveCloudMisses = mutableSetOf<String>()
+
+    /** An in-memory record for this process only; see [definitiveCloudMisses]. */
+    internal fun recordDefinitiveCloudMiss(episodeUuid: String) {
+        definitiveCloudMisses += episodeUuid
+    }
+
+    /** Test seam: whether this process already learned the server has nothing for [episodeUuid]. */
+    internal fun isDefinitiveCloudMiss(episodeUuid: String): Boolean = episodeUuid in definitiveCloudMisses
 
     data class TimeMappingEntry(
         val playbackTime: Double,

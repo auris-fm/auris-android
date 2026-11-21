@@ -197,6 +197,37 @@ class FingerprintTimingManagerCloudReferenceTest {
         )
     }
 
+    /**
+     * A definitive 403/404 must only suppress attempts for THIS PROCESS. A reference generated
+     * later, or an entitlement that changes, has to be fetchable again after a restart.
+     */
+    @Test
+    fun `a definitive miss is remembered for this session only`() {
+        assertFalse("a fresh process knows nothing", manager.isDefinitiveCloudMiss("ep_1"))
+
+        manager.recordDefinitiveCloudMiss("ep_1")
+        assertTrue("within the session the answer is remembered", manager.isDefinitiveCloudMiss("ep_1"))
+        assertFalse("another episode is unaffected", manager.isDefinitiveCloudMiss("ep_2"))
+
+        // A NEW manager is what the next launch builds: the record is gone, so the episode is
+        // fetchable again and a reference generated later can be picked up.
+        val afterRestart = FingerprintTimingManager(
+            playbackManager = mock(PlaybackManager::class.java),
+            referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
+            eventHorizon = mock(EventHorizon::class.java),
+            context = mock(Context::class.java),
+            chapterManager = Lazy { mock(ChapterManager::class.java) },
+            settings = mock(Settings::class.java),
+            dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
+            pcmTap = FingerprintPcmTap(),
+            cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
+            cloudFetcher = CloudFingerprintReferenceFetcher(noCredentialProvider()),
+            cloudReferenceStore = store,
+            decodePolicy = mock(FingerprintDecodePolicy::class.java),
+        )
+        assertFalse("nothing durable carried the miss across launches", afterRestart.isDefinitiveCloudMiss("ep_1"))
+    }
+
     @Test
     fun `a failed fetch leaves the episode retryable while a definitive answer does not`() {
         // The decision the preparation gate applies on every play, resume or turn: one attempt,

@@ -51,8 +51,17 @@ echo "--- :closed_lock_with_key: Installing Auris secrets"
 # Owner-only permissions for every generated secret file (reviewer: umask 022
 # would leave them 0644 while the build runs).
 umask 077
+
+# Newline-proof decode (#71): the hook may export wrapped base64, and
+# LibreSSL's `openssl base64 -d -A` silently outputs ZERO bytes (exit 0)
+# on multiline input. Strip ALL whitespace, decode with a PINNED tool
+# (python3's base64 -- never whatever openssl PATH finds), refuse empty.
+auris_b64_decode() {
+  tr -d '\n\r \t' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'
+}
 if [ -n "${AURIS_GOOGLE_SERVICES_JSON_B64:-}" ]; then
-  echo "$AURIS_GOOGLE_SERVICES_JSON_B64" | openssl base64 -d -A > app/google-services.json
+  printf '%s' "$AURIS_GOOGLE_SERVICES_JSON_B64" | auris_b64_decode > app/google-services.json
+  [ -s app/google-services.json ] || { echo "--- decoded google-services JSON is empty (bad base64 transport)" >&2; exit 1; }
 else
   echo "--- AURIS_GOOGLE_SERVICES_JSON_B64 not set: the google-services plugin will abort" >&2
   exit 1
@@ -69,7 +78,8 @@ if [ -z "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
   echo "--- ANDROID_UPLOAD_KEYSTORE_B64 not set: this pipeline only builds signed releases" >&2
   exit 1
 fi
-echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keystore
+printf '%s' "$ANDROID_UPLOAD_KEYSTORE_B64" | auris_b64_decode > auris-upload.keystore
+[ -s auris-upload.keystore ] || { echo "--- decoded keystore is empty (bad base64 transport)" >&2; exit 1; }
 # Validate the decoded keystore BEFORE Gradle: a still-encoded, double-encoded
 # or truncated secret otherwise fails 10 minutes later inside signReleaseBundle
 # (#70). keytool -list opens it with the store password; no contents printed.

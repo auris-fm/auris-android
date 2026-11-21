@@ -50,18 +50,34 @@ KNOWN = {
     "No commit found": "commit not found on the repository",
     "Branch": "branch rejected by the pipeline",
 }
+# Field names are response VALUES too -- an unknown key or errors[].field
+# string can carry sensitive data. Only recognized names from a fixed
+# allowlist are printed; everything else is counted, never echoed.
+ALLOWED_TOP = {"message", "errors", "error", "id", "state", "number"}
+ALLOWED_ERR_FIELDS = {"commit", "branch", "message", "env", "pipeline",
+                      "organization", "base", "head"}
 diag = None
 shape = []
 try:
     b = json.load(open(sys.argv[1]))
     if isinstance(b, dict):
-        shape.append("fields: " + ", ".join(sorted(b.keys())))
+        keys = set(b.keys())
+        known = sorted(keys & ALLOWED_TOP)
+        unknown = len(keys - ALLOWED_TOP)
+        line = "fields: " + (", ".join(known) if known else "(none recognized)")
+        if unknown:
+            line += f" (+{unknown} unrecognized, withheld)"
+        shape.append(line)
         errs = b.get("errors")
         if isinstance(errs, list):
-            fields = sorted({e["field"] for e in errs
-                             if isinstance(e, dict) and isinstance(e.get("field"), str)})
-            if fields:
-                shape.append("error fields: " + ", ".join(fields))
+            names = {e.get("field") for e in errs if isinstance(e, dict)}
+            known_f = sorted(n for n in names if isinstance(n, str) and n in ALLOWED_ERR_FIELDS)
+            unknown_f = sum(1 for n in names if not (isinstance(n, str) and n in ALLOWED_ERR_FIELDS))
+            if known_f or unknown_f:
+                line = "error fields: " + (", ".join(known_f) if known_f else "(none recognized)")
+                if unknown_f:
+                    line += f" (+{unknown_f} unrecognized, withheld)"
+                shape.append(line)
         msg = b.get("message")
         if isinstance(msg, str):
             for needle, fixed in KNOWN.items():

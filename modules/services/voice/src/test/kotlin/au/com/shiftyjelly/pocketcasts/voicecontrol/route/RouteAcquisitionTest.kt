@@ -38,9 +38,6 @@ class RouteAcquisitionTest {
         var streamStartResult = true
         var closeCalls = 0
         val deviceTypes = mutableMapOf<Int, Int>()
-        var currentAudioMode = AudioManager.MODE_IN_COMMUNICATION
-        val modeSets = mutableListOf<Int>()
-
         /** Ordered record of routing / mode calls, so ordering can be asserted. */
         val events = mutableListOf<String>()
 
@@ -74,14 +71,6 @@ class RouteAcquisitionTest {
         }
 
         override fun deviceType(deviceId: Int): Int? = deviceTypes[deviceId]
-
-        override fun audioMode(): Int = currentAudioMode
-
-        override fun setAudioMode(mode: Int) {
-            currentAudioMode = mode
-            modeSets += mode
-            events += "mode=$mode"
-        }
 
         override fun openInputStream(): Int {
             openCalls++
@@ -137,11 +126,10 @@ class RouteAcquisitionTest {
     }
 
     @Test
-    fun `classic acquisition sets the normal audio mode before SCO and restores it on release`() = runTest {
-        // HFP establishment needs the normal audio mode on some devices; this is the mode
-        // handling that used to live in awaitBluetoothSco, scoped here to acquisition.
+    fun `acquisition and release never write the audio mode`() = runTest {
+        // The NotOnCall gate reads call state from the audio mode, so route acquisition must
+        // leave it alone entirely — whether a call, a ring, or nothing is active.
         val platform = FakePlatform().apply {
-            currentAudioMode = AudioManager.MODE_IN_COMMUNICATION
             scoOn = true
             openedDeviceId = 32
             deviceTypes[32] = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
@@ -154,19 +142,11 @@ class RouteAcquisitionTest {
         )
 
         assertEquals(AcquisitionResult.Acquired(32), result)
-        // The normal mode must be set before startBluetoothSco(), not after it.
-        assertEquals(
-            listOf("mode=" + AudioManager.MODE_NORMAL, "startSco"),
-            platform.events.take(2),
-        )
+        assertFalse(platform.events.any { it.startsWith("mode=") })
 
         acquisition.release()
 
-        assertEquals(
-            "the previous mode must be restored on release",
-            AudioManager.MODE_IN_COMMUNICATION,
-            platform.currentAudioMode,
-        )
+        assertFalse(platform.events.any { it.startsWith("mode=") })
     }
 
     // ── BLE (LE Audio) ──────────────────────────────────────────────────

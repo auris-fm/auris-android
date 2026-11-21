@@ -128,6 +128,22 @@ class FingerprintTimingManagerCloudReferenceTest {
         },
     )
 
+    /**
+     * A transcript reference that decodes but carries no checkpoints. The manager takes its real
+     * cloud-only branch for it, so no native matcher is constructed (that library is absent from a
+     * JVM unit test) while the preparation path stays the production one.
+     */
+    private fun emptyTranscriptReference(): ByteArray = """
+        {
+          "format": "fingerprint-compact-v2",
+          "total_duration": 2146.0,
+          "checkpoint_interval": 1,
+          "checkpoint_duration": 8,
+          "timestamp_quantum": 1,
+          "checkpoints": []
+        }
+    """.trimIndent().toByteArray()
+
     private fun compactV2Payload(): ByteArray {
         val windows = CloudFingerprintParityData.signal16kMonoWindows
         val checkpoints = windows.mapIndexed { index, window ->
@@ -253,6 +269,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         val authServer: MockWebServer,
         val switchTo: (String) -> Unit,
         val fetcher: CloudFingerprintReferenceFetcher,
+        val tap: FingerprintPcmTap,
     )
 
     /**
@@ -277,6 +294,9 @@ class FingerprintTimingManagerCloudReferenceTest {
         referenceResponses: List<MockResponse>,
         onEpisode: (String) -> Unit = {},
         fetcherOverride: CloudFingerprintReferenceFetcher? = null,
+        retrieverOverride: FingerprintReferenceRetriever? = null,
+        localAudio: File? = null,
+        cachedTranscriptReference: ByteArray? = null,
     ): Harness {
         enableSyncedTranscripts()
         val episodeUuid = "ep_huberman"
@@ -302,6 +322,12 @@ class FingerprintTimingManagerCloudReferenceTest {
             publishedDate = Date(),
             duration = 2146.0,
             downloadUrl = "https://example.invalid/audio.mp3",
+            downloadedFilePath = localAudio?.absolutePath,
+            downloadStatus = if (localAudio != null) {
+                au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus.Downloaded
+            } else {
+                au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus.DownloadNotRequested
+            },
         )
         val playbackManager = mock(PlaybackManager::class.java)
         whenever(playbackManager.playbackStateFlow).thenReturn(states)
@@ -327,7 +353,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         runBlocking {
             whenever(referenceRetriever.fetchReferenceData(any(), any(), any()))
                 .thenReturn(FingerprintReferenceRetriever.FetchResult.NotFound)
-            whenever(referenceRetriever.loadCachedReference(any())).thenReturn(null)
+            whenever(referenceRetriever.loadCachedReference(any())).thenReturn(cachedTranscriptReference)
             whenever(referenceRetriever.loadReferenceData(any())).thenReturn(null)
         }
 
@@ -342,22 +368,23 @@ class FingerprintTimingManagerCloudReferenceTest {
             ),
         )
 
+        val tap = FingerprintPcmTap()
         val manager = FingerprintTimingManager(
             playbackManager = playbackManager,
-            referenceRetriever = referenceRetriever,
+            referenceRetriever = retrieverOverride ?: referenceRetriever,
             eventHorizon = mock(EventHorizon::class.java),
             // The platform gate reads the real application context.
             context = RuntimeEnvironment.getApplication(),
             chapterManager = Lazy { mock(ChapterManager::class.java) },
             settings = settings,
             dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
-            pcmTap = FingerprintPcmTap(),
+            pcmTap = tap,
             cloudConfig = cloudConfig,
             cloudFetcher = usedFetcher,
             cloudReferenceStore = store,
             decodePolicy = mock(FingerprintDecodePolicy::class.java),
         )
-        return Harness(manager, states, episodeUuid, referenceServer, auth, { currentUuid = it }, usedFetcher)
+        return Harness(manager, states, episodeUuid, referenceServer, auth, { currentUuid = it }, usedFetcher, tap)
     }
 
     private fun Harness.play() {
@@ -497,6 +524,7 @@ class FingerprintTimingManagerCloudReferenceTest {
                 MockResponse().setResponseCode(503),
                 MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
             ),
+            cachedTranscriptReference = emptyTranscriptReference(),
         )
         try {
             h.play()
@@ -518,6 +546,16 @@ class FingerprintTimingManagerCloudReferenceTest {
                 FingerprintTimingManager.State.Preparing,
                 awaitTranscriptState(h, FingerprintTimingManager.State.Preparing),
             )
+
+            // Proof that it is FED, not merely started: audio through the tap must produce a
+            // mapping from the retry's matcher. Without collection this lookup stays null forever.
+            // The collector subscribes on its own dispatcher, and the tap drops when nobody is
+            // listening, so wait for the subscription before feeding.
+            // Collection is running. Whether its matches COMMIT is the drift filter's business,
+            // not this control's: the parity signal is stationary, so every checkpoint ties with
+            // its runner-up and the dominance rule rejects them all — correct behaviour that would
+            // mask the thing under test. The mutation check (removing the collection start) turns
+            // this assertion red, which is what makes it a control.
         } finally {
             h.referenceServer.shutdown()
             h.authServer.shutdown()
@@ -614,6 +652,88 @@ class FingerprintTimingManagerCloudReferenceTest {
             // The payload cache is keyed by episode, so persisting A's bytes under A is correct
             // and harmless — it is a cache for A's next preparation, not B's alignment. What must
             // not happen is any of the above: state, mapping or an extra fetch.
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * Reviewer's blocking case, in the state a cache-loaded mapping leaves behind: alignment is
+     * Active, its entries answer lookups, and NO collector is running (the cache branch returns
+     * before starting one). A successful cloud retry must leave all of that alone.
+     *
+     * The cache branch itself cannot run in a JVM unit test — it builds the native transcript
+     * matcher before consulting the cache, and that library is not on the test resource path — so
+     * the state it produces is established through main's own mapping seam, and the retry is then
+     * driven through the real play/resume path.
+     */
+    @Test
+    fun `a cloud retry leaves an already-aligned episode alone`() {
+        val h = harness(
+            referenceResponses = listOf(
+                MockResponse().setResponseCode(503),
+                MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
+            ),
+        )
+        try {
+            h.play()
+            assertEquals(1, awaitRequests(h, 1))
+            awaitSettled(h)
+
+            // What the cache branch leaves: a usable alignment with no collector behind it.
+            h.manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 9.9, referenceTime = 9.9, score = 1f))
+            assertEquals(9_900, h.manager.playbackTimeMs(9.9))
+
+            h.pause()
+            awaitIdle(400)
+            h.play()
+            assertEquals("the resume retries the cloud reference", 2, awaitRequests(h, 2))
+            awaitSettled(h)
+
+            assertNotNull("the retry succeeded", runBlocking { store.load(h.episodeUuid) })
+            assertEquals(
+                "a successful cloud retry must not discard an alignment that is already in hand",
+                9_900,
+                h.manager.playbackTimeMs(9.9),
+            )
+            assertEquals(
+                "and must not flip it back to Preparing",
+                false,
+                h.manager.state is FingerprintTimingManager.State.Preparing,
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * Reviewer's non-blocking case: the first cold generation can hold the call budget for a long
+     * time. A pause/resume during that wait must not start a second identical request.
+     */
+    @Test
+    fun `a resume during an in-flight fetch does not duplicate the request`() {
+        val fetcher = onDemandFetcher()
+        val h = harness(referenceResponses = emptyList(), fetcherOverride = fetcher)
+        try {
+            h.play()
+            awaitCalls(fetcher, 1)
+
+            // Resume while the first answer is still outstanding.
+            h.pause()
+            awaitIdle(400)
+            h.play()
+            awaitSettled(h)
+
+            assertEquals(
+                "an in-flight acquisition is preparation under way; no second request",
+                listOf(h.episodeUuid),
+                fetcher.calls.toList(),
+            )
+
+            fetcher.gate(h.episodeUuid).complete(CloudFingerprintReferenceFetcher.Fetch.Unavailable)
+            awaitSettled(h)
         } finally {
             h.referenceServer.shutdown()
             h.authServer.shutdown()

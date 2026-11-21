@@ -163,7 +163,12 @@ class FingerprintTimingManager @Inject constructor(
                 is CloudReferenceAcquisition.Outcome.Ready -> {
                     cloudMatcher = outcome.matcher
                     val audioSource = currentAudioFilePath
-                    if (generationJob == null && audioSource != null) {
+                    // Only when NOTHING is collecting AND no transcript alignment is in hand. A
+                    // mapping loaded from cache leaves generationJob null while its matcher and
+                    // entries are live and the state is Active; restarting collection there would
+                    // throw away a working alignment to chase a reference we already have.
+                    val transcriptAlignmentInHand = currentMatcher != null || snapshotPlaybackToReference.isNotEmpty()
+                    if (generationJob == null && audioSource != null && !transcriptAlignmentInHand) {
                         // Nothing was collecting PCM (the transcript reference was missing), so a
                         // matcher alone would align nothing. Start cloud-only collection here,
                         // under the lock we already hold — startCloudOnly takes it itself.
@@ -349,7 +354,13 @@ class FingerprintTimingManager @Inject constructor(
                         definitiveMiss = episodeUuid in definitiveCloudMisses,
                         cloudConfigured = cloudConfig.baseUrl().isNotBlank(),
                     )
-                if (currentEpisodeUuid == episodeUuid && state !is State.Idle && !retryableFailure && !cloudNeedsRetry) {
+                // An in-flight cloud acquisition is preparation under way even while `state` is
+                // still Idle (the first cold generation can take the whole call budget). Without
+                // this, a pause/resume during that wait starts a SECOND identical request.
+                val cloudFetchInFlight = cloudAcquisition?.takeIf { it.episodeUuid == episodeUuid }?.status ==
+                    CloudReferenceAcquisition.Status.Fetching
+                val preparationUnderWay = state !is State.Idle || cloudFetchInFlight
+                if (currentEpisodeUuid == episodeUuid && preparationUnderWay && !retryableFailure && !cloudNeedsRetry) {
                     if (trigger == PrepareTrigger.TRANSCRIPT_VIEW) {
                         currentTrigger = trigger
                     }

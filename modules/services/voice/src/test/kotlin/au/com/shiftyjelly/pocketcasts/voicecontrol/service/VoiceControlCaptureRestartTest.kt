@@ -18,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CaptureHardware
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter
@@ -310,8 +311,15 @@ class VoiceControlCaptureRestartTest {
         override fun setEarlyWakeCutoff(samples: Int) = Unit
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
-        override fun getFramesConsumed(): Long = if (capturing) consumedFrames else 0L
-        var consumedFrames = 0L
+        /**
+         * A live stream keeps delivering, so the counter advances by one poll's worth of frames
+         * each time it is read. A constant count would trip the starvation check after 2.5 s and end
+         * a capture these tests mean to keep alive, making their stop/attach assertions depend on
+         * wall-clock time rather than on the behaviour under test.
+         */
+        override fun getFramesConsumed(): Long =
+            if (capturing) consumedFrames.addAndGet(OboeConfig.FRAMES_PER_POLL.toLong()) else 0L
+        private val consumedFrames = java.util.concurrent.atomic.AtomicLong(0L)
     }
 
     private class FakeRule(

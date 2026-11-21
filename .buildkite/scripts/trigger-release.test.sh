@@ -34,6 +34,16 @@ class H(http.server.BaseHTTPRequestHandler):
                 body = json.dumps({"message": "Validation failed: token canary-do-not-log-9f3e rejected",
                                    "env": {"DUMMY_SECRET": "canary-do-not-log-9f3e"}}).encode()
                 self.send_response(422)
+            elif MODE == 'shape':
+                # Unknown message wording + errors array: shape (field names)
+                # must print, values (canaries) must not.
+                body = json.dumps({"message": "Something odd canary-do-not-log-9f3e",
+                                   "canary-do-not-log-9f3e": "unknown-key-canary",
+                                   "errors": [{"field": "commit", "code": "canary-do-not-log-9f3e"},
+                                              {"field": "canary-do-not-log-9f3e", "message": "x"},
+                                              {"field": {"structured": "canary-do-not-log-9f3e"}},
+                                              {"field": "branch", "message": "canary-do-not-log-9f3e"}]}).encode()
+                self.send_response(422)
             else:
                 body = json.dumps({"message": {"nested": "canary-do-not-log-9f3e"}}).encode()
                 self.send_response(500)
@@ -107,6 +117,18 @@ if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
   FAIL=$((FAIL+1)); echo "FAIL: failure log leaks credential from message/env"
 else
   PASS=$((PASS+1)); echo "ok: failure log keeps message/env credential out"
+fi
+
+run_case shape
+check "unknown 422 fails" 1 "$CODE" "422" "$OUT"
+check "shape prints recognized field names" 1 "$CODE" "fields: errors, message" "$OUT"
+check "unknown top-level key counted not printed" 1 "$CODE" "+1 unrecognized, withheld" "$OUT"
+check "shape prints recognized error fields" 1 "$CODE" "error fields: branch, commit" "$OUT"
+check "unknown error fields counted not printed" 1 "$CODE" "+2 unrecognized, withheld" "$OUT"
+if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
+  FAIL=$((FAIL+1)); echo "FAIL: shape log leaks values"
+else
+  PASS=$((PASS+1)); echo "ok: shape prints names only, no values"
 fi
 
 run_case struct

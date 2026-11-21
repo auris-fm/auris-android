@@ -54,10 +54,11 @@ umask 077
 
 # Newline-proof decode (#71): the hook may export wrapped base64, and
 # LibreSSL's `openssl base64 -d -A` silently outputs ZERO bytes (exit 0)
-# on multiline input. Strip ALL whitespace, decode with a PINNED tool
-# (python3's base64 -- never whatever openssl PATH finds), refuse empty.
+# on multiline input. Strip ALL whitespace, decode with Ruby (the release
+# job already requires it via bundle; Base64.decode64 ignores line breaks
+# anyway -- never whatever openssl PATH finds), refuse empty.
 auris_b64_decode() {
-  tr -d '\n\r \t' | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'
+  tr -d '\n\r \t' | ruby -rbase64 -e 'STDOUT.write Base64.decode64(STDIN.read)'
 }
 if [ -n "${AURIS_GOOGLE_SERVICES_JSON_B64:-}" ]; then
   printf '%s' "$AURIS_GOOGLE_SERVICES_JSON_B64" | auris_b64_decode > app/google-services.json

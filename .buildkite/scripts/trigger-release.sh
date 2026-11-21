@@ -70,9 +70,12 @@ try:
         shape.append(line)
         errs = b.get("errors")
         if isinstance(errs, list):
-            names = {e.get("field") for e in errs if isinstance(e, dict)}
-            known_f = sorted(n for n in names if isinstance(n, str) and n in ALLOWED_ERR_FIELDS)
-            unknown_f = sum(1 for n in names if not (isinstance(n, str) and n in ALLOWED_ERR_FIELDS))
+            # Type-check BEFORE any set membership: an object/array field
+            # value is unhashable and must not suppress recognized fields.
+            raw = [e.get("field") for e in errs if isinstance(e, dict)]
+            strs = [n for n in raw if isinstance(n, str)]
+            known_f = sorted({n for n in strs if n in ALLOWED_ERR_FIELDS})
+            unknown_f = len(raw) - len([n for n in strs if n in ALLOWED_ERR_FIELDS])
             if known_f or unknown_f:
                 line = "error fields: " + (", ".join(known_f) if known_f else "(none recognized)")
                 if unknown_f:

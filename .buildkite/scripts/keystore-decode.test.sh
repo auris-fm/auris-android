@@ -122,10 +122,25 @@ JAVA_HOME="$WORK/jh" ANDROID_UPLOAD_KEYSTORE_B64="$GOOD_B64" BUILDKITE_BUILD_NUM
   bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
 check "JAVA_HOME keytool selected over failing PATH stub" 0 "$?"
 grep -q "JAVA_HOME-keytool-used" "$WORK/keytool-which" 2>/dev/null && ! grep -q "PATH-keytool-used" "$WORK/keytool-which" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: only JAVA_HOME keytool invoked"; } || { FAIL=$((FAIL+1)); echo "FAIL: wrong keytool invoked"; }
+# Remove the failing PATH stub so later cases reach REAL keytool.
+rm -f "$WORK/bin/keytool"
 
-# Empty decode result must fail even if keytool would somehow accept it:
-# a truncated-to-empty transport value fails the non-empty check.
-run "" 1 "empty base64 value fails the non-empty check"
+# Whitespace-only (PRESENT) value decodes to empty: must fail at the
+# non-empty check with its diagnostic, and keytool must never run.
+cat > "$WORK/bin/keytool" <<'STUB'
+#!/bin/bash
+echo invoked >> "$WORK/keytool-empty-marker"
+exit 0
+STUB
+chmod +x "$WORK/bin/keytool"
+rm -f "$WORK/keytool-empty-marker"
+OUTE=$(ANDROID_UPLOAD_KEYSTORE_B64="   " BUILDKITE_BUILD_NUMBER=9452 \
+  bash -eu .buildkite/commands/auris-release-aab.sh 2>&1); CODEE=$?
+check "whitespace-only value fails" 1 "$CODEE"
+printf '%s' "$OUTE" | grep -q "decoded keystore is empty" && r=ok || r=missing
+check "empty-decode diagnostic printed" ok "$r"
+[ ! -f "$WORK/keytool-empty-marker" ] && { PASS=$((PASS+1)); echo "ok: keytool never invoked on empty decode"; } || { FAIL=$((FAIL+1)); echo "FAIL: keytool invoked on empty decode"; }
+rm -f "$WORK/bin/keytool"
 
 DOUBLE_B64="$(printf '%s' "$GOOD_B64" | openssl base64 -A)"
 run "$DOUBLE_B64" 1 "double-encoded keystore fails before Gradle"

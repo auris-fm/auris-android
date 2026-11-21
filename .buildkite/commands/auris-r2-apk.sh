@@ -90,14 +90,16 @@ echo "--- Publishing to r2:${R2_BUCKET}/apk/"
 # object is byte-identical.
 COND_ERR="$(mktemp)"
 publish_versioned() {
-  HTTP_PUT="$(curl -sS -o "$COND_ERR" -w '%{http_code}' -X PUT \
+  # Credentials via a curl config on stdin (-K -), never process arguments:
+  # the mini is shared and ps would expose --user values.
+  HTTP_PUT="$(curl -sS -K - -o "$COND_ERR" -w '%{http_code}' -X PUT \
     --aws-sigv4 "aws:amz:auto:s3" \
-    --user "${R2_APK_ACCESS_KEY_ID}:${R2_APK_SECRET_ACCESS_KEY}" \
     -H "If-None-Match: *" \
     -H "Content-Type: application/vnd.android.package-archive" \
     -H "Cache-Control: public, max-age=31536000, immutable" \
     --data-binary @play-universal.apk \
-    "${R2_ENDPOINT}/${R2_BUCKET}/${VERSIONED_KEY}")" || return 1
+    "${R2_ENDPOINT}/${R2_BUCKET}/${VERSIONED_KEY}" \
+    <<< "user = \"${R2_APK_ACCESS_KEY_ID}:${R2_APK_SECRET_ACCESS_KEY}\"")" || return 1
   case "$HTTP_PUT" in
     2??) return 0 ;;
     412)

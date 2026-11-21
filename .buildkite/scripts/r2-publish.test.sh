@@ -58,6 +58,10 @@ chmod +x "$WORK/bin/rclone"
 cat > "$WORK/bin/curl" <<'MOCK'
 #!/bin/bash
 echo "curl $*" >> "$MOCK_LOG"
+# Record the exact argv for the ps-exposure control; optionally sleep so a
+# concurrent ps sample can observe the live process arguments.
+printf '%s\n' "$@" > "$MOCK_CURL_ARGV"
+[ -n "${MOCK_CURL_SLEEP:-}" ] && sleep "$MOCK_CURL_SLEEP"
 url=""; data=""; cond=0; out=""
 prev=""
 for a in "$@"; do
@@ -107,6 +111,7 @@ MOCK
 export PATH="$WORK/bin:$PATH"
 export MOCK_STORE="$WORK/store" MOCK_META="$WORK/meta" MOCK_SECRETS="$WORK/secrets"
 export MOCK_LOG="$WORK/rclone.log" MOCK_APK="$WORK/apk.bin" MOCK_ARTIFACTS="$WORK/artifacts"
+export MOCK_CURL_ARGV="$WORK/curl-argv"
 mkdir -p "$MOCK_ARTIFACTS"
 printf 'id' > "$MOCK_SECRETS/R2_APK_ACCESS_KEY_ID"
 printf 'secret' > "$MOCK_SECRETS/R2_APK_SECRET_ACCESS_KEY"
@@ -123,6 +128,13 @@ grep -q 'If-None-Match: \*' "$MOCK_LOG" && r=ok || r=missing
 check "create-only header sent" ok "$r"
 grep -q '"versionCode": 9522' "$MOCK_STORE/auris-download/apk/latest.json" && r=ok || r=missing
 check "latest.json at 9522" ok "$r"
+
+# 1b. Credential exposure: the R2 secret must never appear in curl's argv
+# (what ps shows). The mock records its exact argv; assert absence.
+grep -q 'secret' "$MOCK_CURL_ARGV" && r=leaked || r=clean
+check "R2 secret absent from curl process arguments" clean "$r"
+grep -q 'If-None-Match' "$MOCK_CURL_ARGV" && r=ok || r=missing
+check "condition still passed as header arg" ok "$r"
 
 # 2. Retry with identical bytes: resumes, aliases refreshed, no overwrite.
 run_r2; check "identical-byte retry resumes" 0 "$?"

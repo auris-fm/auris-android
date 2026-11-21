@@ -419,6 +419,7 @@ class WebSocketCloudTurnTransport(
 
     private fun CloudTurnFrame.toJson(): String = when (this) {
         is CloudTurnFrame.Authenticate -> CloudRouteJson.authenticateAdapter.toJson(this)
+        is CloudTurnFrame.AppOperationResult -> CloudRouteJson.appOperationResultAdapter.toJson(this)
     }
 
     internal companion object {

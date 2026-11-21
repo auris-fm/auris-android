@@ -1,8 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 /**
- * A frame the client sends on the turn connection. Only the authentication frame exists so far;
- * the server answers with [CloudRouteEvent]s.
+ * A frame the client sends on the turn connection.
+ *
+ * [Authenticate] opens the turn. [AppOperationResult] answers one app operation on that SAME
+ * authenticated socket, and only after its settlement is durable.
  */
 sealed interface CloudTurnFrame {
     /**
@@ -28,5 +30,19 @@ sealed interface CloudTurnFrame {
         val sourceLanguage: String? = null,
         /** Optional primary subtag of the app's UI language, omitted when unknown. */
         val uiLanguage: String? = null,
+    ) : CloudTurnFrame
+
+    /**
+     * The answer to one app operation (core `cloud-assistant.md`, "App-operation protocol v1").
+     *
+     * Sent on the socket the operation arrived on, identified by the same [requestId] and
+     * [operationId]. A send accepted by the socket is not proof the server received it, so these are
+     * never retried by this client: the durable journal, not the socket, is what makes a redelivery
+     * answerable.
+     */
+    data class AppOperationResult(
+        val requestId: String,
+        val operationId: String,
+        val payloadJson: String,
     ) : CloudTurnFrame
 }

@@ -61,7 +61,15 @@ echo "curl $*" >> "$MOCK_LOG"
 # Record the exact argv for the ps-exposure control; optionally sleep so a
 # concurrent ps sample can observe the live process arguments.
 printf '%s\n' "$@" > "$MOCK_CURL_ARGV"
+# Read the -K - config from stdin and record it: the control asserts the
+# expected dummy credential arrives THERE (and nowhere in argv).
+if printf '%s\n' "$@" | grep -q '^-K$'; then cat > "$MOCK_CURL_STDIN"; fi
 [ -n "${MOCK_CURL_SLEEP:-}" ] && sleep "$MOCK_CURL_SLEEP"
+if [ -n "${MOCK_CURL_FAIL_BODY:-}" ]; then
+  printf '%s' "$MOCK_CURL_FAIL_BODY" > "${out:-/dev/null}"
+  printf '500'
+  exit 0
+fi
 url=""; data=""; cond=0; out=""
 prev=""
 for a in "$@"; do
@@ -111,7 +119,7 @@ MOCK
 export PATH="$WORK/bin:$PATH"
 export MOCK_STORE="$WORK/store" MOCK_META="$WORK/meta" MOCK_SECRETS="$WORK/secrets"
 export MOCK_LOG="$WORK/rclone.log" MOCK_APK="$WORK/apk.bin" MOCK_ARTIFACTS="$WORK/artifacts"
-export MOCK_CURL_ARGV="$WORK/curl-argv"
+export MOCK_CURL_ARGV="$WORK/curl-argv" MOCK_CURL_STDIN="$WORK/curl-stdin"
 mkdir -p "$MOCK_ARTIFACTS"
 printf 'id' > "$MOCK_SECRETS/R2_APK_ACCESS_KEY_ID"
 printf 'secret' > "$MOCK_SECRETS/R2_APK_SECRET_ACCESS_KEY"
@@ -135,6 +143,16 @@ grep -q 'secret' "$MOCK_CURL_ARGV" && r=leaked || r=clean
 check "R2 secret absent from curl process arguments" clean "$r"
 grep -q 'If-None-Match' "$MOCK_CURL_ARGV" && r=ok || r=missing
 check "condition still passed as header arg" ok "$r"
+grep -q 'user = "id:secret"' "$MOCK_CURL_STDIN" && r=ok || r=missing
+check "expected credential arrives via stdin config" ok "$r"
+
+# 1c. PUT failure with a canary in the R2 error body: fixed diagnostic only.
+OUTC="$(cd "$WORK/repo" && MOCK_CURL_FAIL_BODY='<Error>canary-r2-secret-77</Error>' bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RCC=$?
+check "PUT 500 fails the step" 1 "$RCC"
+printf '%s' "$OUTC" | grep -q "HTTP 500" && r=ok || r=missing
+check "PUT failure prints status" ok "$r"
+printf '%s' "$OUTC" | grep -q "canary-r2-secret" && r=leaked || r=clean
+check "R2 error-body canary stays out of logs" clean "$r"
 
 # 2. Retry with identical bytes: resumes, aliases refreshed, no overwrite.
 run_r2; check "identical-byte retry resumes" 0 "$?"
@@ -157,6 +175,17 @@ grep -q '"versionCode": 9600' "$MOCK_STORE/auris-download/apk/latest.json" && r=
 check "latest.json NOT moved backwards" ok "$r"
 [ "$(cat "$MOCK_STORE/auris-download/apk/latest.apk")" = "newer-apk-bytes" ] && r=ok || r=moved
 check "latest.apk NOT moved backwards" ok "$r"
+
+# 4c. Malformed latest.json (listed + readable, but not valid JSON with an
+# integer versionCode): fail closed, aliases untouched. Distinct from absent.
+printf '{"versionCode": "not-a-number"}' > "$MOCK_STORE/auris-download/apk/latest.json"
+run_r2; check "malformed latest.json fails closed" 1 "$?"
+grep -q '"versionCode": "not-a-number"' "$MOCK_STORE/auris-download/apk/latest.json" && r=ok || r=overwritten
+check "malformed case leaves aliases untouched" ok "$r"
+printf 'not json at all' > "$MOCK_STORE/auris-download/apk/latest.json"
+run_r2; check "non-JSON latest.json fails closed" 1 "$?"
+# restore sane state for later controls
+printf '{"versionCode": 9522}' > "$MOCK_STORE/auris-download/apk/latest.json"
 
 # 4b. A failed alias READ (not absence) must be fatal, never publish blind.
 run_r2_env() { (cd "$WORK/repo" && MOCK_RCLONE_FAIL=1 bash .buildkite/commands/auris-r2-apk.sh >/dev/null 2>&1); }

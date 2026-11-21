@@ -112,8 +112,9 @@ publish_versioned() {
       echo "FAIL: ${VERSIONED_KEY} exists with DIFFERENT bytes; refusing to overwrite" >&2
       return 1 ;;
     *)
-      echo "FAIL: create-only PUT returned HTTP $HTTP_PUT" >&2
-      cat "$COND_ERR" >&2
+      # Fixed diagnostic only: the R2 error body can echo request details
+      # (including credential-derived strings). Never print it.
+      echo "FAIL: create-only PUT returned HTTP $HTTP_PUT (response body withheld)" >&2
       return 1 ;;
   esac
 }
@@ -134,7 +135,22 @@ if [ -n "$ALIAS_LIST" ]; then
     echo "FAIL: latest.json listed but unreadable; refusing to publish aliases blind" >&2
     exit 1
   }
-  CURRENT_VC="$(printf '%s' "$ALIAS_JSON" | sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+  # Fail closed on malformed metadata: a listed, readable latest.json that
+  # is not valid JSON with an integer versionCode must STOP the publish,
+  # never fall through and overwrite the aliases.
+  CURRENT_VC="$(printf '%s' "$ALIAS_JSON" | python3 -c '
+import json, sys
+try:
+    vc = json.load(sys.stdin)["versionCode"]
+    if not isinstance(vc, int):
+        raise ValueError("versionCode not an integer")
+    print(vc)
+except Exception:
+    sys.exit(1)
+')" || {
+    echo "FAIL: latest.json is malformed (no integer versionCode); refusing to overwrite aliases" >&2
+    exit 1
+  }
 fi
 if [ -n "$CURRENT_VC" ] && [ "$CURRENT_VC" -gt "$UPLOADED_VERSION_CODE" ]; then
   echo "--- latest.json already at newer versionCode $CURRENT_VC; leaving aliases untouched"

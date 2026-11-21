@@ -23,7 +23,7 @@ import timber.log.Timber
  * so callers degrade gracefully to the transcript-sync path.
  */
 @Singleton
-class CloudFingerprintReferenceFetcher @Inject constructor(
+open class CloudFingerprintReferenceFetcher @Inject constructor(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
@@ -64,7 +64,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         data object Unavailable : Fetch
     }
 
-    suspend fun fetchReference(
+    open suspend fun fetchReference(
         baseUrl: String,
         episodeUuid: String,
         podcastUuid: String,

@@ -138,24 +138,6 @@ class FingerprintTimingManager @Inject constructor(
     private var cloudAcquisition: CloudReferenceAcquisition? = null
     private val definitiveCloudMisses = mutableSetOf<String>()
 
-    /** Test seam: the cloud attempt's own status, independent of transcript readiness. */
-    internal fun cloudReferenceStatus(): CloudReferenceAcquisition.Status? = cloudAcquisition?.status
-
-    /** Test seam: whether this process already learned the server has nothing for [episodeUuid]. */
-    internal fun isDefinitiveCloudMiss(episodeUuid: String): Boolean = definitiveCloudMisses.contains(episodeUuid)
-
-    /** Test seam: the generation a cloud outcome would have to carry to be publishable. */
-    @VisibleForTesting
-    suspend fun currentGenerationForTest(): Long = mutex.withLock { generation }
-
-    /** Test seam: apply an outcome as a fetch finishing now would, to pin the generation rule. */
-    @VisibleForTesting
-    internal suspend fun applyCloudOutcomeForTest(
-        gen: Long,
-        episodeUuid: String,
-        outcome: CloudReferenceAcquisition.Outcome,
-    ) = applyCloudOutcome(gen, episodeUuid, outcome)
-
     /**
      * Applies a cloud outcome for [gen], under the lock, only if [gen] is still current.
      *

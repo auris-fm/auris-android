@@ -70,6 +70,15 @@ if [ -z "${ANDROID_UPLOAD_KEYSTORE_B64:-}" ]; then
   exit 1
 fi
 echo "$ANDROID_UPLOAD_KEYSTORE_B64" | openssl base64 -d -A > auris-upload.keystore
+# Validate the decoded keystore BEFORE Gradle: a still-encoded, double-encoded
+# or truncated secret otherwise fails 10 minutes later inside signReleaseBundle
+# (#70). keytool -list opens it with the store password; no contents printed.
+if ! ANDROID_UPLOAD_KEYSTORE_PASSWORD="${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}" \
+    keytool -list -keystore auris-upload.keystore \
+    -storepass:env ANDROID_UPLOAD_KEYSTORE_PASSWORD >/dev/null 2>&1; then
+  echo "--- decoded keystore is not a valid keystore (still encoded, double-encoded, truncated, or wrong store password)" >&2
+  exit 1
+fi
 printf 'signingKeyStoreFile=%s\nsigningKeyStorePassword=%s\nsigningKeyAlias=%s\nsigningKeyPassword=%s\n' \
   "$PWD/auris-upload.keystore" \
   "${ANDROID_UPLOAD_KEYSTORE_PASSWORD:-}" \
@@ -89,7 +98,9 @@ tail -n 2 settings.gradle.kts
 
 # skipSentryProguardMappingUpload: CI=true enables the mapping upload, but the
 # release secrets carry no Sentry token here; same flag as assemble-release-apk.sh.
-./gradlew :app:bundleRelease --no-daemon -PskipSentryProguardMappingUpload=true
+# --stacktrace: #70's "Tag number over 30" had no stack, so the failing
+# parser was unidentifiable. A failed run must say exactly where it threw.
+./gradlew :app:bundleRelease --no-daemon --stacktrace -PskipSentryProguardMappingUpload=true
 
 # Prove the outcome, not just the inputs: when signing was requested the
 # bundle must carry a certificate, and it must be THE upload certificate.

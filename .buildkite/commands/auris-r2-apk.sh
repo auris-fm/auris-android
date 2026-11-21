@@ -79,37 +79,61 @@ export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
 export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
 
 echo "--- Publishing to r2:${R2_BUCKET}/apk/"
-# 1. Versioned file, immutable, via an ATOMIC create-only write (S3
-# If-None-Match: *). A lookup-then-upload race lets two jobs both see
-# "absent"; the conditional PUT makes exactly one win. A retry after a
-# partial publish resumes ONLY if the existing object is byte-identical.
+# Publication is serialized across builds by the pipeline step's
+# concurrency: 1 / concurrency_group (Buildkite runs one publish at a time).
+#
+# 1. Versioned file, immutable, via an ATOMIC create-only write: a direct
+# SigV4-signed single-request PUT with If-None-Match: *. An APK fits in one
+# request, so there is no multipart completion where the condition could be
+# dropped (rclone's --header-upload is not guaranteed on the committing
+# request). A retry after a partial publish resumes ONLY if the existing
+# object is byte-identical.
+COND_ERR="$(mktemp)"
 publish_versioned() {
-  if rclone copyto play-universal.apk "r2:${R2_BUCKET}/${VERSIONED_KEY}" \
-      --s3-use-multipart-etag=false \
-      --header-upload "If-None-Match: *" \
-      --header-upload "Content-Type: application/vnd.android.package-archive" \
-      --header-upload "Cache-Control: public, max-age=31536000, immutable" 2>/tmp/r2-cond.err; then
-    return 0
-  fi
-  # Precondition failed => object exists. Resume only if byte-identical.
-  if grep -qi "precondition\|412" /tmp/r2-cond.err; then
-    EXISTING_SHA="$(rclone cat "r2:${R2_BUCKET}/${VERSIONED_KEY}" 2>/dev/null | shasum -a 256 | awk '{print $1}')"
-    if [ "$EXISTING_SHA" = "$SHA256" ]; then
-      echo "--- ${VERSIONED_KEY} already published with identical bytes; resuming aliases"
-      return 0
-    fi
-    echo "FAIL: ${VERSIONED_KEY} exists with DIFFERENT bytes; refusing to overwrite" >&2
-    return 1
-  fi
-  cat /tmp/r2-cond.err >&2
-  return 1
+  HTTP_PUT="$(curl -sS -o "$COND_ERR" -w '%{http_code}' -X PUT \
+    --aws-sigv4 "aws:amz:auto:s3" \
+    --user "${R2_APK_ACCESS_KEY_ID}:${R2_APK_SECRET_ACCESS_KEY}" \
+    -H "If-None-Match: *" \
+    -H "Content-Type: application/vnd.android.package-archive" \
+    -H "Cache-Control: public, max-age=31536000, immutable" \
+    --data-binary @play-universal.apk \
+    "${R2_ENDPOINT}/${R2_BUCKET}/${VERSIONED_KEY}")" || return 1
+  case "$HTTP_PUT" in
+    2??) return 0 ;;
+    412)
+      # Object exists. Resume only if byte-identical.
+      EXISTING_SHA="$(rclone cat "r2:${R2_BUCKET}/${VERSIONED_KEY}" | shasum -a 256 | awk '{print $1}')" || return 1
+      if [ "$EXISTING_SHA" = "$SHA256" ]; then
+        echo "--- ${VERSIONED_KEY} already published with identical bytes; resuming aliases"
+        return 0
+      fi
+      echo "FAIL: ${VERSIONED_KEY} exists with DIFFERENT bytes; refusing to overwrite" >&2
+      return 1 ;;
+    *)
+      echo "FAIL: create-only PUT returned HTTP $HTTP_PUT" >&2
+      cat "$COND_ERR" >&2
+      return 1 ;;
+  esac
 }
-publish_versioned || exit 1
-rm -f /tmp/r2-cond.err
+publish_versioned || { rm -f "$COND_ERR"; exit 1; }
+rm -f "$COND_ERR"
 
 # Alias guard: an older run finishing late must not move latest.* backwards.
-CURRENT_VC="$(rclone cat "r2:${R2_BUCKET}/apk/latest.json" 2>/dev/null \
-  | sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+# Distinguish ABSENT (normal first publish) from a failed read via an
+# explicit listing: lsf succeeds with empty output => absent; lsf itself
+# failing => fatal, never publish aliases blind.
+ALIAS_LIST="$(rclone lsf "r2:${R2_BUCKET}/apk/" --include "latest.json")" || {
+  echo "FAIL: could not list apk/ to check latest.json; refusing to publish aliases blind" >&2
+  exit 1
+}
+CURRENT_VC=""
+if [ -n "$ALIAS_LIST" ]; then
+  ALIAS_JSON="$(rclone cat "r2:${R2_BUCKET}/apk/latest.json")" || {
+    echo "FAIL: latest.json listed but unreadable; refusing to publish aliases blind" >&2
+    exit 1
+  }
+  CURRENT_VC="$(printf '%s' "$ALIAS_JSON" | sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+fi
 if [ -n "$CURRENT_VC" ] && [ "$CURRENT_VC" -gt "$UPLOADED_VERSION_CODE" ]; then
   echo "--- latest.json already at newer versionCode $CURRENT_VC; leaving aliases untouched"
   echo "--- Published: ${URL}"

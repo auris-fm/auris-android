@@ -22,27 +22,59 @@ cp "$DIR/.buildkite/scripts/verify-play-apk.sh" "$WORK/repo/.buildkite/scripts/"
 printf 'versionName=8.20\nversionCode=9452\n' > "$WORK/repo/version.properties"
 printf 'dummy-apk-bytes-v1' > "$WORK/apk.bin"
 
-# Mock rclone: conditional create-only copyto (If-None-Match: *), cat, lsf.
+# Mock rclone: cat preserves the real exit status (missing object => 4,
+# like rclone's "not found"); lsf lists a prefix or a single object and can
+# be made to FAIL via MOCK_RCLONE_FAIL to prove read failures stay fatal.
 cat > "$WORK/bin/rclone" <<'MOCK'
 #!/bin/bash
 echo "rclone $*" >> "$MOCK_LOG"
+[ -n "${MOCK_RCLONE_FAIL:-}" ] && exit 7
 key_of() { printf '%s' "${1#r2:}"; }
 case "$1" in
   copyto)
     dst="$MOCK_STORE/$(key_of "$3")"
-    if printf '%s\n' "$@" | grep -q 'If-None-Match: \*'; then
-      if [ -f "$dst" ]; then
-        echo "ERROR: precondition failed (412)" >&2
-        exit 1
-      fi
-    fi
     mkdir -p "$(dirname "$dst")"; cp "$2" "$dst" ;;
-  cat) cat "$MOCK_STORE/$(key_of "$2")" 2>/dev/null ;;
-  lsf) [ -f "$MOCK_STORE/$(key_of "$2")" ] && basename "$2" ;;
+  cat)
+    src="$MOCK_STORE/$(key_of "$2")"
+    if [ -f "$src" ]; then cat "$src"; else exit 4; fi ;;
+  lsf)
+    target="$MOCK_STORE/$(key_of "$2")"
+    inc=""
+    for a in "$@"; do case "$prev" in --include) inc="$a";; esac; prev="$a"; done
+    if [ -d "$target" ]; then
+      if [ -n "$inc" ]; then [ -f "$target/$inc" ] && echo "$inc"; else ls "$target" 2>/dev/null; fi
+    else
+      [ -f "$target" ] && basename "$target"
+    fi
+    exit 0 ;;
 esac
 exit 0
 MOCK
 chmod +x "$WORK/bin/rclone"
+
+# Mock curl: the create-only SigV4 PUT. Honors If-None-Match: * against the
+# store (412 when the object exists), records the header so the control can
+# assert the condition rides the committing request.
+cat > "$WORK/bin/curl" <<'MOCK'
+#!/bin/bash
+echo "curl $*" >> "$MOCK_LOG"
+url=""; data=""; cond=0; out=""
+prev=""
+for a in "$@"; do
+  case "$prev" in -o) out="$a";; --data-binary) data="${a#@}";; esac
+  case "$a" in https://*) url="$a";; "If-None-Match: *") cond=1;; esac
+  prev="$a"
+done
+key="${url#*://*/}"
+dst="$MOCK_STORE/${key%%/*}/${key#*/}"
+if [ "$cond" = 1 ] && [ -f "$dst" ]; then
+  printf '412'
+  exit 0
+fi
+mkdir -p "$(dirname "$dst")"; cp "$data" "$dst"
+printf '200'
+MOCK
+chmod +x "$WORK/bin/curl"
 
 # Mock buildkite-agent: secrets/meta from files; artifact download serves the
 # carried built-version-code.txt.
@@ -99,13 +131,24 @@ run_r2; check "identical-byte retry resumes" 0 "$?"
 printf 'different-bytes' > "$MOCK_STORE/auris-download/apk/auris-8.20-9522.apk"
 run_r2; check "different-byte collision refused" 1 "$?"
 
-# 4. Older run finishing late: aliases must stay at the newer version.
+# 4. Older run finishing late: INCOMING 9522 vs EXISTING 9600 -- the skip
+# must actually trigger, and BOTH aliases stay at the newer version.
 printf 'dummy-apk-bytes-v1' > "$MOCK_STORE/auris-download/apk/auris-8.20-9522.apk"
-printf '9600' > "$MOCK_META/uploaded-version-code"
+printf '9522' > "$MOCK_META/uploaded-version-code"
 printf '{"versionCode": 9600}' > "$MOCK_STORE/auris-download/apk/latest.json"
-run_r2; check "older run exits cleanly" 0 "$?"
+printf 'newer-apk-bytes' > "$MOCK_STORE/auris-download/apk/latest.apk"
+OUT4="$(cd "$WORK/repo" && bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RC4=$?
+check "older run exits cleanly" 0 "$RC4"
+printf '%s' "$OUT4" | grep -q "leaving aliases untouched" && r=ok || r=noskip
+check "skip path actually taken" ok "$r"
 grep -q '"versionCode": 9600' "$MOCK_STORE/auris-download/apk/latest.json" && r=ok || r=moved
-check "aliases NOT moved backwards" ok "$r"
+check "latest.json NOT moved backwards" ok "$r"
+[ "$(cat "$MOCK_STORE/auris-download/apk/latest.apk")" = "newer-apk-bytes" ] && r=ok || r=moved
+check "latest.apk NOT moved backwards" ok "$r"
+
+# 4b. A failed alias READ (not absence) must be fatal, never publish blind.
+run_r2_env() { (cd "$WORK/repo" && MOCK_RCLONE_FAIL=1 bash .buildkite/commands/auris-r2-apk.sh >/dev/null 2>&1); }
+run_r2_env; check "failed alias listing is fatal" 1 "$?"
 
 # 5. Play step records the CARRIED built version, not its checkout's base.
 cp "$DIR/.buildkite/commands/auris-play-upload.sh" "$WORK/repo/.buildkite/commands/"

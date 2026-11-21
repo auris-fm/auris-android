@@ -56,5 +56,9 @@ steps:
     # latest.json, then latest.apk last).
     branches: "main"
     depends_on: [play-upload]
+    # Serialize publication across builds: Buildkite runs one publish at a
+    # time, so alias reads/writes cannot interleave between jobs.
+    concurrency: 1
+    concurrency_group: "auris-android/r2-publish"
     command: .buildkite/commands/auris-r2-apk.sh
     timeout_in_minutes: 20

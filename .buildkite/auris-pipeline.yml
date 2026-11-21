@@ -46,3 +46,19 @@ steps:
     depends_on: [release-aab]
     command: .buildkite/commands/auris-play-upload.sh
     timeout_in_minutes: 30
+
+  - label: "Publish APK to R2"
+    key: r2-apk
+    # Same boundary as the other steps: main only, and the script itself is a
+    # no-op unless PLAY_UPLOAD=1 and the Play step recorded an upload. Fetches
+    # Play's signed universal APK, verifies the app-signing pin + versionCode,
+    # publishes under auris-download/apk/ (versioned immutable, then
+    # latest.json, then latest.apk last).
+    branches: "main"
+    depends_on: [play-upload]
+    # Serialize publication across builds: Buildkite runs one publish at a
+    # time, so alias reads/writes cannot interleave between jobs.
+    concurrency: 1
+    concurrency_group: "auris-android/r2-publish"
+    command: .buildkite/commands/auris-r2-apk.sh
+    timeout_in_minutes: 20

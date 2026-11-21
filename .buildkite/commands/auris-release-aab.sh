@@ -130,3 +130,12 @@ bash "$(dirname "$0")/auris-verify-bundle-signature.sh" \
 
 # Publish ONLY the verified bundle, and only after verification passed.
 buildkite-agent artifact upload app/build/outputs/bundle/release/app-release.aab
+
+# Carry the BUILT version with the artifact: each step checks out its own
+# copy of version.properties, so a later step must never read its own base
+# version as "what was uploaded". The Play step records this value only
+# after a successful upload.
+BUILT_VC="$(sed -n 's/^versionCode=//p' version.properties | head -1)"
+[ -n "$BUILT_VC" ] || { echo "FAIL: no versionCode after build" >&2; exit 1; }
+printf '%s\n' "$BUILT_VC" > built-version-code.txt
+buildkite-agent artifact upload built-version-code.txt

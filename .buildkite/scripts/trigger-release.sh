@@ -35,8 +35,9 @@ PY
 fi
 
 # Fixed diagnostics only: an unchecked message/error value could itself
-# carry credentials (or be a structured object). Known validation errors
-# get a fixed sentence; anything else gets just the HTTP status.
+# carry credentials (or be a structured object). Known error strings get a
+# fixed sentence; anything else gets the HTTP status plus the response's
+# SHAPE (top-level field names and errors[].field names -- never values).
 python3 - "$BODY_FILE" "$HTTP_CODE" <<'PY' >&2
 import json, sys
 code = sys.argv[2]
@@ -45,21 +46,35 @@ KNOWN = {
     "Unauthorized": "API token rejected",
     "Forbidden": "API token lacks permission for this pipeline",
     "Not Found": "organization or pipeline not found",
+    "Unprocessable Entity": "request unprocessable (see field names below)",
+    "No commit found": "commit not found on the repository",
+    "Branch": "branch rejected by the pipeline",
 }
 diag = None
+shape = []
 try:
     b = json.load(open(sys.argv[1]))
-    msg = b.get("message")
-    if isinstance(msg, str):
-        for prefix, fixed in KNOWN.items():
-            if msg.startswith(prefix):
-                diag = fixed
-                break
+    if isinstance(b, dict):
+        shape.append("fields: " + ", ".join(sorted(b.keys())))
+        errs = b.get("errors")
+        if isinstance(errs, list):
+            fields = sorted({e["field"] for e in errs
+                             if isinstance(e, dict) and isinstance(e.get("field"), str)})
+            if fields:
+                shape.append("error fields: " + ", ".join(fields))
+        msg = b.get("message")
+        if isinstance(msg, str):
+            for needle, fixed in KNOWN.items():
+                if needle.lower() in msg.lower():
+                    diag = fixed
+                    break
 except Exception:
     pass
 if diag:
     print(f"Buildkite API returned HTTP {code}: {diag}")
 else:
-    print(f"Buildkite API returned HTTP {code} (response withheld; see Buildkite UI)")
+    print(f"Buildkite API returned HTTP {code} (response values withheld)")
+for line in shape:
+    print("  " + line)
 PY
 exit 1

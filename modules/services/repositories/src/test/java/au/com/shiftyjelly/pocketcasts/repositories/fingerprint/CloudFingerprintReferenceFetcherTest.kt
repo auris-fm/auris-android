@@ -146,6 +146,27 @@ class CloudFingerprintReferenceFetcherTest {
         )
     }
 
+    /**
+     * The call budget is worthless if the client's own read timeout fires first: at 60 s it tore
+     * down cold generations the server then completed anyway.
+     */
+    @Test
+    fun `the client read timeout does not fire before the call budget`() {
+        val field = CloudFingerprintReferenceFetcher::class.java.getDeclaredField("client")
+        field.isAccessible = true
+        val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
+        val client = field.get(fetcher) as okhttp3.OkHttpClient
+
+        assertTrue(
+            "read timeout ${client.readTimeoutMillis} ms must outlast the ${FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS} ms budget",
+            client.readTimeoutMillis >= FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
+        )
+        assertTrue(
+            "connect timeout stays short, so an unreachable host fails fast",
+            client.connectTimeoutMillis < FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
+        )
+    }
+
     @Test
     fun `fetchReference sends the Auris access token and the podcast id`() {
         val server = MockWebServer()

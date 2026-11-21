@@ -110,15 +110,19 @@ class FingerprintTimingManager @Inject constructor(
         podcastUuid: String,
     ): CloudReferenceMatcher? {
         val stored = cloudReferenceStore.load(episodeUuid)
-        when (val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, stored?.etag)) {
+        setCloudReference(CloudReference.Fetching)
+        val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, stored?.etag)
+        when (fetched) {
             is CloudFingerprintReferenceFetcher.Fetch.Fresh -> {
                 cloudReferenceStore.save(episodeUuid, fetched.payload, fetched.etag)
+                setCloudReference(CloudReference.Ready)
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.matcher.count} checkpoints) for $episodeUuid")
                 return fetched.matcher
             }
 
             is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
                 stored?.let { cloudFetcher.buildMatcher(it.payload) }?.let {
+                    setCloudReference(CloudReference.Ready)
                     Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
                     return it
                 }
@@ -126,26 +130,39 @@ class FingerprintTimingManager @Inject constructor(
                 val refetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, null)
                 if (refetched is CloudFingerprintReferenceFetcher.Fetch.Fresh) {
                     cloudReferenceStore.save(episodeUuid, refetched.payload, refetched.etag)
+                    setCloudReference(CloudReference.Ready)
                     Timber.d("FingerprintTimingManager: cloud reference refetched (${refetched.matcher.count} checkpoints) for $episodeUuid")
                     return refetched.matcher
                 }
+                // The refetch gets the SAME classification as the first fetch: a definitive answer
+                // here ends the attempts just as it does below, and a transient one stays retryable.
+                if (isTerminalCloudFailure(refetched)) {
+                    setCloudReference(CloudReference.DefinitiveMiss(episodeUuid))
+                    Timber.d("FingerprintTimingManager: no cloud reference for $episodeUuid (definitive 403/404)")
+                    return null
+                }
+                setCloudReference(CloudReference.Failed)
             }
 
             CloudFingerprintReferenceFetcher.Fetch.NotAvailable -> {
                 // Definitive: the server has no reference for this episode, so this preparation
-                // has nothing to decode and no reason to ask again (see isTerminalCloudFailure).
+                // has nothing to decode and no reason to ask again.
                 Timber.d("FingerprintTimingManager: no cloud reference for $episodeUuid (definitive 403/404)")
-                recordDefinitiveCloudMiss(episodeUuid)
+                setCloudReference(CloudReference.DefinitiveMiss(episodeUuid))
                 return null
             }
 
-            CloudFingerprintReferenceFetcher.Fetch.Unavailable ->
+            CloudFingerprintReferenceFetcher.Fetch.Unavailable -> {
                 stored?.let { cloudFetcher.buildMatcher(it.payload) }?.let {
+                    // A failed revalidation must never drop alignment a stored reference supports.
+                    setCloudReference(CloudReference.Ready)
                     Timber.d("FingerprintTimingManager: revalidation failed; keeping stored cloud reference for $episodeUuid")
                     return it
                 }
-            // No refetch here: this preparation made its one attempt. With nothing stored the
-            // episode stays RETRYABLE, so the next play, resume or turn asks again.
+                // No refetch here: this preparation made its one attempt. With nothing stored the
+                // episode stays RETRYABLE, so the next play or resume asks again.
+                setCloudReference(CloudReference.Failed)
+            }
         }
         Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid (retryable)")
         return null
@@ -160,24 +177,59 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     /**
-     * Episodes the server has definitively told us it has no reference for (403/404), for THIS
-     * PROCESS only. Kept apart from [State] because the state describes PREPARATION — a failure
-     * there is usually transient and must stay retryable — while this is what the server said
-     * about the episode.
+     * Takes a newly fetched cloud matcher into use WITHOUT touching the transcript preparation.
      *
-     * SESSION-SCOPED ON PURPOSE: never persisted. A reference that gets generated later, or an
-     * entitlement that changes, must be fetchable again on the next launch; a durable record here
-     * would be a permanent "this episode has no alignment" the server could never correct.
+     * The tap reads [cloudMatcher] per window, so installing it is enough for the next window to
+     * start matching; a fingerprinter is created only when the tap had none (cloud-only alignment,
+     * or a retry after a first failure).
      */
-    private val definitiveCloudMisses = mutableSetOf<String>()
-
-    /** An in-memory record for this process only; see [definitiveCloudMisses]. */
-    internal fun recordDefinitiveCloudMiss(episodeUuid: String) {
-        definitiveCloudMisses += episodeUuid
+    private suspend fun adoptCloudMatcher(matcher: CloudReferenceMatcher?) {
+        mutex.withLock {
+            cloudMatcher = matcher
+            if (matcher != null && cloudFingerprinter == null) {
+                cloudFingerprinter = CloudFingerprinter()
+            }
+        }
     }
 
-    /** Test seam: whether this process already learned the server has nothing for [episodeUuid]. */
-    internal fun isDefinitiveCloudMiss(episodeUuid: String): Boolean = episodeUuid in definitiveCloudMisses
+    /**
+     * Where the CLOUD reference stands for the current episode, tracked separately from [State].
+     *
+     * [State] describes transcript preparation, which can be perfectly healthy while the cloud
+     * reference is missing or still to be fetched — so a retry must consult this, never [State].
+     * Tracking them together is what let a transient cloud failure disappear behind a working
+     * transcript mapping and lose the episode's alignment for the session.
+     *
+     * SESSION-SCOPED: only [NotTried]/[Failed] ever lead to another attempt, and nothing here is
+     * persisted. A reference generated later, or an entitlement that changes, is fetchable again
+     * on the next launch; a durable "no reference" would be permanent and uncorrectable.
+     */
+    internal sealed interface CloudReference {
+        /** Not asked yet for this episode in this process. */
+        data object NotTried : CloudReference
+
+        /** A fetch is in flight; a second preparation must not start another. */
+        data object Fetching : CloudReference
+
+        /** A matcher is in hand (fresh, revalidated, or restored from the store). */
+        data object Ready : CloudReference
+
+        /** A transient failure: the next play or resume tries again. */
+        data object Failed : CloudReference
+
+        /** A definitive 403/404 from the server: never ask again in this process. */
+        data class DefinitiveMiss(val episodeUuid: String) : CloudReference
+    }
+
+    @Volatile
+    private var cloudReference: CloudReference = CloudReference.NotTried
+
+    /** The cloud reference's own state, independent of transcript readiness. */
+    internal fun cloudReferenceState(): CloudReference = cloudReference
+
+    private fun setCloudReference(next: CloudReference) {
+        cloudReference = next
+    }
 
     data class TimeMappingEntry(
         val playbackTime: Double,
@@ -288,10 +340,16 @@ class FingerprintTimingManager @Inject constructor(
     private fun observePlaybackForProactivePreparation() {
         scope.launch {
             var lastEpisodeUuid: String? = null
+            var wasPlaying = false
             playbackManager.playbackStateFlow.collect { state ->
                 if (!FeatureFlag.isEnabled(Feature.SYNCED_TRANSCRIPTS)) return@collect
                 val uuid = state.episodeUuid
-                if (state.isPlaying && !uuid.isNullOrEmpty() && uuid != lastEpisodeUuid) {
+                // Play AND resume of the same episode both ask for preparation. A pause is not a
+                // stop, so resuming must reach the manager again — otherwise a cloud reference that
+                // failed transiently on the first play would never be asked for again.
+                val startingPlayback = state.isPlaying && !wasPlaying
+                wasPlaying = state.isPlaying
+                if (state.isPlaying && !uuid.isNullOrEmpty() && (uuid != lastEpisodeUuid || startingPlayback)) {
                     lastEpisodeUuid = uuid
                     prepareForCurrentEpisode(PrepareTrigger.PLAYBACK)
                 } else if (lastEpisodeUuid != null && (state.isEmpty || state.isStopped)) {
@@ -319,26 +377,53 @@ class FingerprintTimingManager @Inject constructor(
         }
 
         scope.launch {
-            val gen: Long
-            mutex.withLock {
-                // Already prepared for this episode — reuse existing state. A failed preparation is
-                // RETRYABLE unless the failure was definitive: the next play, resume, turn or
-                // transcript view asks again rather than losing alignment for the whole session.
-                val retryableFailure = isRetryablePreparation(
-                    state = state,
-                    definitiveMiss = currentEpisodeUuid in definitiveCloudMisses,
+            var gen = 0L
+            val cloudRetryOnly = mutex.withLock {
+                // Already prepared for this episode — reuse existing state, EXCEPT when this
+                // preparation would do something the last one did not: (a) the transcript
+                // preparation failed and may be retried, or (b) the cloud reference is still
+                // missing. (b) is decided by the cloud state alone, because a healthy transcript
+                // mapping says nothing about whether the cloud reference was ever fetched — and
+                // testing transcript readiness is exactly how a transient cloud failure used to
+                // disappear for the rest of the session.
+                val cloudNeedsRetry = shouldRetryCloudReference(
+                    cloudReference = cloudReference,
+                    episodeUuid = episodeUuid,
+                    cloudConfigured = cloudConfig.baseUrl().isNotBlank(),
+                    sameEpisode = currentEpisodeUuid == episodeUuid,
                 )
-                if (currentEpisodeUuid == episodeUuid && state !is State.Idle && !retryableFailure) {
+                val transcriptRetryable = currentEpisodeUuid == episodeUuid && isRetryableTranscriptPreparation(state)
+                if (currentEpisodeUuid == episodeUuid && state !is State.Idle && !transcriptRetryable && !cloudNeedsRetry) {
                     if (trigger == PrepareTrigger.TRANSCRIPT_VIEW) {
                         currentTrigger = trigger
                     }
                     return@launch
                 }
-                // The tap builds the map progressively; keep whatever the last episode accumulated.
-                persistMappingCacheIfFull()
-                resetState()
-                generation++
-                gen = generation
+                if (cloudNeedsRetry && currentEpisodeUuid == episodeUuid) {
+                    // Claim the attempt under the lock so two preparations cannot both fetch.
+                    setCloudReference(CloudReference.Fetching)
+                    true
+                } else {
+                    // The tap builds the map progressively; keep whatever the last episode accumulated.
+                    persistMappingCacheIfFull()
+                    resetState()
+                    generation++
+                    gen = generation
+                    false
+                }
+            }
+            if (cloudRetryOnly) {
+                // RETRY THE CLOUD REFERENCE ONLY. The transcript mapping and its state stay
+                // exactly as they are: discarding a working alignment to fetch a reference
+                // would trade one loss for another. The fetch runs OUTSIDE the lock — it can take
+                // up to the call budget, and holding the mutex that long would stall playback.
+                Timber.d("FingerprintTimingManager: cloud reference retry for $episodeUuid")
+                val retryMatcher = resolveCloudMatcher(cloudConfig.baseUrl(), episodeUuid, podcastUuid)
+                adoptCloudMatcher(retryMatcher)
+                if (trigger == PrepareTrigger.TRANSCRIPT_VIEW) {
+                    mutex.withLock { currentTrigger = trigger }
+                }
+                return@launch
             }
             // Abort if a newer stop()/prepare() has started since we acquired the lock.
             if (gen != generation) return@launch
@@ -808,6 +893,7 @@ class FingerprintTimingManager @Inject constructor(
         cloudMatcher = null
         cloudFingerprinter = null
         cloudFirstMappingLogged = false
+        cloudReference = CloudReference.NotTried
         activeEpisodeUuid = null
         hasReachedActive = false
         hasTrackedFailure = false
@@ -904,7 +990,8 @@ class FingerprintTimingManager @Inject constructor(
         // independently of the transcript-sync reference below.
         cloudMatcher = null
         val cloudBaseUrl = cloudConfig.baseUrl()
-        if (cloudBaseUrl.isNotBlank() && episodeUuid in definitiveCloudMisses) {
+        val knownMiss = (cloudReference as? CloudReference.DefinitiveMiss)?.episodeUuid == episodeUuid
+        if (cloudBaseUrl.isNotBlank() && knownMiss) {
             // One definitive answer per episode is enough: the server already said it has no
             // reference, and asking on every play would be a request per playback for nothing.
             Timber.d("FingerprintTimingManager: cloud reference known absent for $episodeUuid, not asking again")
@@ -1812,21 +1899,35 @@ class FingerprintTimingManager @Inject constructor(
 
     companion object {
         /**
-         * Whether a preparation already under way for this episode may be started again.
+         * Whether a TRANSCRIPT preparation that is already under way may be started again.
+         *
+         * Only the failures that mean "not this time" qualify; an actively preparing episode is
+         * reused and an unavailable one has nothing more to try. The cloud reference is judged
+         * separately by [shouldRetryCloudReference], so a healthy transcript never hides a
+         * missing cloud reference.
+         */
+        internal fun isRetryableTranscriptPreparation(state: State): Boolean = state is State.Failed
+
+        /**
+         * Whether this preparation should make a fresh CLOUD reference attempt.
          *
          * A transient failure (offline, timeout, 5xx, a token that was not usable yet) must be
-         * retryable: the next play, resume, turn or transcript view asks again, rather than the
-         * episode losing its alignment for the rest of the session. Only a definitive answer from
-         * the server — a 403 or 404, recorded per episode — ends the attempts.
+         * retryable: the next play or resume asks again, rather than the episode losing its
+         * alignment for the rest of the session. A definitive 403/404 ends the attempts, and an
+         * in-flight fetch is never duplicated.
          */
-        internal fun isRetryablePreparation(
-            state: State,
-            definitiveMiss: Boolean = false,
-        ): Boolean = when (state) {
-            is State.Failed -> true
-            is State.Unavailable -> !definitiveMiss
-            else -> false
-        }
+        internal fun shouldRetryCloudReference(
+            cloudReference: CloudReference,
+            episodeUuid: String,
+            cloudConfigured: Boolean,
+            sameEpisode: Boolean,
+        ): Boolean = cloudConfigured &&
+            sameEpisode &&
+            when (cloudReference) {
+                CloudReference.NotTried, CloudReference.Failed -> true
+                is CloudReference.DefinitiveMiss -> false
+                CloudReference.Fetching, CloudReference.Ready -> false
+            }
 
         /** A definitive 403/404; every other failure may resolve itself on a later attempt. */
         internal fun isTerminalCloudFailure(fetched: CloudFingerprintReferenceFetcher.Fetch): Boolean = fetched is CloudFingerprintReferenceFetcher.Fetch.NotAvailable

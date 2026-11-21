@@ -31,7 +31,11 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        // The READ timeout is the one that fires while a cold generation is still running
+        // server-side: at 60 s it tore down requests whose 150 s call budget had not run out,
+        // throwing away work the server then completed anyway. It must not be shorter than the
+        // call budget, or the budget is decorative.
+        .readTimeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .build()
 
     /**

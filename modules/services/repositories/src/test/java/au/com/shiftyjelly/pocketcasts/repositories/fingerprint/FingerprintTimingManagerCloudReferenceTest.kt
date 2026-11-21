@@ -72,6 +72,20 @@ class FingerprintTimingManagerCloudReferenceTest {
         )
     }
 
+    /** One acquisition, driven directly: the object owns claim + I/O + outcome, publishing nothing. */
+    private suspend fun acquireOnce(
+        baseUrl: String,
+        episodeUuid: String,
+        fetcher: CloudFingerprintReferenceFetcher = CloudFingerprintReferenceFetcher(noCredentialProvider()),
+    ): CloudReferenceAcquisition.Outcome = CloudReferenceAcquisition(
+        generation = 1L,
+        episodeUuid = episodeUuid,
+        podcastUuid = "pod_1",
+        baseUrl = baseUrl,
+        fetcher = fetcher,
+        store = store,
+    ).also { it.claim() }.acquire()
+
     /** No credential at all: every fetchReference is fail-closed Unavailable, no request leaves. */
     private fun noCredentialProvider() = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
         clientProvider = { null },
@@ -106,10 +120,10 @@ class FingerprintTimingManagerCloudReferenceTest {
             store.save("ep_keep", compactV2Payload(), "\"v1\"")
 
             // No credential -> fetchReference is Unavailable without touching the network.
-            val matcher = manager.resolveCloudMatcher("https://offline.invalid", "ep_keep", "pod_1")
+            val outcome = acquireOnce("https://offline.invalid", "ep_keep")
 
-            assertNotNull("a failed revalidation must keep the stored reference", matcher)
-            assertEquals(3, matcher!!.count)
+            assertTrue("a failed revalidation must keep the stored reference", outcome is CloudReferenceAcquisition.Outcome.Ready)
+            assertEquals(3, (outcome as CloudReferenceAcquisition.Outcome.Ready).matcher.count)
         }
     }
 
@@ -155,11 +169,9 @@ class FingerprintTimingManagerCloudReferenceTest {
                     decodePolicy = mock(FingerprintDecodePolicy::class.java),
                 )
 
-                val matcher = runBlocking {
-                    managerWithServer.resolveCloudMatcher(server.url("/").toString().trimEnd('/'), "ep_none", "pod_1")
-                }
+                val outcome = acquireOnce(server.url("/").toString().trimEnd('/'), "ep_none", fetcher)
 
-                assertNull(matcher)
+                assertEquals(CloudReferenceAcquisition.Outcome.Retryable, outcome)
                 assertEquals("one attempt per preparation, never a second request inside it", 1, server.requestCount)
                 auth.shutdown()
             } finally {
@@ -168,72 +180,39 @@ class FingerprintTimingManagerCloudReferenceTest {
         }
     }
 
-    @Test
-    fun `a transient failure leaves transcript preparation retryable while a definitive one does not`() {
-        assertTrue(
-            "a Failed transcript preparation may be attempted again",
-            FingerprintTimingManager.isRetryableTranscriptPreparation(
-                FingerprintTimingManager.State.Failed(IOException("timeout"), "ep_1"),
-            ),
-        )
-        assertFalse(
-            "an actively preparing episode is reused, never restarted",
-            FingerprintTimingManager.isRetryableTranscriptPreparation(FingerprintTimingManager.State.Active(3)),
-        )
-        assertFalse(
-            "an unavailable transcript preparation has nothing more to try",
-            FingerprintTimingManager.isRetryableTranscriptPreparation(FingerprintTimingManager.State.Unavailable("ep_1")),
-        )
-    }
-
     /**
-     * The cloud reference has its own state. Its retry rule must be independent of transcript
-     * readiness — that independence is the whole point: a transient cloud failure used to vanish
-     * behind a working transcript mapping.
+     * The cloud reference has its own attempt state. Its retry rule must be independent of
+     * transcript readiness — that independence is the whole point: a transient cloud failure used
+     * to vanish behind a working transcript mapping.
      */
     @Test
     fun `a transient cloud failure is retryable and a definitive miss is not`() {
-        fun retry(state: FingerprintTimingManager.CloudReference, sameEpisode: Boolean = true, configured: Boolean = true) =
-            FingerprintTimingManager.shouldRetryCloudReference(
-                cloudReference = state,
-                episodeUuid = "ep_1",
-                cloudConfigured = configured,
-                sameEpisode = sameEpisode,
-            )
-
-        assertTrue("never tried: fetch", retry(FingerprintTimingManager.CloudReference.NotTried))
-        assertTrue("a transient failure retries on the next play", retry(FingerprintTimingManager.CloudReference.Failed))
-        assertFalse("an in-flight fetch is never duplicated", retry(FingerprintTimingManager.CloudReference.Fetching))
-        assertFalse("a ready reference is not refetched", retry(FingerprintTimingManager.CloudReference.Ready))
-        assertFalse(
-            "a definitive 403/404 ends the attempts",
-            retry(FingerprintTimingManager.CloudReference.DefinitiveMiss("ep_1")),
+        fun retry(
+            status: CloudReferenceAcquisition.Status?,
+            definitiveMiss: Boolean = false,
+            configured: Boolean = true,
+        ) = FingerprintTimingManager.shouldRetryCloudReference(
+            status = status,
+            definitiveMiss = definitiveMiss,
+            cloudConfigured = configured,
         )
-        assertFalse("cutover off means no cloud attempt", retry(FingerprintTimingManager.CloudReference.Failed, configured = false))
-        assertFalse("another episode's state does not drive this one", retry(FingerprintTimingManager.CloudReference.Failed, sameEpisode = false))
+
+        assertTrue("never tried: fetch", retry(null))
+        assertTrue("not tried yet: fetch", retry(CloudReferenceAcquisition.Status.NotTried))
+        assertTrue("a transient failure retries on the next play", retry(CloudReferenceAcquisition.Status.Failed))
+        assertFalse("an in-flight fetch is never duplicated", retry(CloudReferenceAcquisition.Status.Fetching))
+        assertFalse("a ready reference is not refetched", retry(CloudReferenceAcquisition.Status.Ready))
+        assertFalse(
+            "a definitive 403/404 ends the attempts for this process",
+            retry(CloudReferenceAcquisition.Status.Failed, definitiveMiss = true),
+        )
+        assertFalse("cutover off means no cloud attempt", retry(CloudReferenceAcquisition.Status.Failed, configured = false))
     }
 
     @Test
-    fun `a definitive miss is remembered for this session only`() {
-        assertNotEquals(
-            "a fresh manager has not tried yet",
-            FingerprintTimingManager.CloudReference.DefinitiveMiss("ep_1"),
-            manager.cloudReferenceState(),
-        )
-    }
-
-    @Test
-    fun `a failed fetch leaves the episode retryable while a definitive answer does not`() {
-        // The decision the preparation gate applies on every play, resume or turn: one attempt,
-        // then either the preparation is terminal for the episode or the next play tries again.
-        assertFalse(
-            "no token, transport failure, 500 or 503: the next play must try again",
-            FingerprintTimingManager.isTerminalCloudFailure(CloudFingerprintReferenceFetcher.Fetch.Unavailable),
-        )
-        assertTrue(
-            "a 404 or 403 is the server's final word for this episode",
-            FingerprintTimingManager.isTerminalCloudFailure(CloudFingerprintReferenceFetcher.Fetch.NotAvailable),
-        )
+    fun `a fresh manager has no cloud attempt and no definitive miss`() {
+        assertNull(manager.cloudReferenceStatus())
+        assertFalse(manager.isDefinitiveCloudMiss("ep_1"))
     }
 
     // --- triggers, driven through the REAL entry point (play, then resume) ---
@@ -244,6 +223,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         val episodeUuid: String,
         val referenceServer: MockWebServer,
         val authServer: MockWebServer,
+        val switchTo: (String) -> Unit,
     )
 
     /**
@@ -266,6 +246,8 @@ class FingerprintTimingManagerCloudReferenceTest {
 
     private fun harness(
         referenceResponses: List<MockResponse>,
+        transcriptPayload: ByteArray? = null,
+        onEpisode: (String) -> Unit = {},
     ): Harness {
         enableSyncedTranscripts()
         val episodeUuid = "ep_huberman"
@@ -284,6 +266,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         auth.start()
 
         val states = MutableStateFlow(PlaybackState())
+        var currentUuid = episodeUuid
         val episode = PodcastEpisode(
             uuid = episodeUuid,
             podcastUuid = "pod_1",
@@ -293,7 +276,10 @@ class FingerprintTimingManagerCloudReferenceTest {
         )
         val playbackManager = mock(PlaybackManager::class.java)
         whenever(playbackManager.playbackStateFlow).thenReturn(states)
-        whenever(playbackManager.getCurrentEpisode()).thenReturn(episode)
+        whenever(playbackManager.getCurrentEpisode()).thenAnswer {
+            onEpisode(currentUuid)
+            episode.copy(uuid = currentUuid)
+        }
         whenever(playbackManager.isPlaybackRemote()).thenReturn(false)
         whenever(playbackManager.playbackStateRelay).thenReturn(
             com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState()).toSerialized(),
@@ -311,7 +297,13 @@ class FingerprintTimingManagerCloudReferenceTest {
         val referenceRetriever = mock(FingerprintReferenceRetriever::class.java)
         runBlocking {
             whenever(referenceRetriever.fetchReferenceData(any(), any(), any()))
-                .thenReturn(FingerprintReferenceRetriever.FetchResult.NotFound)
+                .thenReturn(
+                    if (transcriptPayload != null) {
+                        FingerprintReferenceRetriever.FetchResult.Success(transcriptPayload)
+                    } else {
+                        FingerprintReferenceRetriever.FetchResult.NotFound
+                    },
+                )
             whenever(referenceRetriever.loadCachedReference(any())).thenReturn(null)
             whenever(referenceRetriever.loadReferenceData(any())).thenReturn(null)
         }
@@ -340,7 +332,7 @@ class FingerprintTimingManagerCloudReferenceTest {
             cloudReferenceStore = store,
             decodePolicy = mock(FingerprintDecodePolicy::class.java),
         )
-        return Harness(manager, states, episodeUuid, referenceServer, auth)
+        return Harness(manager, states, episodeUuid, referenceServer, auth) { currentUuid = it }
     }
 
     private fun Harness.play() {
@@ -366,16 +358,27 @@ class FingerprintTimingManagerCloudReferenceTest {
 
     private fun awaitIdle(millis: Long) = Thread.sleep(millis)
 
+    private fun awaitTranscriptState(
+        h: Harness,
+        expected: FingerprintTimingManager.State,
+    ): FingerprintTimingManager.State {
+        repeat(200) {
+            if (h.manager.state == expected) return expected
+            Thread.sleep(25)
+        }
+        return h.manager.state
+    }
+
     /** The fetch runs on the manager's own dispatcher; wait for it to settle rather than racing it. */
     private fun awaitCloudState(
         h: Harness,
-        expected: FingerprintTimingManager.CloudReference,
-    ): FingerprintTimingManager.CloudReference {
+        expected: CloudReferenceAcquisition.Status,
+    ): CloudReferenceAcquisition.Status? {
         repeat(200) {
-            if (h.manager.cloudReferenceState() == expected) return expected
+            if (h.manager.cloudReferenceStatus() == expected) return expected
             Thread.sleep(25)
         }
-        return h.manager.cloudReferenceState()
+        return h.manager.cloudReferenceStatus()
     }
 
     @Test
@@ -394,8 +397,8 @@ class FingerprintTimingManagerCloudReferenceTest {
             assertEquals("the play must fetch once", 1, awaitRequests(h, 1))
             assertEquals(
                 "a transient failure is retryable, not terminal",
-                FingerprintTimingManager.CloudReference.Failed,
-                awaitCloudState(h, FingerprintTimingManager.CloudReference.Failed),
+                CloudReferenceAcquisition.Status.Failed,
+                awaitCloudState(h, CloudReferenceAcquisition.Status.Failed),
             )
 
             // Pause, let the observer take it in, then resume: the observer must see the play
@@ -409,13 +412,199 @@ class FingerprintTimingManagerCloudReferenceTest {
             assertEquals("the resume must make exactly one fresh attempt", 2, awaitRequests(h, 2))
             assertEquals(
                 "the retry succeeded",
-                FingerprintTimingManager.CloudReference.Ready,
-                awaitCloudState(h, FingerprintTimingManager.CloudReference.Ready),
+                CloudReferenceAcquisition.Status.Ready,
+                awaitCloudState(h, CloudReferenceAcquisition.Status.Ready),
             )
             assertNotEquals(
                 "a cloud retry must not reset the transcript preparation it did not touch",
                 FingerprintTimingManager.State.Idle,
                 h.manager.state,
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * The control reviewer asked for: a WORKING transcript mapping must survive a cloud retry.
+     * `state != Idle` was too weak — Unavailable passes it — so this asserts the real mapping.
+     */
+    @Test
+    fun `a cloud retry keeps a working transcript mapping intact`() {
+        val h = harness(
+            referenceResponses = listOf(
+                MockResponse().setResponseCode(503),
+                MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
+            ),
+            transcriptPayload = compactV2Payload(),
+        )
+        try {
+            h.play()
+            assertEquals(1, awaitRequests(h, 1))
+            awaitCloudState(h, CloudReferenceAcquisition.Status.Failed)
+
+            // A real transcript alignment, as the tap would have produced it.
+            h.manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 12.0, referenceTime = 12.0))
+            assertEquals(12_000, h.manager.playbackTimeMs(12.0))
+
+            h.pause()
+            awaitIdle(400)
+            h.play()
+
+            assertEquals("the resume makes one fresh cloud attempt", 2, awaitRequests(h, 2))
+            assertEquals(
+                CloudReferenceAcquisition.Status.Ready,
+                awaitCloudState(h, CloudReferenceAcquisition.Status.Ready),
+            )
+            assertEquals(
+                "the working transcript mapping must survive the cloud retry",
+                12_000,
+                h.manager.playbackTimeMs(12.0),
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * Cloud-only recovery: the transcript reference is missing, so nothing was collecting PCM. A
+     * successful retry must start collection, or the matcher it installs is read by nobody.
+     */
+    @Test
+    fun `a successful retry starts cloud-only collection when nothing was collecting`() {
+        val h = harness(
+            referenceResponses = listOf(
+                MockResponse().setResponseCode(503),
+                MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
+            ),
+        )
+        try {
+            h.play()
+            assertEquals(1, awaitRequests(h, 1))
+            awaitCloudState(h, CloudReferenceAcquisition.Status.Failed)
+            assertEquals(
+                "with no transcript reference and no cloud matcher there is nothing to align",
+                FingerprintTimingManager.State.Unavailable(h.episodeUuid),
+                h.manager.state,
+            )
+
+            h.pause()
+            awaitIdle(400)
+            h.play()
+
+            assertEquals(2, awaitRequests(h, 2))
+            assertEquals(
+                CloudReferenceAcquisition.Status.Ready,
+                awaitCloudState(h, CloudReferenceAcquisition.Status.Ready),
+            )
+            assertEquals(
+                "cloud-only collection must be running, so the new matcher is actually fed",
+                FingerprintTimingManager.State.Preparing,
+                awaitTranscriptState(h, FingerprintTimingManager.State.Preparing),
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * A definitive answer outlives a generation: A → B → A in one process must not ask the server
+     * about A again. The record is per episode, not per preparation.
+     */
+    @Test
+    fun `a definitive miss survives switching away and back`() {
+        val h = harness(
+            referenceResponses = listOf(
+                MockResponse().setResponseCode(404),
+                MockResponse().setResponseCode(404),
+                MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
+            ),
+        )
+        try {
+            h.play()
+            awaitRequests(h, 1)
+            awaitCloudState(h, CloudReferenceAcquisition.Status.Failed)
+            assertTrue(h.manager.isDefinitiveCloudMiss(h.episodeUuid))
+
+            // Away to B...
+            h.switchTo("ep_other")
+            h.pause()
+            awaitIdle(400)
+            h.playbackStates.value = PlaybackState(
+                state = PlaybackState.State.PLAYING,
+                episodeUuid = "ep_other",
+                isPrepared = true,
+            )
+            awaitIdle(800)
+
+            // ...and back to A.
+            h.switchTo(h.episodeUuid)
+            h.pause()
+            awaitIdle(400)
+            h.play()
+            awaitIdle(1200)
+
+            assertTrue(
+                "the definitive answer for A must survive the round trip",
+                h.manager.isDefinitiveCloudMiss(h.episodeUuid),
+            )
+            assertEquals(
+                "A must not be asked again after B; only B's own attempt may have gone out",
+                2,
+                h.referenceServer.requestCount,
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * The publication rule, pinned deterministically: an outcome may only be applied while its
+     * generation is still the current one. A fetch started for A that lands after a switch to B
+     * must change nothing — no matcher, no state, no per-episode record.
+     */
+    @Test
+    fun `an outcome from a superseded generation publishes nothing`() {
+        val h = harness(referenceResponses = listOf(MockResponse().setResponseCode(503)))
+        try {
+            h.play()
+            awaitRequests(h, 1)
+            awaitCloudState(h, CloudReferenceAcquisition.Status.Failed)
+
+            // Move to another episode: this bumps the generation and discards A's attempt.
+            h.switchTo("ep_other")
+            h.pause()
+            awaitIdle(400)
+            h.playbackStates.value = PlaybackState(
+                state = PlaybackState.State.PLAYING,
+                episodeUuid = "ep_other",
+                isPrepared = true,
+            )
+            awaitIdle(800)
+
+            val before = h.manager.state
+            runBlocking {
+                val staleGen = h.manager.currentGenerationForTest() - 1
+                // A's late answer arrives now, carrying the generation it was started under.
+                h.manager.applyCloudOutcomeForTest(
+                    staleGen,
+                    h.episodeUuid,
+                    CloudReferenceAcquisition.Outcome.DefinitiveMiss,
+                )
+            }
+
+            assertFalse(
+                "a superseded generation must not record a definitive answer",
+                h.manager.isDefinitiveCloudMiss(h.episodeUuid),
+            )
+            assertEquals("a superseded generation must not change preparation state", before, h.manager.state)
+            assertNull(
+                "no mapping may be published from a superseded episode's reference",
+                h.manager.playbackTimeMs(1.0),
             )
         } finally {
             h.referenceServer.shutdown()
@@ -434,12 +623,11 @@ class FingerprintTimingManagerCloudReferenceTest {
         try {
             h.play()
             assertEquals("the play asks once", 1, awaitRequests(h, 1))
-            assertEquals(
-                FingerprintTimingManager.CloudReference.DefinitiveMiss(h.episodeUuid),
-                awaitCloudState(h, FingerprintTimingManager.CloudReference.DefinitiveMiss(h.episodeUuid)),
-            )
+            awaitCloudState(h, CloudReferenceAcquisition.Status.Failed)
+            assertTrue("a 404 is recorded per episode for this process", h.manager.isDefinitiveCloudMiss(h.episodeUuid))
 
             h.pause()
+            awaitIdle(400)
             h.play()
             awaitIdle(600)
 
@@ -496,12 +684,10 @@ class FingerprintTimingManagerCloudReferenceTest {
                 // Corrupt stored entry: a 304 against it must not trust it.
                 store.save("ep_retry", "not json".toByteArray(), "\"stale\"")
 
-                val matcher = runBlocking {
-                    managerWithServer.resolveCloudMatcher(server.url("/").toString().trimEnd('/'), "ep_retry", "pod_1")
-                }
+                val outcome = acquireOnce(server.url("/").toString().trimEnd('/'), "ep_retry", fetcher)
 
-                assertNotNull(matcher)
-                assertEquals(3, matcher!!.count)
+                assertTrue(outcome is CloudReferenceAcquisition.Outcome.Ready)
+                assertEquals(3, (outcome as CloudReferenceAcquisition.Outcome.Ready).matcher.count)
                 assertEquals("\"stale\"", server.takeRequest().getHeader("If-None-Match"))
                 assertNull("the retry must be unconditional", server.takeRequest().getHeader("If-None-Match"))
                 // The fresh payload replaced the corrupt one for next time.
@@ -557,19 +743,13 @@ class FingerprintTimingManagerCloudReferenceTest {
                 )
                 store.save("ep_revalidate", compactV2Payload(), "\"stored\"")
 
-                val matcher = managerWithServer.resolveCloudMatcher(
-                    server.url("/").toString().trimEnd('/'),
-                    "ep_revalidate",
-                    "pod_1",
-                )
+                val outcome = acquireOnce(server.url("/").toString().trimEnd('/'), "ep_revalidate", fetcher)
 
-                assertNotNull("a transient revalidation failure must not drop a working reference", matcher)
-                assertEquals(3, matcher!!.count)
-                assertEquals(
-                    "the stored reference counts as ready, so no further attempt is made",
-                    FingerprintTimingManager.CloudReference.Ready,
-                    managerWithServer.cloudReferenceState(),
+                assertTrue(
+                    "a transient revalidation failure must not drop a working reference",
+                    outcome is CloudReferenceAcquisition.Outcome.Ready,
                 )
+                assertEquals(3, (outcome as CloudReferenceAcquisition.Outcome.Ready).matcher.count)
                 auth.shutdown()
             } finally {
                 server.shutdown()

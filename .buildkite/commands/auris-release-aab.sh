@@ -97,7 +97,9 @@ tail -n 2 settings.gradle.kts
 
 # skipSentryProguardMappingUpload: CI=true enables the mapping upload, but the
 # release secrets carry no Sentry token here; same flag as assemble-release-apk.sh.
-./gradlew :app:bundleRelease --no-daemon -PskipSentryProguardMappingUpload=true
+# --stacktrace: #70's "Tag number over 30" had no stack, so the failing
+# parser was unidentifiable. A failed run must say exactly where it threw.
+./gradlew :app:bundleRelease --no-daemon --stacktrace -PskipSentryProguardMappingUpload=true
 
 # Prove the outcome, not just the inputs: when signing was requested the
 # bundle must carry a certificate, and it must be THE upload certificate.

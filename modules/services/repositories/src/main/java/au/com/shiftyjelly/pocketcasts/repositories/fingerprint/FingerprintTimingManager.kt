@@ -166,7 +166,10 @@ class FingerprintTimingManager @Inject constructor(
                     // Only when NOTHING is collecting AND no transcript alignment is in hand. A
                     // mapping loaded from cache leaves generationJob null while its matcher and
                     // entries are live and the state is Active; restarting collection there would
-                    // throw away a working alignment to chase a reference we already have.
+                    // throw away a working alignment to chase a reference we already have. Note
+                    // that the cache can also load with NO entries (all pruned), which is exactly
+                    // the case that must still start collection — hence the entries check rather
+                    // than "a cache was loaded".
                     val transcriptAlignmentInHand = currentMatcher != null || snapshotPlaybackToReference.isNotEmpty()
                     if (generationJob == null && audioSource != null && !transcriptAlignmentInHand) {
                         // Nothing was collecting PCM (the transcript reference was missing), so a
@@ -179,7 +182,13 @@ class FingerprintTimingManager @Inject constructor(
                         _stateFlow.value = State.Preparing
                         startTapCollection(gen, null)
                     } else if (cloudFingerprinter == null) {
+                        // Attaching to a collector that is ALREADY running: this fingerprinter's
+                        // first sample is the NEXT chunk, not the start of the tap stream. Its
+                        // windows are relative to its own first sample, so they must be placed at
+                        // the position that sample occupies — using the stream's start would put
+                        // every cloud anchor early by the elapsed playback time.
                         cloudFingerprinter = CloudFingerprinter()
+                        cloudStreamStartSec = tapFrontierSec
                     }
                 }
 
@@ -279,6 +288,21 @@ class FingerprintTimingManager @Inject constructor(
     // Independent of the transcript-sync Rust matcher above.
     private var cloudMatcher: CloudReferenceMatcher? = null
     private var cloudFingerprinter: CloudFingerprinter? = null
+
+    /**
+     * Media position of the CLOUD fingerprinter's first sample. Normally the tap stream's start, but
+     * a reference that arrives mid-stream attaches a fingerprinter whose first sample is the next
+     * chunk — its windows are relative to that, so placing them at the stream's start would shift
+     * every cloud anchor early by the elapsed playback time. NaN until a position is known.
+     */
+    private var cloudStreamStartSec: Double = Double.NaN
+
+    /**
+     * The transcript preparation's own failure, kept apart from [state]. A cloud recovery may move
+     * the visible state to Preparing, and main's transcript-retry rule reads `state is Failed` — so
+     * without this record a successful cloud retry would silently end the transcript's retries.
+     */
+    private var transcriptFailure: Throwable? = null
     private var cloudFirstMappingLogged = false
     private var hasReachedActive = false
     private var hasTrackedFailure = false
@@ -342,7 +366,8 @@ class FingerprintTimingManager @Inject constructor(
             val cloudRetryOnly = mutex.withLock {
                 // Transcript preparation keeps EXACTLY main's rule: reuse what is under way, and
                 // let a failed one retry when the user opens the transcript.
-                val retryableFailure = trigger == PrepareTrigger.TRANSCRIPT_VIEW && state is State.Failed
+                val retryableFailure = trigger == PrepareTrigger.TRANSCRIPT_VIEW &&
+                    (state is State.Failed || transcriptFailure != null)
                 // A cloud retry is a separate question, asked only on play/resume: the cloud
                 // reference can be missing while transcript alignment is perfectly healthy, and
                 // judging that by transcript readiness is how a transient cloud failure used to
@@ -734,6 +759,7 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     private fun markFailed(error: Throwable, stage: String) {
+        transcriptFailure = error
         _stateFlow.value = State.Failed(error, currentEpisodeUuid)
         if (hasTrackedFailure) return
         hasTrackedFailure = true
@@ -854,6 +880,8 @@ class FingerprintTimingManager @Inject constructor(
         currentMatcher = null
         cloudMatcher = null
         cloudFingerprinter = null
+        cloudStreamStartSec = Double.NaN
+        transcriptFailure = null
         cloudFirstMappingLogged = false
         // The attempt belongs to the generation being torn down; the definitive-miss record does
         // NOT — it is per episode for the whole process, so A → B → A never asks again about A.
@@ -1120,6 +1148,7 @@ class FingerprintTimingManager @Inject constructor(
     private fun startEagerLocalDecode(gen: Long, audioFilePath: String, matcher: CheckpointMatcher, episodeUuid: String) {
         generationJob?.cancel()
         cloudFingerprinter = if (cloudMatcher != null) CloudFingerprinter() else null
+        cloudStreamStartSec = Double.NaN
         generationJob = scope.launch(decodeDispatcher) {
             try {
                 streamFingerprint(gen, audioFilePath, matcher, episodeUuid, startingAt = 0.0)
@@ -1141,6 +1170,7 @@ class FingerprintTimingManager @Inject constructor(
     private fun startTapCollection(gen: Long, matcher: CheckpointMatcher?) {
         generationJob?.cancel()
         cloudFingerprinter = if (cloudMatcher != null) CloudFingerprinter() else null
+        cloudStreamStartSec = Double.NaN
         generationJob = scope.launch(decodeDispatcher) {
             var streamer: StreamingWindowedFingerprinter? = null
             var streamStartSec = 0.0
@@ -1159,6 +1189,7 @@ class FingerprintTimingManager @Inject constructor(
                     if (!isContinuous) {
                         streamer?.let { finishTapStreamer(gen, it, matcher, streamStartSec) }
                         cloudFingerprinter = if (cloudMatcher != null) CloudFingerprinter() else null
+                        cloudStreamStartSec = chunk.positionSec
                         Timber.d("FingerprintTimingManager: tap stream started at %.1fs", chunk.positionSec)
                         streamer = if (matcher != null) {
                             StreamingWindowedFingerprinter(
@@ -1199,7 +1230,7 @@ class FingerprintTimingManager @Inject constructor(
                             if (cloudWindows.isNotEmpty()) {
                                 mutex.withLock {
                                     if (gen != generation) throw CancellationException("Fingerprint tap superseded")
-                                    processCloudMatches(cloudWindows, streamStartSec)
+                                    processCloudMatches(cloudWindows, cloudOriginSec(streamStartSec))
                                 }
                             }
                         }
@@ -1686,6 +1717,13 @@ class FingerprintTimingManager @Inject constructor(
             buffer.order(byteOrder)
         }
     }
+
+    /**
+     * Where the cloud fingerprinter's window 0 sits in media time. Its own recorded origin wins;
+     * [streamStart] is the fallback for a fingerprinter created with the stream, before the first
+     * chunk has stamped a position.
+     */
+    private fun cloudOriginSec(streamStart: Double): Double = if (cloudStreamStartSec.isNaN()) streamStart else cloudStreamStartSec
 
     /**
      * Matches cloud-fingerprinter windows against the cloud reference and

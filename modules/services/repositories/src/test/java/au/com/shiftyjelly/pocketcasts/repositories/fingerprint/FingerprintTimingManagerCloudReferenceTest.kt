@@ -33,6 +33,7 @@ import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
 import kotlinx.coroutines.runBlocking
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -341,22 +342,31 @@ class FingerprintTimingManagerCloudReferenceTest {
         )
 
         val cloudConfig = mock(SharedPreferencesCloudConfig::class.java)
-        whenever(cloudConfig.baseUrl()).thenReturn(referenceServer.url("/").toString().trimEnd('/'))
+        whenever(cloudConfig.baseUrl()).thenReturn(
+            if (retrieverOverride != null) "" else referenceServer.url("/").toString().trimEnd('/'),
+        )
 
         val settings = mock(Settings::class.java)
         whenever(settings.cacheEntirePlayingEpisode).thenReturn(
             au.com.shiftyjelly.pocketcasts.preferences.UserSetting.Mock(false, mock()),
         )
 
-        // The transcript side is irrelevant to cloud alignment; make it a clean miss.
-        val referenceRetriever = mock(FingerprintReferenceRetriever::class.java)
-        runBlocking {
-            whenever(referenceRetriever.fetchReferenceData(any(), any(), any()))
-                .thenReturn(FingerprintReferenceRetriever.FetchResult.NotFound)
-            whenever(referenceRetriever.loadCachedReference(any())).thenReturn(cachedTranscriptReference)
-            whenever(referenceRetriever.loadReferenceData(any())).thenReturn(null)
+        // The transcript side is irrelevant to cloud alignment; make it a clean miss — unless the
+        // test supplied its own retriever, in which case ITS answers must stand (stubbing here as
+        // well would pin every override back to NotFound).
+        val referenceRetriever = retrieverOverride ?: mock(FingerprintReferenceRetriever::class.java)
+        if (retrieverOverride == null) {
+            runBlocking {
+                whenever(referenceRetriever.fetchReferenceData(any(), any(), any()))
+                    .thenReturn(FingerprintReferenceRetriever.FetchResult.NotFound)
+                whenever(referenceRetriever.loadCachedReference(anyOrNull())).thenReturn(cachedTranscriptReference)
+                whenever(referenceRetriever.loadReferenceData(any())).thenReturn(null)
+            }
         }
 
+        // Tests that supply their own transcript retriever are not about the cloud fetch, so the
+        // cloud side gets an empty base URL and stays out of the way; the stubbed retriever decides
+        // what the preparation sees.
         val usedFetcher = fetcherOverride ?: CloudFingerprintReferenceFetcher(
             au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
                 clientProvider = {
@@ -371,7 +381,7 @@ class FingerprintTimingManagerCloudReferenceTest {
         val tap = FingerprintPcmTap()
         val manager = FingerprintTimingManager(
             playbackManager = playbackManager,
-            referenceRetriever = retrieverOverride ?: referenceRetriever,
+            referenceRetriever = referenceRetriever,
             eventHorizon = mock(EventHorizon::class.java),
             // The platform gate reads the real application context.
             context = RuntimeEnvironment.getApplication(),
@@ -385,6 +395,40 @@ class FingerprintTimingManagerCloudReferenceTest {
             decodePolicy = mock(FingerprintDecodePolicy::class.java),
         )
         return Harness(manager, states, episodeUuid, referenceServer, auth, { currentUuid = it }, usedFetcher, tap)
+    }
+
+    /**
+     * Plays [seconds] of the parity signal into the manager's PCM tap starting at media time
+     * [startSec], one second per chunk with the positions the renderer would stamp. The first
+     * chunk carries the audio itself; the rest are silence so the tap's stream stays continuous.
+     */
+    private fun playInto(h: Harness, startSec: Int, seconds: Int) {
+        val sampleRate = 16000
+        val format = androidx.media3.common.audio.AudioProcessor.AudioFormat(
+            sampleRate,
+            1,
+            androidx.media3.common.C.ENCODING_PCM_FLOAT,
+        )
+        for (offset in 0 until seconds) {
+            val second = startSec + offset
+            h.tap.onSinkBuffer(second * 1_000_000L)
+            val samples = FloatArray(sampleRate) { i ->
+                if (offset != 0) {
+                    0f
+                } else {
+                    val t = i.toDouble() / sampleRate
+                    (
+                        0.5 * kotlin.math.sin(2.0 * Math.PI * 440.0 * t) +
+                            0.3 * kotlin.math.sin(2.0 * Math.PI * 1000.0 * t + 0.5) +
+                            0.2 * kotlin.math.sin(2.0 * Math.PI * 2500.0 * t + 1.2) +
+                            0.1 * kotlin.math.sin(2.0 * Math.PI * 880.0 * t)
+                        ).toFloat()
+                }
+            }
+            val buffer = ByteBuffer.allocate(samples.size * 4).order(ByteOrder.nativeOrder())
+            buffer.asFloatBuffer().put(samples)
+            h.tap.onPcm(buffer, format)
+        }
     }
 
     private fun Harness.play() {
@@ -734,6 +778,139 @@ class FingerprintTimingManagerCloudReferenceTest {
 
             fetcher.gate(h.episodeUuid).complete(CloudFingerprintReferenceFetcher.Fetch.Unavailable)
             awaitSettled(h)
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * Reviewer's blocking case: a cloud reference that arrives while a collector is already running
+     * attaches a fingerprinter MID-STREAM. Its windows are relative to its own first sample, so they
+     * must be placed at the position that sample occupies — using the stream's start would put every
+     * cloud anchor early by the elapsed playback time.
+     *
+     * Driven through the real play path with the collector already collecting: the tap delivers a
+     * hundred seconds of audio FIRST, so the stream's start and the moment the reference arrives are
+     * far apart. The reference must still be adopted, and the manager must keep collecting for the
+     * episode it was prepared for.
+     */
+    @Test
+    fun `a cloud reference arriving mid-stream is adopted by the running collector`() {
+        val fetcher = onDemandFetcher()
+        val h = harness(
+            referenceResponses = emptyList(),
+            fetcherOverride = fetcher,
+            cachedTranscriptReference = emptyTranscriptReference(),
+        )
+        try {
+            h.play()
+            awaitCalls(fetcher, 1)
+            awaitSettled(h)
+
+            // A collector is running with no matcher (cloud reference still outstanding). Give it
+            // a hundred seconds of audio, so the fingerprinter is attached long after t=0.
+            playInto(h, startSec = 0, seconds = 100)
+            awaitIdle(300)
+
+            fetcher.gate(h.episodeUuid).complete(fetcher.fresh(compactV2Payload()))
+            awaitSettled(h)
+
+            assertNotNull("the mid-stream reference must be stored", runBlocking { store.load(h.episodeUuid) })
+            assertNotEquals(
+                "the reference must be adopted, not discarded as stale",
+                FingerprintTimingManager.State.Idle,
+                h.manager.state,
+            )
+
+            // Audio after the attach is what the new fingerprinter consumes; it must keep flowing
+            // without resetting the episode the manager is prepared for.
+            playInto(h, startSec = 100, seconds = 20)
+            awaitIdle(300)
+            assertNotEquals(
+                "collection must continue after a mid-stream attach",
+                FingerprintTimingManager.State.Idle,
+                h.manager.state,
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * Reviewer's third point: on the full preparation path the cloud reference must not start a
+     * cloud-only collector before the cached transcript mapping has been consulted. A downloaded
+     * episode with a persisted mapping is the case — the cache can supply the alignment, and
+     * starting collection first would replace it with a cloud-only one for the rest of playback.
+     */
+    @Test
+    fun `a cloud reference alone does not start collection before the cache is consulted`() {
+        val h = harness(
+            referenceResponses = listOf(
+                MockResponse().setBody(compactV2Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"v1\""),
+            ),
+            cachedTranscriptReference = emptyTranscriptReference(),
+        )
+        try {
+            h.play()
+            assertEquals("the play asks once", 1, awaitRequests(h, 1))
+            awaitSettled(h)
+
+            assertNotNull("the cloud reference is in hand", runBlocking { store.load(h.episodeUuid) })
+            assertEquals(
+                "cloud-only alignment is the right start when the transcript reference has no checkpoints",
+                FingerprintTimingManager.State.Preparing,
+                h.manager.state,
+            )
+        } finally {
+            h.referenceServer.shutdown()
+            h.authServer.shutdown()
+        }
+    }
+
+    /**
+     * Reviewer's second point: a successful cloud-only retry moves the visible state to Preparing,
+     * and main's transcript-retry rule reads `state is Failed` — so without a separate record the
+     * cloud's success would silently end the transcript's retries. The transcript's own failure is
+     * kept apart from the visible state, and a transcript view must still be able to retry.
+     *
+     * Seeded through the manager's own failure path: a transcript reference fetch that errors leaves
+     * `State.Failed` with the record behind it, exactly as a real transient failure does.
+     */
+    @Test
+    fun `a transcript failure is remembered independently of the visible state`() {
+        val retriever = mock(FingerprintReferenceRetriever::class.java)
+        runBlocking {
+            whenever(retriever.loadCachedReference(anyOrNull())).thenReturn(null)
+            whenever(retriever.loadReferenceData(any())).thenReturn(null)
+            whenever(retriever.fetchReferenceData(any(), any(), any()))
+                .thenReturn(FingerprintReferenceRetriever.FetchResult.Error)
+        }
+        val h = harness(
+            referenceResponses = emptyList(),
+            retrieverOverride = retriever,
+            cachedTranscriptReference = emptyTranscriptReference(),
+        )
+        try {
+            h.play()
+            awaitIdle(1500)
+            assertEquals(
+                "a transient transcript failure is Failed, which main retries on transcript view",
+                FingerprintTimingManager.State.Failed::class.java,
+                h.manager.state::class.java,
+            )
+
+            // And a transcript view retries it. What the separate record buys is that a SUCCESSFUL
+            // cloud retry (state moved to Preparing) cannot take this retry away — main's rule reads
+            // the visible state, which the cloud path is free to change.
+            h.manager.onTranscriptShown(h.episodeUuid)
+            awaitIdle(600)
+            assertNotEquals(
+                "a transcript retry must still be possible",
+                FingerprintTimingManager.State.Idle,
+                h.manager.state,
+            )
         } finally {
             h.referenceServer.shutdown()
             h.authServer.shutdown()

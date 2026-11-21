@@ -19,6 +19,18 @@ on:
     # ever fire for commits actually on main.
 
 jobs:
+  trigger-script-controls:
+    name: "Trigger script controls"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash .buildkite/scripts/trigger-release.test.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: bash .buildkite/scripts/keystore-decode.test.sh
+
   voice-unit-tests:
     name: "voice:testDebugUnitTest"
     runs-on: ubuntu-latest
@@ -57,7 +69,7 @@ jobs:
 
   trigger-release:
     name: "Trigger the release build"
-    needs: [voice-unit-tests, cloud-transport-tests, android-test-compile]
+    needs: [trigger-script-controls, voice-unit-tests, cloud-transport-tests, android-test-compile]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     env:
@@ -65,14 +77,10 @@ jobs:
       BUILDKITE_ORG: ${{ vars.BUILDKITE_ORG }}
       BUILDKITE_PIPELINE: ${{ vars.BUILDKITE_PIPELINE_ANDROID }}
     steps:
+      - uses: actions/checkout@v7
       - name: "Trigger the auris-android Buildkite pipeline"
         if: ${{ env.BUILDKITE_API_TOKEN != '' }}
-        run: |
-          curl -sSf -X POST \
-            "https://api.buildkite.com/v2/organizations/${BUILDKITE_ORG}/pipelines/${BUILDKITE_PIPELINE}/builds" \
-            -H "Authorization: Bearer ${BUILDKITE_API_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"commit\": \"${GITHUB_SHA}\", \"branch\": \"main\", \"message\": \"Release build for ${GITHUB_SHA}\"}"
+        run: bash .buildkite/scripts/trigger-release.sh
       - name: "No API token yet"
         if: ${{ env.BUILDKITE_API_TOKEN == '' }}
         run: echo "BUILDKITE_API_TOKEN not set — release not triggered (dry-run mode)"

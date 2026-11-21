@@ -1985,6 +1985,15 @@ class FingerprintTimingManager @Inject constructor(
          * retryable: the next play or resume asks again, rather than the episode losing its
          * alignment for the rest of the session. A definitive 403/404 ends the attempts for this
          * process, and an in-flight or already-successful attempt is never duplicated.
+         *
+         * A 503 lands here as transient ON PURPOSE, and the server needs it to: a generation that
+         * is already running is refused outright rather than queued (ClaimFingerprint only succeeds
+         * on a pending row with no live lease), and the one case that waits is capped at 120 s
+         * server-side. So the first playback of a cold episode can see a fast 503 while the server
+         * is still generating. Treating it as an answer would cost the episode its cloud alignment
+         * for the whole session; treating it as budget exhaustion costs one request on the next
+         * play. This playback falls back to the transcript path meanwhile, which is already
+         * concurrent with the attempt.
          */
         internal fun shouldRetryCloudReference(
             status: CloudReferenceAcquisition.Status?,

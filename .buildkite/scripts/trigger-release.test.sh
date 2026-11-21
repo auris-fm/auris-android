@@ -46,8 +46,16 @@ run_case() { # mode
   PORT=
   for _ in $(seq 1 100); do
     PORT="$(cat "$PORT_FILE" 2>/dev/null)"
-    if [ -n "$PORT" ] && (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-      exec 3>&- 3<&-
+    # Portable readiness probe: TCP connect via python (the same interpreter
+    # that runs the mock), not bash-only /dev/tcp. Any HTTP response means
+    # the listener is up; only connection failure keeps us waiting.
+    if [ -n "$PORT" ] && python3 -c "
+import socket,sys
+try:
+    socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=1).close()
+except OSError:
+    sys.exit(1)
+" "$PORT" 2>/dev/null; then
       break
     fi
     PORT=

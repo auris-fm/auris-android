@@ -69,7 +69,7 @@ jobs:
 
   trigger-release:
     name: "Trigger the release build"
-    needs: [voice-unit-tests, cloud-transport-tests, android-test-compile]
+    needs: [trigger-script-controls, voice-unit-tests, cloud-transport-tests, android-test-compile]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     env:

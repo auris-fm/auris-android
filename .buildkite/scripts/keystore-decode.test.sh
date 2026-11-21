@@ -21,7 +21,6 @@ keytool -genkeypair -keystore good.keystore -alias upload -storepass testpass \
 
 mkdir -p app .buildkite/commands
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" .buildkite/commands/
-printf '{"package":"fm.auris"}' > /dev/null
 printf 'versionName=7.90\nversionCode=9452\n' > version.properties
 printf 'org.gradle.jvmargs=-Xmx1g\n' > gradle.properties
 printf 'rootProject.name="x"\n' > settings.gradle.kts
@@ -40,6 +39,15 @@ exit 0
 STUB
 chmod +x bin/buildkite-agent
 export PATH="$WORK/bin:$PATH"
+# Stub the signature verifier at the path the script actually invokes
+# (same directory as the copied release script), with production flags:
+# the fixture runs the script exactly as the job does.
+cat > .buildkite/commands/auris-verify-bundle-signature.sh <<'STUB'
+#!/bin/bash
+set -euo pipefail
+exit 0
+STUB
+chmod +x .buildkite/commands/auris-verify-bundle-signature.sh
 export AURIS_GOOGLE_SERVICES_JSON_B64="$(printf '{"package":"fm.auris"}' | openssl base64 -A)"
 export AURIS_SECRET_PROPERTIES="measureBuildsEnabled=false"
 export ANDROID_UPLOAD_KEYSTORE_PASSWORD=testpass
@@ -57,7 +65,8 @@ touch app/build/outputs/bundle/release/app-release.aab
 
 run() { # b64-value expected_exit name
   rm -f gradlew-reached
-  ANDROID_UPLOAD_KEYSTORE_B64="$1" bash .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
+  ANDROID_UPLOAD_KEYSTORE_B64="$1" BUILDKITE_BUILD_NUMBER=9452 \
+    bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
   check "$3" "$2" "$?"
 }
 

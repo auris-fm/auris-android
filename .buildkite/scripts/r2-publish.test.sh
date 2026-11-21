@@ -29,6 +29,7 @@ cat > "$WORK/bin/rclone" <<'MOCK'
 #!/bin/bash
 echo "rclone $*" >> "$MOCK_LOG"
 [ -n "${MOCK_RCLONE_FAIL:-}" ] && exit 7
+[ -n "${MOCK_RCLONE_LSF_FAIL:-}" ] && [ "$1" = lsf ] && exit 7
 key_of() { printf '%s' "${1#r2:}"; }
 case "$1" in
   copyto)
@@ -208,8 +209,12 @@ run_r2; check "zero versionCode fails closed" 1 "$?"
 printf '{"versionCode": 9522}' > "$MOCK_STORE/auris-download/apk/latest.json"
 
 # 4b. A failed alias READ (not absence) must be fatal, never publish blind.
-run_r2_env() { (cd "$WORK/repo" && MOCK_RCLONE_FAIL=1 bash .buildkite/commands/auris-r2-apk.sh >/dev/null 2>&1); }
-run_r2_env; check "failed alias listing is fatal" 1 "$?"
+# Fail ONLY the listing (the retry byte-check cat must still work), and
+# assert the listing-specific diagnostic.
+OUTL="$(cd "$WORK/repo" && MOCK_RCLONE_LSF_FAIL=1 bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RCL=$?
+check "failed alias listing is fatal" 1 "$RCL"
+printf '%s' "$OUTL" | grep -q "could not list apk/" && r=ok || r=missing
+check "listing failure prints its own diagnostic" ok "$r"
 
 # 5. Play step records the CARRIED built version, not its checkout's base.
 cp "$DIR/.buildkite/commands/auris-play-upload.sh" "$WORK/repo/.buildkite/commands/"

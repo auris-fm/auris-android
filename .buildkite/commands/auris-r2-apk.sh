@@ -141,20 +141,18 @@ if [ -n "$ALIAS_LIST" ]; then
   # Fail closed on malformed metadata: a listed, readable latest.json that
   # is not valid JSON with an integer versionCode must STOP the publish,
   # never fall through and overwrite the aliases.
-  CURRENT_VC="$(printf '%s' "$ALIAS_JSON" | python3 -c '
-import json, sys
-try:
-    vc = json.load(sys.stdin)["versionCode"]
-    # bool is a subclass of int in Python -- reject it explicitly. Play
-    # version codes are positive and must fit the platform range; an
-    # out-of-range value could break the Bash comparison and fall through.
-    if isinstance(vc, bool) or not isinstance(vc, int):
-        raise ValueError("versionCode not an integer")
-    if not (0 < vc <= 2100000000):
-        raise ValueError("versionCode out of range")
-    print(vc)
-except Exception:
-    sys.exit(1)
+  # Ruby, not python3: the publish job already requires Ruby (bundle), and
+  # python3 is not guaranteed on the runner's PATH. Strict integer check:
+  # JSON true/false are not Integers in Ruby; range is Play's positive one.
+  CURRENT_VC="$(printf '%s' "$ALIAS_JSON" | ruby -rjson -e '
+begin
+  vc = JSON.parse(STDIN.read)["versionCode"]
+  raise "not an integer" unless vc.is_a?(Integer)
+  raise "out of range" unless vc > 0 && vc <= 2100000000
+  puts vc
+rescue Exception
+  exit 1
+end
 ')" || {
     echo "FAIL: latest.json is malformed (no integer versionCode); refusing to overwrite aliases" >&2
     exit 1

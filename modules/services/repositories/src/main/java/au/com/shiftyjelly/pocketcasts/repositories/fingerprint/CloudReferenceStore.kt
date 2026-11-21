@@ -7,6 +7,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 /** The stored cloud reference for one episode: payload bytes plus the ETag to revalidate with. */
 data class CachedCloudReference(val payload: ByteArray, val etag: String)
@@ -60,7 +61,13 @@ class FileCloudReferenceStore @Inject constructor(
     override suspend fun save(episodeUuid: String, payload: ByteArray, etag: String?) = saveBlocking(episodeUuid, payload, etag)
 
     private fun saveInternal(episodeUuid: String, payload: ByteArray, etag: String?) {
-        if (etag == null) return // Without an ETag there is nothing to revalidate with later.
+        // The outcome is logged HERE: only the store knows whether a write was
+        // skipped, failed, or landed, so callers must not claim "cached".
+        if (etag == null) {
+            // Without an ETag there is nothing to revalidate with later.
+            Timber.d("FileCloudReferenceStore: cache write skipped (no ETag), ${payload.size} bytes for $episodeUuid")
+            return
+        }
         try {
             // Payload first, etag last: a crash between the two leaves no etag sidecar, and
             // load() then discards the half-written entry instead of trusting a truncated payload.
@@ -68,8 +75,10 @@ class FileCloudReferenceStore @Inject constructor(
             etagFile(episodeUuid).writeText(etag)
         } catch (e: Exception) {
             // Cache-write failure must never fail the fetch that produced the payload.
+            Timber.w(e, "FileCloudReferenceStore: cache write failed, ${payload.size} bytes for $episodeUuid")
             return
         }
+        Timber.d("FileCloudReferenceStore: cached ${payload.size} bytes for $episodeUuid")
         prune()
     }
 

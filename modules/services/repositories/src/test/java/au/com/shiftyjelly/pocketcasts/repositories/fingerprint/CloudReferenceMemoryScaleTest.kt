@@ -86,9 +86,11 @@ class CloudReferenceMemoryScaleTest {
     }
 
     @Test
-    fun `streaming decode scores identically to the boxed reference implementation`() {
-        // Parity: same timestamps, same scores, including duplicate hashes and
-        // unsorted input. The compact structure must not change match semantics.
+    fun `compact storage scores identically to the boxed reference implementation on deduplicated inputs`() {
+        // Parity on DEDUPLICATED inputs (spec ecb09160): server windows are
+        // deduped, so real-reference scores must equal the old ones exactly.
+        // Duplicate-heavy behaviour is pinned separately by the shared
+        // distinct-count fixture in CloudReferenceMatcherTest.
         val payload = compactV2(checkpoints = 40, hashesPer = 24, seed = 3)
         val compact = buildMatcher(payload)!!
         val legacy = ReferenceFingerprint.decode(payload)!!
@@ -98,7 +100,10 @@ class CloudReferenceMemoryScaleTest {
         }
         val rnd = Random(5)
         repeat(20) {
-            val query = LongArray(24) { rnd.nextLong() and 0xFFFFFFFFL }
+            val query = rnd.nextLong().let { seed ->
+                val r = Random(seed)
+                generateSequence { r.nextLong() and 0xFFFFFFFFL }.distinct().take(24).toList().toLongArray()
+            }
             val a = compact.findTopMatches(query, 3)
             val b = legacyMatcher.findTopMatches(query, 3)
             assertEquals(b.size, a.size)

@@ -69,9 +69,11 @@ class CloudReferenceMatcher {
             for (i in 0 until queryUnique) {
                 if (binarySearch(cp.sortedHashes, query[i])) intersection++
             }
-            // Previous semantics: |A ∩ B| over min(distinct query size, RAW
-            // checkpoint hash count). Dedup changes the numerator for
-            // duplicate queries, so keep the denominator on the raw count.
+            // Spec rule (ecb09160, both platforms): distinct query hashes
+            // found in the checkpoint, over min(distinct query count,
+            // distinct checkpoint count). sortedHashes is already deduped,
+            // so its length IS the distinct checkpoint count. Server windows
+            // are deduped, so real-reference scores equal the old ones.
             val smallest = minOf(queryUnique, cp.sortedHashes.size)
             val score = if (smallest == 0) 0f else intersection.toFloat() / smallest
             insertTop(top, Match(cp.timestampSeconds, score), maxResults)
@@ -115,20 +117,4 @@ class CloudReferenceMatcher {
         }
     }
 
-    companion object {
-        /**
-         * Overlap score = |A ∩ B| / min(|A|, |B|) ∈ [0, 1]. Exact matches on
-         * the same audio span score 1.0; offset windows share only part of
-         * their hash sets and score proportionally lower.
-         */
-        fun overlapScore(a: LongArray, b: LongArray): Float {
-            if (a.isEmpty() || b.isEmpty()) return 0f
-            val small = if (a.size < b.size) a else b
-            val large = if (a.size < b.size) b else a
-            val set = large.toHashSet()
-            var intersection = 0
-            for (h in small) if (h in set) intersection++
-            return intersection.toFloat() / small.size
-        }
-    }
 }

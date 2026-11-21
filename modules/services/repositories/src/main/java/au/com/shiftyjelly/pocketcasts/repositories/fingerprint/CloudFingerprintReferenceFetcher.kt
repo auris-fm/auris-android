@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintConstants
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -8,7 +9,6 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -23,7 +23,7 @@ import timber.log.Timber
  * so callers degrade gracefully to the transcript-sync path.
  */
 @Singleton
-class CloudFingerprintReferenceFetcher @Inject constructor(
+open class CloudFingerprintReferenceFetcher @Inject constructor(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
@@ -31,14 +31,21 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
 ) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        // The READ timeout is the one that fires while a cold generation is still running
+        // server-side: at 60 s it tore down requests whose 150 s call budget had not run out,
+        // throwing away work the server then completed anyway. It must not be shorter than the
+        // call budget, or the budget is decorative.
+        .readTimeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         .build()
 
     /**
      * Conditional fetch (delta: fingerprint revalidation). When [cachedEtag] is non-null it is
      * sent as If-None-Match; the server answers 304 (stored reference still current) or 200
-     * (fresh payload with its new ETag). Every failure collapses to [Fetch.Unavailable] so the
-     * caller degrades exactly as before.
+     * (fresh payload with its new ETag).
+     *
+     * The failure split matters to the caller: [Unavailable] means "not this time" and the
+     * episode stays retryable, while [NotAvailable] is the server's final answer for this
+     * episode and ends the attempts.
      */
     sealed interface Fetch {
         /** A 200: new payload, decoded matcher, and the ETag to store for the next revalidation. */
@@ -47,11 +54,17 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         /** A 304 against [cachedEtag]: keep the stored payload; [etag] is the validated one. */
         data class NotModified(val etag: String) : Fetch
 
-        /** Anything else: no token, network failure, non-success status, undecodable body. */
+        /**
+         * The server has no reference for this episode and will not grow one by being asked
+         * again: a definitive 403 or 404. Every other failure is [Unavailable].
+         */
+        data object NotAvailable : Fetch
+
+        /** No token, network failure, 5xx, unparseable base URL, undecodable body: retryable. */
         data object Unavailable : Fetch
     }
 
-    suspend fun fetchReference(
+    open suspend fun fetchReference(
         baseUrl: String,
         episodeUuid: String,
         podcastUuid: String,
@@ -85,11 +98,13 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         data class Done(val matcher: CloudReferenceMatcher?, val payload: ByteArray?, val etag: String?) : Attempt
         data class NotModified(val etag: String) : Attempt
         data object Unauthorized : Attempt
+        data object NotAvailable : Attempt
     }
 
     private fun Attempt.toFetch(): Fetch {
         if (this is Attempt.Done && matcher != null && payload != null) return Fetch.Fresh(matcher, payload, etag)
         if (this is Attempt.NotModified) return Fetch.NotModified(etag)
+        if (this is Attempt.NotAvailable) return Fetch.NotAvailable
         return Fetch.Unavailable
     }
 
@@ -143,9 +158,15 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
                         }
                     }
 
+                    response.code == 403 || response.code == 404 -> {
+                        // DEFINITIVE: the server is telling us there is no reference for this
+                        // episode, so asking again in this session would only burn a request.
+                        Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} — no reference for $episodeUuid")
+                        Attempt.NotAvailable
+                    }
+
                     !response.isSuccessful -> {
-                        // Definitive statuses (e.g. 404 = no reference) are not
-                        // timeouts — log them as what they are.
+                        // A 5xx is the server having a bad day, not an answer about this episode.
                         Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} for $episodeUuid")
                         deadAttempt()
                     }

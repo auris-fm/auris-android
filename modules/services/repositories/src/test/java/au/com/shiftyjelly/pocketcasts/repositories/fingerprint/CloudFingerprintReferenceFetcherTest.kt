@@ -24,8 +24,7 @@ class CloudFingerprintReferenceFetcherTest {
      * A REAL AurisTokenProvider against a mock auth issuer. [credential] null models no signed-in
      * account (fail closed); otherwise the issuer mints [access].
      */
-    private fun providerFor(credential: String?, access: String, authServer: MockWebServer?):
-        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider {
+    private fun providerFor(credential: String?, access: String, authServer: MockWebServer?): au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider {
         authServer?.enqueue(mintResponse(access))
         return au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
             clientProvider = {
@@ -40,12 +39,10 @@ class CloudFingerprintReferenceFetcherTest {
     }
 
     /** An issuer that mints stale-token first, then fresh-token — the turn route's 401 posture. */
-    private fun refreshingProvider(authServer: MockWebServer):
-        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider {
+    private fun refreshingProvider(authServer: MockWebServer): au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider {
         val minted = java.util.concurrent.atomic.AtomicInteger(0)
         authServer.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
-            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse =
-                mintResponse(if (minted.incrementAndGet() == 1) "stale-token" else "fresh-token")
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse = mintResponse(if (minted.incrementAndGet() == 1) "stale-token" else "fresh-token")
         }
         return au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
             clientProvider = {
@@ -56,7 +53,6 @@ class CloudFingerprintReferenceFetcherTest {
             },
         )
     }
-
 
     /** Convenience: fetch and unwrap Fresh, else null — the pre-ETag matcher contract. */
     private fun fetchMatcher(
@@ -135,6 +131,40 @@ class CloudFingerprintReferenceFetcherTest {
         val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
             .buildMatcher(json.toByteArray())
         assertNull(matcher)
+    }
+
+    /**
+     * The server GENERATES a missing reference and holds the request for it (ceiling 120 s). A
+     * client call timeout below that ceiling throws the work away and loses the reference for the
+     * episode, so the budget must sit above it.
+     */
+    @Test
+    fun `the reference fetch budget outlasts the server's generation ceiling`() {
+        assertTrue(
+            "server generation ceiling is 120 s; the client must wait for it",
+            FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS > 120_000L,
+        )
+    }
+
+    /**
+     * The call budget is worthless if the client's own read timeout fires first: at 60 s it tore
+     * down cold generations the server then completed anyway.
+     */
+    @Test
+    fun `the client read timeout does not fire before the call budget`() {
+        val field = CloudFingerprintReferenceFetcher::class.java.getDeclaredField("client")
+        field.isAccessible = true
+        val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
+        val client = field.get(fetcher) as okhttp3.OkHttpClient
+
+        assertTrue(
+            "read timeout ${client.readTimeoutMillis} ms must outlast the ${FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS} ms budget",
+            client.readTimeoutMillis >= FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
+        )
+        assertTrue(
+            "connect timeout stays short, so an unreachable host fails fast",
+            client.connectTimeoutMillis < FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
+        )
     }
 
     @Test
@@ -223,15 +253,77 @@ class CloudFingerprintReferenceFetcherTest {
     }
 
     @Test
-    fun `fetchReference returns null on non-success status`() {
+    fun `fetchReference reports a definitive 404 as NotAvailable so callers stop retrying`() {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"catalog_not_found"}"""))
         server.start()
 
         try {
-            val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
             val outcome = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_missing", "pod_1") }
-            assertTrue("a definitive 404 stays unavailable", outcome is CloudFingerprintReferenceFetcher.Fetch.Unavailable)
+            assertTrue(
+                "a 404 is the server saying this episode has no reference",
+                outcome is CloudFingerprintReferenceFetcher.Fetch.NotAvailable,
+            )
+            auth.shutdown()
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `fetchReference reports a definitive 403 as NotAvailable`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(403).setBody("""{"error":"forbidden"}"""))
+        server.start()
+
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
+            val outcome = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_denied", "pod_1") }
+            assertTrue(
+                "a 403 will not change on a retry this session",
+                outcome is CloudFingerprintReferenceFetcher.Fetch.NotAvailable,
+            )
+            auth.shutdown()
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `no token leaves the fetch Unavailable, which callers retry`() {
+        val server = MockWebServer()
+        server.start()
+
+        try {
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
+            val outcome = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1") }
+            assertTrue(
+                "a missing token is transient, not a definitive answer",
+                outcome is CloudFingerprintReferenceFetcher.Fetch.Unavailable,
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `a 500 stays Unavailable so a later attempt can succeed`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(500))
+        server.start()
+
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
+            val outcome = runBlocking { fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1") }
+            assertTrue("a server error is transient", outcome is CloudFingerprintReferenceFetcher.Fetch.Unavailable)
+            auth.shutdown()
         } finally {
             server.shutdown()
         }
@@ -239,74 +331,76 @@ class CloudFingerprintReferenceFetcherTest {
 
 // --- ETag revalidation (delta: fingerprint revalidation) ---
 
-@Test
-fun `a cached etag is sent as If-None-Match and a 304 yields NotModified`() {
-    val server = MockWebServer()
-    server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"v7\""))
-    server.start()
+    @Test
+    fun `a cached etag is sent as If-None-Match and a 304 yields NotModified`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"v7\""))
+        server.start()
 
-    try {
-        val auth = MockWebServer()
-        auth.start()
-        val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
-        val outcome = runBlocking {
-            fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = "\"v7\"")
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
+            val outcome = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = "\"v7\"")
+            }
+
+            assertTrue(
+                "a 304 against the stored etag must be NotModified",
+                outcome is CloudFingerprintReferenceFetcher.Fetch.NotModified,
+            )
+            assertEquals("\"v7\"", (outcome as CloudFingerprintReferenceFetcher.Fetch.NotModified).etag)
+            assertEquals("\"v7\"", server.takeRequest().getHeader("If-None-Match"))
+            auth.shutdown()
+        } finally {
+            server.shutdown()
         }
-
-        assertTrue("a 304 against the stored etag must be NotModified",
-            outcome is CloudFingerprintReferenceFetcher.Fetch.NotModified)
-        assertEquals("\"v7\"", (outcome as CloudFingerprintReferenceFetcher.Fetch.NotModified).etag)
-        assertEquals("\"v7\"", server.takeRequest().getHeader("If-None-Match"))
-        auth.shutdown()
-    } finally {
-        server.shutdown()
     }
-}
 
-@Test
-fun `a 200 after revalidation carries the payload and the new etag`() {
-    val server = MockWebServer()
-    server.enqueue(MockResponse().setBody(compactV2Json()).setHeader("ETag", "\"v8\""))
-    server.start()
+    @Test
+    fun `a 200 after revalidation carries the payload and the new etag`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody(compactV2Json()).setHeader("ETag", "\"v8\""))
+        server.start()
 
-    try {
-        val auth = MockWebServer()
-        auth.start()
-        val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
-        val fresh = runBlocking {
-            fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = "\"v7\"")
-        } as CloudFingerprintReferenceFetcher.Fetch.Fresh
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "tok", auth))
+            val fresh = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = "\"v7\"")
+            } as CloudFingerprintReferenceFetcher.Fetch.Fresh
 
-        assertEquals("\"v8\"", fresh.etag)
-        assertEquals(3, fresh.matcher.count)
-        assertEquals("the stored etag was still sent", "\"v7\"", server.takeRequest().getHeader("If-None-Match"))
-        auth.shutdown()
-    } finally {
-        server.shutdown()
-    }
-}
-
-@Test
-fun `a 401 refresh keeps the revalidation etag on the retry`() {
-    val server = MockWebServer()
-    server.enqueue(MockResponse().setResponseCode(401))
-    server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"v7\""))
-    server.start()
-
-    try {
-        val auth = MockWebServer()
-        auth.start()
-        val fetcher = CloudFingerprintReferenceFetcher(refreshingProvider(auth))
-        val outcome = runBlocking {
-            fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = "\"v7\"")
+            assertEquals("\"v8\"", fresh.etag)
+            assertEquals(3, fresh.matcher.count)
+            assertEquals("the stored etag was still sent", "\"v7\"", server.takeRequest().getHeader("If-None-Match"))
+            auth.shutdown()
+        } finally {
+            server.shutdown()
         }
-
-        assertTrue(outcome is CloudFingerprintReferenceFetcher.Fetch.NotModified)
-        server.takeRequest()
-        assertEquals("\"v7\"", server.takeRequest().getHeader("If-None-Match"))
-        auth.shutdown()
-    } finally {
-        server.shutdown()
     }
-}
+
+    @Test
+    fun `a 401 refresh keeps the revalidation etag on the retry`() {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(401))
+        server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"v7\""))
+        server.start()
+
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(refreshingProvider(auth))
+            val outcome = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = "\"v7\"")
+            }
+
+            assertTrue(outcome is CloudFingerprintReferenceFetcher.Fetch.NotModified)
+            server.takeRequest()
+            assertEquals("\"v7\"", server.takeRequest().getHeader("If-None-Match"))
+            auth.shutdown()
+        } finally {
+            server.shutdown()
+        }
+    }
 }

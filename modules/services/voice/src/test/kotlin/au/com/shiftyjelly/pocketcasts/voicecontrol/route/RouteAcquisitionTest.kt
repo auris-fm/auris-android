@@ -82,7 +82,9 @@ class RouteAcquisitionTest {
             return streamStartResult
         }
 
-        override fun closeInputStream() {
+                override fun openStreamGeneration(): Long? = null
+
+override fun closeInputStream(generation: Long?) {
             closeCalls++
         }
     }

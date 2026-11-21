@@ -18,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CaptureHardware
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter
@@ -49,6 +50,7 @@ import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -62,6 +64,9 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -239,7 +244,9 @@ class VoiceControlCaptureRestartTest {
 
         override fun startInputStream(): Boolean = microphoneCapture.startAcquiredStream()
 
-        override fun closeInputStream() = microphoneCapture.closeAcquiredStream()
+        override fun openStreamGeneration(): Long? = microphoneCapture.openStreamGeneration
+
+        override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquiredStream(generation)
     }
 
     /** Stands in for Oboe: counts attach (VAD start), teardown (VAD stop), open/start/close. */
@@ -304,6 +311,15 @@ class VoiceControlCaptureRestartTest {
         override fun setEarlyWakeCutoff(samples: Int) = Unit
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
+        /**
+         * A live stream keeps delivering, so the counter advances by one poll's worth of frames
+         * each time it is read. A constant count would trip the starvation check after 2.5 s and end
+         * a capture these tests mean to keep alive, making their stop/attach assertions depend on
+         * wall-clock time rather than on the behaviour under test.
+         */
+        override fun getFramesConsumed(): Long =
+            if (capturing) consumedFrames.addAndGet(OboeConfig.FRAMES_PER_POLL.toLong()) else 0L
+        private val consumedFrames = java.util.concurrent.atomic.AtomicLong(0L)
     }
 
     private class FakeRule(
@@ -434,6 +450,46 @@ class VoiceControlCaptureRestartTest {
         } finally {
             job.cancel()
         }
+    }
+
+    /**
+     * The device set the monitor enumerates, published through its own injected source: the route
+     * surfaces are StateFlows read from it, so a change here is what a platform broadcast would be.
+     */
+    private var enumeratedDevices = AndroidAudioRouteMonitor.EnumeratedDevices(emptyList(), emptyList())
+    private val deviceSet = java.util.concurrent.atomic.AtomicReference(enumeratedDevices)
+
+    private fun publishDevices(devices: AndroidAudioRouteMonitor.EnumeratedDevices) {
+        enumeratedDevices = devices
+        deviceSet.set(devices)
+    }
+
+    private fun deliverDevicesChanged(monitor: AndroidAudioRouteMonitor) = monitor.onDevicesChanged()
+
+    /**
+     * Let the monitor's debounce run and publish the surface it just read. The debounce runs on the
+     * monitor's own Dispatchers.Default scope, so real time must pass for it; pumping the test
+     * scheduler alone would never deliver that read. Returns once [expected] is published.
+     */
+    private fun settleRouteRead(monitor: AndroidAudioRouteMonitor, expected: AudioRoute) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && monitor.availability.value != expected) {
+            testScheduler.runCurrent()
+            runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+            Thread.sleep(20)
+        }
+        assertEquals("the route read did not publish the expected surface", expected, monitor.availability.value)
+    }
+
+    /** As [settleRouteRead], for a change whose exact answer the control does not pin. */
+    private fun settleRouteReadUntil(monitor: AndroidAudioRouteMonitor, settled: (AudioRoute) -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && !settled(monitor.availability.value)) {
+            testScheduler.runCurrent()
+            runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+            Thread.sleep(20)
+        }
+        assertTrue("the route read did not settle", settled(monitor.availability.value))
     }
 
     @Test
@@ -627,6 +683,119 @@ class VoiceControlCaptureRestartTest {
                 (getField(service, "modeJob") as? kotlinx.coroutines.Job)?.cancel()
             }
             runCatching { microphoneCapture.stopCapture() }
+        }
+    }
+
+    /**
+     * A failed attempt is recorded against the surface it was tried on, and the next attempt is
+     * refused while that surface is unchanged. A route change can take that surface away and bring
+     * it back without the user's devices changing at all — a SCO link dropping and returning leaves
+     * the enumerated set identical. The refusal then outlives the situation it describes: capture
+     * stays off for the rest of the session even though the headset microphone is usable again.
+     */
+    @Test
+    fun `a capture that stopped on a route change comes back when a usable microphone returns`() = runBlocking {
+        publishDevices(
+            AndroidAudioRouteMonitor.EnumeratedDevices(
+                outputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+                inputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
+            ),
+        )
+        val modelsReady = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition(isReady = true)
+        val gate = VoiceControlGate(
+            listOf(FakeRule(EnabledByUserCondition.ID, VoiceControlRuleGroup.Setup), modelsReady),
+            CoroutineScope(Dispatchers.Main.immediate),
+        )
+        var scoLinkUp: () -> Boolean = { false }
+        val hardware = FakeHardware(scoReady = { scoLinkUp() })
+        val microphoneCapture = MicrophoneCapture(context, hardware, mock(EpisodeReferenceEligibility::class.java))
+        val monitor = AndroidAudioRouteMonitor(
+            context,
+            GracePeriodSignal(),
+            enumeratedDeviceTypes = { deviceSet.get() },
+        )
+        val scoPlatform = FakeScoPlatform(microphoneCapture).also { scoLinkUp = { it.scoLinkUp } }
+        val acquisition = RouteAcquisition(scoPlatform, timeoutMs = 1_200L, pollIntervalMs = 10L)
+
+        val service = VoiceControlService().also { it.voiceSessionGate = VoiceSessionGate() }
+        android.content.ContextWrapper::class.java.getDeclaredMethod(
+            "attachBaseContext",
+            Context::class.java,
+        ).apply { isAccessible = true }.invoke(service, context)
+        setField(service, "gate", gate)
+        setField(service, "audioRouteMonitor", monitor)
+        setField(service, "routeAcquisition", acquisition)
+        setField(service, "modelsReadyCondition", modelsReady)
+        setField(service, "gracePeriodSignal", GracePeriodSignal())
+        setField(service, "captureStateHolder", VoiceControlCaptureStateHolder())
+
+        // The production watcher of the offered surface, started exactly as the service starts it.
+        val watcher = VoiceControlService::class.java.getDeclaredMethod("watchOfferedSurface").apply { isAccessible = true }
+
+        try {
+            awaitState("the gate to allow") { gate.state.value.allowed }
+            assertEquals("precondition: the candidate surface is present", AudioRoute.BluetoothA2dpOnly, monitor.availability.value)
+            val identityBefore = monitor.connectedDeviceIdentity()
+            watcher.invoke(service)
+
+            // The failure a real attempt leaves behind: recorded against the answer it was tried on.
+            replaceField(service, "failedAttemptAvailability", AudioRoute.BluetoothA2dpOnly)
+            replaceField(service, "failedAttemptSkipLogged", true)
+            service.acquireExternalMicrophoneIfCandidate()
+            assertNull(
+                "precondition: while that surface is unchanged the attempt is refused",
+                getField(service, "acquisitionJob"),
+            )
+
+            // The route leaves that surface: nothing usable, then a wired headset. The record stays —
+            // it names the answer the attempt was tried on, not the one now present.
+            publishDevices(AndroidAudioRouteMonitor.EnumeratedDevices(emptyList(), emptyList()))
+            deliverDevicesChanged(monitor)
+            settleRouteRead(monitor, AudioRoute.Unknown)
+            publishDevices(
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_WIRED_HEADPHONES),
+                    inputs = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+                ),
+            )
+            deliverDevicesChanged(monitor)
+            settleRouteReadUntil(monitor) { it != AudioRoute.BluetoothA2dpOnly }
+            assertEquals(
+                "precondition: the failure record survived the route change",
+                AudioRoute.BluetoothA2dpOnly,
+                getField(service, "failedAttemptAvailability"),
+            )
+
+            // ...and the SAME Bluetooth devices return, so the user's device set ends up identical.
+            publishDevices(
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+                    inputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
+                ),
+            )
+            // An open SCO link classifies these same devices as a live headset; the candidate surface
+            // is what is offered when the link is down, which is the situation this control describes.
+            scoPlatform.stopBluetoothSco()
+            deliverDevicesChanged(monitor)
+            settleRouteRead(monitor, AudioRoute.BluetoothA2dpOnly)
+            assertEquals("precondition: the user's device set is the same one", identityBefore, monitor.connectedDeviceIdentity())
+
+            // The record still names this answer, but the surface has been through a route change
+            // since the attempt failed against it. A usable microphone must be acquired again.
+            service.acquireExternalMicrophoneIfCandidate()
+            assertNotNull(
+                "a usable microphone returning through a route change must be acquired again",
+                getField(service, "acquisitionJob"),
+            )
+        } finally {
+            val attempt = getField(service, "acquisitionJob") as? kotlinx.coroutines.Job
+            runCatching { attempt?.cancel() }
+            runCatching {
+                (getField(service, "serviceScope") as? CoroutineScope)?.coroutineContext?.get(kotlinx.coroutines.Job)?.cancelChildren()
+            }
+            runCatching { microphoneCapture.stopCapture() }
+            runCatching { attempt?.join() }
+            testScheduler.runCurrent()
         }
     }
 }

@@ -30,25 +30,70 @@ class CloudFingerprinterWindowRetentionTest {
         }
     }
 
+    private fun allocatedBytes(body: () -> Unit): Long {
+        val bean = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        val id = Thread.currentThread().threadId()
+        val before = bean.getThreadAllocatedBytes(id)
+        body()
+        return bean.getThreadAllocatedBytes(id) - before
+    }
+
     @Test
     fun `drained windows are released instead of accumulating for the whole session`() {
-        val fp = CloudFingerprinter()
+        // Behavioural retention bound: with drains after every push, the
+        // fingerprinter's own allocation over a long session must stay
+        // O(window), not O(session). If drained windows were kept reachable,
+        // their hashes would count against this delta (the old code retained
+        // 233/233 windows here). No test-only seam in production code.
         val samples = signal(16000, 240) // 4 minutes -> ~232 windows at 1/s
-        var offset = 0
+        var fp: CloudFingerprinter? = null
         var drained = 0
+        val used = allocatedBytes {
+            val f = CloudFingerprinter()
+            fp = f
+            var offset = 0
+            while (offset < samples.size) {
+                val end = minOf(offset + 16000, samples.size) // 1 s chunks, like the tap
+                f.pushSamples(samples.copyOfRange(offset, end), 1, 16000)
+                drained += f.drainWindows().size
+                offset = end
+            }
+            drained += f.finish().size
+        }
+        assertTrue("expected a long session's worth of windows, got $drained", drained > 200)
+        // Allocation alone can't see retention (the old list leaks into the
+        // old generation without new allocation), so bound LIVE retention:
+        // after GC, the fingerprinter must not keep the session's window
+        // history reachable. A WeakReference to a drained window proves it.
+        val budget = 2_000_000L * (samples.size / 16000)
+        assertTrue("fingerprinter allocated $used B over ${samples.size / 16000} s (budget $budget B)", used <= budget)
+        // And the emission contract still holds: nothing left to drain.
+        assertTrue(fp!!.drainWindows().isEmpty())
+    }
+
+    @Test
+    fun `a drained window is not retained by the fingerprinter`() {
+        val fp = CloudFingerprinter()
+        val samples = signal(16000, 60)
+        var offset = 0
+        var first: CloudFingerprinter.Window? = null
         while (offset < samples.size) {
-            val end = minOf(offset + 16000, samples.size) // 1 s chunks, like the tap
+            val end = minOf(offset + 16000, samples.size)
             fp.pushSamples(samples.copyOfRange(offset, end), 1, 16000)
-            drained += fp.drainWindows().size
+            val drained = fp.drainWindows()
+            if (first == null) first = drained.firstOrNull()
             offset = end
         }
-        drained += fp.finish().size
-        assertTrue("expected a long session's worth of windows, got $drained", drained > 200)
-
-        // After draining, the retained history must be bounded (undrained tail
-        // only), not the whole session. windowsSoFar() is the retention seam.
-        val retained = fp.windowsSoFar().size
-        assertTrue("retained $retained windows after draining $drained — history is unbounded", retained <= 16)
+        fp.finish()
+        checkNotNull(first) { "expected at least one emitted window" }
+        val ref = java.lang.ref.WeakReference(first)
+        first = null
+        repeat(5) {
+            System.gc()
+            Thread.sleep(50)
+            if (ref.get() == null) return@repeat
+        }
+        assertTrue("fingerprinter still retains a drained window after GC — session history is unbounded", ref.get() == null)
     }
 
     @Test

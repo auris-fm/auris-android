@@ -147,9 +147,6 @@ class CloudFingerprinter {
         return drainWindows()
     }
 
-    /** Windows emitted but not yet drained (a window is only emitted once its tail lookahead is available). */
-    fun windowsSoFar(): List<Window> = windows.toList()
-
     /**
      * Returns the windows emitted since the last call to this method and
      * RELEASES them. The caller feeds PCM in chunks and drains windows after

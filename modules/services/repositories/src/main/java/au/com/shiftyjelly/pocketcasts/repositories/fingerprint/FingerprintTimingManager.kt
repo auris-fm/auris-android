@@ -231,6 +231,7 @@ class FingerprintTimingManager @Inject constructor(
     // Independent of the transcript-sync Rust matcher above.
     private var cloudMatcher: CloudReferenceMatcher? = null
     private var cloudFingerprinter: CloudFingerprinter? = null
+    private var cloudFirstMappingLogged = false
     private var hasReachedActive = false
     private var hasTrackedFailure = false
 
@@ -767,6 +768,7 @@ class FingerprintTimingManager @Inject constructor(
         currentMatcher = null
         cloudMatcher = null
         cloudFingerprinter = null
+        cloudFirstMappingLogged = false
         activeEpisodeUuid = null
         hasReachedActive = false
         hasTrackedFailure = false
@@ -865,6 +867,8 @@ class FingerprintTimingManager @Inject constructor(
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
             cloudMatcher = resolveCloudMatcher(cloudBaseUrl, episodeUuid, podcastUuid)
+        } else {
+            Timber.d("FingerprintTimingManager: cloud alignment off — no gateway URL (cutover inactive) for $episodeUuid")
         }
 
         // Try loading cached reference from disk. A reference cached while streaming is still valid
@@ -1620,7 +1624,16 @@ class FingerprintTimingManager @Inject constructor(
                 referenceTime = best.timestampSeconds.toDouble(),
                 score = best.score,
             )
-            consider(candidate, isDebug)
+            val committed = consider(candidate, isDebug)
+            // Log the first mapping the drift filter actually commits, not a
+            // candidate it may reject (spec: the turn's context depends on it).
+            if (committed > 0 && !cloudFirstMappingLogged) {
+                cloudFirstMappingLogged = true
+                Timber.d(
+                    "FingerprintTimingManager: first cloud mapping committed — playback %.1fs, reference %.1fs, score %.2f",
+                    absolutePlaybackTime, best.timestampSeconds, best.score,
+                )
+            }
         }
 
         publishSnapshot()

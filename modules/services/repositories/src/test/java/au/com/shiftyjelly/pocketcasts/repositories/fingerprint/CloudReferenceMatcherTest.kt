@@ -87,10 +87,11 @@ class CloudReferenceMatcherTest {
         deduped.add(0f, longArrayOf(7, 9, 11))
         assertEquals(2f / 3f, deduped.findTopMatches(longArrayOf(7, 9, 42), 1)[0].score)
 
-        // Smaller distinct checkpoint side wins the min: checkpoint {7, 9},
-        // query {7, 9, 42} -> 2 / min(3, 2) = 1.0.
+        // Reverse case (shared fixture): checkpoint [7, 7, 9] -> distinct
+        // {7, 9} (2); window [7, 9, 42] -> distinct 3, found 2. Score =
+        // 2 / min(3, 2) = 1.0. A window-count-only denominator gives 2/3.
         val small = CloudReferenceMatcher()
-        small.add(0f, longArrayOf(7, 9, 9))
+        small.add(0f, longArrayOf(7, 7, 9))
         assertEquals(1.0f, small.findTopMatches(longArrayOf(7, 9, 42), 1)[0].score)
     }
 }

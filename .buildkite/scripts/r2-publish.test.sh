@@ -65,11 +65,6 @@ printf '%s\n' "$@" > "$MOCK_CURL_ARGV"
 # expected dummy credential arrives THERE (and nowhere in argv).
 if printf '%s\n' "$@" | grep -q '^-K$'; then cat > "$MOCK_CURL_STDIN"; fi
 [ -n "${MOCK_CURL_SLEEP:-}" ] && sleep "$MOCK_CURL_SLEEP"
-if [ -n "${MOCK_CURL_FAIL_BODY:-}" ]; then
-  printf '%s' "$MOCK_CURL_FAIL_BODY" > "${out:-/dev/null}"
-  printf '500'
-  exit 0
-fi
 url=""; data=""; cond=0; out=""
 prev=""
 for a in "$@"; do
@@ -77,6 +72,12 @@ for a in "$@"; do
   case "$a" in https://*) url="$a";; "If-None-Match: *") cond=1;; esac
   prev="$a"
 done
+if [ -n "${MOCK_CURL_FAIL_BODY:-}" ]; then
+  # Like curl -o: the error body goes to the output file on ANY status.
+  [ -n "$out" ] && printf '%s' "$MOCK_CURL_FAIL_BODY" > "$out"
+  printf '500'
+  exit 0
+fi
 key="${url#*://*/}"
 dst="$MOCK_STORE/${key%%/*}/${key#*/}"
 if [ "$cond" = 1 ] && [ -f "$dst" ]; then
@@ -147,6 +148,9 @@ grep -q 'user = "id:secret"' "$MOCK_CURL_STDIN" && r=ok || r=missing
 check "expected credential arrives via stdin config" ok "$r"
 
 # 1c. PUT failure with a canary in the R2 error body: fixed diagnostic only.
+# Remove the versioned object first so the PUT actually runs (an existing
+# identical object would take the 412 resume path and never exercise it).
+rm -f "$MOCK_STORE/auris-download/apk/auris-8.20-9522.apk"
 OUTC="$(cd "$WORK/repo" && MOCK_CURL_FAIL_BODY='<Error>canary-r2-secret-77</Error>' bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RCC=$?
 check "PUT 500 fails the step" 1 "$RCC"
 printf '%s' "$OUTC" | grep -q "HTTP 500" && r=ok || r=missing

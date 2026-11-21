@@ -30,8 +30,6 @@ class RouteAcquisitionOverlapTest {
         override fun setCommunicationDevice(deviceId: Int) = true
         override fun communicationDeviceId(): Int? = null
         override fun clearCommunicationDevice() = Unit
-        override fun audioMode() = 0
-        override fun setAudioMode(mode: Int) = Unit
         override fun deviceType(deviceId: Int) = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
         override fun openInputStream(): Int {
             opens++

@@ -3001,10 +3001,6 @@ class VoiceAsrEngineTest {
 
         override fun clearCommunicationDevice() = Unit
 
-        override fun audioMode(): Int = AudioManager.MODE_NORMAL
-
-        override fun setAudioMode(mode: Int) = Unit
-
         override fun deviceType(deviceId: Int): Int? = AudioDeviceInfo.TYPE_WIRED_HEADSET
 
         override fun openInputStream(): Int {

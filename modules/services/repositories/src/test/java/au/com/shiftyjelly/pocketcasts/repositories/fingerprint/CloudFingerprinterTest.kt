@@ -96,6 +96,6 @@ class CloudFingerprinterTest {
         // until frames past its target zone exist (~9.5 s of audio).
         val samples = deterministicSignal(16000, 10.0)
         fp.pushSamples(samples.copyOfRange(0, 16000 * 8), 1, 16000)
-        assertTrue("no window should be emitted after only 8 s", fp.windowsSoFar().isEmpty())
+        assertTrue("no window should be emitted after only 8 s", fp.drainWindows().isEmpty())
     }
 }

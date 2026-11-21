@@ -124,6 +124,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
                             // A 304 without any etag to validate against cannot be trusted.
                             deadAttempt()
                         } else {
+                            Timber.d("CloudFingerprintReferenceFetcher: 304 not modified for $episodeUuid")
                             Attempt.NotModified(etag)
                         }
                     }
@@ -138,8 +139,15 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
                     else -> {
                         val payload = response.body.bytes()
                         val matcher = buildMatcher(payload)
-                        if (matcher == null) Attempt.Done(null, null, null)
-                        else Attempt.Done(matcher, payload, response.header("ETag"))
+                        // Diagnosability (spec: a failed retest must be readable
+                        // from the phone alone): one line per fetch outcome.
+                        if (matcher == null) {
+                            Timber.w("CloudFingerprintReferenceFetcher: 200 but undecodable reference (${payload.size} bytes) for $episodeUuid")
+                            Attempt.Done(null, null, null)
+                        } else {
+                            Timber.d("CloudFingerprintReferenceFetcher: fetched ${payload.size} bytes, ${matcher.count} checkpoints for $episodeUuid")
+                            Attempt.Done(matcher, payload, response.header("ETag"))
+                        }
                     }
                 }
             }

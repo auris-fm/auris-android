@@ -66,7 +66,8 @@ class CloudReferenceMatcherTest {
     }
 
     /**
-     * Shared cross-platform fixture (spec ecb09160): score = distinct query
+     * Shared cross-platform fixture (timeline-alignment "Reference matching"):
+     * score = distinct query
      * hashes found in the checkpoint / min(distinct query count, distinct
      * checkpoint count). iOS pins the same numbers. Duplicates on either
      * side must not change the score.

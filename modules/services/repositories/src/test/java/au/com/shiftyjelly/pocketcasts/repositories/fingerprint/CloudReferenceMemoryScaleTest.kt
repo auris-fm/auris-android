@@ -16,8 +16,8 @@ import org.junit.Test
  *
  *  - matcher storage: primitive, bounded bytes per hash (no boxed Long sets).
  *
- * Per spec delta 8c58e3f6 the decode-peak bound is dropped until cloud's real
- * payload numbers say decoding matters; storage bound + score parity stay.
+ * The decode-peak bound is deferred until real payload numbers say decoding
+ * matters; storage bound + score parity stay.
  *
  * Budgets are allocation deltas measured on the current thread, so they are
  * deterministic (no GC-timing dependence). They are generous against the
@@ -85,37 +85,49 @@ class CloudReferenceMemoryScaleTest {
         assertTrue("matcher allocated $used B for $totalHashes hashes (budget $budget B)", used <= budget)
     }
 
+    /** Test-only longhand oracle: distinct-over-min-distinct set overlap. */
+    private fun oracleScore(query: LongArray, checkpoint: LongArray): Float {
+        val q = query.toHashSet()
+        val c = checkpoint.toHashSet()
+        if (q.isEmpty() || c.isEmpty()) return 0f
+        return q.count { it in c }.toFloat() / minOf(q.size, c.size)
+    }
+
     @Test
-    fun `compact storage scores identically to the boxed reference implementation on deduplicated inputs`() {
-        // Parity on DEDUPLICATED inputs (spec ecb09160): server windows are
-        // deduped, so real-reference scores must equal the old ones exactly.
-        // Duplicate-heavy behaviour is pinned separately by the shared
-        // distinct-count fixture in CloudReferenceMatcherTest.
+    fun `compact storage scores match a set-overlap oracle with guaranteed partial overlap`() {
+        // Deduplicated inputs with GUARANTEED partial overlap: each query is
+        // built from a checkpoint's own hashes plus foreign ones, so random
+        // near-zero-overlap queries can't make this control vacuous.
         val payload = compactV2(checkpoints = 40, hashesPer = 24, seed = 3)
         val compact = buildMatcher(payload)!!
-        val legacy = ReferenceFingerprint.decode(payload)!!
-        val legacyMatcher = CloudReferenceMatcher()
-        for (cp in legacy.libraryCheckpoints()) {
-            legacyMatcher.add(cp.timestampSeconds, cp.hashes.map { it.toLong() and 0xFFFFFFFFL }.toLongArray())
-        }
+        val decoded = ReferenceFingerprint.decode(payload)!!.libraryCheckpoints()
+        val checkpoints = decoded.map { cp -> cp.timestampSeconds to cp.hashes.map { it.toLong() and 0xFFFFFFFFL }.toLongArray() }
+
         val rnd = Random(5)
-        repeat(20) {
-            val query = rnd.nextLong().let { seed ->
-                val r = Random(seed)
-                generateSequence { r.nextLong() and 0xFFFFFFFFL }.distinct().take(24).toList().toLongArray()
+        var partialSeen = 0
+        for ((idx, cp) in checkpoints.withIndex()) {
+            // Query: 12 of this checkpoint's hashes + 12 foreign hashes.
+            val own = cp.second.toList().shuffled(Random(idx)).take(12)
+            val foreign = generateSequence { rnd.nextLong() and 0xFFFFFFFFL }
+                .filter { it !in cp.second.toHashSet() }.distinct().take(12).toList()
+            val query = (own + foreign).toLongArray()
+            val matches = compact.findTopMatches(query, 3)
+            assertEquals(3, matches.size)
+            for (m in matches) {
+                val expected = oracleScore(query, checkpoints.first { it.first == m.timestampSeconds }.second)
+                assertEquals("checkpoint ${m.timestampSeconds}", expected, m.score)
+                if (expected > 0f && expected < 1f) partialSeen++
             }
-            val a = compact.findTopMatches(query, 3)
-            val b = legacyMatcher.findTopMatches(query, 3)
-            assertEquals(b.size, a.size)
-            for (i in a.indices) {
-                assertEquals(b[i].timestampSeconds, a[i].timestampSeconds)
-                assertEquals(b[i].score, a[i].score)
-            }
+            // The queried checkpoint itself must appear with score 12/24 = 0.5.
+            val self = matches.first { it.timestampSeconds == cp.first }
+            assertEquals(0.5f, self.score)
         }
-        // A query drawn from an actual checkpoint must score 1.0 at its timestamp.
-        val first = legacy.libraryCheckpoints()[7]
-        val exact = compact.findTopMatches(first.hashes.map { it.toLong() and 0xFFFFFFFFL }.toLongArray(), 1)
-        assertEquals(first.timestampSeconds, exact[0].timestampSeconds)
+        assertTrue("control must exercise partial overlap, saw $partialSeen", partialSeen > 0)
+
+        // Exact query: a checkpoint's own hashes score 1.0 at its timestamp.
+        val first = checkpoints[7]
+        val exact = compact.findTopMatches(first.second, 1)
+        assertEquals(first.first, exact[0].timestampSeconds)
         assertEquals(1.0f, exact[0].score)
     }
 }

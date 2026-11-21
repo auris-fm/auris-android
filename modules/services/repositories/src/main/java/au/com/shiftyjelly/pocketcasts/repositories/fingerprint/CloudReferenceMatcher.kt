@@ -69,7 +69,7 @@ class CloudReferenceMatcher {
             for (i in 0 until queryUnique) {
                 if (binarySearch(cp.sortedHashes, query[i])) intersection++
             }
-            // Spec rule (ecb09160, both platforms): distinct query hashes
+            // Spec rule (timeline-alignment, both platforms): distinct query hashes
             // found in the checkpoint, over min(distinct query count,
             // distinct checkpoint count). sortedHashes is already deduped,
             // so its length IS the distinct checkpoint count. Server windows

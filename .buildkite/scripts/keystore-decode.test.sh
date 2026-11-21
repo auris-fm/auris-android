@@ -11,6 +11,7 @@ check() {
   else FAIL=$((FAIL+1)); echo "FAIL: $1 (exit $3 want $2)"; fi
 }
 
+SAVED_REAL_KEYTOOL_EARLY="$(command -v keytool)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
@@ -63,9 +64,13 @@ STUB
 mkdir -p app/build/outputs/bundle/release
 touch app/build/outputs/bundle/release/app-release.aab
 
+# Pin JAVA_HOME to the REAL JDK for the generic cases: CI jobs set their
+# own JAVA_HOME, and the gate (correctly) prefers it -- the fixture must
+# not inherit a JAVA_HOME that points somewhere without a working keytool.
+FIXTURE_JAVA_HOME="$(dirname "$(dirname "$SAVED_REAL_KEYTOOL_EARLY")")"
 run() { # b64-value expected_exit name
   rm -f gradlew-reached
-  ANDROID_UPLOAD_KEYSTORE_B64="$1" BUILDKITE_BUILD_NUMBER=9452 \
+  JAVA_HOME="$FIXTURE_JAVA_HOME" ANDROID_UPLOAD_KEYSTORE_B64="$1" BUILDKITE_BUILD_NUMBER=9452 \
     bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
   check "$3" "$2" "$?"
 }
@@ -95,7 +100,7 @@ exec /usr/bin/openssl "$@"
 STUB
 chmod +x "$WORK/libressl-bin/openssl"
 rm -f gradlew-reached
-PATH="$WORK/libressl-bin:$PATH" ANDROID_UPLOAD_KEYSTORE_B64="$WRAPPED_B64" BUILDKITE_BUILD_NUMBER=9452 \
+PATH="$WORK/libressl-bin:$PATH" JAVA_HOME="$FIXTURE_JAVA_HOME" ANDROID_UPLOAD_KEYSTORE_B64="$WRAPPED_B64" BUILDKITE_BUILD_NUMBER=9452 \
   bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
 check "wrapped base64 under LibreSSL-like PATH openssl still passes" 0 "$?"
 
@@ -127,14 +132,19 @@ rm -f "$WORK/bin/keytool"
 
 # Whitespace-only (PRESENT) value decodes to empty: must fail at the
 # non-empty check with its diagnostic, and keytool must never run.
-cat > "$WORK/bin/keytool" <<'STUB'
+# Unquoted heredoc so $WORK expands NOW (the stub runs in a subshell that
+# never sees the fixture's unexported variables). Also place the stub in
+# JAVA_HOME/bin so the case selects it even when CI sets JAVA_HOME.
+mkdir -p "$WORK/empty-jh/bin"
+cat > "$WORK/empty-jh/bin/keytool" <<STUB
 #!/bin/bash
 echo invoked >> "$WORK/keytool-empty-marker"
 exit 0
 STUB
-chmod +x "$WORK/bin/keytool"
+chmod +x "$WORK/empty-jh/bin/keytool"
+cp "$WORK/empty-jh/bin/keytool" "$WORK/bin/keytool"
 rm -f "$WORK/keytool-empty-marker"
-OUTE=$(ANDROID_UPLOAD_KEYSTORE_B64="   " BUILDKITE_BUILD_NUMBER=9452 \
+OUTE=$(JAVA_HOME="$WORK/empty-jh" ANDROID_UPLOAD_KEYSTORE_B64="   " BUILDKITE_BUILD_NUMBER=9452 \
   bash -eu .buildkite/commands/auris-release-aab.sh 2>&1); CODEE=$?
 check "whitespace-only value fails" 1 "$CODEE"
 printf '%s' "$OUTE" | grep -q "decoded keystore is empty" && r=ok || r=missing

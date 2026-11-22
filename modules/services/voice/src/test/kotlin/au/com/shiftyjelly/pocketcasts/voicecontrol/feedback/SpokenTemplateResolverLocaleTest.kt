@@ -393,7 +393,7 @@ class SpokenTemplateResolverLocaleTest {
         "cloud_error_retrieval_unavailable",
         "yue",
         "b+yue",
-        "唔好意思，我啱啲查唔到呢樣嘢。唔該再試一次。",
+        "唔好意思，我啱啱查唔到呢樣嘢。唔該再試一次。",
     )
 
     @Test
@@ -711,6 +711,29 @@ class SpokenTemplateResolverLocaleTest {
             }
         }
         assertEquals("a spoken line must not name internals: $offenders", emptyList<String>(), offenders)
+    }
+
+    /**
+     * The Cantonese "just now" adverb is 啱啱. A near-homophone (啱啲) shipped in one line and read as
+     * ungrammatical to a Cantonese speaker; nothing caught it because every assertion compared the
+     * line to itself, copied from the same source.
+     *
+     * This pins the WORD, not the sentence, so the same slip in any other yue line fails here. It is
+     * deliberately narrow — one adverb, one locale — and does not claim to validate Cantonese grammar
+     * generally; that still needs a reader.
+     */
+    @Test
+    fun `cantonese copy does not use a near-homophone for just now`() {
+        Locale.setDefault(Locale.ENGLISH)
+        RuntimeEnvironment.setQualifiers("b+yue")
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        val keys = listOf(
+            "cloud_error_retrieval_unavailable",
+            "cloud_error_speech_unavailable",
+            "cloud_error_internal_error",
+        )
+        val offenders = keys.filter { resolver.resolveLocalized(it, "yue").text.contains("啱啲") }
+        assertEquals("啱啲 is not the 'just now' adverb; use 啱啱: $offenders", emptyList<String>(), offenders)
     }
 
     @Test

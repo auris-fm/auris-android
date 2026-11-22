@@ -14,8 +14,9 @@
         <item>sleep.query|Sleep timer {remaining}</item>
         <item>bookmark.add|Bookmarked at {position}</item>
         <item>playback.next_episode|Playing {episode title}</item>
-        <!-- Cloud diagnostics. A code with a user-facing meaning gets its own line
-             here; anything else gets the dedicated cloud_error_generic string below, and the error earcon
+        <!-- Cloud diagnostics do NOT belong here: every cloud_error_* line is a dedicated string
+             below, because an array entry cannot be overridden per locale. A control fails if one is
+             added back. A code with no line of its own gets cloud_error_generic, and the error earcon
              only if even that is missing. -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
         <item>general.cloud_incomplete_turn|Sorry, I couldn\'t complete that request.</item>

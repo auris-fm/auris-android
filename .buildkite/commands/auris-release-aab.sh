@@ -133,8 +133,8 @@ buildkite-agent artifact upload app/build/outputs/bundle/release/app-release.aab
 
 # Carry the BUILT version with the artifact: each step checks out its own
 # copy of version.properties, so a later step must never read its own base
-# version as "what was uploaded". The Play step records this value only
-# after a successful upload.
+# version as "what was built". The Play step validates and records this value
+# BEFORE it uploads, so no fallible step follows the irreversible one.
 BUILT_VC="$(sed -n 's/^versionCode=//p' version.properties | head -1)"
 [ -n "$BUILT_VC" ] || { echo "FAIL: no versionCode after build" >&2; exit 1; }
 printf '%s\n' "$BUILT_VC" > built-version-code.txt

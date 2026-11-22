@@ -42,6 +42,34 @@ def check(name)
 end
 
 S = Google::Apis::AndroidpublisherV3
+
+# The gem under test must be the one Gemfile.lock pins. Otherwise a lockfile bump
+# leaves this control green against an OLD gem while the release step uses the
+# new, unverified one -- the control would certify a version nobody ships.
+lock = File.read(File.expand_path('../../Gemfile.lock', __dir__))
+pinned = lock[/^\s{4}google-apis-androidpublisher_v3 \(([0-9.]+)\)/, 1]
+if pinned.nil?
+  warn 'FAIL: could not read the google-apis-androidpublisher_v3 pin from Gemfile.lock'
+  exit 1
+end
+# $LOAD_PATH loading (the vendored-bundle path) does not register a loaded_spec,
+# so fall back to the gem's own VERSION constant -- still the real gem's value.
+loaded = Gem.loaded_specs['google-apis-androidpublisher_v3']&.version&.to_s
+# (The gem's VERSION constant is the API version "V3", not the gem version, so
+# it cannot serve here.)
+if loaded.nil?
+  # Last resort: the directory the library was actually required from.
+  path = $LOADED_FEATURES.find { |f| f.include?('google-apis-androidpublisher_v3-') }
+  loaded = path && path[/google-apis-androidpublisher_v3-([0-9.]+)/, 1]
+end
+if loaded != pinned
+  warn "FAIL: loaded gem #{loaded.inspect} != Gemfile.lock pin #{pinned.inspect}."
+  warn "      Install the pinned version: gem install google-apis-androidpublisher_v3 -v #{pinned}"
+  exit 1
+end
+puts "ok: gem under test is the locked pin (#{pinned})"
+PASS[0] += 1
+
 svc = S::AndroidPublisherService.new
 
 check("list_generatedapks exists") { svc.respond_to?(:list_generatedapks) }

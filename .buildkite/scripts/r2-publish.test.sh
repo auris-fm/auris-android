@@ -165,6 +165,26 @@ check "create-only header sent" ok "$r"
 grep -q '"versionCode": 9522' "$MOCK_STORE/auris-download/apk/latest.json" && r=ok || r=missing
 check "latest.json at 9522" ok "$r"
 
+# 1a. WRITE ORDER, not just existence. latest.apk must be published LAST: it is
+# the pointer users download, so writing it before latest.json (or before the
+# versioned object) exposes a half-published set. Asserting the three objects
+# exist cannot see a reordering; read the recorded order of the actual writes.
+ORDER="$(grep -oE 'apk/(auris-[0-9.]+-[0-9]+\.apk|latest\.json|latest\.apk)' "$MOCK_LOG" \
+  | awk '!seen[$0]++' | tr '\n' ' ')"
+case "$ORDER" in
+  *"latest.json "*"latest.apk "*) r=ok ;;
+  *) r="wrong: $ORDER" ;;
+esac
+check "latest.json written before latest.apk" ok "$r"
+case "$ORDER" in
+  apk/auris-*"latest.apk "*) r=ok ;;
+  *) r="wrong: $ORDER" ;;
+esac
+check "versioned object written before latest.apk" ok "$r"
+# latest.apk must be the FINAL write of the three, not merely after one of them.
+LAST_PUBLISH="$(printf '%s' "$ORDER" | awk '{print $NF}')"
+check "latest.apk is the last publish" "apk/latest.apk" "$LAST_PUBLISH"
+
 # 1b. Credential exposure: the R2 secret must never appear in curl's argv
 # (what ps shows). The mock records its exact argv; assert absence.
 grep -q 'secret' "$MOCK_CURL_ARGV" && r=leaked || r=clean

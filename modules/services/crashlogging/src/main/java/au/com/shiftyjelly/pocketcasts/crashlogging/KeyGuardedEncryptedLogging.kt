@@ -16,14 +16,18 @@ import java.io.File
  * CoroutineExceptionHandler -- so it reaches the thread's default handler and
  * kills the process. Nothing about "no secret" should be able to do that.
  *
- * Only the two entry points that lead to encryption are guarded. Resetting upload
- * states and observing results touch local persistence only, so they stay working:
- * refusing them would strand stale in-progress rows for no benefit.
+ * Guarding ENQUEUE alone is sufficient: nothing reaches the encryptor unless it was
+ * queued first. Upload, reset and the result flow stay delegated -- they touch local
+ * persistence only, and refusing them would strand stale in-progress rows.
+ *
+ * [tryEnqueueLog] reports acceptance so callers describing a log elsewhere depend on
+ * the capability, not on recognising this type.
  */
 class KeyGuardedEncryptedLogging(
     private val delegate: EncryptedLogging,
     encryptedLoggingKey: String,
-) : EncryptedLogging by delegate {
+) : EncryptedLogging by delegate,
+    LogQueueing {
 
     /**
      * Whether this instance will queue or upload logs. Callers that describe a log
@@ -35,8 +39,13 @@ class KeyGuardedEncryptedLogging(
     }.getOrDefault(false)
 
     override fun enqueueSendingEncryptedLogs(uuid: String, file: File, shouldUploadImmediately: Boolean) {
-        if (!acceptsLogs) return
+        tryEnqueueLog(uuid, file, shouldUploadImmediately)
+    }
+
+    override fun tryEnqueueLog(uuid: String, file: File, shouldUploadImmediately: Boolean): Boolean {
+        if (!acceptsLogs) return false
         delegate.enqueueSendingEncryptedLogs(uuid, file, shouldUploadImmediately)
+        return true
     }
 
     override fun uploadEncryptedLogs() {

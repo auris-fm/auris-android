@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeBuildDataProvider
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeCrashReportPermissionCheck
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeObserveUser
+import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.asLogQueueing
 import com.automattic.android.tracks.crashlogging.CrashLoggingUser
 import com.automattic.android.tracks.crashlogging.ErrorSampling
 import com.automattic.android.tracks.crashlogging.EventLevel
@@ -32,7 +33,7 @@ class PocketCastsCrashLoggingDataProviderTest {
             fakeObserveUser,
             FakeCrashReportPermissionCheck(),
             fakeBuildDataProvider,
-            FakeEncryptedLogging(),
+            FakeEncryptedLogging().asLogQueueing(),
             File.createTempFile("test", "test"),
             localeProvider = { null },
             connectionStatusProvider = { true },
@@ -125,5 +126,26 @@ class PocketCastsCrashLoggingDataProviderTest {
 
         assertEquals(setOf(PocketCastsCrashLoggingDataProvider.EXTRA_UUID), extras.keys)
         assertEquals(1, fake.toUpload.size)
+    }
+
+    @Test
+    fun `should not attach a log uuid when any other implementation refuses the log`() {
+        // The provider must depend on the CAPABILITY, not on recognising the key
+        // guard's concrete type: a future wrapper that refuses logs has to suppress
+        // the uuid too, or triage points at a log that never exists. This case is
+        // deliberately not a KeyGuardedEncryptedLogging.
+        val provider = PocketCastsCrashLoggingDataProvider(
+            fakeObserveUser,
+            FakeCrashReportPermissionCheck(),
+            fakeBuildDataProvider,
+            LogQueueing { _, _, _ -> false },
+            File.createTempFile("test", "test"),
+            localeProvider = { null },
+            connectionStatusProvider = { true },
+        )
+
+        val extras = provider.provideExtrasForEvent(emptyMap(), EventLevel.FATAL)
+
+        assertTrue(extras.isEmpty())
     }
 }

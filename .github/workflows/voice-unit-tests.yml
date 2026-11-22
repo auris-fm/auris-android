@@ -28,19 +28,21 @@ jobs:
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-android-all-v1
-      - name: Prefetch Robolectric android-all (retried, so Maven Central blips cannot fail tests)
+      - name: Prefetch Robolectric android-all (no-op when the cache is warm)
         shell: bash
         run: |
-          # The android-all jar Robolectric ${ROBOLECTRIC_VERSION} needs at class-load time.
-          # Keyed above on a manual -v1 so a deliberate bump updates this list in the same PR.
-          ARTIFACT="android-all-instrumented-15-robolectric-13954326-i7"
-          VERSION="15-robolectric-13954326-i7"
-          DIR="$HOME/.m2/repository/org/robolectric/android-all-instrumented/$VERSION"
-          mkdir -p "$DIR"
-          BASE="https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/$VERSION"
-          for SUFFIX in jar pom jar.sha512 pom.sha512; do
-            curl --fail --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$DIR/$ARTIFACT.$SUFFIX" "$BASE/$ARTIFACT.$SUFFIX"
-          done
+          # Derives the artifact from the RESOLVED Robolectric jar and the SDK the suite runs
+          # at, so a bump cannot leave a stale pin here while the job stays green.
+          ROBO_VERSION="$(sed -n 's/^robolectric = "org.robolectric:robolectric:\([^"]*\)".*/\1/p' gradle/libs.versions.toml)"
+          ROBO_JAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.robolectric/robolectric/$ROBO_VERSION" -name "robolectric-$ROBO_VERSION.jar" | head -1)"
+          if [ -z "$ROBO_JAR" ]; then
+            ./gradlew :modules:services:voice:dependencies --configuration debugUnitTestRuntimeClasspath -q > /dev/null
+            ROBO_JAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.robolectric/robolectric/$ROBO_VERSION" -name "robolectric-$ROBO_VERSION.jar" | head -1)"
+          fi
+          ROBOLECTRIC_VERSION="$ROBO_VERSION" \
+            ANDROID_SDK="$(sed -n 's/^sdk=\([0-9]*\).*/\1/p' modules/services/voice/src/test/resources/robolectric.properties)" \
+            ROBOLECTRIC_JAR="$ROBO_JAR" \
+            bash .github/scripts/robolectric-prefetch.sh
       - name: Run voice module Robolectric unit tests (self-contained)
         shell: bash
         run: set -o pipefail; ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log
@@ -64,23 +66,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Cache Robolectric android-all jars
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository/org/robolectric
-          key: robolectric-android-all-v1
-      - name: Prefetch Robolectric android-all (retried, so Maven Central blips cannot fail tests)
-        shell: bash
-        run: |
-          # The android-all jar Robolectric ${ROBOLECTRIC_VERSION} needs at class-load time.
-          # Keyed above on a manual -v1 so a deliberate bump updates this list in the same PR.
-          ARTIFACT="android-all-instrumented-15-robolectric-13954326-i7"
-          VERSION="15-robolectric-13954326-i7"
-          DIR="$HOME/.m2/repository/org/robolectric/android-all-instrumented/$VERSION"
-          mkdir -p "$DIR"
-          BASE="https://repo1.maven.org/maven2/org/robolectric/android-all-instrumented/$VERSION"
-          for SUFFIX in jar pom jar.sha512 pom.sha512; do
-            curl --fail --retry 5 --retry-all-errors --retry-delay 3 -sS -o "$DIR/$ARTIFACT.$SUFFIX" "$BASE/$ARTIFACT.$SUFFIX"
-          done
+      # No Robolectric cache or prefetch here: these are plain-JUnit tests that never load an
+      # android-all jar. Prefetching one would only add a way for this job to fail on a Maven
+      # outage that previously left it green.
       - name: Run cloud transport and encoding tests
         run: ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon

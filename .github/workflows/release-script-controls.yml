@@ -1,4 +1,4 @@
-name: "Release script controls"
+name: "Release and CI script controls"
 
 # The trigger and keystore-decode controls must gate PRs too: a PR that breaks
 # them should fail before merge, not only on the next main push.
@@ -10,10 +10,14 @@ on:
       - ".buildkite/commands/**"
       - ".github/workflows/release-script-controls.yml"
       - ".github/workflows/auris-release.yml"
+      - ".github/scripts/**"
+      - ".github/workflows/voice-unit-tests.yml"
+      - "gradle/libs.versions.toml"
+      - "modules/services/voice/src/test/resources/robolectric.properties"
 
 jobs:
   controls:
-    name: "Trigger + keystore controls"
+    name: "Trigger + keystore + prefetch controls"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -22,4 +26,20 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
       - run: bash .buildkite/scripts/keystore-decode.test.sh
+      # The Robolectric prefetch controls need the resolved org.robolectric jar, so resolve
+      # the voice test classpath first. They skip (loudly) if it is still absent.
+      - name: Resolve Robolectric for the prefetch controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew :modules:services:voice:dependencies --configuration debugUnitTestRuntimeClasspath -q > /dev/null
+          ROBO_VERSION="$(sed -n 's/^robolectric = "org.robolectric:robolectric:\([^"]*\)".*/\1/p' gradle/libs.versions.toml)"
+          # FAIL CLOSED: the controls skip when the artifact is absent, and a skipped control
+          # that reports success is no control at all. If resolution did not produce the jar,
+          # this job must go red rather than quietly assert nothing.
+          find "$HOME/.gradle/caches/modules-2/files-2.1/org.robolectric/robolectric/$ROBO_VERSION" \
+            -name "robolectric-$ROBO_VERSION.jar" | grep -q . || {
+              echo "robolectric-$ROBO_VERSION.jar not resolved; prefetch controls would skip" >&2; exit 1; }
+      - run: bash .github/scripts/robolectric-prefetch.test.sh

@@ -32,10 +32,16 @@ echo reached > gradlew-reached
 exit 0
 STUB
 chmod +x gradlew
-# Stub buildkite-agent (artifact upload at the end).
+# Stub buildkite-agent: RECORDS what it was asked to upload. A stub that just
+# exits 0 lets the release step stop publishing its artifacts entirely and every
+# control here stays green -- the assertion has to be on the outbound action.
 mkdir -p bin
-cat > bin/buildkite-agent <<'STUB'
+cat > bin/buildkite-agent <<STUB
 #!/bin/bash
+if [ "\$1 \$2" = "artifact upload" ]; then
+  printf '%s\n' "\$3" >> "$WORK/artifact-uploads"
+  [ -f "\$3" ] || { echo "FAIL: upload of missing file \$3" >&2; exit 1; }
+fi
 exit 0
 STUB
 chmod +x bin/buildkite-agent
@@ -76,7 +82,17 @@ run() { # b64-value expected_exit name
 }
 
 GOOD_B64="$(openssl base64 -A < good.keystore)"
+rm -f "$WORK/artifact-uploads"
 run "$GOOD_B64" 0 "valid base64 keystore passes the gate"
+# The step must PUBLISH both artifacts the later steps download. Asserting the
+# pair (producer's upload call + the consumer's download path) is what catches a
+# declared-but-unproduced artifact; asserting either side alone does not.
+grep -qx 'app/build/outputs/bundle/release/app-release.aab' "$WORK/artifact-uploads" 2>/dev/null \
+  && { PASS=$((PASS+1)); echo "ok: release step uploads the AAB the Play step downloads"; } \
+  || { FAIL=$((FAIL+1)); echo "FAIL: release step did not upload the AAB"; }
+grep -qx 'built-version-code.txt' "$WORK/artifact-uploads" 2>/dev/null \
+  && { PASS=$((PASS+1)); echo "ok: release step uploads the built version the Play step reads"; } \
+  || { FAIL=$((FAIL+1)); echo "FAIL: release step did not upload built-version-code.txt"; }
 [ -f gradlew-reached ] && { PASS=$((PASS+1)); echo "ok: gradle reached on valid input"; } || { FAIL=$((FAIL+1)); echo "FAIL: gradle not reached on valid input"; }
 
 # Wrapped base64 (GNU base64 wraps at 76 cols): must decode identically.

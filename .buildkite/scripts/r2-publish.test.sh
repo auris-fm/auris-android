@@ -14,6 +14,11 @@ check() {
   else FAIL=$((FAIL+1)); echo "FAIL: $1 (got '$3' want '$2')"; fi
 }
 
+# Real JDK for the producer fixture: CI sets its own JAVA_HOME and the release
+# gate correctly prefers it, so the fixture must pin one with a working keytool.
+PAIR_JAVA_HOME="$(dirname "$(dirname "$(command -v keytool)")")"
+export PAIR_JAVA_HOME
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin" "$WORK/store" "$WORK/meta" "$WORK/secrets" "$WORK/repo/.buildkite/commands" "$WORK/repo/.buildkite/scripts"
@@ -227,7 +232,47 @@ mkdir -p "$WORK/repo/app/build/outputs/bundle/release"
 printf 'aab' > "$WORK/repo/app/build/outputs/bundle/release/app-release.aab"
 mkdir -p "$MOCK_ARTIFACTS/app/build/outputs/bundle/release"
 printf 'aab' > "$MOCK_ARTIFACTS/app/build/outputs/bundle/release/app-release.aab"
-printf '9522\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
+# The carried version must come from the PRODUCER, not a hand-seeded fixture:
+# seeding it here would prove only that the consumer reads a file, and would
+# stay green if the release step stopped uploading it. Run the real release
+# script into the same artifact store the consumer downloads from.
+cp "$DIR/.buildkite/commands/auris-release-aab.sh" "$WORK/repo/.buildkite/commands/"
+(
+  cd "$WORK/repo"
+  # Producer fixture: the signing gate needs a real keystore; Gradle and the
+  # signature verifier are stubbed because this control targets the artifact
+  # hand-off, not signing (keystore-decode.test.sh owns that gate).
+  keytool -genkeypair -keystore producer.keystore -alias upload -storepass testpass \
+    -keypass testpass -dname "CN=PairControl" -keyalg RSA -keysize 2048 -validity 1 >/dev/null 2>&1
+  printf 'org.gradle.jvmargs=-Xmx1g\n' > gradle.properties
+  printf 'rootProject.name="x"\n' > settings.gradle.kts
+  mkdir -p app
+  cat > gradlew <<'PRODSTUB'
+#!/bin/bash
+exit 0
+PRODSTUB
+  chmod +x gradlew
+  cat > .buildkite/commands/auris-verify-bundle-signature.sh <<'PRODSTUB'
+#!/bin/bash
+exit 0
+PRODSTUB
+  chmod +x .buildkite/commands/auris-verify-bundle-signature.sh
+  # A DIFFERENT base from the consumer's checkout, so a consumer reading its
+  # own version.properties cannot coincidentally produce the right answer.
+  printf 'versionName=8.20\nversionCode=1000\n' > version.properties
+  JAVA_HOME="$PAIR_JAVA_HOME" \
+  ANDROID_UPLOAD_KEYSTORE_B64="$(openssl base64 -A < producer.keystore)" \
+  ANDROID_UPLOAD_KEYSTORE_PASSWORD=testpass \
+  ANDROID_UPLOAD_KEY_ALIAS=upload \
+  ANDROID_UPLOAD_KEY_PASSWORD=testpass \
+  AURIS_GOOGLE_SERVICES_JSON_B64="$(printf '{"package":"fm.auris"}' | openssl base64 -A)" \
+  AURIS_SECRET_PROPERTIES="measureBuildsEnabled=false" \
+  BUILDKITE_BUILD_NUMBER=8522 \
+    bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
+)
+check "producer runs and carries its built version" 0 "$?"
+# 1000 base + 8522 build number = 9522, produced by the real script.
+check "producer uploaded built-version-code.txt to the artifact store" 9522 "$(cat "$MOCK_ARTIFACTS/built-version-code.txt" 2>/dev/null)"
 # fastlane stub: success without touching anything.
 cat > "$WORK/bin/fastlane-stub" <<'MOCK'
 #!/bin/bash
@@ -246,7 +291,12 @@ exit 0
 MOCK
 chmod +x "$WORK/bin/bundle"
 rm -f "$MOCK_META/uploaded-version-code"
-(cd "$WORK/repo" && bash .buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
+# The consumer checks out its OWN copy: restore the base version so reading
+# its own file would give 9452, not the carried 9522.
+printf 'versionName=8.20\nversionCode=9452\n' > "$WORK/repo/version.properties"
+rm -f "$WORK/repo/built-version-code.txt"
+(cd "$WORK/repo" && PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
+  bash .buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
 check "play step succeeds with carried version" 0 "$?"
 check "recorded version is the BUILT one (9522), not checkout base (9452)" 9522 "$(cat "$MOCK_META/uploaded-version-code" 2>/dev/null)"
 

@@ -4,6 +4,7 @@ import android.util.Base64
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -126,6 +127,15 @@ internal class KeyGuardedEncryptedLoggingTest {
         guarded("").resetUploadStates()
 
         assertEquals(FakeEncryptedLogging.UploadState.NOT_STARTED, delegate.toUpload.single().second)
+    }
+
+    @Test
+    fun `the guard reports whether it will accept logs`() {
+        // The crash-data provider needs this to avoid attaching a log uuid that
+        // points at a log which will never be queued.
+        assertFalse(guarded("").acceptsLogs)
+        assertFalse(guarded(keyOfLength(31)).acceptsLogs)
+        assertTrue(guarded(keyOfLength(32)).acceptsLogs)
     }
 
     @Test

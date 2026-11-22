@@ -8,14 +8,18 @@ import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeObserveUser
 import com.automattic.android.tracks.crashlogging.CrashLoggingUser
 import com.automattic.android.tracks.crashlogging.ErrorSampling
+import com.automattic.android.tracks.crashlogging.EventLevel
 import java.io.File
 import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+@org.robolectric.annotation.Config(manifest = org.robolectric.annotation.Config.NONE)
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
 class PocketCastsCrashLoggingDataProviderTest {
 
     private lateinit var sut: PocketCastsCrashLoggingDataProvider
@@ -82,5 +86,44 @@ class PocketCastsCrashLoggingDataProviderTest {
         sut.user.test {
             assertEquals(null, expectMostRecentItem())
         }
+    }
+
+    @Test
+    fun `should not attach a log uuid when logs cannot be queued`() {
+        val fake = FakeEncryptedLogging()
+        val provider = PocketCastsCrashLoggingDataProvider(
+            fakeObserveUser,
+            FakeCrashReportPermissionCheck(),
+            fakeBuildDataProvider,
+            KeyGuardedEncryptedLogging(fake, ""),
+            File.createTempFile("test", "test"),
+            localeProvider = { null },
+            connectionStatusProvider = { true },
+        )
+
+        val extras = provider.provideExtrasForEvent(emptyMap(), EventLevel.FATAL)
+
+        assertTrue(extras.isEmpty())
+        assertTrue(fake.toUpload.isEmpty())
+    }
+
+    @Test
+    fun `should attach a log uuid when logs can be queued`() {
+        val fake = FakeEncryptedLogging()
+        val key = android.util.Base64.encodeToString(ByteArray(32), android.util.Base64.NO_WRAP)
+        val provider = PocketCastsCrashLoggingDataProvider(
+            fakeObserveUser,
+            FakeCrashReportPermissionCheck(),
+            fakeBuildDataProvider,
+            KeyGuardedEncryptedLogging(fake, key),
+            File.createTempFile("test", "test"),
+            localeProvider = { null },
+            connectionStatusProvider = { true },
+        )
+
+        val extras = provider.provideExtrasForEvent(emptyMap(), EventLevel.FATAL)
+
+        assertEquals(setOf(PocketCastsCrashLoggingDataProvider.EXTRA_UUID), extras.keys)
+        assertEquals(1, fake.toUpload.size)
     }
 }

@@ -73,6 +73,12 @@ internal class PocketCastsCrashLoggingDataProvider @Inject constructor(
     }
 
     private fun appendEncryptedLogsUuid(eventLevel: EventLevel): Map<ExtraKnownKey, String> {
+        // No usable key means no log will be queued, so attaching a uuid would
+        // point triage at a log that never exists. Only the guarded implementation
+        // can answer this; an unguarded one always accepts.
+        if (encryptedLogging is KeyGuardedEncryptedLogging && !encryptedLogging.acceptsLogs) {
+            return emptyMap()
+        }
         val uuid = UUID.randomUUID().toString()
         encryptedLogging.enqueueSendingEncryptedLogs(
             uuid,

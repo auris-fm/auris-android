@@ -25,17 +25,22 @@ class KeyGuardedEncryptedLogging(
     encryptedLoggingKey: String,
 ) : EncryptedLogging by delegate {
 
-    private val hasUsableKey: Boolean = runCatching {
+    /**
+     * Whether this instance will queue or upload logs. Callers that describe a log
+     * to the outside world (the crash-data provider's `uuid` extra) must consult
+     * this, or they point triage at a log that will never exist.
+     */
+    val acceptsLogs: Boolean = runCatching {
         Base64.decode(encryptedLoggingKey, Base64.DEFAULT).size == PUBLIC_KEY_BYTES
     }.getOrDefault(false)
 
     override fun enqueueSendingEncryptedLogs(uuid: String, file: File, shouldUploadImmediately: Boolean) {
-        if (!hasUsableKey) return
+        if (!acceptsLogs) return
         delegate.enqueueSendingEncryptedLogs(uuid, file, shouldUploadImmediately)
     }
 
     override fun uploadEncryptedLogs() {
-        if (!hasUsableKey) return
+        if (!acceptsLogs) return
         delegate.uploadEncryptedLogs()
     }
 

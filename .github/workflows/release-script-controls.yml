@@ -1,4 +1,4 @@
-name: "Release and CI script controls"
+name: "Release script controls"
 
 # The trigger and keystore-decode controls must gate PRs too: a PR that breaks
 # them should fail before merge, not only on the next main push.
@@ -12,12 +12,10 @@ on:
       - ".github/workflows/auris-release.yml"
       - ".github/scripts/**"
       - ".github/workflows/voice-unit-tests.yml"
-      - "gradle/libs.versions.toml"
-      - "modules/services/voice/src/test/resources/robolectric.properties"
 
 jobs:
   controls:
-    name: "Trigger + keystore + prefetch controls"
+    name: "Trigger + keystore controls"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -27,9 +25,4 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: bash .buildkite/scripts/keystore-decode.test.sh
-      # The Robolectric prefetch controls need the resolved org.robolectric jar, so resolve
-      # the voice test classpath first. They skip (loudly) if it is still absent.
-      # No dependency-resolution step: `gradlew dependencies` resolves metadata only (poms, no
-      # jars), so it never produced the artifact these controls need. The script fetches the
-      # Robolectric jar itself when the Gradle cache is cold, and the controls exercise that path.
-      - run: bash .github/scripts/robolectric-prefetch.test.sh
+      - run: bash .github/scripts/robolectric-cache.test.sh

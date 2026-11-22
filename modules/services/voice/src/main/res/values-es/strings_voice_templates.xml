@@ -7,4 +7,13 @@
     <string name="voice_cloud_error_conversation_expired">Esa conversación ha terminado.</string>
     <string name="voice_cloud_error_answer_unavailable">Lo siento, no he podido responder a eso ahora mismo. Inténtalo de nuevo.</string>
     <string name="voice_cloud_error_generic">Lo siento, no he podido completar esa solicitud.</string>
+    <!-- Cloud error lines, taken verbatim from the iOS copy so both apps say the same thing.
+         Dedicated strings, not array entries: an array entry cannot be overridden per locale. -->
+    <string name="voice_cloud_error_no_answer">Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.</string>
+    <string name="voice_cloud_error_retrieval_unavailable">Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.</string>
+    <string name="voice_cloud_error_queue_overflow">Lo siento, no he podido terminar de responder. Inténtalo de nuevo.</string>
+    <string name="voice_cloud_error_budget_exceeded">Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.</string>
+    <string name="voice_cloud_error_turn_conflict">Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.</string>
+    <string name="voice_cloud_error_corrupt_record">Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.</string>
+    <string name="voice_cloud_error_connection_lost">Se ha perdido la conexión. Inténtalo de nuevo.</string>
 </resources>

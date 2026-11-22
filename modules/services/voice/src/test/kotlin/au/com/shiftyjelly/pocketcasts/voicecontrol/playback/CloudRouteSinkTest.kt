@@ -26,13 +26,13 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.emitAll
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -4262,7 +4262,7 @@ class CloudRouteSinkTest {
         assertSpokenInLanguage(
             CloudRouteErrorCodes.NO_ANSWER,
             "de",
-            "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders.",
+            "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders zu fragen.",
         )
     }
 
@@ -4289,7 +4289,7 @@ class CloudRouteSinkTest {
         assertSpokenInLanguage(
             CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE,
             "ko",
-            "죄송합니다. 지금은 찾아볼 수 없습니다. 다시 시도해 주세요.",
+            "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.",
         )
     }
 

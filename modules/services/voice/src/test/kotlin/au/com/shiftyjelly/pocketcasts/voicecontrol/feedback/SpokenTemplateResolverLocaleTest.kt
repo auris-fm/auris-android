@@ -258,6 +258,461 @@ class SpokenTemplateResolverLocaleTest {
         )
     }
 
+    /**
+     * Every Required cloud error line, in every locale this module ships, resolved from the REAL
+     * resources through the production lookup.
+     *
+     * Two failures this catches that a non-blank assertion cannot: a locale falling back to ENGLISH
+     * (what these codes did while they lived in the array), and a locale resolving to the GENERIC
+     * line instead of its own. Both are asserted explicitly, so a translation that is merely present
+     * but wrong does not pass.
+     *
+     * The expected strings are the iOS copy taken verbatim, so the two apps cannot drift apart
+     * without one of these failing.
+     */
+    private fun assertLocalizedLine(key: String, language: String, qualifier: String, expected: String) {
+        Locale.setDefault(Locale.ENGLISH)
+        RuntimeEnvironment.setQualifiers(qualifier)
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        val line = resolver.resolveLocalized(key, language)
+        assertEquals(expected, line.text)
+        assertEquals("the voice must match the text", language, line.languageTag)
+        assertTrue("$key/$language must not be the English line", line.text != resolver.resolve(key))
+        assertTrue(
+            "$key/$language must not be the generic line",
+            line.text != resolver.resolveLocalized("cloud_error_generic", language).text,
+        )
+    }
+
+    @Test
+    fun `a de no answer line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "de",
+        "de",
+        "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders zu fragen.",
+    )
+
+    @Test
+    fun `a es no answer line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "es",
+        "es",
+        "Lo siento, no he encontrado una respuesta a eso. Prueba a preguntarlo de otra manera.",
+    )
+
+    @Test
+    fun `a fr no answer line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "fr",
+        "fr",
+        "Désolé, je n'ai pas trouvé de réponse à cela. Essayez de le demander autrement.",
+    )
+
+    @Test
+    fun `a ja no answer line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "ja",
+        "ja",
+        "申し訳ありません。それに対する答えが見つかりませんでした。別の聞き方でお試しください。",
+    )
+
+    @Test
+    fun `a ko no answer line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "ko",
+        "ko",
+        "죄송합니다. 그에 대한 답을 찾지 못했습니다. 다른 방식으로 물어봐 주세요.",
+    )
+
+    @Test
+    fun `a zh no answer line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "zh",
+        "zh",
+        "抱歉，我没找到这个问题的答案。请换一种问法试试。",
+    )
+
+    @Test
+    fun `a yue no answer line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_no_answer",
+        "yue",
+        "b+yue",
+        "唔好意思，我搵唔到呢個問題嘅答案。唔該試吓用第二種問法。",
+    )
+
+    @Test
+    fun `a de retrieval unavailable line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "de",
+        "de",
+        "Entschuldigung, ich konnte das gerade nicht nachschlagen. Bitte versuche es noch einmal.",
+    )
+
+    @Test
+    fun `a es retrieval unavailable line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "es",
+        "es",
+        "Lo siento, no he podido consultarlo ahora mismo. Inténtalo de nuevo.",
+    )
+
+    @Test
+    fun `a fr retrieval unavailable line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "fr",
+        "fr",
+        "Désolé, je n'ai pas pu le vérifier pour le moment. Veuillez réessayer.",
+    )
+
+    @Test
+    fun `a ja retrieval unavailable line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "ja",
+        "ja",
+        "申し訳ありません。今は調べられませんでした。もう一度お試しください。",
+    )
+
+    @Test
+    fun `a ko retrieval unavailable line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "ko",
+        "ko",
+        "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.",
+    )
+
+    @Test
+    fun `a zh retrieval unavailable line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "zh",
+        "zh",
+        "抱歉，我刚才没能查到这个内容。请再试一次。",
+    )
+
+    @Test
+    fun `a yue retrieval unavailable line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_retrieval_unavailable",
+        "yue",
+        "b+yue",
+        "唔好意思，我啱啲查唔到呢樣嘢。唔該再試一次。",
+    )
+
+    @Test
+    fun `a de queue overflow line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "de",
+        "de",
+        "Entschuldigung, ich konnte die Antwort nicht zu Ende geben. Bitte versuche es noch einmal.",
+    )
+
+    @Test
+    fun `a es queue overflow line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "es",
+        "es",
+        "Lo siento, no he podido terminar de responder. Inténtalo de nuevo.",
+    )
+
+    @Test
+    fun `a fr queue overflow line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "fr",
+        "fr",
+        "Désolé, je n'ai pas pu terminer ma réponse. Veuillez réessayer.",
+    )
+
+    @Test
+    fun `a ja queue overflow line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "ja",
+        "ja",
+        "申し訳ありません。最後までお答えできませんでした。もう一度お試しください。",
+    )
+
+    @Test
+    fun `a ko queue overflow line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "ko",
+        "ko",
+        "죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.",
+    )
+
+    @Test
+    fun `a zh queue overflow line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "zh",
+        "zh",
+        "抱歉，我没能把这个回答说完。请再试一次。",
+    )
+
+    @Test
+    fun `a yue queue overflow line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_queue_overflow",
+        "yue",
+        "b+yue",
+        "唔好意思，我答唔晒呢個問題。唔該再試一次。",
+    )
+
+    @Test
+    fun `a de budget exceeded line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "de",
+        "de",
+        "Entschuldigung, die Antwort hat zu lange gedauert. Bitte versuche es noch einmal.",
+    )
+
+    @Test
+    fun `a es budget exceeded line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "es",
+        "es",
+        "Lo siento, responder ha tardado demasiado. Inténtalo de nuevo.",
+    )
+
+    @Test
+    fun `a fr budget exceeded line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "fr",
+        "fr",
+        "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+    )
+
+    @Test
+    fun `a ja budget exceeded line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "ja",
+        "ja",
+        "申し訳ありません。お答えするのに時間がかかりすぎました。もう一度お試しください。",
+    )
+
+    @Test
+    fun `a ko budget exceeded line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "ko",
+        "ko",
+        "죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.",
+    )
+
+    @Test
+    fun `a zh budget exceeded line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "zh",
+        "zh",
+        "抱歉，回答这个问题用的时间太长了。请再试一次。",
+    )
+
+    @Test
+    fun `a yue budget exceeded line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_budget_exceeded",
+        "yue",
+        "b+yue",
+        "唔好意思，答咗太耐都答唔完。唔該再試一次。",
+    )
+
+    @Test
+    fun `a de turn conflict line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "de",
+        "de",
+        "Ich beantworte gerade noch deine letzte Frage. Bitte versuche es gleich noch einmal.",
+    )
+
+    @Test
+    fun `a es turn conflict line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "es",
+        "es",
+        "Todavía estoy respondiendo a tu última pregunta. Inténtalo de nuevo en un momento.",
+    )
+
+    @Test
+    fun `a fr turn conflict line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "fr",
+        "fr",
+        "Je suis encore en train de répondre à votre dernière question. Veuillez réessayer dans un instant.",
+    )
+
+    @Test
+    fun `a ja turn conflict line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "ja",
+        "ja",
+        "前の質問にまだお答えしています。少し待ってからもう一度お試しください。",
+    )
+
+    @Test
+    fun `a ko turn conflict line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "ko",
+        "ko",
+        "이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.",
+    )
+
+    @Test
+    fun `a zh turn conflict line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "zh",
+        "zh",
+        "我还在回答你上一个问题。请稍等一下再试。",
+    )
+
+    @Test
+    fun `a yue turn conflict line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_turn_conflict",
+        "yue",
+        "b+yue",
+        "我仲答緊你上一個問題。唔該等一陣再試一次。",
+    )
+
+    @Test
+    fun `a de corrupt record line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "de",
+        "de",
+        "Entschuldigung, ich habe den Überblick über unser Gespräch verloren. Bitte frag noch einmal, dann beginnt ein neues.",
+    )
+
+    @Test
+    fun `a es corrupt record line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "es",
+        "es",
+        "Lo siento, he perdido el hilo de nuestra conversación. Vuelve a preguntar para empezar una nueva.",
+    )
+
+    @Test
+    fun `a fr corrupt record line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "fr",
+        "fr",
+        "Désolé, j'ai perdu le fil de notre conversation. Reposez votre question pour en commencer une nouvelle.",
+    )
+
+    @Test
+    fun `a ja corrupt record line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "ja",
+        "ja",
+        "申し訳ありません。会話の流れがわからなくなってしまいました。もう一度話しかけていただくと、新しい会話が始まります。",
+    )
+
+    @Test
+    fun `a ko corrupt record line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "ko",
+        "ko",
+        "죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.",
+    )
+
+    @Test
+    fun `a zh corrupt record line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "zh",
+        "zh",
+        "抱歉，我跟不上我们这段对话了。请再问一次，这样就会开始新的对话。",
+    )
+
+    @Test
+    fun `a yue corrupt record line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_corrupt_record",
+        "yue",
+        "b+yue",
+        "唔好意思，我唔記得咗我哋傾到邊。唔該再問一次，咁就會開新嘅對話。",
+    )
+
+    @Test
+    fun `a de connection lost line is spoken in de`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "de",
+        "de",
+        "Die Verbindung wurde unterbrochen. Bitte versuche es noch einmal.",
+    )
+
+    @Test
+    fun `a es connection lost line is spoken in es`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "es",
+        "es",
+        "Se ha perdido la conexión. Inténtalo de nuevo.",
+    )
+
+    @Test
+    fun `a fr connection lost line is spoken in fr`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "fr",
+        "fr",
+        "La connexion a été perdue. Veuillez réessayer.",
+    )
+
+    @Test
+    fun `a ja connection lost line is spoken in ja`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "ja",
+        "ja",
+        "接続が切れました。もう一度お試しください。",
+    )
+
+    @Test
+    fun `a ko connection lost line is spoken in ko`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "ko",
+        "ko",
+        "연결이 끊어졌습니다. 다시 시도해 주세요.",
+    )
+
+    @Test
+    fun `a zh connection lost line is spoken in zh`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "zh",
+        "zh",
+        "连接已断开。请再试一次。",
+    )
+
+    @Test
+    fun `a yue connection lost line is spoken in yue`() = assertLocalizedLine(
+        "cloud_error_connection_lost",
+        "yue",
+        "b+yue",
+        "連線斷咗。唔該再試一次。",
+    )
+
+    /**
+     * No line may name the machinery behind the failure — a queue, a record, a budget, a server.
+     * The listener needs what happened and what to do, not our internals.
+     *
+     * SCOPE, DELIBERATELY NARROW: this searches ENGLISH words, so it cannot see a system term written
+     * in Japanese, Korean, Chinese or Cantonese. iOS proved the same blind spot by mutation (a ja
+     * line naming the server queue left its equivalent control green). Rather than imply coverage it
+     * does not have, this runs over the Latin-script locales only; the CJK and yue lines are reviewed
+     * by a reader, and that is stated here so nobody reads a green run as proof for them.
+     */
+    @Test
+    fun `no latin-script cloud error line names the machinery`() {
+        val forbidden = listOf("queue", "record", "budget", "server", "token", "socket", "database")
+        val latin = listOf("en" to "en", "de" to "de", "es" to "es", "fr" to "fr")
+        val codes = listOf(
+            "no_answer",
+            "retrieval_unavailable",
+            "queue_overflow",
+            "budget_exceeded",
+            "turn_conflict",
+            "corrupt_record",
+            "connection_lost",
+        )
+        assertEquals("the Latin-script locales this control covers", 4, latin.size)
+        val offenders = mutableListOf<String>()
+        latin.forEach { (language, qualifier) ->
+            Locale.setDefault(Locale.ENGLISH)
+            RuntimeEnvironment.setQualifiers(qualifier)
+            val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+            codes.forEach { code ->
+                val text = resolver.resolveLocalized("cloud_error_$code", language).text.lowercase()
+                forbidden.filter { text.contains(it) }.forEach { offenders += "$language/$code:$it" }
+            }
+        }
+        assertEquals("a spoken line must not name internals: $offenders", emptyList<String>(), offenders)
+    }
+
     @Test
     fun `traditional chinese resolves rather than falling back to english`() {
         // A zh-Hant speaker must not get the English line: values-zh covers both scripts in this

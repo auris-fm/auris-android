@@ -25,3 +25,18 @@ jobs:
       - run: bash .buildkite/scripts/keystore-decode.test.sh
       - run: bash .buildkite/scripts/r2-publish.test.sh
       - run: bash .buildkite/scripts/verify-play-apk.test.sh
+
+  play-api-surface:
+    name: "Play API surface (real gem)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The fetcher's Play API names were only ever read statically: the gem was
+      # not installed where the review ran. Install JUST that gem at the locked
+      # version -- a full `bundle install` pulls fastlane and takes minutes, and
+      # this control needs one gem, not the release toolchain.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - run: gem install google-apis-androidpublisher_v3 -v 0.106.0 --no-document
+      - run: ruby .buildkite/scripts/fetch-play-apk-api.test.rb

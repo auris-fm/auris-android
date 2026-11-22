@@ -16,9 +16,14 @@ import java.io.File
  * CoroutineExceptionHandler -- so it reaches the thread's default handler and
  * kills the process. Nothing about "no secret" should be able to do that.
  *
- * Guarding ENQUEUE alone is sufficient: nothing reaches the encryptor unless it was
- * queued first. Upload, reset and the result flow stay delegated -- they touch local
- * persistence only, and refusing them would strand stale in-progress rows.
+ * BOTH enqueue and upload are guarded, and both are needed. Enqueue stops new logs
+ * from being recorded; upload stops rows persisted by an EARLIER build that had a
+ * real key from being encrypted now that the key is gone -- InitializeRemoteLogging
+ * calls uploadEncryptedLogs unconditionally at startup, so without that override a
+ * downgrade to an unconfigured build crashes on launch.
+ *
+ * Reset and the result flow stay delegated: they touch local persistence only, and
+ * refusing them would strand stale in-progress rows for no benefit.
  *
  * [tryEnqueueLog] reports acceptance so callers describing a log elsewhere depend on
  * the capability, not on recognising this type.
@@ -29,11 +34,7 @@ class KeyGuardedEncryptedLogging(
 ) : EncryptedLogging by delegate,
     LogQueueing {
 
-    /**
-     * Whether this instance will queue or upload logs. Callers that describe a log
-     * to the outside world (the crash-data provider's `uuid` extra) must consult
-     * this, or they point triage at a log that will never exist.
-     */
+    /** Whether this instance will queue or upload logs with the configured key. */
     val acceptsLogs: Boolean = runCatching {
         Base64.decode(encryptedLoggingKey, Base64.DEFAULT).size == PUBLIC_KEY_BYTES
     }.getOrDefault(false)

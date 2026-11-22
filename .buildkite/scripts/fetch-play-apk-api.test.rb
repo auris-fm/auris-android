@@ -55,10 +55,9 @@ end
 # $LOAD_PATH loading (the vendored-bundle path) does not register a loaded_spec,
 # so fall back to the gem's own VERSION constant -- still the real gem's value.
 loaded = Gem.loaded_specs['google-apis-androidpublisher_v3']&.version&.to_s
-# (The gem's VERSION constant is the API version "V3", not the gem version, so
-# it cannot serve here.)
+# The gem's VERSION constant is the API version "V3", not the gem version, so it
+# cannot serve here; fall back to the directory the library was required from.
 if loaded.nil?
-  # Last resort: the directory the library was actually required from.
   path = $LOADED_FEATURES.find { |f| f.include?('google-apis-androidpublisher_v3-') }
   loaded = path && path[/google-apis-androidpublisher_v3-([0-9.]+)/, 1]
 end

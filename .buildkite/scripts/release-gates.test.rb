@@ -66,6 +66,17 @@ controls.sort.each do |path|
   end
 end
 
+# A control's INPUTS must be in the PR workflow's paths filter, or a PR changing
+# only that input runs none of these jobs and the breakage surfaces after merge.
+# The Play-API control reads Gemfile.lock, so a gem bump has to trigger it.
+paths = Array(pr.dig(true, 'pull_request', 'paths'))
+check('PR controls run when the gem lock changes') do
+  paths.include?('Gemfile.lock') && paths.include?('Gemfile')
+end
+check('PR controls run when the release scripts change') do
+  paths.include?('.buildkite/scripts/**') && paths.include?('.buildkite/commands/**')
+end
+
 # The trigger itself must not depend on a job that does not exist: a typo there
 # makes GitHub fail the whole workflow rather than run it.
 dangling = needs - jobs.keys

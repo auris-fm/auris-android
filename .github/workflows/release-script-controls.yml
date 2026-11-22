@@ -10,6 +10,10 @@ on:
       - ".buildkite/commands/**"
       - ".github/workflows/release-script-controls.yml"
       - ".github/workflows/auris-release.yml"
+      # The Play-API control reads its pin from the lock, so a gem bump must run
+      # it: otherwise a renamed or removed API is first discovered after merge.
+      - "Gemfile"
+      - "Gemfile.lock"
 
 jobs:
   controls:

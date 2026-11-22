@@ -49,6 +49,13 @@ case "$UPLOADED_VC" in
   ''|*[!0-9]*) echo "FAIL: carried built-version-code is not a number: '$UPLOADED_VC'" >&2; exit 1 ;;
 esac
 
+# Record the version BEFORE uploading, for the same reason it is validated
+# before: if this write fails after `fastlane supply` succeeds, Play has the
+# bundle, the R2 step never runs (it reads uploaded-version-code), and a re-run
+# cannot recover because Play rejects the duplicate versionCode. Every step that
+# can fail must precede the irreversible one.
+buildkite-agent meta-data set uploaded-version-code "$UPLOADED_VC"
+
 bundle install --quiet
 bundle exec fastlane supply \
   --package_name fm.auris \
@@ -56,9 +63,4 @@ bundle exec fastlane supply \
   --aab app/build/outputs/bundle/release/app-release.aab \
   --json_key google-upload-credentials.json
 
-# Record what was uploaded so the R2 step fetches exactly this version's
-# Play-signed APK. UPLOADED_VC was validated BEFORE the upload above; the value
-# comes from the artifact the BUILD step carried (built-version-code.txt), NOT
-# this checkout's version.properties: a fresh checkout has the base version.
-buildkite-agent meta-data set uploaded-version-code "$UPLOADED_VC"
 echo "--- Uploaded versionCode $UPLOADED_VC recorded for the R2 step"

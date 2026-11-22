@@ -23,6 +23,10 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/bin" "$WORK/store" "$WORK/meta" "$WORK/secrets" "$WORK/repo/.buildkite/commands" "$WORK/repo/.buildkite/scripts"
 cp "$DIR/.buildkite/commands/auris-r2-apk.sh" "$WORK/repo/.buildkite/commands/"
+# Buildkite runs these as EXECUTABLES, so their `#!/bin/bash -eu` shebang applies.
+# Invoking them as `bash script` silently drops those flags and the fixture would
+# then test a laxer script than production runs.
+chmod +x "$WORK/repo/.buildkite/commands/"*.sh
 cp "$DIR/.buildkite/scripts/verify-play-apk.sh" "$WORK/repo/.buildkite/scripts/"
 printf 'versionName=8.20\nversionCode=9452\n' > "$WORK/repo/version.properties"
 printf 'dummy-apk-bytes-v1' > "$WORK/apk.bin"
@@ -102,9 +106,16 @@ cat > "$WORK/bin/buildkite-agent" <<'MOCK'
 case "$1 $2" in
   "secret get") cat "$MOCK_SECRETS/$3" 2>/dev/null ;;
   "meta-data get") cat "$MOCK_META/$3" 2>/dev/null ;;
-  "meta-data set") printf '%s' "$4" > "$MOCK_META/$3" ;;
-  "artifact download") cp "$MOCK_ARTIFACTS/$3" . ;;
-  "artifact upload") cp "$3" "$MOCK_ARTIFACTS/" ;;
+  "meta-data set")
+    # MOCK_META_SET_FAILS reproduces a Buildkite meta-data write failure.
+    [ -n "${MOCK_META_SET_FAILS:-}" ] && { echo "mock: meta-data write failed" >&2; exit 1; }
+    printf '%s' "$4" > "$MOCK_META/$3" ;;
+  "artifact download")
+    [ -n "${MOCK_DOWNLOAD_FAILS:-}" ] && { echo "mock: download failed" >&2; exit 1; }
+    cp "$MOCK_ARTIFACTS/$3" . ;;
+  "artifact upload")
+    [ -n "${MOCK_UPLOAD_FAILS:-}" ] && { echo "mock: upload failed" >&2; exit 1; }
+    cp "$3" "$MOCK_ARTIFACTS/" ;;
 esac
 MOCK
 chmod +x "$WORK/bin/buildkite-agent"
@@ -143,7 +154,7 @@ printf 'secret' > "$MOCK_SECRETS/R2_APK_SECRET_ACCESS_KEY"
 export PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{}'
 printf '9522' > "$MOCK_META/uploaded-version-code"
 
-run_r2() { (cd "$WORK/repo" && bash .buildkite/commands/auris-r2-apk.sh >/dev/null 2>&1); }
+run_r2() { (cd "$WORK/repo" && ./.buildkite/commands/auris-r2-apk.sh >/dev/null 2>&1); }
 
 # 1. Fresh publish: versioned + aliases exist, conditional header used.
 run_r2; check "fresh publish succeeds" 0 "$?"
@@ -167,7 +178,7 @@ check "expected credential arrives via stdin config" ok "$r"
 # Remove the versioned object first so the PUT actually runs (an existing
 # identical object would take the 412 resume path and never exercise it).
 rm -f "$MOCK_STORE/auris-download/apk/auris-8.20-9522.apk"
-OUTC="$(cd "$WORK/repo" && MOCK_CURL_FAIL_BODY='<Error>canary-r2-secret-77</Error>' bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RCC=$?
+OUTC="$(cd "$WORK/repo" && MOCK_CURL_FAIL_BODY='<Error>canary-r2-secret-77</Error>' ./.buildkite/commands/auris-r2-apk.sh 2>&1)"; RCC=$?
 check "PUT 500 fails the step" 1 "$RCC"
 printf '%s' "$OUTC" | grep -q "HTTP 500" && r=ok || r=missing
 check "PUT failure prints status" ok "$r"
@@ -187,7 +198,7 @@ printf 'dummy-apk-bytes-v1' > "$MOCK_STORE/auris-download/apk/auris-8.20-9522.ap
 printf '9522' > "$MOCK_META/uploaded-version-code"
 printf '{"versionCode": 9600}' > "$MOCK_STORE/auris-download/apk/latest.json"
 printf 'newer-apk-bytes' > "$MOCK_STORE/auris-download/apk/latest.apk"
-OUT4="$(cd "$WORK/repo" && bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RC4=$?
+OUT4="$(cd "$WORK/repo" && ./.buildkite/commands/auris-r2-apk.sh 2>&1)"; RC4=$?
 check "older run exits cleanly" 0 "$RC4"
 printf '%s' "$OUT4" | grep -q "leaving aliases untouched" && r=ok || r=noskip
 check "skip path actually taken" ok "$r"
@@ -216,13 +227,14 @@ printf '{"versionCode": 9522}' > "$MOCK_STORE/auris-download/apk/latest.json"
 # 4b. A failed alias READ (not absence) must be fatal, never publish blind.
 # Fail ONLY the listing (the retry byte-check cat must still work), and
 # assert the listing-specific diagnostic.
-OUTL="$(cd "$WORK/repo" && MOCK_RCLONE_LSF_FAIL=1 bash .buildkite/commands/auris-r2-apk.sh 2>&1)"; RCL=$?
+OUTL="$(cd "$WORK/repo" && MOCK_RCLONE_LSF_FAIL=1 ./.buildkite/commands/auris-r2-apk.sh 2>&1)"; RCL=$?
 check "failed alias listing is fatal" 1 "$RCL"
 printf '%s' "$OUTL" | grep -q "could not list apk/" && r=ok || r=missing
 check "listing failure prints its own diagnostic" ok "$r"
 
 # 5. Play step records the CARRIED built version, not its checkout's base.
 cp "$DIR/.buildkite/commands/auris-play-upload.sh" "$WORK/repo/.buildkite/commands/"
+chmod +x "$WORK/repo/.buildkite/commands/"*.sh
 cp "$DIR/.buildkite/commands/auris-verify-bundle-signature.sh" "$WORK/repo/.buildkite/commands/" 2>/dev/null || true
 cat > "$WORK/repo/.buildkite/commands/auris-verify-bundle-signature.sh" <<'MOCK'
 #!/bin/bash
@@ -237,6 +249,7 @@ printf 'aab' > "$MOCK_ARTIFACTS/app/build/outputs/bundle/release/app-release.aab
 # stay green if the release step stopped uploading it. Run the real release
 # script into the same artifact store the consumer downloads from.
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" "$WORK/repo/.buildkite/commands/"
+chmod +x "$WORK/repo/.buildkite/commands/"*.sh
 (
   cd "$WORK/repo"
   # Producer fixture: the signing gate needs a real keystore; Gradle and the
@@ -268,7 +281,7 @@ PRODSTUB
   AURIS_GOOGLE_SERVICES_JSON_B64="$(printf '{"package":"fm.auris"}' | openssl base64 -A)" \
   AURIS_SECRET_PROPERTIES="measureBuildsEnabled=false" \
   BUILDKITE_BUILD_NUMBER=8522 \
-    bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
+    ./.buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
 )
 check "producer runs and carries its built version" 0 "$?"
 # 1000 base + 8522 build number = 9522, produced by the real script.
@@ -296,7 +309,7 @@ rm -f "$MOCK_META/uploaded-version-code"
 printf 'versionName=8.20\nversionCode=9452\n' > "$WORK/repo/version.properties"
 rm -f "$WORK/repo/built-version-code.txt"
 (cd "$WORK/repo" && PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
-  bash .buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
+  ./.buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
 check "play step succeeds with carried version" 0 "$?"
 check "recorded version is the BUILT one (9522), not checkout base (9452)" 9522 "$(cat "$MOCK_META/uploaded-version-code" 2>/dev/null)"
 
@@ -329,7 +342,7 @@ for BAD in missing corrupt; do
     printf 'not-a-number\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
   fi
   (cd "$WORK/repo" && PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
-    bash .buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
+    ./.buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
   check "$BAD carried version fails the step" 1 "$?"
   [ ! -f "$MOCK_FASTLANE_RAN" ] \
     && { PASS=$((PASS+1)); echo "ok: $BAD carried version never reaches fastlane (no irreversible upload)"; } \
@@ -337,6 +350,34 @@ for BAD in missing corrupt; do
 done
 # Restore a good carried version for any later case.
 printf '9522\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
+
+# 7. A meta-data write failure AFTER a successful upload strands the release:
+# Play has the bundle, R2 never runs (it needs uploaded-version-code), and a
+# re-run cannot recover because Play rejects the duplicate versionCode. So the
+# already-validated version must be recorded BEFORE the irreversible upload.
+rm -f "$MOCK_FASTLANE_RAN" "$WORK/repo/built-version-code.txt"
+printf '9522\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
+rm -f "$MOCK_META/uploaded-version-code"
+(cd "$WORK/repo" && PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
+  MOCK_META_SET_FAILS=1 ./.buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
+check "meta-data write failure fails the step" 1 "$?"
+[ ! -f "$MOCK_FASTLANE_RAN" ] \
+  && { PASS=$((PASS+1)); echo "ok: meta-data failure happens BEFORE any upload (release not stranded)"; } \
+  || { FAIL=$((FAIL+1)); echo "FAIL: uploaded to Play then failed to record the version -- unrecoverable"; }
+
+# 8. A buildkite-agent failure must FAIL the step, not be walked past: a dropped
+# artifact strands the NEXT step just as a dropped meta-data write strands this
+# one. The scripts rely on their `#!/bin/bash -eu` shebang for this, which is why
+# every invocation here runs them as EXECUTABLES -- `bash script` drops those
+# flags and would test a laxer script than Buildkite runs.
+rm -f "$MOCK_FASTLANE_RAN" "$WORK/repo/built-version-code.txt"
+printf '9522\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
+(cd "$WORK/repo" && PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
+  MOCK_DOWNLOAD_FAILS=1 ./.buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
+check "artifact download failure fails the Play step" 1 "$?"
+[ ! -f "$MOCK_FASTLANE_RAN" ] \
+  && { PASS=$((PASS+1)); echo "ok: download failure never reaches fastlane"; } \
+  || { FAIL=$((FAIL+1)); echo "FAIL: uploaded despite a failed artifact download"; }
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

@@ -38,6 +38,17 @@ AURIS_UPLOAD_CERT_SHA256="${AURIS_UPLOAD_CERT_SHA256:-16:89:BD:A2:5A:0B:47:DB:6D
 bash .buildkite/commands/auris-verify-bundle-signature.sh \
   app/build/outputs/bundle/release/app-release.aab \
   "$AURIS_UPLOAD_CERT_SHA256"
+# Validate the carried version BEFORE uploading, not after. Play rejects a
+# duplicate versionCode, so a step that uploads and THEN discovers the carried
+# version is missing or corrupt cannot be recovered by re-running: the release
+# is already live and every retry fails on the duplicate. Fail before the
+# irreversible action.
+buildkite-agent artifact download built-version-code.txt .
+UPLOADED_VC="$(head -1 built-version-code.txt | tr -d '[:space:]')"
+case "$UPLOADED_VC" in
+  ''|*[!0-9]*) echo "FAIL: carried built-version-code is not a number: '$UPLOADED_VC'" >&2; exit 1 ;;
+esac
+
 bundle install --quiet
 bundle exec fastlane supply \
   --package_name fm.auris \
@@ -46,13 +57,8 @@ bundle exec fastlane supply \
   --json_key google-upload-credentials.json
 
 # Record what was uploaded so the R2 step fetches exactly this version's
-# Play-signed APK. The version comes from the artifact the BUILD step
-# carried (built-version-code.txt), NOT this checkout's version.properties:
-# a fresh checkout still has the base version, not the bumped one.
-buildkite-agent artifact download built-version-code.txt .
-UPLOADED_VC="$(head -1 built-version-code.txt | tr -d '[:space:]')"
-case "$UPLOADED_VC" in
-  ''|*[!0-9]*) echo "FAIL: carried built-version-code is not a number: '$UPLOADED_VC'" >&2; exit 1 ;;
-esac
+# Play-signed APK. UPLOADED_VC was validated BEFORE the upload above; the value
+# comes from the artifact the BUILD step carried (built-version-code.txt), NOT
+# this checkout's version.properties: a fresh checkout has the base version.
 buildkite-agent meta-data set uploaded-version-code "$UPLOADED_VC"
 echo "--- Uploaded versionCode $UPLOADED_VC recorded for the R2 step"

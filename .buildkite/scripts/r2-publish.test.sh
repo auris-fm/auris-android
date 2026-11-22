@@ -300,5 +300,43 @@ rm -f "$WORK/repo/built-version-code.txt"
 check "play step succeeds with carried version" 0 "$?"
 check "recorded version is the BUILT one (9522), not checkout base (9452)" 9522 "$(cat "$MOCK_META/uploaded-version-code" 2>/dev/null)"
 
+# 6. A missing/corrupt carried version must fail BEFORE the upload, not after.
+# Play rejects a duplicate versionCode, so "upload then discover the version is
+# bad" is unrecoverable: the release is live and every re-run fails on the
+# duplicate. The fastlane stub records that it ran, so the assertion is on the
+# irreversible ACTION, not on the exit code alone.
+cat > "$WORK/bin/bundle" <<'MOCK'
+#!/bin/bash
+if [ "$1" = install ]; then touch "$MOCK_BUNDLE_INSTALLED"; exit 0; fi
+if [ "$1 $2" = "exec fastlane" ]; then touch "$MOCK_FASTLANE_RAN"; exit 0; fi
+if [ "$1 $2" = "exec ruby" ]; then
+  [ -f "$MOCK_BUNDLE_INSTALLED" ] || { echo "FAIL: exec without install" >&2; exit 1; }
+  cp "$MOCK_APK" "$6"
+fi
+exit 0
+MOCK
+chmod +x "$WORK/bin/bundle"
+export MOCK_FASTLANE_RAN="$WORK/fastlane-ran"
+
+for BAD in missing corrupt; do
+  rm -f "$MOCK_FASTLANE_RAN" "$MOCK_META/uploaded-version-code"
+  # A fresh checkout per case: the script downloads into its own cwd, so a
+  # leftover file from the previous run would satisfy `head` and hide the defect.
+  rm -f "$WORK/repo/built-version-code.txt"
+  if [ "$BAD" = missing ]; then
+    rm -f "$MOCK_ARTIFACTS/built-version-code.txt"
+  else
+    printf 'not-a-number\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
+  fi
+  (cd "$WORK/repo" && PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
+    bash .buildkite/commands/auris-play-upload.sh >/dev/null 2>&1)
+  check "$BAD carried version fails the step" 1 "$?"
+  [ ! -f "$MOCK_FASTLANE_RAN" ] \
+    && { PASS=$((PASS+1)); echo "ok: $BAD carried version never reaches fastlane (no irreversible upload)"; } \
+    || { FAIL=$((FAIL+1)); echo "FAIL: $BAD carried version UPLOADED before failing"; }
+done
+# Restore a good carried version for any later case.
+printf '9522\n' > "$MOCK_ARTIFACTS/built-version-code.txt"
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

@@ -26,7 +26,10 @@ fi
 # OLDEST first and the CURRENT (newest) signer LAST. The pin is the current
 # app-signing key, so compare against the LAST reported digest. All digests
 # are printed for the log.
-CERT_DIGESTS="$("$APKSIGNER" verify --print-certs "$APK" | grep 'certificate SHA-256 digest' | awk '{print $NF}')"
+# `|| true` on the pipeline: under `set -euo pipefail` a grep MISS aborts the
+# whole script here, so the empty-check below never runs and the step reds with
+# no diagnostic at all. The check IS the failure path; let it be reached.
+CERT_DIGESTS="$("$APKSIGNER" verify --print-certs "$APK" | grep 'certificate SHA-256 digest' | awk '{print $NF}' || true)"
 [ -n "$CERT_DIGESTS" ] || { echo "FAIL: no signer certificate found" >&2; exit 1; }
 echo "APK signer SHA-256 chain (oldest to newest):"
 printf '  %s\n' $CERT_DIGESTS

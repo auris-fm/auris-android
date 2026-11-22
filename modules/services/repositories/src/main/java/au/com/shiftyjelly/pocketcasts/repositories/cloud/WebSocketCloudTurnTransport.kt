@@ -214,9 +214,21 @@ class WebSocketCloudTurnTransport(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                // A clean server close ends the turn with no error event: finish the channel so the
-                // consumer drains what it has and then ends the flow.
-                channel.close()
+                // A close AFTER the server's terminal, or after this exchange stopped collecting,
+                // is the teardown we asked for. Finishing the channel there lets the consumer drain
+                // what it has and end the flow.
+                if (terminalArrived.get() || exchangeCancelled.get()) {
+                    channel.close()
+                    return
+                }
+                // Otherwise the stream ended mid-turn with neither Done nor Error. Ending the flow
+                // silently would leave the sink with no outcome at all -- it assigns one only in
+                // those two branches -- so the user hears nothing after asking something. Report
+                // the same loss a socket failure reports, enqueued behind everything already sent.
+                emitTerminal(
+                    channel,
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                )
             }
         }
 
@@ -292,7 +304,17 @@ class WebSocketCloudTurnTransport(
                             }
 
                             is RawSocketEvent.Closed -> {
-                                channel.close()
+                                // Same rule as the dialled listener's onClosed: a close after the
+                                // terminal is teardown, a close before it ended the turn without an
+                                // answer and must be reported, not swallowed into silence.
+                                if (terminalArrived.get() || exchangeCancelled.get()) {
+                                    channel.close()
+                                } else {
+                                    emitTerminal(
+                                        channel,
+                                        CloudRouteEvent.Error(CloudRouteErrorCodes.CONNECTION_LOST, ""),
+                                    )
+                                }
                                 return@launch
                             }
                         }

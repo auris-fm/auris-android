@@ -86,6 +86,7 @@ class WebSocketCloudTurnTransport(
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    terminalArrived,
                 )
                 return
             }
@@ -100,6 +101,7 @@ class WebSocketCloudTurnTransport(
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    terminalArrived,
                 )
                 return
             }
@@ -124,6 +126,7 @@ class WebSocketCloudTurnTransport(
                             code = CloudRouteErrorCodes.CONNECTION_LOST,
                             message = "",
                         ),
+                        terminalArrived,
                     )
                     return
                 }
@@ -134,7 +137,7 @@ class WebSocketCloudTurnTransport(
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val codec = negotiatedCodec.get()
                 if (codec == null) {
-                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""), terminalArrived)
                     return
                 }
                 emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
@@ -152,11 +155,12 @@ class WebSocketCloudTurnTransport(
                     emitTerminal(
                         channel,
                         CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""),
+                        terminalArrived,
                     )
                 } else if (event is CloudRouteEvent.Connected) {
                     // The handshake is where the negotiated codec arrives; binary frames carry it.
                     if (event.codec !in offeredCodecs || !negotiatedCodec.compareAndSet(null, event.codec)) {
-                        emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                        emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""), terminalArrived)
                     } else {
                         emitOrFail(channel, event)
                     }
@@ -165,7 +169,7 @@ class WebSocketCloudTurnTransport(
                     // admitted, so it never receives `connected` and no codec is ever negotiated --
                     // requiring one here would replace the server's own refusal code with
                     // invalid_response and lose the cause the turn failed for.
-                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""), terminalArrived)
                 } else {
                     // Server-originated terminal: record at actual decode point.
                     if (event is CloudRouteEvent.Done) {
@@ -191,7 +195,7 @@ class WebSocketCloudTurnTransport(
                     // sink hangs after selection); closing on a NONterminal frame would truncate a
                     // healthy streamed answer mid-flight, so those keep emitOrFail.
                     if (event is CloudRouteEvent.Done || event is CloudRouteEvent.Error) {
-                        emitTerminal(channel, event)
+                        emitTerminal(channel, event, terminalArrived)
                     } else {
                         emitOrFail(channel, event)
                     }
@@ -210,6 +214,7 @@ class WebSocketCloudTurnTransport(
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    terminalArrived,
                 )
             }
 
@@ -224,10 +229,14 @@ class WebSocketCloudTurnTransport(
                 // Otherwise the stream ended mid-turn with neither Done nor Error. Ending the flow
                 // silently would leave the sink with no outcome at all -- it assigns one only in
                 // those two branches -- so the user hears nothing after asking something. Report
-                // the same loss a socket failure reports, enqueued behind everything already sent.
+                // the same loss a socket failure reports, enqueued behind everything already sent,
+                // and tell the observer: support reads the persisted trace, and this outage is
+                // indistinguishable from a server refusal there unless it is recorded.
+                observer?.onConnectionFailed(frame.requestId, stillNeeded = true)
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    terminalArrived,
                 )
             }
         }
@@ -287,7 +296,7 @@ class WebSocketCloudTurnTransport(
                             is RawSocketEvent.Binary -> {
                                 val codec = negotiatedCodec.get()
                                 if (codec == null) {
-                                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""), terminalArrived)
                                 } else {
                                     emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = raw.bytes))
                                 }
@@ -310,9 +319,11 @@ class WebSocketCloudTurnTransport(
                                 if (terminalArrived.get() || exchangeCancelled.get()) {
                                     channel.close()
                                 } else {
+                                    observer?.onConnectionFailed(frame.requestId, stillNeeded = true)
                                     emitTerminal(
                                         channel,
                                         CloudRouteEvent.Error(CloudRouteErrorCodes.CONNECTION_LOST, ""),
+                                        terminalArrived,
                                     )
                                 }
                                 return@launch
@@ -402,7 +413,13 @@ class WebSocketCloudTurnTransport(
     private fun ProducerScope<CloudRouteEvent>.emitTerminal(
         channel: Channel<CloudRouteEvent>,
         event: CloudRouteEvent,
+        terminalArrived: java.util.concurrent.atomic.AtomicBoolean,
     ) {
+        // This turn has its ending, whoever produced it. A server terminal is recorded at its
+        // decode point; a LOCAL one (rejected handshake, undecodable frame, lost connection) is
+        // recorded here, so a close arriving afterwards is recognised as teardown instead of a
+        // second loss competing for a channel that is already finished.
+        terminalArrived.set(true)
         val result = channel.trySend(event)
         if (result.isFailure) {
             // The terminal event could not be enqueued, so closing normally would end the turn with

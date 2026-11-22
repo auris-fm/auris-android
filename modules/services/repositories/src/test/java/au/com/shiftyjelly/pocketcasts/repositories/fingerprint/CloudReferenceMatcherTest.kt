@@ -41,9 +41,10 @@ class CloudReferenceMatcherTest {
 
     @Test
     fun `partial overlap scores proportionally`() {
-        val a = longArrayOf(1, 2, 3, 4, 5)
-        val b = longArrayOf(1, 2, 3, 99, 100) // 3 of 5 shared
-        assertEquals(3f / 5f, CloudReferenceMatcher.overlapScore(a, b))
+        val matcher = CloudReferenceMatcher()
+        matcher.add(0f, longArrayOf(1, 2, 3, 99, 100))
+        val matches = matcher.findTopMatches(longArrayOf(1, 2, 3, 4, 5), 1)
+        assertEquals(3f / 5f, matches[0].score) // 3 of 5 shared
     }
 
     @Test
@@ -57,8 +58,40 @@ class CloudReferenceMatcherTest {
     fun `score is symmetric and min normalized`() {
         val a = longArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
         val b = longArrayOf(1, 2, 3, 4) // subset
-        // min normalization: 4 shared / min(8,4) = 1.0
-        assertEquals(1.0f, CloudReferenceMatcher.overlapScore(a, b))
-        assertEquals(CloudReferenceMatcher.overlapScore(a, b), CloudReferenceMatcher.overlapScore(b, a))
+        // min normalization: 4 shared / min(8,4) = 1.0, both directions.
+        val ab = CloudReferenceMatcher().apply { add(0f, b) }.findTopMatches(a, 1)
+        val ba = CloudReferenceMatcher().apply { add(0f, a) }.findTopMatches(b, 1)
+        assertEquals(1.0f, ab[0].score)
+        assertEquals(ab[0].score, ba[0].score)
+    }
+
+    /**
+     * Shared cross-platform fixture (timeline-alignment "Reference matching"):
+     * score = distinct query
+     * hashes found in the checkpoint / min(distinct query count, distinct
+     * checkpoint count). iOS pins the same numbers. Duplicates on either
+     * side must not change the score.
+     */
+    @Test
+    fun `duplicate fixture pins the distinct-count rule`() {
+        // Checkpoint raw [7, 7, 9, 11, 11, 11] -> distinct {7, 9, 11} (3).
+        // Query raw [7, 7, 9, 42] -> distinct {7, 9, 42} (3), found {7, 9} (2).
+        // Score = 2 / min(3, 3) = 2/3.
+        val matcher = CloudReferenceMatcher()
+        matcher.add(0f, longArrayOf(7, 7, 9, 11, 11, 11))
+        val matches = matcher.findTopMatches(longArrayOf(7, 7, 9, 42), 1)
+        assertEquals(2f / 3f, matches[0].score)
+
+        // Same fixture without duplicates scores identically.
+        val deduped = CloudReferenceMatcher()
+        deduped.add(0f, longArrayOf(7, 9, 11))
+        assertEquals(2f / 3f, deduped.findTopMatches(longArrayOf(7, 9, 42), 1)[0].score)
+
+        // Reverse case (shared fixture): checkpoint [7, 7, 9] -> distinct
+        // {7, 9} (2); window [7, 9, 42] -> distinct 3, found 2. Score =
+        // 2 / min(3, 2) = 1.0. A window-count-only denominator gives 2/3.
+        val small = CloudReferenceMatcher()
+        small.add(0f, longArrayOf(7, 7, 9))
+        assertEquals(1.0f, small.findTopMatches(longArrayOf(7, 9, 42), 1)[0].score)
     }
 }

@@ -27,21 +27,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository/org/robolectric
-          key: robolectric-android-all-v1
+          # Keyed on the INPUTS that decide which jar is needed, not a manual -vN. A static key
+          # survives a Robolectric or SDK bump, so the new jar would be re-downloaded every run
+          # and an outage would fail the job again -- the very thing this cache exists to prevent.
+          key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
       - name: Prefetch Robolectric android-all (no-op when the cache is warm)
         shell: bash
         run: |
-          # Derives the artifact from the RESOLVED Robolectric jar and the SDK the suite runs
-          # at, so a bump cannot leave a stale pin here while the job stays green.
-          ROBO_VERSION="$(sed -n 's/^robolectric = "org.robolectric:robolectric:\([^"]*\)".*/\1/p' gradle/libs.versions.toml)"
-          ROBO_JAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.robolectric/robolectric/$ROBO_VERSION" -name "robolectric-$ROBO_VERSION.jar" | head -1)"
-          if [ -z "$ROBO_JAR" ]; then
-            ./gradlew :modules:services:voice:dependencies --configuration debugUnitTestRuntimeClasspath -q > /dev/null
-            ROBO_JAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.robolectric/robolectric/$ROBO_VERSION" -name "robolectric-$ROBO_VERSION.jar" | head -1)"
-          fi
-          ROBOLECTRIC_VERSION="$ROBO_VERSION" \
+          # Derives every coordinate from the Robolectric artifact and the SDK the suite runs at,
+          # so a bump cannot leave a stale pin here while the job stays green.
+          # The script finds the resolved Robolectric jar itself and falls back to fetching it
+          # directly when the Gradle cache is cold: `gradlew dependencies` resolves METADATA ONLY,
+          # so relying on it here failed every cold run before a test could execute.
+          ROBOLECTRIC_VERSION="$(sed -n 's/^robolectric = "org.robolectric:robolectric:\([^"]*\)".*/\1/p' gradle/libs.versions.toml)" \
             ANDROID_SDK="$(sed -n 's/^sdk=\([0-9]*\).*/\1/p' modules/services/voice/src/test/resources/robolectric.properties)" \
-            ROBOLECTRIC_JAR="$ROBO_JAR" \
             bash .github/scripts/robolectric-prefetch.sh
       - name: Run voice module Robolectric unit tests (self-contained)
         shell: bash

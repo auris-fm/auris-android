@@ -52,11 +52,10 @@ if pinned.nil?
   warn 'FAIL: could not read the google-apis-androidpublisher_v3 pin from Gemfile.lock'
   exit 1
 end
-# $LOAD_PATH loading (the vendored-bundle path) does not register a loaded_spec,
-# so fall back to the gem's own VERSION constant -- still the real gem's value.
+# Loading via $LOAD_PATH (the vendored-bundle path) registers no loaded_spec, so
+# fall back to the directory the library was required from. The gem's VERSION
+# constant cannot serve: it is the API version "V3", not the gem version.
 loaded = Gem.loaded_specs['google-apis-androidpublisher_v3']&.version&.to_s
-# The gem's VERSION constant is the API version "V3", not the gem version, so it
-# cannot serve here; fall back to the directory the library was required from.
 if loaded.nil?
   path = $LOADED_FEATURES.find { |f| f.include?('google-apis-androidpublisher_v3-') }
   loaded = path && path[/google-apis-androidpublisher_v3-([0-9.]+)/, 1]

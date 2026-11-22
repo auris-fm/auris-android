@@ -164,12 +164,97 @@ class SpokenTemplateResolverLocaleTest {
             "cloud_error_internal_error",
             "cloud_error_limit_exceeded",
             "cloud_error_conversation_expired",
+            "cloud_error_no_answer",
+            "cloud_error_retrieval_unavailable",
+            "cloud_error_budget_exceeded",
+            "cloud_error_connection_lost",
+            "cloud_error_queue_overflow",
+            "cloud_error_turn_conflict",
+            "cloud_error_corrupt_record",
+            "cloud_error_unauthorized",
+            "cloud_error_provider_error",
         )
         val duplicated = array.map { it.substringBefore('|') }.filter { it in overlaid }
         assertEquals(
             "these keys are overlaid from dedicated strings; an array entry would be dead: $duplicated",
             emptyList<String>(),
             duplicated,
+        )
+    }
+
+    /**
+     * Every cloud error line must be a DEDICATED string, not an array entry.
+     *
+     * The array cannot be overridden per locale without redefining all of it, so an array entry is
+     * English for every non-English speaker -- which is how six codes came to speak English to a
+     * German user while the daily-limit line beside them was translated. This reads the array
+     * itself, so re-adding any cloud line there fails here rather than shipping untranslated.
+     */
+    @Test
+    fun `no cloud error line lives in the spoken-templates array`() {
+        val array = getApplicationContext<Context>().resources.getStringArray(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.R.array.voice_spoken_templates,
+        )
+        val inArray = array.map { it.substringBefore('|') }.filter { it.startsWith("cloud_error_") }
+        assertEquals(
+            "cloud error lines must be dedicated strings so a locale can override one key: $inArray",
+            emptyList<String>(),
+            inArray,
+        )
+    }
+
+    /**
+     * The three codes that had NO line at all, resolved from the real resources.
+     *
+     * Each must be its OWN sentence and not the catch-all: a code that falls through to generic
+     * tells the listener neither what happened nor what to do, which is what the contract's
+     * "Required" classification forbids. Asserting the difference (not just non-blank) is what makes
+     * a future collapse into generic fail here.
+     */
+    private fun assertOwnEnglishLine(key: String, expected: String) {
+        Locale.setDefault(Locale.ENGLISH)
+        RuntimeEnvironment.setQualifiers("en")
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        assertEquals(expected, resolver.resolve(key))
+        assertTrue(
+            "$key must not be the generic line",
+            resolver.resolve(key) != resolver.resolve("cloud_error_generic"),
+        )
+    }
+
+    @Test
+    fun `an audio queue overflow has its own english line`() = assertOwnEnglishLine(
+        "cloud_error_queue_overflow",
+        "Sorry, I couldn't finish answering that. Please try again.",
+    )
+
+    @Test
+    fun `a turn conflict has its own english line`() = assertOwnEnglishLine(
+        "cloud_error_turn_conflict",
+        "I'm still answering your last question. Please try again in a moment.",
+    )
+
+    @Test
+    fun `an unreadable record has its own english line`() = assertOwnEnglishLine(
+        "cloud_error_corrupt_record",
+        "Sorry, I've lost track of our conversation. Please ask again to start a new one.",
+    )
+
+    @Test
+    fun `the approved wording replaces the old no-answer and budget lines`() {
+        // Both used to be indistinguishable from a fall-through: no_answer was word-for-word the
+        // generic line, and budget_exceeded named a limit rather than the shared deadline. The
+        // approved set (spec 5ab7b0aa) is both apps' copy, so a revert to either old line fails here.
+        Locale.setDefault(Locale.ENGLISH)
+        RuntimeEnvironment.setQualifiers("en")
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        assertEquals(
+            "Sorry, I couldn't find an answer to that. Please try asking another way.",
+            resolver.resolve("cloud_error_no_answer"),
+        )
+        assertEquals(
+            "Sorry, that took too long to answer. Please try again.",
+            resolver.resolve("cloud_error_budget_exceeded"),
         )
     }
 

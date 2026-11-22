@@ -19,15 +19,6 @@
              only if even that is missing. -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
         <item>general.cloud_incomplete_turn|Sorry, I couldn\'t complete that request.</item>
-        <item>cloud_error_no_answer|Sorry, I couldn\'t complete that request.</item>
-        <item>cloud_error_unauthorized|Service is unavailable at the moment.</item>
-        <item>cloud_error_retrieval_unavailable|I can\'t reach the podcast evidence right now.</item>
-        <item>cloud_error_provider_error|The assistant couldn\'t finish that request.</item>
-        <item>cloud_error_connection_lost|Connection lost. Please try again.</item>
-        <!-- The edge mints these two with user-facing prose in `message`, which the client
-             never speaks. These lines keep the reason instead of collapsing it into the
-             generic one; the numbers in the server's own sentence are not available here. -->
-        <item>cloud_error_budget_exceeded|The assistant has reached its limit right now.</item>
         <item>pipeline.unclear_command|I didn\'t catch that.</item>
     </string-array>
     <!-- Daily-limit feedback (task: localized refusal). Per cloud-assistant.md the template must
@@ -46,4 +37,28 @@
     <string name="voice_cloud_error_answer_unavailable" translatable="true">Sorry, I couldn\'t answer that just now. Please try again.</string>
     <!-- The catch-all for a code with no line of its own. Same reason as above. -->
     <string name="voice_cloud_error_generic" translatable="true">Sorry, I couldn\'t complete that request.</string>
+    <!-- Every cloud error line lives OUTSIDE the array, for one reason: an array entry cannot be
+         overridden per locale without redefining the whole array, and no values-* does that. Left in
+         the array these codes resolved to ENGLISH for every non-English speaker while the daily-limit
+         and generic lines beside them were translated. SpokenTemplateResolver overlays each key onto
+         the resolved map, so a locale overrides ONE string and the rest still resolve.
+         Wording is shared with iOS (spec ruling: the approved set is both apps' copy). -->
+    <string name="voice_cloud_error_no_answer" translatable="true">Sorry, I couldn\'t find an answer to that. Please try asking another way.</string>
+    <string name="voice_cloud_error_retrieval_unavailable" translatable="true">Sorry, I couldn\'t look that up just now. Please try again.</string>
+    <!-- A shared deadline and call budget, not question length: the line must not send the user
+         after the wrong cause, and it invents no reset time. -->
+    <string name="voice_cloud_error_budget_exceeded" translatable="true">Sorry, that took too long to answer. Please try again.</string>
+    <string name="voice_cloud_error_connection_lost" translatable="true">Connection lost. Please try again.</string>
+    <!-- The application-level audio queue exceeded its bound. The listener's experience is a
+         partial or missing answer; the queue itself is never named. -->
+    <string name="voice_cloud_error_queue_overflow" translatable="true">Sorry, I couldn\'t finish answering that. Please try again.</string>
+    <!-- Nothing failed: another turn is still answering. No apology, and it says when to retry. -->
+    <string name="voice_cloud_error_turn_conflict" translatable="true">I\'m still answering your last question. Please try again in a moment.</string>
+    <!-- Prior admissions cannot be established, so a fresh conversation is required. A voice user
+         has no separate "start a new conversation" action: asking again IS what starts one. -->
+    <string name="voice_cloud_error_corrupt_record" translatable="true">Sorry, I\'ve lost track of our conversation. Please ask again to start a new one.</string>
+    <!-- Not in the approved seven: wording unchanged, moved out of the array so it can be
+         localized like the rest. -->
+    <string name="voice_cloud_error_unauthorized" translatable="true">Service is unavailable at the moment.</string>
+    <string name="voice_cloud_error_provider_error" translatable="true">The assistant couldn\'t finish that request.</string>
 </resources>

@@ -32,6 +32,7 @@ jobs:
       - run: bash .buildkite/scripts/keystore-decode.test.sh
       - run: bash .buildkite/scripts/r2-publish.test.sh
       - run: bash .buildkite/scripts/verify-play-apk.test.sh
+      - run: ruby .buildkite/scripts/release-gates.test.rb
 
 
   play-api-surface:
@@ -87,7 +88,10 @@ jobs:
 
   trigger-release:
     name: "Trigger the release build"
-    needs: [trigger-script-controls, voice-unit-tests, cloud-transport-tests, android-test-compile]
+    # EVERY job that runs a release control belongs here. A control outside this
+    # list reds the PR check list while the pipeline still uploads to Play;
+    # release-gates.test.rb asserts this pairing so a new one cannot be forgotten.
+    needs: [trigger-script-controls, play-api-surface, voice-unit-tests, cloud-transport-tests, android-test-compile]
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     env:

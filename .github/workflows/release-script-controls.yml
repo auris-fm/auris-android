@@ -25,6 +25,7 @@ jobs:
       - run: bash .buildkite/scripts/keystore-decode.test.sh
       - run: bash .buildkite/scripts/r2-publish.test.sh
       - run: bash .buildkite/scripts/verify-play-apk.test.sh
+      - run: ruby .buildkite/scripts/release-gates.test.rb
 
   play-api-surface:
     name: "Play API surface (real gem)"

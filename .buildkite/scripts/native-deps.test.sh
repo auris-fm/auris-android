@@ -286,6 +286,35 @@ check "cmake resolved the llama tree to a real directory" yes "$(grep -q "LLAMA_
 check "cmake resolved the oboe tree to a real directory" yes "$(grep -q "OBOE_SRC=$PAIR_CACHE/oboe/$OBOE_SHA$" "$WORK/pair-cmake.out" && echo yes || echo no)"
 check "the pair path attempted no clone" no "$(grep -qi 'Cloning into' "$WORK/pair-cmake.out" && echo yes || echo no)"
 
+# --- 9d. A BAD DECLARATION MUST FAIL THE HELPER, not yield empty output. ------------------------
+#     The loop reads the declarations through a process substitution, whose exit status is not the
+#     script's. If the ruby guard aborts -- a pin back to a tag, a missing URL -- the loop simply
+#     gets no lines and the helper exits 0 with empty stdout. The release then runs with NO
+#     overrides and silently clones per ABI again, which is the whole defect this PR removes.
+BADDIR="$WORK/badcml"; mkdir -p "$BADDIR/modules/services/voice/src/main/cpp"
+sed 's/GIT_TAG 03242e9ef9495e418e6ae83954d239dc9193ec5c/GIT_TAG 1.9.0/' "$CML" \
+  > "$BADDIR/modules/services/voice/src/main/cpp/CMakeLists.txt"
+mkdir -p "$BADDIR/.buildkite/scripts"
+cp "$SCRIPT" "$BADDIR/.buildkite/scripts/native-deps.sh"
+AURIS_NATIVE_DEPS_CACHE="$WORK/badcache" bash "$BADDIR/.buildkite/scripts/native-deps.sh" \
+  > "$WORK/bad.out" 2>"$WORK/bad.err"
+check_nonzero "a tag pin fails the helper instead of returning nothing" $?
+check "the failure names the reason" yes "$(grep -qi 'not a full commit sha' "$WORK/bad.err" && echo yes || echo no)"
+
+# A declaration that loses its URL entirely must fail the same way.
+sed 's#GIT_REPOSITORY https://github.com/google/oboe.git##' "$CML" \
+  > "$BADDIR/modules/services/voice/src/main/cpp/CMakeLists.txt"
+AURIS_NATIVE_DEPS_CACHE="$WORK/badcache" bash "$BADDIR/.buildkite/scripts/native-deps.sh" \
+  > "$WORK/nourl.out" 2>"$WORK/nourl.err"
+check_nonzero "a declaration with no URL fails the helper" $?
+
+# And a CMakeLists with no declarations at all must not read as "nothing to do".
+printf 'cmake_minimum_required(VERSION 3.22)\nproject(x NONE)\n' \
+  > "$BADDIR/modules/services/voice/src/main/cpp/CMakeLists.txt"
+AURIS_NATIVE_DEPS_CACHE="$WORK/badcache" bash "$BADDIR/.buildkite/scripts/native-deps.sh" \
+  > "$WORK/none.out" 2>"$WORK/none.err"
+check_nonzero "no declarations at all fails the helper" $?
+
 # --- 10. Both declarations carry a TRANSFER BOUND, and oboe is pinned to a commit. --------------
 ruby - "$CML" <<'RUBY' > "$WORK/shape.out" 2>&1
   src = File.read(ARGV[0])

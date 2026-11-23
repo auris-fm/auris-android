@@ -114,6 +114,16 @@ prepare() { # prepare <name> <url> <sha>
   return 1
 }
 
+# Capture the declarations BEFORE looping. Reading them through a process substitution would hide
+# the ruby guard's exit status: an abort would leave the loop with no lines and this script would
+# exit 0 with empty stdout, so the release would run with no overrides and clone per ABI again --
+# silently undoing everything above. `set -e` stops here instead, and an empty result is a failure.
+DECLS="$(declarations)"
+if [ -z "$DECLS" ]; then
+  echo "FAIL: no native dependency declarations found in $CML" >&2
+  exit 1
+fi
+
 EXPORTS=""
 while IFS=$'\t' read -r name url sha; do
   [ -n "$name" ] || continue
@@ -124,7 +134,7 @@ while IFS=$'\t' read -r name url sha; do
   esac
   prepare "$name" "$url" "$sha"
   EXPORTS="${EXPORTS}FETCHCONTENT_SOURCE_DIR_${upper}=$CACHE/$name/$sha"$'\n'
-done < <(declarations)
+done <<< "$DECLS"
 
 # The overrides are printed once, as NAME=path lines with NO quotes: the caller turns each into a
 # -D argument and nothing between Gradle and cmake would strip quote characters from the value.

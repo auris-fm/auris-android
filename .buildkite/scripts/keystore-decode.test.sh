@@ -29,8 +29,8 @@ cp "$DIR/.buildkite/scripts/native-deps.sh" .buildkite/scripts/
 mkdir -p native-trees/llama native-trees/oboe
 cat > .buildkite/scripts/native-deps.sh <<'NATIVESTUB'
 #!/bin/bash
-printf 'FETCHCONTENT_SOURCE_DIR_LLAMA="%s/native-trees/llama"\n' "$PWD"
-printf 'FETCHCONTENT_SOURCE_DIR_OBOE="%s/native-trees/oboe"\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_LLAMA=%s/native-trees/llama\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_OBOE=%s/native-trees/oboe\n' "$PWD"
 NATIVESTUB
 chmod +x .buildkite/scripts/native-deps.sh
 # Buildkite runs the step as an executable, so its `#!/bin/bash -eu` applies.

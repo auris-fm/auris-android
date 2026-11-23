@@ -275,8 +275,8 @@ chmod +x "$WORK/repo/.buildkite/commands/"*.sh
 mkdir -p "$WORK/repo/.buildkite/scripts" "$WORK/repo/native-trees/llama" "$WORK/repo/native-trees/oboe"
 cat > "$WORK/repo/.buildkite/scripts/native-deps.sh" <<'NATIVESTUB'
 #!/bin/bash
-printf 'FETCHCONTENT_SOURCE_DIR_LLAMA="%s/native-trees/llama"\n' "$PWD"
-printf 'FETCHCONTENT_SOURCE_DIR_OBOE="%s/native-trees/oboe"\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_LLAMA=%s/native-trees/llama\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_OBOE=%s/native-trees/oboe\n' "$PWD"
 NATIVESTUB
 chmod +x "$WORK/repo/.buildkite/scripts/native-deps.sh"
 (

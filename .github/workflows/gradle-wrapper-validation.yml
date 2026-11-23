@@ -6,7 +6,7 @@ jobs:
     name: "Validation"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # SHA-pinned for supply-chain safety (the trailing "# v6.1.0" is the readable version).
       # Dependabot (github-actions ecosystem) auto-bumps the SHA + comment on new releases —
       # no manual step. To pin a tag by hand: gh api repos/gradle/actions/commits/v6.1.0 --jq .sha

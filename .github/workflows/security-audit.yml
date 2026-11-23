@@ -102,9 +102,12 @@ jobs:
             startsWith(github.head_ref, 'upstream-sync/')) && 'workflows' ||
             'secrets code workflows' }}
           # "true" makes a new high-severity code or workflow finding fail the check as a
-          # leaked secret already does. Off while the first weeks of results show which rules
+          # leaked secret already does. A scanner name enforces only that scanner. Unpinned
+          # actions are enforced now: an action referenced by a tag runs whatever that tag
+          # points at next, including in this workflow, which holds the release token. The
+          # other scanners stay off while the first weeks of results show which of their rules
           # are noise here; review on 2026-12-04.
-          AUDIT_ENFORCE: "false"
+          AUDIT_ENFORCE: "workflows"
           # A merge group's ref is a LINEAR commit: the base tip with the queued changes on
           # top, so it has no second parent and `HEAD^1` is not the base. GitHub names the
           # base explicitly for that event.

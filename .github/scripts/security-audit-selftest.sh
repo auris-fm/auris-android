@@ -112,6 +112,45 @@ expect "the first workflow of a repository is audited" 0 "zizmor/dangerous-trigg
 expect "a high-severity finding blocks once enforced" 1 "" \
   AUDIT_SCANNERS=workflows AUDIT_ENFORCE=true bash "$audit" pr 'HEAD^1'
 
+# --- Pinning enforcement -------------------------------------------------------------------
+# Pinning every `uses:` is the durable fix; enforcing it is what keeps it pinned. These cases
+# execute the audit rather than inspecting the script, because the property is a decision the
+# audit makes, not a line it contains.
+#
+# The unsafe workflow it picks up is a version-tagged checkout: if such a finding is not treated
+# as high severity, enforcing the scanner blocks nothing.
+
+# The first workflow of a repository is audited at all (the base has no workflow), and pinning
+# a scanner ON without touching what counts as high must not fail on an unenforced rule.
+#
+# The expectation is measured, not guessed: zizmor 1.32.0 reports FOUR high-severity findings for
+# this one file -- dangerous-triggers, artipacked and excessive-permissions alongside
+# unpinned-uses -- so enabling the scanner blocks with four, and an assertion of one would be
+# asserting a zizmor version rather than the gate.
+new_repo pinned-gate-off
+mkdir -p .github/workflows
+printf '%s' "$unsafe_workflow" > .github/workflows/unsafe.yml
+commit_all "add a version-tagged workflow"
+expect "an unpinned workflow is reported but does not block when the scanner is not enforced" 0 \
+  "zizmor/unpinned-uses" \
+  AUDIT_SCANNERS=workflows bash "$audit" pr 'HEAD^1'
+
+# THE GATE: the same finding, with zizmor enforced and nothing else enforced, fails the check.
+expect "enforcing the workflow scanner alone blocks an unpinned workflow" 1 \
+  "::error::Security audit:" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="workflows" bash "$audit" pr 'HEAD^1'
+
+# And the control for that control: an already-pinned workflow must pass the same gate, so the
+# previous case is not merely "enforcing fails".
+new_repo pinned-gate-on
+mkdir -p .github/workflows
+printf 'name: pinned\non: pull_request\npermissions: {}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n' \
+  > .github/workflows/pinned.yml
+commit_all "add a commit-pinned workflow"
+expect "enforcing the workflow scanner passes an already-pinned workflow" 0 \
+  "Unsafe workflows (zizmor): 0" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="workflows" bash "$audit" pr 'HEAD^1'
+
 new_repo broken-workflow
 mkdir -p .github/workflows
 printf 'name: broken\non: [push\njobs: {}\n' > .github/workflows/broken.yml

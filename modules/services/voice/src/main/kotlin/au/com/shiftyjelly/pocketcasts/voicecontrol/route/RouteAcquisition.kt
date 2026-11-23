@@ -67,11 +67,17 @@ interface RouteAcquisitionPlatform {
     /** Opens the input stream without starting it; returns the selected device id. */
     fun openInputStream(): Int
 
+    /** The generation naming the stream just opened, so a later close can be ownership-checked. */
+    fun openStreamGeneration(): Long?
+
     /** Starts the previously opened stream. */
     fun startInputStream(): Boolean
 
-    /** Closes any open stream. Idempotent. */
-    fun closeInputStream()
+    /**
+     * Closes the open stream, only while [generation] is still the current one. A late close for a
+     * replaced stream must not delete the replacement's live capture. Idempotent.
+     */
+    fun closeInputStream(generation: Long?)
 }
 
 /**
@@ -113,6 +119,9 @@ class RouteAcquisition(
 
     /** Device id reported by the stream this attempt opened, reused when capture already started it. */
     private var openedDeviceId: Int = -1
+
+    /** The generation of the stream this attempt opened; names it for an ownership-checked close. */
+    private var openedGeneration: Long? = null
 
     /** True once the opened stream was started and so belongs to the capture engine. */
     private var streamHandedOff = false
@@ -287,6 +296,7 @@ class RouteAcquisition(
         // still a real stream this attempt owns, so it stays owned and release() closes it.
         openedStream = deviceId >= 0
         openedDeviceId = deviceId
+        openedGeneration = if (deviceId >= 0) platform.openStreamGeneration() else null
         streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
             Timber.w(
@@ -308,11 +318,12 @@ class RouteAcquisition(
      */
     fun release() {
         if (openedStream && !streamHandedOff) {
-            runCatching { platform.closeInputStream() }
+            runCatching { platform.closeInputStream(openedGeneration) }
         }
         openedStream = false
         streamHandedOff = false
         openedDeviceId = -1
+        openedGeneration = null
         if (routingAcquired) {
             routingAcquired = false
             runCatching { platform.stopBluetoothSco() }

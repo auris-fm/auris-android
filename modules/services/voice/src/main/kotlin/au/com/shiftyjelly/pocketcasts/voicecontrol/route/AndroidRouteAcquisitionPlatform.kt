@@ -67,8 +67,10 @@ class AndroidRouteAcquisitionPlatform(
 
     override fun startInputStream(): Boolean = microphoneCapture.startAcquiredStream()
 
-    override fun closeInputStream() {
-        microphoneCapture.closeAcquiredStream()
+    override fun openStreamGeneration(): Long? = microphoneCapture.openStreamGeneration
+
+    override fun closeInputStream(generation: Long?) {
+        microphoneCapture.closeAcquiredStream(generation)
     }
 
     private fun communicationDevice(deviceId: Int): AudioDeviceInfo? = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == deviceId }

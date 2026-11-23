@@ -37,6 +37,38 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
+def _skip_template(text, start):
+    """Return the index just past a `${...}` template beginning at `start`.
+
+    The template is part of the surrounding literal, so its contents must not be read as code:
+    a nested string inside it would otherwise close the outer literal early, and everything
+    after that quote would be treated as layout. Track brace depth and skip nested literals.
+    """
+    j = start + 2
+    depth = 1
+    n = len(text)
+    while j < n and depth:
+        ch = text[j]
+        if ch in '"`' or (ch == "'" and _is_char_literal(text, j)):
+            quote = ch
+            j += 1
+            while j < n:
+                if quote != "`" and text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == quote:
+                    j += 1
+                    break
+                j += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        j += 1
+    return j
+
+
 def _is_char_literal(text, i):
     """True when the quote at i opens a Kotlin character literal rather than something else.
 
@@ -85,8 +117,11 @@ def split_spans(text):
             flush_code()
             j = i + 1
             while j < n:
-                if ch == '"' and text[j] == "\\":
-                    j += 2
+                if ch != "`" and text[j] == "\\":
+                    j += 2          # an escape, in a string OR a char literal ('\\'')
+                    continue
+                if ch == '"' and text.startswith("${", j):
+                    j = _skip_template(text, j)
                     continue
                 if text[j] == ch:
                     j += 1
@@ -220,9 +255,12 @@ def equivalent(before, after):
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
+    # Added, copied, modified or renamed files: a file that exists only on the base has nothing
+    # to compare in the working tree. Deletions are not formatting questions.
+    names = git("diff", "--name-only", "--diff-filter=ACMR", base)
     files = [
         f
-        for f in git("diff", "--name-only", base).split("\n")
+        for f in names.split("\n")
         if f.endswith(".kt") or (f.endswith(".kts") and "/" not in f)
     ]
     if not files:

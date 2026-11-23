@@ -16,6 +16,23 @@ import timber.log.Timber
 import uniffi.fingerprint_uniffi.CheckpointMatcher
 
 /**
+ * What the manager needs from the cloud reference source: one reference's bytes, and a matcher built
+ * from them. Naming the two operations lets a caller supply the fetch boundary — or a matcher that
+ * cannot be built on the JVM — without the manager reaching into a concrete transport.
+ */
+@Singleton
+interface CloudReferenceSource {
+    suspend fun fetchReference(
+        baseUrl: String,
+        episodeUuid: String,
+        podcastUuid: String,
+        cachedEtag: String? = null,
+    ): CloudFingerprintReferenceFetcher.Fetch
+
+    fun buildMatcher(data: ByteArray): CheckpointMatcher?
+}
+
+/**
  * Fetches the Auris cloud reference fingerprints for an episode from
  * `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
  * parses the `fingerprint-compact-v3` payload into the inherited library's [CheckpointMatcher].
@@ -23,13 +40,12 @@ import uniffi.fingerprint_uniffi.CheckpointMatcher
  * Returns null on any failure (unconfigured, network, decode, no checkpoints)
  * so callers degrade gracefully to the transcript-sync path.
  */
-@Singleton
 class CloudFingerprintReferenceFetcher @Inject constructor(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
     private val tokenProvider: AurisTokenProvider,
-) {
+) : CloudReferenceSource {
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -52,11 +68,11 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         data object Unavailable : Fetch
     }
 
-    suspend fun fetchReference(
+    override suspend fun fetchReference(
         baseUrl: String,
         episodeUuid: String,
         podcastUuid: String,
-        cachedEtag: String? = null,
+        cachedEtag: String?,
     ): Fetch {
         // The SAME credential the turn route presents, never the TOFU user_<uuid>: generating a
         // reference is paid work, so it needs a verified token.
@@ -175,7 +191,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
     }
 
     /** Parses compact-v3 bytes into the inherited library's matcher, or null when unusable. */
-    internal fun buildMatcher(data: ByteArray): CheckpointMatcher? {
+    override fun buildMatcher(data: ByteArray): CheckpointMatcher? {
         val reference = ReferenceFingerprint.decode(data, ReferenceFingerprint.AURIS_FORMAT) ?: return null
         val checkpoints = reference.libraryCheckpoints()
         if (checkpoints.isEmpty()) return null

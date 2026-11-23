@@ -200,6 +200,40 @@ KT
 printf 'sb.append(%s).append(%sab%s)\n' "'\"'" "$Q" "$Q" > File.kt
 expect fail "a string edit after a quote char literal is still seen"
 
+# A template containing its own string: the inner quotes must not close the outer literal, or
+# everything after them is read as code layout and a whitespace edit inside passes.
+# Write these fixtures with printf so the shell never has to quote a dollar-brace or a backslash.
+D=$(printf '\044')     # $
+B=$(printf '\134')     # backslash
+fixture nested-template <<KT
+val s = ${Q}prefix ${D}{name.removePrefix(${Q}### ${Q})}${Q}
+KT
+printf 'val s = %sprefix %s{name.removePrefix(%s###%s)}%s\n' "$Q" "$D" "$Q" "$Q" "$Q" > File.kt
+expect fail "a whitespace edit inside a nested template literal is not formatting"
+
+fixture escaped-char <<KT
+val q = '${B}${B}'
+val a = 1
+KT
+printf "val q = '%s%s'\nval a = 2\n" "$B" "$B" > File.kt
+expect fail "an edit after an escaped char literal is still seen"
+# The escape handling itself: an escaped apostrophe must be carried as ONE literal span, not split
+# at the middle quote. Asserted on the spans directly -- no behaviour edit distinguishes the two
+# spellings today, so a verdict-only control would pass for the wrong reason.
+R="$WORK/spans"; mkdir -p "$R"; cd "$R" || exit 1
+python3 - "$CHECKER" "$B" <<'PYSPANS'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("eq", sys.argv[1])
+eq = importlib.util.module_from_spec(spec); spec.loader.exec_module(eq)
+backslash = sys.argv[2]
+quote = chr(39)          # an APOSTROPHE: $Q above is a double quote, which is not this case
+source = "val q = " + quote + backslash + quote + quote + "\n"
+lits = [s for kind, s in eq.split_spans(source) if kind == "lit"]
+want = quote + backslash + quote + quote
+sys.exit(0 if lits == [want] else 1)
+PYSPANS
+[ $? -eq 0 ] && ok "an escaped apostrophe is one literal span" || bad "the escaped char literal was split"
+
 fixture raw-blank-line <<KT
 val msg = $T
 line one

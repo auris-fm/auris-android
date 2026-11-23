@@ -1,21 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
-import android.content.Context
-import android.media.MediaCodec
-import android.media.MediaExtractor
-import android.media.MediaFormat
-import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.repositories.playback.ExoPlayerDataSourceFactory
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
-import au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager
-import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintDecodePolicy
-import com.automattic.eventhorizon.EventHorizon
-import dagger.Lazy
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.Dispatcher
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -33,14 +24,13 @@ import uniffi.fingerprint_uniffi.MatchResult
 import uniffi.fingerprint_uniffi.WindowedFingerprint
 
 /**
- * A downloaded episode with generated chapters decodes the whole file locally. That decode must
- * score BOTH references: the transcript reference and the Auris reference, exactly as the PCM tap
- * path does. Otherwise the eager path silently loses every Auris candidate.
+ * A decoded episode must score the Auris reference for the windows it emits DURING decoding and for
+ * the windows released by the final flush. Skipping either loses anchors: the streamed ones are most
+ * of the map, and the tail is the last seconds of every episode.
  *
- * The decoder is driven through a fake extractor/codec pair so the real production loop runs —
- * input feeding, output extraction, window emission, flush — without a device. The fingerprinter
- * and both matchers are fakes over the library's own types, whose test constructors take no native
- * pointer, so nothing here needs the native library.
+ * These cases start the real preparation. The reference travels the real fetch path against a stub
+ * endpoint, so a break in that resolution shows up here too; only the boundaries needing a device —
+ * the audio stream, the fingerprinter and the native matcher build — are replaced.
  */
 @Config(manifest = Config.NONE)
 @RunWith(RobolectricTestRunner::class)
@@ -49,92 +39,86 @@ class FingerprintTimingManagerEagerCloudTest {
     @get:Rule
     val temp = TemporaryFolder()
 
-    private lateinit var manager: FingerprintTimingManager
     private lateinit var cloudMatcher: CheckpointMatcher
-    private lateinit var transcriptMatcher: CheckpointMatcher
     private lateinit var audioFile: File
+    private lateinit var cloud: MockWebServer
+    private lateinit var harness: FingerprintDecodeHarness
 
-    /** One decoded block of silence; long enough for the fake fingerprinter to emit a window. */
-    private val blockBytes = 4096
+    /** Bytes the real transport delivered to the matcher build; empty means no reference survived. */
+    private val builtFrom = mutableListOf<Int>()
 
     @Before
     fun setUp() {
-        val playbackManager = mock(PlaybackManager::class.java)
-        whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
         cloudMatcher = mock(CheckpointMatcher::class.java)
-        transcriptMatcher = mock(CheckpointMatcher::class.java)
-        audioFile = temp.newFile("episode.mp3").apply { writeBytes(ByteArray(blockBytes)) }
+        cloud = MockWebServer().also { it.start() }
+        cloud.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.path!!.contains("fingerprints")) {
+                MockResponse().setResponseCode(200)
+                    .setBody(String(FingerprintDecodeHarness.payload(ReferenceFingerprint.AURIS_FORMAT)))
+            } else {
+                MockResponse().setResponseCode(200).setBody(
+                    """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
+                )
+            }
+        }
+        audioFile = temp.newFile("episode.mp3").apply { writeBytes(ByteArray(4096)) }
 
-        manager = FingerprintTimingManager(
-            playbackManager = playbackManager,
-            referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
-            eventHorizon = mock(EventHorizon::class.java),
-            context = mock(Context::class.java),
-            chapterManager = Lazy { mock(ChapterManager::class.java) },
-            settings = mock(Settings::class.java),
-            dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
-            pcmTap = FingerprintPcmTap(),
-            cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
-            cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
-            cloudReferenceStore = mock(CloudReferenceStore::class.java),
-            decodePolicy = mock(FingerprintDecodePolicy::class.java),
+        // The bytes come from the real transport; only the native build is replaced.
+        val realFetcher = CloudFingerprintReferenceFetcher(alwaysMintToken())
+        val source = object : CloudReferenceSource {
+            override suspend fun fetchReference(
+                baseUrl: String,
+                episodeUuid: String,
+                podcastUuid: String,
+                cachedEtag: String?,
+            ): CloudFingerprintReferenceFetcher.Fetch = realFetcher.fetchReference(baseUrl, episodeUuid, podcastUuid, cachedEtag)
+
+            override fun buildMatcher(data: ByteArray): CheckpointMatcher {
+                builtFrom += data.size
+                return cloudMatcher
+            }
+        }
+
+        harness = FingerprintDecodeHarness(
+            audioFile = audioFile,
+            cloudReferenceSource = source,
+            cloudBaseUrl = cloud.url("/").toString().trimEnd('/'),
+            transcriptMatcher = mock(CheckpointMatcher::class.java),
         )
-        manager.debugTrackingEnabled = true
-        manager.installCloudMatcherForTest(cloudMatcher)
     }
 
+    private fun alwaysMintToken() = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+        clientProvider = {
+            au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(
+                cloud.url("/").toString().trimEnd('/'),
+            )
+        },
+        credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+            override fun credential(): String = "session"
+        },
+    )
+
+    @After
+    fun tearDown() {
+        harness.close()
+        runCatching { cloud.shutdown() }
+    }
+
+    private val manager get() = harness.manager
+
     /**
-     * Runs the eager decode with [streamedWindows] emitted during decoding and [tailWindows] on
-     * flush. The transcript matcher returns nothing, so any committed mapping can only have come
-     * from the Auris reference.
+     * Runs the real preparation with [streamedWindows] emitted during decoding and [tailWindows] on
+     * flush. No transcript reference exists, so any committed mapping can only be Auris-derived.
      */
     private fun runEagerDecode(
         streamedWindows: List<WindowedFingerprint>,
         tailWindows: List<WindowedFingerprint>,
     ) {
-        whenever(transcriptMatcher.findTopMatches(any(), any())).thenReturn(emptyList())
-
-        val extractor = mock(MediaExtractor::class.java)
-        whenever(extractor.readSampleData(any(), any())).thenReturn(-1)
-
-        val codec = mock(MediaCodec::class.java)
-        whenever(codec.dequeueInputBuffer(any())).thenReturn(-1)
-        // One output buffer carrying the block, flagged end-of-stream, then nothing further.
-        val info = MediaCodec.BufferInfo()
-        whenever(codec.dequeueOutputBuffer(any(), any())).thenAnswer { invocation ->
-            val out = invocation.getArgument<MediaCodec.BufferInfo>(0)
-            if (!delivered) {
-                delivered = true
-                out.set(0, blockBytes, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                0
-            } else {
-                out.set(0, 0, 0L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                -1
-            }
-        }
-        whenever(codec.getOutputBuffer(0)).thenReturn(
-            ByteBuffer.allocate(blockBytes).order(ByteOrder.nativeOrder()),
-        )
-        whenever(codec.outputFormat).thenReturn(mock(MediaFormat::class.java))
-
-        val streamer = mock(uniffi.fingerprint_uniffi.StreamingWindowedFingerprinter::class.java)
-        whenever(streamer.pushSamplesF32(any(), any())).thenReturn(streamedWindows)
-        whenever(streamer.flush()).thenReturn(tailWindows)
-        whenever(streamer.durationMs()).thenReturn(0u)
-
-        manager.runEagerDecodeForTest(
-            audioFilePath = audioFile.absolutePath,
-            transcriptMatcher = transcriptMatcher,
-            extractor = extractor,
-            codec = codec,
-            streamer = streamer,
-            format = mock(MediaFormat::class.java),
-            sampleRate = 44100,
-            channelCount = 2,
-        )
+        harness.streamedWindows = streamedWindows
+        harness.tailWindows = tailWindows
+        harness.prepareAndAwaitDecode()
+        assertTrue("no Auris reference reached the matcher build", builtFrom.isNotEmpty())
     }
-
-    private var delivered = false
 
     private fun window(second: Int) = WindowedFingerprint(
         timestampMs = (second * 1000).toUInt(),

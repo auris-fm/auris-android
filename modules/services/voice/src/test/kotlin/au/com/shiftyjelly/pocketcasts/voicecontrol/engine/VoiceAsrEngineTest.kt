@@ -3010,7 +3010,9 @@ class VoiceAsrEngineTest {
 
         override fun startInputStream(): Boolean = true
 
-        override fun closeInputStream() {
+                override fun openStreamGeneration(): Long? = null
+
+override fun closeInputStream(generation: Long?) {
             closeCalls++
         }
     }

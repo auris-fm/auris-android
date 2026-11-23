@@ -39,8 +39,10 @@ class VoiceSharingSwitchPutTest {
     private lateinit var state: VoiceSharingAccountState
     private lateinit var owner: TestOwner
     private lateinit var operations: VoiceSharingAccountOperations
+
     /** The requests the control asserts on, recorded by the dispatcher as it answers. */
     private val requests = ConcurrentLinkedQueue<RecordedRequest>()
+
     /** The exact bytes of those requests, in the same order. */
     private val bodies = ConcurrentLinkedQueue<String>()
 
@@ -101,10 +103,13 @@ class VoiceSharingSwitchPutTest {
         append("\"accepted_disclosure_version\":${disclosure?.let { "\"$it\"" } ?: "null"},")
         append("\"withdrawal_state\":\"$withdrawal\"}")
     }.toString()
+
     /** Answers the NEXT requests with the given bodies. */
     private fun enqueue(vararg responses: MockResponse) = responses.forEach { answer(it) }
+
     /** Answers the next request with [response]: the dispatcher's own queue, in order. */
     private fun answer(response: MockResponse) = queue.add(response)
+
     /** Stands in for the server's queue so a control can decide what each request gets. */
     private val queue = ConcurrentLinkedQueue<MockResponse>()
 
@@ -192,10 +197,10 @@ class VoiceSharingSwitchPutTest {
         assertEquals("both attempts carry the SAME desired state", bodies.toList()[0], bodies.toList()[1])
     }
 
+    // The revision can disappear between the read and the freeze: a lifecycle clear empties the
+    // Projection while the bearer is being acquired. Frozen() must refuse rather than emit a
+    // SWITCH with no If-Match.
     @Test
-        // The revision can disappear between the read and the freeze: a lifecycle clear empties the
-        // Projection while the bearer is being acquired. Frozen() must refuse rather than emit a
-        // SWITCH with no If-Match.
     fun `an account switch while the request is in flight refuses it instead of relabelling it`() = runTest {
         seedCurrent(enrolled = false, revision = "rev-1")
         enqueue(okProjection(enrolled = true, revision = "rev-2"))

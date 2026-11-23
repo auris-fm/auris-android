@@ -66,25 +66,24 @@ class EarlyConnectionOpener(
      * Like [openFor], but only if no [shutdown] has been requested since [expectedGeneration] was
      * captured. Returns null -- without dialling -- when a shutdown superseded the request.
      */
-    private suspend fun openForIfCurrent(tag: String, expectedGeneration: Long): CloudTurnConnection? =
-        withContext(dispatcher) {
-            lock.withLock {
-                if (generation.get() != expectedGeneration) {
-                    Timber.i(
-                        "Early connection dial tag=%s dropped: superseded by shutdown (generation %d != %d)",
-                        tag,
-                        expectedGeneration,
-                        generation.get(),
-                    )
-                    return@withLock null
-                }
-                openLocked(tag)
+    private suspend fun openForIfCurrent(tag: String, expectedGeneration: Long): CloudTurnConnection? = withContext(dispatcher) {
+        lock.withLock {
+            if (generation.get() != expectedGeneration) {
+                Timber.i(
+                    "Early connection dial tag=%s dropped: superseded by shutdown (generation %d != %d)",
+                    tag,
+                    expectedGeneration,
+                    generation.get(),
+                )
+                return@withLock null
             }
+            openLocked(tag)
         }
+    }
 
     /** The dial-or-resume body. Callers hold [lock]. */
     private suspend fun openLocked(tag: String): CloudTurnConnection {
-    val nowMs = now()
+        val nowMs = now()
         val current = held
         // A DEAD handle is not a resumption. Liveness is part of the keep condition, so a socket
         // that failed while the same utterance was still speaking is replaced here rather than

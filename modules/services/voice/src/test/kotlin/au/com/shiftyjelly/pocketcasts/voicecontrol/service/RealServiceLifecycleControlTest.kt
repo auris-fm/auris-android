@@ -383,7 +383,6 @@ class RealServiceLifecycleControlTest {
             .apply { isAccessible = true }.set(service, surface)
     }
 
-    private fun failedAttemptSurfaceLeft(service: VoiceControlService): Boolean =
-        service.javaClass.getDeclaredField("failedAttemptSurfaceLeft")
-            .apply { isAccessible = true }.getBoolean(service)
+    private fun failedAttemptSurfaceLeft(service: VoiceControlService): Boolean = service.javaClass.getDeclaredField("failedAttemptSurfaceLeft")
+        .apply { isAccessible = true }.getBoolean(service)
 }

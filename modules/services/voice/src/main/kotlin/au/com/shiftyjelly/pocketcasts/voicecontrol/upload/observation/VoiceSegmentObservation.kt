@@ -186,7 +186,6 @@ enum class AdmissionRefusalReason {
 
     /** The account has no durably saved opt-in (nothing ever saved, other account's, or withdrawn). */
     NO_SAVED_CHOICE,
-
 }
 
 /**

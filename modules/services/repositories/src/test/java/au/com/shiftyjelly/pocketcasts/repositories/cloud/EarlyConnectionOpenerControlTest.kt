@@ -3,11 +3,11 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -255,7 +255,7 @@ class EarlyConnectionOpenerControlTest {
     }
 
 /** `ExecutorService.asCoroutineDispatcher()` under a name that reads as what it is here. */
-private fun java.util.concurrent.ExecutorService.asCoroutineDispatcherSafe(): kotlinx.coroutines.CoroutineDispatcher = this.asCoroutineDispatcher()
+    private fun java.util.concurrent.ExecutorService.asCoroutineDispatcherSafe(): kotlinx.coroutines.CoroutineDispatcher = this.asCoroutineDispatcher()
 
     /**
      * A single-threaded owner dispatcher whose queued tasks run only when the test releases them,
@@ -305,5 +305,4 @@ private fun java.util.concurrent.ExecutorService.asCoroutineDispatcherSafe(): ko
         )
         assertTrue("no dial may run for a superseded request", harness.opens.get() == 0)
     }
-
 }

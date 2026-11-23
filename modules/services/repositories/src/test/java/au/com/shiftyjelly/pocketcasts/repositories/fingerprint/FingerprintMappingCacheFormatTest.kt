@@ -50,19 +50,27 @@ class FingerprintMappingCacheFormatTest {
         FingerprintTimingManager.TimeMappingEntry(playbackTime = 99.0, referenceTime = 99.0, score = 0.9f),
     )
 
-    private fun saveAndLoad(f: Fixture, auris: AurisReferenceIdentity? = null) =
-        FingerprintMappingCache.load(f.audio.absolutePath, f.reference.absolutePath, f.data, auris)
+    private fun saveAndLoad(f: Fixture, auris: AurisReferenceIdentity? = null) = FingerprintMappingCache.load(f.audio.absolutePath, f.reference.absolutePath, f.data, auris)
 
     /** A saved mapping that also recorded which Auris reference contributed to it. */
     private fun saveWithAuris(f: Fixture, auris: AurisReferenceIdentity?) = FingerprintMappingCache.save(
-        fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0, auris,
+        fullEntries(),
+        f.audio.absolutePath,
+        f.reference.absolutePath,
+        f.data,
+        100.0,
+        auris,
     )
 
     @Test
     fun `an Auris mapping saved against the Auris format is reused`() {
         val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
         FingerprintMappingCache.save(
-            fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0,
+            fullEntries(),
+            f.audio.absolutePath,
+            f.reference.absolutePath,
+            f.data,
+            100.0,
         )
 
         val loaded = saveAndLoad(f)
@@ -77,7 +85,11 @@ class FingerprintMappingCacheFormatTest {
         // not be thrown away by a change to what the Auris endpoint serves.
         val f = fixture(ReferenceFingerprint.TRANSCRIPT_FORMAT)
         FingerprintMappingCache.save(
-            fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0,
+            fullEntries(),
+            f.audio.absolutePath,
+            f.reference.absolutePath,
+            f.data,
+            100.0,
         )
 
         assertNotNull("a transcript-derived mapping is still valid", saveAndLoad(f))
@@ -87,7 +99,11 @@ class FingerprintMappingCacheFormatTest {
     fun `a mapping recording another format than the reference in hand is discarded`() {
         val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
         FingerprintMappingCache.save(
-            fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0,
+            fullEntries(),
+            f.audio.absolutePath,
+            f.reference.absolutePath,
+            f.data,
+            100.0,
         )
         // Rewrite only the recorded format, leaving every byte-guard intact: this is the upgrade
         // case where the reference file itself has not changed.
@@ -111,7 +127,11 @@ class FingerprintMappingCacheFormatTest {
     fun `a mapping with no recorded format is discarded`() {
         val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
         FingerprintMappingCache.save(
-            fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0,
+            fullEntries(),
+            f.audio.absolutePath,
+            f.reference.absolutePath,
+            f.data,
+            100.0,
         )
         // A cache written before the format was recorded: its provenance is unknown, which is not
         // evidence that it is usable.
@@ -128,7 +148,11 @@ class FingerprintMappingCacheFormatTest {
     fun `a reference whose format cannot be read discards the mapping`() {
         val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
         FingerprintMappingCache.save(
-            fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0,
+            fullEntries(),
+            f.audio.absolutePath,
+            f.reference.absolutePath,
+            f.data,
+            100.0,
         )
         // The reference in hand no longer parses, so nothing establishes what the mapping describes.
         val unreadable = "not json".toByteArray()

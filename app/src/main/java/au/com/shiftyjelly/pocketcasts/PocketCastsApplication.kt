@@ -113,7 +113,9 @@ class PocketCastsApplication :
     @Inject lateinit var userManager: UserManager
 
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
+
     @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
+
     @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
 
     @Inject lateinit var analyticsController: AnalyticsController

@@ -12,9 +12,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.After
-import org.junit.Before
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.any
@@ -270,7 +270,6 @@ class TurnTimingWiringTest {
             active.isEmpty(),
         )
     }
-
 
     @Test
     fun `a locally declined turn that escalates keeps its record open for the first audible mark`() = runTest {

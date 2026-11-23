@@ -90,9 +90,9 @@ class VoiceControlServiceAcquisitionTest {
 
         override fun startInputStream() = false
 
-                override fun openStreamGeneration(): Long? = null
+        override fun openStreamGeneration(): Long? = null
 
-override fun closeInputStream(generation: Long?) = Unit
+        override fun closeInputStream(generation: Long?) = Unit
     }
 
     @Test

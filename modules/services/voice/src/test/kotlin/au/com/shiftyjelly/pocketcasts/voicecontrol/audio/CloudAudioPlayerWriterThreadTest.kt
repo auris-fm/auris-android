@@ -164,7 +164,10 @@ class CloudAudioPlayerWriterThreadTest {
         player.play()
         (1..3).forEach { player.submitFrame(frame(it)) }
         assertTrue(entered.await(2, TimeUnit.SECONDS))
-        Thread { Thread.sleep(200); gate.countDown() }.start()
+        Thread {
+            Thread.sleep(200)
+            gate.countDown()
+        }.start()
 
         val completion = player.drainAndAwaitCompletion(timeoutMs = 5_000)
 

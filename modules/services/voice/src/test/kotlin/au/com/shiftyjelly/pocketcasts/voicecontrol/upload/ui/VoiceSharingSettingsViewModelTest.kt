@@ -14,8 +14,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -41,6 +41,7 @@ class VoiceSharingSettingsViewModelTest {
 
     /** Launched jobs whose scopes were never handed to the rule (leak-proofing, CI flake on 7a9664f95e). */
     private val extraJobs = mutableListOf<kotlinx.coroutines.Job>()
+
     @get:Rule
     val mainRule = object : TestWatcher() {
         override fun starting(description: Description) {
@@ -63,6 +64,7 @@ class VoiceSharingSettingsViewModelTest {
     }
 
     private val projection = MutableStateFlow<VoiceSharingAccountProjection?>(null)
+
     @Suppress("UNUSED_PARAMETER")
     private fun setProjection(session: Long, p: VoiceSharingAccountProjection?) {
         projection.value = p
@@ -120,6 +122,7 @@ class VoiceSharingSettingsViewModelTest {
                         epoch = p.enrollmentEpoch,
                         acceptedDisclosureVersion = p.acceptedDisclosureVersion,
                     )
+
                 p != null && p.withdrawalState == WithdrawalState.WITHDRAWN ->
                     au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice(
                         account = "user@example.com",
@@ -127,6 +130,7 @@ class VoiceSharingSettingsViewModelTest {
                         epoch = null,
                         acceptedDisclosureVersion = null,
                     )
+
                 else -> null
             }
         }
@@ -384,8 +388,6 @@ class VoiceSharingSettingsViewModelTest {
         assertEquals("the failure must be surfaced honestly", SettingsOperationStatus.FAILED, failed.status)
     }
 
-
-
     @Test
     fun `the failure copy survives unrelated projection updates until the next action`() = runTest(mainDispatcher) {
         setProjection(enrolledProjection().copy(voiceSharingEnrolled = false, withdrawalState = WithdrawalState.NOT_ENROLLED))
@@ -557,7 +559,6 @@ class VoiceSharingSettingsViewModelTest {
         assertFalse("the dead tap leaves no pending state on the new account", vm.state.value.pending)
         assertEquals(PendingOperation.NONE, vm.state.value.pendingOperation)
     }
-
 
     @Test
     fun `deletion is honest - pending is not success and failure stays visible`() = runTest(mainDispatcher) {
@@ -879,6 +880,7 @@ class VoiceSharingSettingsViewModelTest {
     private val enrollGate2 = Gate()
     private val withdrawGate2 = Gate()
     private val deleteGate2 = ReceiptGate()
+
     @Test
     fun `a retired stale tap does not clear a newer action's pending presentation`() = runTest(mainDispatcher) {
         var session = 1L
@@ -928,6 +930,7 @@ class VoiceSharingSettingsViewModelTest {
         }
         val hasTasks: Boolean get() = queue.isNotEmpty()
     }
+
     /**
      * ONE LOCAL TRUTH, the owner's Pixel bug in test form: an unenrolling PROJECTION alone must not
      * flip the switch off while the durable choice still says ENROLLED — that mismatch is exactly
@@ -990,6 +993,4 @@ class VoiceSharingSettingsViewModelTest {
             vm.state.value.enrolled,
         )
     }
-
-
 }

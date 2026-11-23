@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
@@ -34,7 +35,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner

@@ -23,11 +23,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.Mockito.mock
+import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import org.mockito.Mockito.mock
-import org.mockito.kotlin.whenever
 
 /**
  * The revalidation fallback contract (delta: fingerprint revalidation): a failed or unusable
@@ -100,16 +100,15 @@ class FingerprintTimingManagerCloudReferenceTest {
     @Test
     fun `a failed revalidation keeps the stored reference instead of dropping alignment`() = runBlocking {
         kotlinx.coroutines.runBlocking {
-        store.save("ep_keep", compactV3Payload(), "\"v1\"")
+            store.save("ep_keep", compactV3Payload(), "\"v1\"")
 
-        // No credential -> fetchReference is Unavailable without touching the network.
-        val kept = manager.resolveCloudReferencePayload("https://offline.invalid", "ep_keep", "pod_1")
+            // No credential -> fetchReference is Unavailable without touching the network.
+            val kept = manager.resolveCloudReferencePayload("https://offline.invalid", "ep_keep", "pod_1")
 
-        assertNotNull("a failed revalidation must keep the stored reference", kept)
-        assertEquals(3, ReferenceFingerprint.decode(kept!!)!!.libraryCheckpoints().size)
+            assertNotNull("a failed revalidation must keep the stored reference", kept)
+            assertEquals(3, ReferenceFingerprint.decode(kept!!)!!.libraryCheckpoints().size)
         }
     }
-
 
     @Test
     fun `a stored reference in another format is not kept by a failed revalidation`() {
@@ -127,117 +126,119 @@ class FingerprintTimingManagerCloudReferenceTest {
     @Test
     fun `a failure with no stored reference stays unavailable after exactly one fetch`() {
         kotlinx.coroutines.runBlocking {
-        val server = MockWebServer()
-        server.enqueue(MockResponse().setResponseCode(503))
-        server.start()
+            val server = MockWebServer()
+            server.enqueue(MockResponse().setResponseCode(503))
+            server.start()
 
-        try {
-            val playbackManager = mock(PlaybackManager::class.java)
-            whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
-            val auth = MockWebServer()
-            auth.enqueue(MockResponse().setResponseCode(200).setBody(
-                """{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}"""
-            ))
-            auth.start()
-            val fetcher = CloudFingerprintReferenceFetcher(
-                au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
-                    clientProvider = {
-                        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(auth.url("/").toString().trimEnd('/'))
-                    },
-                    credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
-                        override fun credential(): String = "session"
-                    },
-                ),
-            )
-            val managerWithServer = FingerprintTimingManager(
-                playbackManager = playbackManager,
-                referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
-                eventHorizon = mock(EventHorizon::class.java),
-                context = mock(Context::class.java),
-                chapterManager = Lazy { mock(ChapterManager::class.java) },
-                settings = mock(Settings::class.java),
-                dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
-                pcmTap = FingerprintPcmTap(),
-                cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
-                cloudFetcher = fetcher,
-                cloudReferenceStore = store,
-                decodePolicy = mock(FingerprintDecodePolicy::class.java),
-            )
+            try {
+                val playbackManager = mock(PlaybackManager::class.java)
+                whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
+                val auth = MockWebServer()
+                auth.enqueue(
+                    MockResponse().setResponseCode(200).setBody(
+                        """{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}""",
+                    ),
+                )
+                auth.start()
+                val fetcher = CloudFingerprintReferenceFetcher(
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+                        clientProvider = {
+                            au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(auth.url("/").toString().trimEnd('/'))
+                        },
+                        credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+                            override fun credential(): String = "session"
+                        },
+                    ),
+                )
+                val managerWithServer = FingerprintTimingManager(
+                    playbackManager = playbackManager,
+                    referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
+                    eventHorizon = mock(EventHorizon::class.java),
+                    context = mock(Context::class.java),
+                    chapterManager = Lazy { mock(ChapterManager::class.java) },
+                    settings = mock(Settings::class.java),
+                    dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
+                    pcmTap = FingerprintPcmTap(),
+                    cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
+                    cloudFetcher = fetcher,
+                    cloudReferenceStore = store,
+                    decodePolicy = mock(FingerprintDecodePolicy::class.java),
+                )
 
-            val payload = runBlocking {
-                managerWithServer.resolveCloudReferencePayload(server.url("/").toString().trimEnd('/'), "ep_none", "pod_1")
+                val payload = runBlocking {
+                    managerWithServer.resolveCloudReferencePayload(server.url("/").toString().trimEnd('/'), "ep_none", "pod_1")
+                }
+
+                assertNull(payload)
+                assertEquals("Unavailable must not fire a second attempt", 1, server.requestCount)
+                auth.shutdown()
+            } finally {
+                server.shutdown()
             }
-
-            assertNull(payload)
-            assertEquals("Unavailable must not fire a second attempt", 1, server.requestCount)
-            auth.shutdown()
-        } finally {
-            server.shutdown()
-        }
         }
     }
-
 
     @Test
     fun `a 304 against an unusable stored payload retries once without the etag`() {
         kotlinx.coroutines.runBlocking {
-        val server = MockWebServer()
-        server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"stale\""))
-        server.enqueue(MockResponse().setBody(compactV3Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"fresh\""))
-        server.start()
+            val server = MockWebServer()
+            server.enqueue(MockResponse().setResponseCode(304).setHeader("ETag", "\"stale\""))
+            server.enqueue(MockResponse().setBody(compactV3Payload().toString(Charsets.UTF_8)).setHeader("ETag", "\"fresh\""))
+            server.start()
 
-        try {
-            val playbackManager = mock(PlaybackManager::class.java)
-            whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
-            val auth = MockWebServer()
-            // One mint: the provider caches the access token for the whole revalidation chain.
-            auth.enqueue(MockResponse().setResponseCode(200).setBody(
-                """{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}"""
-            ))
-            auth.start()
-            val fetcher = CloudFingerprintReferenceFetcher(
-                au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
-                    clientProvider = {
-                        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(auth.url("/").toString().trimEnd('/'))
-                    },
-                    credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
-                        override fun credential(): String = "session"
-                    },
-                ),
-            )
-            val managerWithServer = FingerprintTimingManager(
-                playbackManager = playbackManager,
-                referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
-                eventHorizon = mock(EventHorizon::class.java),
-                context = mock(Context::class.java),
-                chapterManager = Lazy { mock(ChapterManager::class.java) },
-                settings = mock(Settings::class.java),
-                dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
-                pcmTap = FingerprintPcmTap(),
-                cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
-                cloudFetcher = fetcher,
-                cloudReferenceStore = store,
-                decodePolicy = mock(FingerprintDecodePolicy::class.java),
-            )
-            // Corrupt stored entry: a 304 against it must not trust it.
-            store.save("ep_retry", "not json".toByteArray(), "\"stale\"")
+            try {
+                val playbackManager = mock(PlaybackManager::class.java)
+                whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
+                val auth = MockWebServer()
+                // One mint: the provider caches the access token for the whole revalidation chain.
+                auth.enqueue(
+                    MockResponse().setResponseCode(200).setBody(
+                        """{"access_token":"tok-1","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}""",
+                    ),
+                )
+                auth.start()
+                val fetcher = CloudFingerprintReferenceFetcher(
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+                        clientProvider = {
+                            au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(auth.url("/").toString().trimEnd('/'))
+                        },
+                        credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+                            override fun credential(): String = "session"
+                        },
+                    ),
+                )
+                val managerWithServer = FingerprintTimingManager(
+                    playbackManager = playbackManager,
+                    referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
+                    eventHorizon = mock(EventHorizon::class.java),
+                    context = mock(Context::class.java),
+                    chapterManager = Lazy { mock(ChapterManager::class.java) },
+                    settings = mock(Settings::class.java),
+                    dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
+                    pcmTap = FingerprintPcmTap(),
+                    cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
+                    cloudFetcher = fetcher,
+                    cloudReferenceStore = store,
+                    decodePolicy = mock(FingerprintDecodePolicy::class.java),
+                )
+                // Corrupt stored entry: a 304 against it must not trust it.
+                store.save("ep_retry", "not json".toByteArray(), "\"stale\"")
 
-            val payload = runBlocking {
-                managerWithServer.resolveCloudReferencePayload(server.url("/").toString().trimEnd('/'), "ep_retry", "pod_1")
+                val payload = runBlocking {
+                    managerWithServer.resolveCloudReferencePayload(server.url("/").toString().trimEnd('/'), "ep_retry", "pod_1")
+                }
+
+                assertNotNull(payload)
+                assertEquals(3, ReferenceFingerprint.decode(payload!!)!!.libraryCheckpoints().size)
+                assertEquals("\"stale\"", server.takeRequest().getHeader("If-None-Match"))
+                assertNull("the retry must be unconditional", server.takeRequest().getHeader("If-None-Match"))
+                // The fresh payload replaced the corrupt one for next time.
+                val stored = store.load("ep_retry")
+                assertEquals("\"fresh\"", stored!!.etag)
+                auth.shutdown()
+            } finally {
+                server.shutdown()
             }
-
-            assertNotNull(payload)
-            assertEquals(3, ReferenceFingerprint.decode(payload!!)!!.libraryCheckpoints().size)
-            assertEquals("\"stale\"", server.takeRequest().getHeader("If-None-Match"))
-            assertNull("the retry must be unconditional", server.takeRequest().getHeader("If-None-Match"))
-            // The fresh payload replaced the corrupt one for next time.
-            val stored = store.load("ep_retry")
-            assertEquals("\"fresh\"", stored!!.etag)
-            auth.shutdown()
-        } finally {
-            server.shutdown()
-        }
         }
     }
-
 }

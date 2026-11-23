@@ -41,7 +41,6 @@ interface VoiceSharingAccountApi {
 
         fun create(retrofit: Retrofit): VoiceSharingAccountApi = retrofit.create(VoiceSharingAccountApi::class.java)
     }
-
 }
 
 sealed interface VoiceSharingMutationResult {
@@ -93,7 +92,6 @@ class VoiceSharingAccountOperations(
                 )
                 false
             }
-
         }
     }
 
@@ -130,7 +128,9 @@ class VoiceSharingAccountOperations(
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
         return if (apply(json, issued, fromRefresh = false, applyUnderGuard = applyUnderGuard)) {
             VoiceSharingMutationResult.Applied(projection)
-        } else VoiceSharingMutationResult.Failure
+        } else {
+            VoiceSharingMutationResult.Failure
+        }
     }
 
     /**

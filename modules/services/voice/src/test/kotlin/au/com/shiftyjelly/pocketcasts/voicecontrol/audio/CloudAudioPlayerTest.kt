@@ -29,7 +29,9 @@ class TimestampedAudioTrackShadow : org.robolectric.shadows.ShadowAudioTrack() {
 
     companion object {
         @JvmStatic var armed = false
+
         @JvmStatic var nanoTime = 0L
+
         @JvmStatic var framePosition = 0L
     }
 }

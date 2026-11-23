@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
-import org.junit.rules.TemporaryFolder
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -12,6 +11,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /**
  * THE UPLOAD USER-AGENT (spec on the `platform=` log line): the server classifies each request's

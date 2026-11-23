@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintConstants
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -8,27 +9,18 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import uniffi.fingerprint_uniffi.CheckpointMatcher
 import timber.log.Timber
+import uniffi.fingerprint_uniffi.CheckpointMatcher
 
-/**
- * Fetches the Auris cloud reference fingerprints for an episode from
- * `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
- * parses the `fingerprint-compact-v3` payload into the inherited library's [CheckpointMatcher].
- *
- * Returns null on any failure (unconfigured, network, decode, no checkpoints)
- * so callers degrade gracefully to the transcript-sync path.
- */
-@Singleton
 /**
  * What the manager needs from the cloud reference source: one reference's bytes, and a matcher built
  * from them. Naming the two operations lets a caller supply the fetch boundary — or a matcher that
  * cannot be built on the JVM — without the manager reaching into a concrete transport.
  */
+@Singleton
 interface CloudReferenceSource {
     suspend fun fetchReference(
         baseUrl: String,
@@ -40,6 +32,14 @@ interface CloudReferenceSource {
     fun buildMatcher(data: ByteArray): CheckpointMatcher?
 }
 
+/**
+ * Fetches the Auris cloud reference fingerprints for an episode from
+ * `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
+ * parses the `fingerprint-compact-v3` payload into the inherited library's [CheckpointMatcher].
+ *
+ * Returns null on any failure (unconfigured, network, decode, no checkpoints)
+ * so callers degrade gracefully to the transcript-sync path.
+ */
 class CloudFingerprintReferenceFetcher @Inject constructor(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this

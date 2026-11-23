@@ -131,6 +131,15 @@ jobs:
         name: Pre-commit hook control
         run: bash .github/scripts/git-hooks.test.sh
 
+      # The checker itself is guarded like any other control script: it must still accept a
+      # purely formatting change and still reject a behaviour edit. It is NOT run over the PR's
+      # own diff -- most guarded PRs contain real Kotlin changes, and demanding those be
+      # formatting-only would fail every one of them. Reformatting PRs run it locally against
+      # their base before committing; this proves the tool they used still works.
+      - if: steps.scope.outputs.run == 'true'
+        name: Spotless formatting-equivalence checker controls
+        run: bash .github/scripts/spotless-formatting-equivalence.test.sh
+
   play-api-surface:
     name: "Play API surface (real gem)"
     runs-on: ubuntu-latest

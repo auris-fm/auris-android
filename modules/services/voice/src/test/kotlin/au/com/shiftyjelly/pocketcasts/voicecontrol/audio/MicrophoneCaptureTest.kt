@@ -4,8 +4,8 @@ import android.content.Context
 import android.content.res.AssetManager
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking

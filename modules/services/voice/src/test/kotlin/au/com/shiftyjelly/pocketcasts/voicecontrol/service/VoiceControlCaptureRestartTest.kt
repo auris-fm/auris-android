@@ -236,7 +236,6 @@ class VoiceControlCaptureRestartTest {
         override fun communicationDeviceId(): Int? = null
         override fun clearCommunicationDevice() = Unit
 
-
         // Device truth: once the HFP link is up, the opened stream selects the SCO input device.
         override fun deviceType(deviceId: Int): Int? = if (deviceId == SCO_INPUT_ID) AudioDeviceInfo.TYPE_BLUETOOTH_SCO else null
 
@@ -311,14 +310,14 @@ class VoiceControlCaptureRestartTest {
         override fun setEarlyWakeCutoff(samples: Int) = Unit
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
+
         /**
          * A live stream keeps delivering, so the counter advances by one poll's worth of frames
          * each time it is read. A constant count would trip the starvation check after 2.5 s and end
          * a capture these tests mean to keep alive, making their stop/attach assertions depend on
          * wall-clock time rather than on the behaviour under test.
          */
-        override fun getFramesConsumed(): Long =
-            if (capturing) consumedFrames.addAndGet(OboeConfig.FRAMES_PER_POLL.toLong()) else 0L
+        override fun getFramesConsumed(): Long = if (capturing) consumedFrames.addAndGet(OboeConfig.FRAMES_PER_POLL.toLong()) else 0L
         private val consumedFrames = java.util.concurrent.atomic.AtomicLong(0L)
     }
 

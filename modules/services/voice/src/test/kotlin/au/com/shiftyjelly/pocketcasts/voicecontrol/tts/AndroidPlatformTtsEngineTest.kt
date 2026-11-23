@@ -1020,26 +1020,35 @@ class AndroidPlatformTtsEngineTest {
         val startedAt = System.nanoTime()
         val old = scope.launch { wired.speak("old", "en") }
         // speak() hops to the main looper before reaching synthesis; pump while waiting for the park.
-        assertTrue("old must be parked mid-synthesis", (0 until 100).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            oldParked.count == 0L
-        })
+        assertTrue(
+            "old must be parked mid-synthesis",
+            (0 until 100).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                oldParked.count == 0L
+            },
+        )
 
         // Successor starts while the old is still parked: it claims the generation, synthesizes,
         // and reaches playback.
         val successor = scope.launch { wired.speak("successor", "en") }
-        assertTrue("successor synthesis must queue", (0 until 100).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            fake.synthesizeCount >= 2
-        })
+        assertTrue(
+            "successor synthesis must queue",
+            (0 until 100).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                fake.synthesizeCount >= 2
+            },
+        )
         // The resumption after onDone is itself a main-looper task: pump until the write runs.
-        assertTrue("successor write must enter", (0 until 100).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            newEntered.count == 0L
-        })
+        assertTrue(
+            "successor write must enter",
+            (0 until 100).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                newEntered.count == 0L
+            },
+        )
         assertEquals("successor must be playing", android.media.AudioTrack.PLAYSTATE_PLAYING, successorTrack.get().playState)
 
         // THE REAL DEADLINE: wait out the old utterance's synthesis deadline BEFORE releasing the
@@ -1067,7 +1076,6 @@ class AndroidPlatformTtsEngineTest {
         assertEquals("a timed-out utterance whose successor owns the engine must not stop it", 0, stops)
         assertEquals("the successor's audio must survive the old timeout", android.media.AudioTrack.PLAYSTATE_PLAYING, successorStillPlaying)
     }
-
 
     @Test
     fun `reviewer cancellation stops old blocked track and preserves actual successor`() {

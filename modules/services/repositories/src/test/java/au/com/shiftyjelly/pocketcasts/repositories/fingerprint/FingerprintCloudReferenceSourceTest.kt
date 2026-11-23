@@ -12,20 +12,20 @@ import dagger.Lazy
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -75,17 +75,16 @@ class FingerprintCloudReferenceSourceTest {
         )
     }
 
-    private fun alwaysMintToken() =
-        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
-            clientProvider = {
-                au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(
-                    cloud.url("/").toString().trimEnd('/'),
-                )
-            },
-            credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
-                override fun credential(): String = "session"
-            },
-        )
+    private fun alwaysMintToken() = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+        clientProvider = {
+            au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(
+                cloud.url("/").toString().trimEnd('/'),
+            )
+        },
+        credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+            override fun credential(): String = "session"
+        },
+    )
 
     /** Three one-second checkpoints the client accumulates into usable values. */
     private fun compactV3(asString: String = ReferenceFingerprint.AURIS_FORMAT): String {
@@ -111,14 +110,13 @@ class FingerprintCloudReferenceSourceTest {
         // The token mint and the reference both come from this server; the order is whatever the
         // fetcher asks for first, so answer by path.
         cloud.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                if (request.path!!.contains("fingerprints")) {
-                    MockResponse().setResponseCode(200).setBody(compactV3())
-                } else {
-                    MockResponse().setResponseCode(200).setBody(
-                        """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
-                    )
-                }
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.path!!.contains("fingerprints")) {
+                MockResponse().setResponseCode(200).setBody(compactV3())
+            } else {
+                MockResponse().setResponseCode(200).setBody(
+                    """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
+                )
+            }
         }
     }
 
@@ -149,14 +147,13 @@ class FingerprintCloudReferenceSourceTest {
         store.cached = CachedCloudReference(payload, etag = "\"v1\"")
         // 304: the endpoint says the stored bytes are still current.
         cloud.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                if (request.path!!.contains("fingerprints")) {
-                    MockResponse().setResponseCode(304)
-                } else {
-                    MockResponse().setResponseCode(200).setBody(
-                        """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
-                    )
-                }
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.path!!.contains("fingerprints")) {
+                MockResponse().setResponseCode(304)
+            } else {
+                MockResponse().setResponseCode(200).setBody(
+                    """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
+                )
+            }
         }
 
         val resolved = manager.resolveCloudReference(cloud.url("/").toString().trimEnd('/'), "episode", "podcast")
@@ -169,14 +166,13 @@ class FingerprintCloudReferenceSourceTest {
     @Test
     fun `no stored reference and an unreachable endpoint leaves no reference`() = runTest {
         cloud.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                if (request.path!!.contains("fingerprints")) {
-                    MockResponse().setResponseCode(503)
-                } else {
-                    MockResponse().setResponseCode(200).setBody(
-                        """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
-                    )
-                }
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.path!!.contains("fingerprints")) {
+                MockResponse().setResponseCode(503)
+            } else {
+                MockResponse().setResponseCode(200).setBody(
+                    """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
+                )
+            }
         }
 
         val resolved = manager.resolveCloudReference(cloud.url("/").toString().trimEnd('/'), "episode", "podcast")
@@ -193,14 +189,13 @@ class FingerprintCloudReferenceSourceTest {
             etag = "\"v1\"",
         )
         cloud.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                if (request.path!!.contains("fingerprints")) {
-                    MockResponse().setResponseCode(304)
-                } else {
-                    MockResponse().setResponseCode(200).setBody(
-                        """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
-                    )
-                }
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.path!!.contains("fingerprints")) {
+                MockResponse().setResponseCode(304)
+            } else {
+                MockResponse().setResponseCode(200).setBody(
+                    """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
+                )
+            }
         }
 
         val resolved = manager.resolveCloudReference(cloud.url("/").toString().trimEnd('/'), "episode", "podcast")

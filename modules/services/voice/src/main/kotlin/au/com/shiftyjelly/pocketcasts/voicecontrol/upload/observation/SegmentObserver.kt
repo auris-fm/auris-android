@@ -352,7 +352,7 @@ class SegmentObserver(
         wakeState: SegmentObservation.WakeState,
         wakeMeasurement: SegmentObservation.WakeMeasurement? = null,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
-    ): Unit {
+    ) {
         // [framesProvider] is wrapped SINGLE-SHOT (blocker b3): the first call drains and hands the
         // native buffer back; every later call returns EMPTY — no second copy-out can double-run.
         var drained = false

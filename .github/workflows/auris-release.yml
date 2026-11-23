@@ -30,6 +30,12 @@ jobs:
           distribution: temurin
           java-version: "21"
       - run: bash .buildkite/scripts/keystore-decode.test.sh
+      # The interpreter gate needs ruby on PATH; ubuntu runners carry one. It reads the
+      # pins from the checkout, so no version is repeated here.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - run: bash .buildkite/scripts/release-interpreter.test.sh
 
   voice-unit-tests:
     name: "voice:testDebugUnitTest"

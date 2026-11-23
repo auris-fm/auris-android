@@ -22,6 +22,31 @@ keytool -genkeypair -keystore good.keystore -alias upload -storepass testpass \
 
 mkdir -p app .buildkite/commands
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" .buildkite/commands/
+cp "$DIR/.buildkite/commands/auris-require-interpreter.sh" .buildkite/commands/
+# The release step asserts the repo's pinned ruby and bundler before it decodes anything.
+# These controls target the DECODE gate, so give the fixture the pinned pair rather than
+# whatever this machine's PATH resolves -- the interpreter gate has its own suite.
+cp "$DIR/.ruby-version" "$DIR/Gemfile.lock" .
+mkdir -p pin-bin
+cat > pin-bin/ruby <<'STUB'
+#!/bin/bash
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "ruby $(cat .ruby-version) (fixture) [arm64-darwin]"
+  exit 0
+fi
+exec REAL_RUBY_PLACEHOLDER "$@"
+STUB
+sed -i.bak "s|REAL_RUBY_PLACEHOLDER|$(command -v ruby)|" pin-bin/ruby && rm -f pin-bin/ruby.bak
+chmod +x pin-bin/ruby
+cat > pin-bin/bundle <<'STUB'
+#!/bin/bash
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "Bundler version $(awk '/^BUNDLED WITH/{getline; gsub(/[ \t]/,""); print}' Gemfile.lock)"
+  exit 0
+fi
+exit 0
+STUB
+chmod +x pin-bin/bundle
 printf 'versionName=7.90\nversionCode=9452\n' > version.properties
 printf 'org.gradle.jvmargs=-Xmx1g\n' > gradle.properties
 printf 'rootProject.name="x"\n' > settings.gradle.kts
@@ -39,7 +64,7 @@ cat > bin/buildkite-agent <<'STUB'
 exit 0
 STUB
 chmod +x bin/buildkite-agent
-export PATH="$WORK/bin:$PATH"
+export PATH="$WORK/pin-bin:$WORK/bin:$PATH"
 # Stub the signature verifier at the path the script actually invokes
 # (same directory as the copied release script), with production flags:
 # the fixture runs the script exactly as the job does.
@@ -100,7 +125,7 @@ exec /usr/bin/openssl "$@"
 STUB
 chmod +x "$WORK/libressl-bin/openssl"
 rm -f gradlew-reached
-PATH="$WORK/libressl-bin:$PATH" JAVA_HOME="$FIXTURE_JAVA_HOME" ANDROID_UPLOAD_KEYSTORE_B64="$WRAPPED_B64" BUILDKITE_BUILD_NUMBER=9452 \
+PATH="$WORK/libressl-bin:$WORK/pin-bin:$PATH" JAVA_HOME="$FIXTURE_JAVA_HOME" ANDROID_UPLOAD_KEYSTORE_B64="$WRAPPED_B64" BUILDKITE_BUILD_NUMBER=9452 \
   bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
 check "wrapped base64 under LibreSSL-like PATH openssl still passes" 0 "$?"
 

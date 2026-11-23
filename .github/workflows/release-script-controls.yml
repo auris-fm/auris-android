@@ -18,6 +18,9 @@ on:
       # either has to run this job: until the queue is switched on, this is the only place
       # that control runs at all.
       - ".github/scripts/**"
+      # The pre-commit hook is guarded by a control beside the others, and it lives outside
+      # both guarded directories, so a change to it has to run this job.
+      - "scripts/git-hooks/**"
       - ".github/workflows/**"
       # The seed control derives its coordinate from these two pins, so a bump has to run it.
       - "gradle/libs.versions.toml"
@@ -66,7 +69,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^gradle/libs\.versions\.toml$|^modules/services/voice/src/test/resources/robolectric\.properties$|^Gemfile(\.lock)?$|^modules/services/voice/(src/main/cpp/CMakeLists\.txt|build\.gradle\.kts)$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^scripts/git-hooks/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^gradle/libs\.versions\.toml$|^modules/services/voice/src/test/resources/robolectric\.properties$|^Gemfile(\.lock)?$|^modules/services/voice/(src/main/cpp/CMakeLists\.txt|build\.gradle\.kts)$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -121,6 +124,12 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         name: Robolectric seed control
         run: bash .github/scripts/robolectric-seed.test.sh
+
+      # Runs no Gradle and needs no checkout beyond the hook itself: the control supplies a
+      # fake ./gradlew and asserts what the hook asks for and what it does with the answer.
+      - if: steps.scope.outputs.run == 'true'
+        name: Pre-commit hook control
+        run: bash .github/scripts/git-hooks.test.sh
 
   play-api-surface:
     name: "Play API surface (real gem)"

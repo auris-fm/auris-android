@@ -106,8 +106,9 @@ class RealServiceSessionAdmissionControlTest {
      * This is the observable that distinguishes a consulting service from one that skips the gate.
      * Engine-started and wired-backend are NOT usable here: model readiness stops the start in this
      * environment either way, so both stay unset even when the gate is bypassed entirely.
+     *
+     * Put the service in the state a started instance is in: holding a session.
      */
-    /** Put the service in the state a started instance is in: holding a session. */
     private fun setSession(service: VoiceControlService, session: VoiceSessionGate.Session) {
         service.javaClass.getDeclaredField("voiceSession")
             .apply { isAccessible = true }.set(service, session)
@@ -121,8 +122,7 @@ class RealServiceSessionAdmissionControlTest {
             .apply { isAccessible = true }.getBoolean(state)
     }
 
-    private fun takenSession(service: VoiceControlService): Any? =
-        service.javaClass.getDeclaredField("voiceSession").apply { isAccessible = true }.get(service)
+    private fun takenSession(service: VoiceControlService): Any? = service.javaClass.getDeclaredField("voiceSession").apply { isAccessible = true }.get(service)
 
     /** Await the current teardown, pumping the Main looper the releases run on. */
     private suspend fun awaitTeardown(service: VoiceControlService): TeardownResult {

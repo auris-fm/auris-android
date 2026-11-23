@@ -243,12 +243,11 @@ class VoiceControlModeObserverAvailabilityTest {
         override fun communicationDeviceId(): Int? = null
         override fun clearCommunicationDevice() = Unit
 
-        override fun deviceType(deviceId: Int): Int? =
-            when {
-                deviceId != SCO_INPUT_ID -> null
-                wiredInput -> AudioDeviceInfo.TYPE_WIRED_HEADSET
-                else -> AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-            }
+        override fun deviceType(deviceId: Int): Int? = when {
+            deviceId != SCO_INPUT_ID -> null
+            wiredInput -> AudioDeviceInfo.TYPE_WIRED_HEADSET
+            else -> AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }
 
         /**
          * Presents the input as ALREADY selected before the service starts — an already-isolated
@@ -272,9 +271,9 @@ class VoiceControlModeObserverAvailabilityTest {
 
         override fun openInputStream(): Int = microphoneCapture.openStreamForAcquisition()
         override fun startInputStream(): Boolean = microphoneCapture.startAcquiredStream()
-                override fun openStreamGeneration(): Long? = microphoneCapture.openStreamGeneration
+        override fun openStreamGeneration(): Long? = microphoneCapture.openStreamGeneration
 
-override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquiredStream(generation)
+        override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquiredStream(generation)
     }
 
     private class FakeHardware(private val scoReady: () -> Boolean) : CaptureHardware {
@@ -349,14 +348,14 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
         override fun getSpeechOnsetSample() = 0
         override fun getSpeechEndSample() = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
+
         /**
          * A live stream keeps delivering, so the counter advances by one poll's worth of frames
          * each time it is read. A constant count would trip the starvation check after 2.5 s and end
          * a capture these tests mean to keep alive, making their stop/attach assertions depend on
          * wall-clock time rather than on the behaviour under test.
          */
-        override fun getFramesConsumed(): Long =
-            if (capturing) consumedFrames.addAndGet(OboeConfig.FRAMES_PER_POLL.toLong()) else 0L
+        override fun getFramesConsumed(): Long = if (capturing) consumedFrames.addAndGet(OboeConfig.FRAMES_PER_POLL.toLong()) else 0L
         private val consumedFrames = java.util.concurrent.atomic.AtomicLong(0L)
     }
 
@@ -385,8 +384,7 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
 
     private class NoopRecognizer : VoiceRecognizer {
         override suspend fun ensureReady() = Result.success(Unit)
-        override suspend fun recognize(input: IntentRoutingInput, context: VoiceRecognitionContext, logicalRequestId: String) =
-            throw IllegalStateException("not used in this harness")
+        override suspend fun recognize(input: IntentRoutingInput, context: VoiceRecognitionContext, logicalRequestId: String) = throw IllegalStateException("not used in this harness")
 
         override fun release() = Unit
     }
@@ -418,8 +416,7 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
         setInputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
     }
 
-    private fun getField(target: Any, name: String): Any? =
-        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+    private fun getField(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
 
     private fun setField(target: Any, name: String, value: Any?) {
         val field: Field = target.javaClass.getDeclaredField(name)
@@ -517,8 +514,11 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
         // Non-BT rows (wired) capture without an SCO link: the fake capture hardware accepts
         // the input unconditionally there.
         val hardware =
-            if (alwaysCaptureReady) FakeHardware(scoReady = { true })
-            else FakeHardware(scoReady = { scoLinkUp() })
+            if (alwaysCaptureReady) {
+                FakeHardware(scoReady = { true })
+            } else {
+                FakeHardware(scoReady = { scoLinkUp() })
+            }
         val microphoneCapture = MicrophoneCapture(context, hardware, mock(EpisodeReferenceEligibility::class.java))
         val voiceAudioProcessor = VoiceAudioProcessor(microphoneCapture)
         val engine = VoiceAsrEngine(
@@ -530,8 +530,7 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
             audioFeedbackRenderer = mock(AudioFeedbackRenderer::class.java),
             translationStage = object : au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage {
                 override suspend fun ensureReady(sourceLanguage: String) = Result.success(Unit)
-                override suspend fun translate(text: String, sourceLanguage: String): Result<String> =
-                    Result.failure(IllegalStateException("unused"))
+                override suspend fun translate(text: String, sourceLanguage: String): Result<String> = Result.failure(IllegalStateException("unused"))
             },
             collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(false, false) },
             retentionSink = org.mockito.kotlin.mock(),
@@ -623,10 +622,9 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
     )
 
     /** Whether the service's engine coordinator has a live (committed) start. */
-    private fun Harness.engineStarted(): Boolean =
-        getField(service, "engineStart")!!.javaClass
-            .getDeclaredMethod("isStarted").apply { isAccessible = true }
-            .invoke(getField(service, "engineStart")) as Boolean
+    private fun Harness.engineStarted(): Boolean = getField(service, "engineStart")!!.javaClass
+        .getDeclaredMethod("isStarted").apply { isAccessible = true }
+        .invoke(getField(service, "engineStart")) as Boolean
 
     /**
      * End the capture the way production dies: the capture stream FAULTS (FakeHardware reports
@@ -653,7 +651,6 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
     /** Ordered count of capture-failure stops the fault fixture has processed so far. */
     private val captureStoppedLogCount = java.util.concurrent.atomic.AtomicInteger(0)
     private lateinit var captureStopTree: timber.log.Timber.Tree
-
 
     @Test
     fun `a headset capture that ends by itself re-acquires and restarts exactly once`() = runBlocking {
@@ -699,8 +696,10 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
             endCaptureByFault(harness)
             awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
-                !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
-                    .get(budget) as Boolean)
+                !(
+                    budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                        .get(budget) as Boolean
+                    )
             }
             val scoStartsAfterFailure = harness.scoPlatform.scoStarts
 
@@ -735,8 +734,10 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
             endCaptureByFault(harness)
             awaitState("restart withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
-                !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
-                    .get(budget) as Boolean)
+                !(
+                    budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                        .get(budget) as Boolean
+                    )
             }
         } finally {
             harness.stop()
@@ -768,8 +769,10 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
             endCaptureByFault(harness)
             awaitState("restarts withheld", probe = { harness.wedgeState() }) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
-                !(budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
-                    .get(budget) as Boolean)
+                !(
+                    budget.javaClass.getDeclaredField("restartAvailable").apply { isAccessible = true }
+                        .get(budget) as Boolean
+                    )
             }
             Thread.sleep(400)
             testScheduler.advanceTimeBy(400.milliseconds)
@@ -923,8 +926,11 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
                     }
                 }
                 error(
-                    if (attachedLate) "CLASSIFIED: capture attaches LATE (starvation/timing, not a lost trigger)"
-                    else "CLASSIFIED: SCO-up trigger LOST -- observer never attached (product bug candidate)"
+                    if (attachedLate) {
+                        "CLASSIFIED: capture attaches LATE (starvation/timing, not a lost trigger)"
+                    } else {
+                        "CLASSIFIED: SCO-up trigger LOST -- observer never attached (product bug candidate)"
+                    },
                 )
             }
 
@@ -1000,7 +1006,6 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
                 (getField(harness.service, "lastConnectedDeviceIdentity") as String) == "8|7|0"
             }
 
-
             // The wired capture ends by itself: one restart at once (its stream was its own,
             // not an acquisition's), then the fast second death withholds.
             withheldLogs[0] = 0
@@ -1018,8 +1023,10 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
                 },
             ) {
                 val budget = getField(harness.service, "captureRestartBudget")!!
-                !(budget.javaClass.getDeclaredField("restartAvailable")
-                    .apply { isAccessible = true }.get(budget) as Boolean) && withheldLogs[0] >= 1
+                !(
+                    budget.javaClass.getDeclaredField("restartAvailable")
+                        .apply { isAccessible = true }.get(budget) as Boolean
+                    ) && withheldLogs[0] >= 1
             }
             Thread.sleep(300)
             testScheduler.advanceTimeBy(300.milliseconds)
@@ -1039,8 +1046,7 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
      * are no-ops, the device list is unchanged, and NO emission ever arrives — the restart waits
      * forever and the microphone stays dead in silence. The bound must expire, spend the credit,
      * and attempt the start anyway (what main does), or report the restart as withheld.
-     */
-    /**
+     *
      * The wedge, end to end: a self-ended acquisition capture whose stream was never confirmed
      * leaves its owed restart waiting, and nothing resolves it — the platform tore the SCO link
      * down, so the release's SCO/communication-device calls are no-ops and no emission follows.
@@ -1177,6 +1183,7 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
             throw t
         }
     }
+
     /**
      * Stage `pendingAutomaticRestart = true` for a bound test, safely. The observer clears a
      * pending restart whenever its run processes a route trigger it had not yet recorded (the
@@ -1277,7 +1284,6 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
         }
     }
 
-
     /**
      * The restart nudge must be strictly increasing: two nudges in the same real millisecond
      * wrote the same wall-clock value into the StateFlow, which conflated them and DROPPED the
@@ -1308,7 +1314,7 @@ override fun closeInputStream(generation: Long?) = microphoneCapture.closeAcquir
             testScheduler.runCurrent()
             Thread.sleep(100)
             testScheduler.runCurrent()
-assertEquals(
+            assertEquals(
                 "both nudges must reach a collector",
                 listOf(0L, 1L, 2L),
                 seen,
@@ -1328,7 +1334,9 @@ assertEquals(
                     message.contains("capture_start_refused") ||
                     message.contains("engine not started: selected device is not an external microphone") ||
                     message.contains("acquisition skipped: automatic restart withheld")
-                ) withheldLogs[0]++
+                ) {
+                    withheldLogs[0]++
+                }
             }
         }
         timber.log.Timber.plant(tree)
@@ -1594,8 +1602,10 @@ assertEquals(
                             endCaptureByFault(harness)
                             awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
-                                !(budget.javaClass.getDeclaredField("restartAvailable")
-                                    .apply { isAccessible = true }.get(budget) as Boolean)
+                                !(
+                                    budget.javaClass.getDeclaredField("restartAvailable")
+                                        .apply { isAccessible = true }.get(budget) as Boolean
+                                    )
                             }
                             Thread.sleep(400)
                             testScheduler.advanceTimeBy(400.milliseconds)
@@ -1620,8 +1630,10 @@ assertEquals(
                             // spend happens at the attempt); wait for BOTH.
                             awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
-                                !(budget.javaClass.getDeclaredField("restartAvailable")
-                                    .apply { isAccessible = true }.get(budget) as Boolean) &&
+                                !(
+                                    budget.javaClass.getDeclaredField("restartAvailable")
+                                        .apply { isAccessible = true }.get(budget) as Boolean
+                                    ) &&
                                     withheldLogs[0] >= 1
                             }
                             assertEquals("$case: exactly one withheld log", 1, withheldLogs[0])
@@ -1637,8 +1649,10 @@ assertEquals(
                             // spend happens at the attempt); wait for BOTH.
                             awaitState("$case: withheld", probe = { harness.wedgeState() }) {
                                 val budget = getField(harness.service, "captureRestartBudget")!!
-                                !(budget.javaClass.getDeclaredField("restartAvailable")
-                                    .apply { isAccessible = true }.get(budget) as Boolean) &&
+                                !(
+                                    budget.javaClass.getDeclaredField("restartAvailable")
+                                        .apply { isAccessible = true }.get(budget) as Boolean
+                                    ) &&
                                     withheldLogs[0] >= 1
                             }
                             assertEquals("$case: exactly one withheld log", 1, withheldLogs[0])
@@ -1864,6 +1878,7 @@ assertEquals(
                     "the teardown had not finished ${TEARDOWN_JOIN_BUDGET_MS}ms after onDestroy; " +
                         "it is still joining its own work, so the session is legitimately held",
                 )
+
                 joined is TeardownResult.Held -> error(
                     "the teardown HELD the shared resources, so the session cannot come back: " +
                         "${joined.failure.reason}. The engine was not proven settled; this is " +

@@ -22,11 +22,12 @@ fi
 
 if [ $RESULT -ne 0 ]; then
   echo ""
-  echo "Spotless found format violations, so aborting the commit and applying formatting changes..."
-  # using "> /dev/null/" because --quiet doesn't suppress ALL non-error output
-  ./gradlew spotlessApply "-PspotlessPreCommitFiles=$SPOTLESS_FILE_LIST" > /dev/null
-
-  echo "Recommended changes from spotless have been applied."
+  echo "Spotless found format violations, so aborting the commit."
+  # Nothing is rewritten here on purpose. A hook that runs spotlessApply edits the working tree
+  # behind the author's back: the reformatted files are not staged, so the commit still fails,
+  # and the next `git add -A` sweeps in changes to files this commit never touched. The author
+  # runs the fix themselves, when they can see what it changed.
+  echo "Run './gradlew spotlessApply' to fix them, review the diff, and stage it."
   exit $RESULT
 fi
 

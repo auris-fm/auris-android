@@ -7,8 +7,7 @@ import com.squareup.moshi.JsonClass
  * Token contracts for `POST /api/v1/auth/token` and `/api/v1/auth/refresh`
  * (final contract: task #33). The exchanged credential is the account session
  * the app already holds at login — the client never invents a subject.
- */
-/**
+ *
  * The sign-in body carries ONLY the credential. The former optional `device`
  * block is removed (owner + spec, server cleanup on 135): the server ignored it,
  * and the platform reaches the server on every request via the User-Agent.

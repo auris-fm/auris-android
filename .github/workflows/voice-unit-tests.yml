@@ -24,9 +24,29 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
+      # Robolectric resolves android-all into ~/.m2/repository (its MavenDependencyResolver's
+      # default), so caching that directory is enough: on a hit the class loader finds the jar
+      # locally and nothing touches the network. On a miss it downloads as it does on main.
+      # Keyed on the inputs that decide WHICH jar is needed, so a Robolectric or SDK bump cannot
+      # leave a stale key re-downloading every run.
+      - name: Cache Robolectric android-all jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
       - name: Run voice module Robolectric unit tests (self-contained)
         shell: bash
         run: set -o pipefail; ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log
+      # Evidence that the cached directory is the one Robolectric READS, from the runner itself
+      # rather than from a local assumption. --info logs each android-all artifact resolution.
+      - name: Report the resolved android-all path
+        if: always()
+        shell: bash
+        run: |
+          echo "--- android-all files present under the cached directory ---"
+          find "$HOME/.m2/repository/org/robolectric" -name 'android-all*.jar' 2>/dev/null || true
+          echo "--- resolver lines from the test log ---"
+          grep -iE "android-all|robolectric.*\.m2" voice-test-output.log | head -20 || true
       - name: Upload test reports and logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -47,5 +67,8 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
+      # No Robolectric cache or prefetch here: these are plain-JUnit tests that never load an
+      # android-all jar. Prefetching one would only add a way for this job to fail on a Maven
+      # outage that previously left it green.
       - name: Run cloud transport and encoding tests
         run: ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon

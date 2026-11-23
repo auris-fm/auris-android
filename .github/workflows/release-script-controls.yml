@@ -56,7 +56,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/workflows/(release-script-controls|auris-release)\.yml$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -68,7 +68,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-
       - if: steps.scope.outputs.run == 'true'
         name: Trigger control
         run: bash .buildkite/scripts/trigger-release.test.sh
@@ -76,3 +75,8 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         name: Keystore-decode control
         run: bash .buildkite/scripts/keystore-decode.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Robolectric cache control
+        run: bash .github/scripts/robolectric-cache.test.sh
+

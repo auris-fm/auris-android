@@ -270,6 +270,31 @@ printf 'aab' > "$MOCK_ARTIFACTS/app/build/outputs/bundle/release/app-release.aab
 # script into the same artifact store the consumer downloads from.
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" "$WORK/repo/.buildkite/commands/"
 chmod +x "$WORK/repo/.buildkite/commands/"*.sh
+# Both release steps now assert the repo's pinned ruby and bundler before doing any work. This
+# control targets the artifact hand-off, so give the fixture the pinned pair rather than whatever
+# this machine's PATH resolves -- the interpreter gate has its own suite. Without this the producer
+# fails at that gate and every case below reads as a hand-off defect.
+cp "$DIR/.buildkite/commands/auris-require-interpreter.sh" "$WORK/repo/.buildkite/commands/"
+cp "$DIR/.ruby-version" "$DIR/Gemfile.lock" "$WORK/repo/"
+mkdir -p "$WORK/repo/pin-bin"
+cat > "$WORK/repo/pin-bin/ruby" <<'PINSTUB'
+#!/bin/bash
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "ruby $(cat .ruby-version) (fixture) [arm64-darwin]"
+  exit 0
+fi
+exec REAL_RUBY_PLACEHOLDER "$@"
+PINSTUB
+sed -i.bak "s|REAL_RUBY_PLACEHOLDER|$(command -v ruby)|" "$WORK/repo/pin-bin/ruby" && rm -f "$WORK/repo/pin-bin/ruby.bak"
+cat > "$WORK/repo/pin-bin/bundle" <<'PINSTUB'
+#!/bin/bash
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "Bundler version $(awk '/^BUNDLED WITH/{getline; gsub(/[ \t]/,""); print}' Gemfile.lock)"
+  exit 0
+fi
+exit 0
+PINSTUB
+chmod +x "$WORK/repo/pin-bin/ruby" "$WORK/repo/pin-bin/bundle"
 (
   cd "$WORK/repo"
   # Producer fixture: the signing gate needs a real keystore; Gradle and the
@@ -293,6 +318,7 @@ PRODSTUB
   # A DIFFERENT base from the consumer's checkout, so a consumer reading its
   # own version.properties cannot coincidentally produce the right answer.
   printf 'versionName=8.20\nversionCode=1000\n' > version.properties
+  PATH="$WORK/repo/pin-bin:$PATH" \
   JAVA_HOME="$PAIR_JAVA_HOME" \
   ANDROID_UPLOAD_KEYSTORE_B64="$(openssl base64 -A < producer.keystore)" \
   ANDROID_UPLOAD_KEYSTORE_PASSWORD=testpass \
@@ -315,6 +341,11 @@ MOCK
 # ruby fetches -- extend it to succeed for fastlane too.
 cat > "$WORK/bin/bundle" <<'MOCK'
 #!/bin/bash
+# Answer the interpreter gate's probe with the version the fixture's lockfile pins.
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "Bundler version $(awk '/^BUNDLED WITH/{getline; gsub(/[ \t]/,""); print}' Gemfile.lock)"
+  exit 0
+fi
 if [ "$1" = install ]; then touch "$MOCK_BUNDLE_INSTALLED"; exit 0; fi
 if [ "$1 $2" = "exec ruby" ]; then
   [ -f "$MOCK_BUNDLE_INSTALLED" ] || { echo "FAIL: exec without install" >&2; exit 1; }
@@ -323,6 +354,17 @@ fi
 exit 0
 MOCK
 chmod +x "$WORK/bin/bundle"
+# Same for ruby: a version-reporting WRAPPER, so the real interpreter still runs everything else.
+cat > "$WORK/bin/ruby" <<'MOCK'
+#!/bin/bash
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "ruby $(cat .ruby-version) (fixture) [arm64-darwin]"
+  exit 0
+fi
+exec REAL_RUBY_PLACEHOLDER "$@"
+MOCK
+sed -i.bak "s|REAL_RUBY_PLACEHOLDER|$(command -v ruby)|" "$WORK/bin/ruby" && rm -f "$WORK/bin/ruby.bak"
+chmod +x "$WORK/bin/ruby"
 rm -f "$MOCK_META/uploaded-version-code"
 # The consumer checks out its OWN copy: restore the base version so reading
 # its own file would give 9452, not the carried 9522.
@@ -340,6 +382,12 @@ check "recorded version is the BUILT one (9522), not checkout base (9452)" 9522 
 # irreversible ACTION, not on the exit code alone.
 cat > "$WORK/bin/bundle" <<'MOCK'
 #!/bin/bash
+# The upload step asserts the pinned pair before any gem work; answer that probe with the
+# version the fixture's lockfile pins, so this control is not coupled to the host's bundler.
+if [ "$1" = "-v" ] || [ "$1" = "--version" ]; then
+  echo "Bundler version $(awk '/^BUNDLED WITH/{getline; gsub(/[ \t]/,""); print}' Gemfile.lock)"
+  exit 0
+fi
 if [ "$1" = install ]; then touch "$MOCK_BUNDLE_INSTALLED"; exit 0; fi
 if [ "$1 $2" = "exec fastlane" ]; then touch "$MOCK_FASTLANE_RAN"; exit 0; fi
 if [ "$1 $2" = "exec ruby" ]; then

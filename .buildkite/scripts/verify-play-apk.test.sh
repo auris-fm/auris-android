@@ -228,13 +228,20 @@ run good 9522 9522 bounded-offpin
 check "an off-pin bounded signer is caught even beside a valid unbounded one" 1 "$CODE"
 
 # The real Play output's app-signing line carries NO SDK label, so the threshold must never
-# affect it. Run with the threshold raised far past any range: an unlabelled off-pin signer must
-# still fail. Without this, "skip anything without a range" would look plausible and stay green.
-OUT="$(cd "$WORK/repo" && MODE=good VC=9522 SHAPE_FILE="$WORK/shape-hybrid-wrongapp" \
+# affect it. The fixture pairs the off-pin UNLABELLED signer with a valid LABELLED one: without
+# that pair, skipping the unlabelled signer would exit 1 via "no app-signing signer found" and
+# the case would pass for the wrong reason. Asserting the diagnostic as well pins WHICH failure.
+cat > "$WORK/shape-unlabelled-offpin" <<'SHAPE'
+Signer (minSdkVersion=37, maxSdkVersion=2147483647) certificate SHA-256 digest: aa:bb:cc
+V3.0 Signer: certificate SHA-256 digest: 11:22:33
+SHAPE
+OUT="$(cd "$WORK/repo" && MODE=good VC=9522 SHAPE_FILE="$WORK/shape-unlabelled-offpin" \
   AURIS_CURRENT_DEVICE_SDK=999 \
   bash .buildkite/scripts/verify-play-apk.sh "$WORK/app.apk" 9522 "$PIN" 2>&1)"
 CODE=$?
 check "an UNLABELLED app signer is compared whatever the threshold" 1 "$CODE"
+printf '%s' "$OUT" | grep -q "app-signing signer is NOT the pinned" && r=ok || r=missing
+check "and it fails on the PIN comparison, not on a missing signer" ok "$r"
 
 # Diagnostic still printed on a FAILING run -- the run we need to read is a failing one.
 run good 9522 9522 hybrid-wrongapp

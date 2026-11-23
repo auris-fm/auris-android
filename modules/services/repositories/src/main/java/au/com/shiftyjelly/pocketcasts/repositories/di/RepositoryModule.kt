@@ -308,6 +308,7 @@ abstract class RepositoryModule {
          * defaults, so this binding is required even though the constructor parameter has one.
          */
         @Provides
+        @FingerprintScope
         fun provideFingerprintScope(): CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
         /** The inherited library's fingerprinter; needs the native library at call time. */
@@ -319,6 +320,7 @@ abstract class RepositoryModule {
         fun provideCheckpointMatcherFactory(): CheckpointMatcherFactory = NativeCheckpointMatcherFactory()
 
         @Provides
+        @TranscriptReferenceBaseUrl
         fun provideTranscriptBaseUrl(): String = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/"
 
         @Provides

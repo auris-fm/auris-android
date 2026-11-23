@@ -12,6 +12,8 @@ import au.com.shiftyjelly.pocketcasts.analytics.AnalyticsTracker
 import au.com.shiftyjelly.pocketcasts.models.entity.BaseEpisode
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
+import au.com.shiftyjelly.pocketcasts.repositories.di.FingerprintScope
+import au.com.shiftyjelly.pocketcasts.repositories.di.TranscriptReferenceBaseUrl
 import au.com.shiftyjelly.pocketcasts.repositories.playback.ExoPlayerDataSourceFactory
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager
@@ -257,7 +259,7 @@ class FingerprintTimingManager @Inject constructor(
      * Where preparation and decoding run. Injected so a caller can own the lifetime of that work;
      * production gets its own supervisor scope on [Dispatchers.Default].
      */
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    @FingerprintScope private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
     /** Opens the audio to decode. Injected so decoding can be driven without a media stack. */
     private val audioStreamOpener: AudioStreamOpener = MediaCodecAudioStreamOpener(dataSourceFactory),
     /** Builds the windowed fingerprinter for one stream. Injected because it needs the native library. */
@@ -265,7 +267,7 @@ class FingerprintTimingManager @Inject constructor(
     /** Builds a checkpoint matcher from a decoded reference. Also needs the native library. */
     private val matcherFactory: CheckpointMatcherFactory = NativeCheckpointMatcherFactory(),
     /** Where transcript references are served. Injected so a caller can point it at its own host. */
-    private val transcriptBaseUrl: String = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/",
+    @TranscriptReferenceBaseUrl private val transcriptBaseUrl: String = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/",
 ) {
 
     /** Who asked for preparation; decides whether streaming over a metered network is acceptable. */

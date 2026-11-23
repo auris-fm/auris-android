@@ -1,6 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
@@ -8,9 +11,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Test
 
 /**
@@ -315,7 +315,12 @@ class MutationFenceTest {
         // The newer intent now owns the fence: the old attempt's guarded apply is refused, the
         // new attempt's goes through.
         var refusedEffectRan = false
-        assertNull(fence.applyIfCurrent(attempt, live) { refusedEffectRan = true; true })
+        assertNull(
+            fence.applyIfCurrent(attempt, live) {
+                refusedEffectRan = true
+                true
+            },
+        )
         assertFalse(refusedEffectRan)
         assertTrue(fence.applyIfCurrent(newer.get()!!, live) { true } == true)
         worker.join()

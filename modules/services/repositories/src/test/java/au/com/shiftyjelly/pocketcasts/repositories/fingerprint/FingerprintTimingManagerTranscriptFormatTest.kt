@@ -21,29 +21,29 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
 import java.util.Collections
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Date
-import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.RuntimeEnvironment
-import org.robolectric.annotation.Config
 import org.mockito.Mockito.mock
 import org.mockito.kotlin.any
 import org.mockito.kotlin.doAnswer
 import org.mockito.kotlin.whenever
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 
 /**
  * The transcript reference and the Auris reference come from different hosts that serve different
@@ -89,6 +89,7 @@ class FingerprintTimingManagerTranscriptFormatTest {
 
         retriever = mock(FingerprintReferenceRetriever::class.java)
         val settings = mock(Settings::class.java)
+
         @Suppress("UNCHECKED_CAST")
         val off = mock(UserSetting::class.java) as UserSetting<Boolean>
         whenever(off.value).thenReturn(false)

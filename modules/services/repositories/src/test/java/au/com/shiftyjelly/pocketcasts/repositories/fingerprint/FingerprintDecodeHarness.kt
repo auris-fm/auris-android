@@ -4,6 +4,8 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode
+import au.com.shiftyjelly.pocketcasts.models.to.Chapters
+import au.com.shiftyjelly.pocketcasts.models.to.DbChapter
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.UserSetting
@@ -14,9 +16,6 @@ import au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager
 import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintDecodePolicy
 import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintPolicy
 import com.automattic.eventhorizon.EventHorizon
-import au.com.shiftyjelly.pocketcasts.models.to.Chapters
-import au.com.shiftyjelly.pocketcasts.models.to.DbChapter
-import kotlinx.coroutines.flow.Flow
 import dagger.Lazy
 import java.io.File
 import java.nio.ByteBuffer
@@ -26,6 +25,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -93,6 +93,7 @@ class FingerprintDecodeHarness(
         whenever(playbackManager.isPlaybackRemote()).thenReturn(false)
 
         val settings = mock(Settings::class.java)
+
         @Suppress("UNCHECKED_CAST")
         val off = mock(UserSetting::class.java) as UserSetting<Boolean>
         whenever(off.value).thenReturn(false)
@@ -250,21 +251,19 @@ class FingerprintDecodeHarness(
         }
 
         /** A source whose bytes come from [data] and whose matcher build returns [matcher]. */
-        fun source(data: ByteArray?, matcher: CheckpointMatcher?): CloudReferenceSource =
-            object : CloudReferenceSource {
-                override suspend fun fetchReference(
-                    baseUrl: String,
-                    episodeUuid: String,
-                    podcastUuid: String,
-                    cachedEtag: String?,
-                ): CloudFingerprintReferenceFetcher.Fetch =
-                    if (data == null) {
-                        CloudFingerprintReferenceFetcher.Fetch.Unavailable
-                    } else {
-                        CloudFingerprintReferenceFetcher.Fetch.Fresh(data, "etag")
-                    }
-
-                override fun buildMatcher(data: ByteArray): CheckpointMatcher? = matcher
+        fun source(data: ByteArray?, matcher: CheckpointMatcher?): CloudReferenceSource = object : CloudReferenceSource {
+            override suspend fun fetchReference(
+                baseUrl: String,
+                episodeUuid: String,
+                podcastUuid: String,
+                cachedEtag: String?,
+            ): CloudFingerprintReferenceFetcher.Fetch = if (data == null) {
+                CloudFingerprintReferenceFetcher.Fetch.Unavailable
+            } else {
+                CloudFingerprintReferenceFetcher.Fetch.Fresh(data, "etag")
             }
+
+            override fun buildMatcher(data: ByteArray): CheckpointMatcher? = matcher
+        }
     }
 }

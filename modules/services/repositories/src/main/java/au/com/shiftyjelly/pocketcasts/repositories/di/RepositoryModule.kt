@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.models.to.TranscriptType
 import au.com.shiftyjelly.pocketcasts.payment.PurchaseApprover
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.SettingsImpl
+import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
 import au.com.shiftyjelly.pocketcasts.repositories.ads.BlazeAdsManager
 import au.com.shiftyjelly.pocketcasts.repositories.ads.BlazeAdsManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.analytics.AnalyticsLiveDebugListener
@@ -33,19 +34,18 @@ import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSync
 import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSyncImpl
 import au.com.shiftyjelly.pocketcasts.repositories.external.ExternalDataManager
 import au.com.shiftyjelly.pocketcasts.repositories.external.ExternalDataManagerImpl
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
-import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.AudioStreamOpener
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CheckpointMatcherFactory
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.NativeCheckpointMatcherFactory
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.MediaCodecAudioStreamOpener
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.NativeWindowedFingerprinterFactory
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.WindowedFingerprinterFactory
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudFingerprintReferenceFetcher
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudReferenceSource
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudReferenceStore
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FileCloudReferenceStore
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.MediaCodecAudioStreamOpener
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.NativeCheckpointMatcherFactory
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.NativeWindowedFingerprinterFactory
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.SharedPreferencesCloudConfig
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.WindowedFingerprinterFactory
 import au.com.shiftyjelly.pocketcasts.repositories.history.upnext.UpNextHistoryManager
 import au.com.shiftyjelly.pocketcasts.repositories.history.upnext.UpNextHistoryManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationDrawer
@@ -56,6 +56,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationMana
 import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationScheduler
 import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationSchedulerImpl
+import au.com.shiftyjelly.pocketcasts.repositories.playback.ExoPlayerDataSourceFactory
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlayerFactory
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlayerFactoryImpl
 import au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextQueue
@@ -111,12 +112,8 @@ import com.google.android.play.core.review.ReviewManager
 import com.google.android.play.core.review.ReviewManagerFactory
 import com.squareup.moshi.Moshi
 import dagger.Binds
-import dagger.Module
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.Dispatchers
 import dagger.Lazy
-import au.com.shiftyjelly.pocketcasts.repositories.playback.ExoPlayerDataSourceFactory
+import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -124,6 +121,9 @@ import dagger.hilt.components.SingletonComponent
 import dagger.multibindings.IntoMap
 import dagger.multibindings.IntoSet
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -144,7 +144,6 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindsCloudReferenceSource(fetcher: CloudFingerprintReferenceFetcher): CloudReferenceSource
-
 
     @Binds
     @Singleton
@@ -324,8 +323,7 @@ abstract class RepositoryModule {
         fun provideTranscriptBaseUrl(): String = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/"
 
         @Provides
-        fun provideAudioStreamOpener(dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>): AudioStreamOpener =
-            MediaCodecAudioStreamOpener(dataSourceFactory)
+        fun provideAudioStreamOpener(dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>): AudioStreamOpener = MediaCodecAudioStreamOpener(dataSourceFactory)
 
         @Provides
         @IntoMap

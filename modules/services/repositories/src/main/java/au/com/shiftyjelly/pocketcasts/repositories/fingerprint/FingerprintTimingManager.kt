@@ -46,11 +46,11 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.DurationUnit
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -84,7 +84,6 @@ class MediaCodecAudioStreamOpener(
         isCurrent: () -> Boolean,
         followPlayerCache: Boolean,
     ): FingerprintTimingManager.AudioStream {
-
         val isRemoteUrl = audioFilePath.startsWith("http://") || audioFilePath.startsWith("https://")
         if (!isRemoteUrl && !File(audioFilePath).exists()) {
             throw FingerprintTimingManager.AudioUnavailableException("audio file not found at $audioFilePath")
@@ -232,13 +231,12 @@ fun interface WindowedFingerprinterFactory {
 
 /** The inherited library's fingerprinter. Needs the native library, so it is injected, not constructed inline. */
 class NativeWindowedFingerprinterFactory : WindowedFingerprinterFactory {
-    override fun create(sampleRate: Int, channelCount: Int): StreamingWindowedFingerprinter =
-        StreamingWindowedFingerprinter(
-            sampleRate.toUInt(),
-            channelCount.toUShort(),
-            FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
-            FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
-        )
+    override fun create(sampleRate: Int, channelCount: Int): StreamingWindowedFingerprinter = StreamingWindowedFingerprinter(
+        sampleRate.toUInt(),
+        channelCount.toUShort(),
+        FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
+        FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
+    )
 }
 
 @Singleton
@@ -291,9 +289,8 @@ class FingerprintTimingManager @Inject constructor(
         cloudBaseUrl: String,
         episodeUuid: String,
         podcastUuid: String,
-    ): CheckpointMatcher? =
-        resolveCloudReference(cloudBaseUrl, episodeUuid, podcastUuid)
-            ?.let { cloudFetcher.buildMatcher(it.payload) }
+    ): CheckpointMatcher? = resolveCloudReference(cloudBaseUrl, episodeUuid, podcastUuid)
+        ?.let { cloudFetcher.buildMatcher(it.payload) }
 
     /**
      * The same resolution, stopping at the payload. Building the matcher needs the native library,
@@ -329,6 +326,7 @@ class FingerprintTimingManager @Inject constructor(
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.payload.size} bytes) for $episodeUuid")
                 return resolved(fetched.payload)
             }
+
             is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
                 if (stored != null && ReferenceFingerprint.decode(stored.payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true) {
                     Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
@@ -342,6 +340,7 @@ class FingerprintTimingManager @Inject constructor(
                     return resolved(refetched.payload)
                 }
             }
+
             CloudFingerprintReferenceFetcher.Fetch.Unavailable -> {
                 if (stored != null && ReferenceFingerprint.decode(stored.payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true) {
                     Timber.d("FingerprintTimingManager: revalidation failed; keeping stored cloud reference for $episodeUuid")
@@ -354,12 +353,11 @@ class FingerprintTimingManager @Inject constructor(
         return null
     }
 
-    private fun resolved(payload: ByteArray): ResolvedCloudReference =
-        ResolvedCloudReference(
-            payload = payload,
-            format = ReferenceFingerprint.decode(payload, ReferenceFingerprint.AURIS_FORMAT)?.format,
-            payloadHash = ReferenceFingerprint.sha256(payload),
-        )
+    private fun resolved(payload: ByteArray): ResolvedCloudReference = ResolvedCloudReference(
+        payload = payload,
+        format = ReferenceFingerprint.decode(payload, ReferenceFingerprint.AURIS_FORMAT)?.format,
+        payloadHash = ReferenceFingerprint.sha256(payload),
+    )
 
     sealed interface State {
         data object Idle : State
@@ -796,8 +794,7 @@ class FingerprintTimingManager @Inject constructor(
         return fetched
     }
 
-    private fun buildMatcher(reference: ReferenceFingerprint): CheckpointMatcher? =
-        matcherFactory.create(reference)
+    private fun buildMatcher(reference: ReferenceFingerprint): CheckpointMatcher? = matcherFactory.create(reference)
 
     private suspend fun streamFingerprintBounded(
         audioFilePath: String,
@@ -1725,7 +1722,9 @@ class FingerprintTimingManager @Inject constructor(
                 cloudFirstMappingLogged = true
                 Timber.d(
                     "FingerprintTimingManager: first cloud mapping committed — playback %.1fs, reference %.1fs, score %.2f",
-                    absolutePlaybackTime, accepted.referenceTimeSeconds, accepted.score,
+                    absolutePlaybackTime,
+                    accepted.referenceTimeSeconds,
+                    accepted.score,
                 )
             }
         }
@@ -1848,7 +1847,6 @@ class FingerprintTimingManager @Inject constructor(
         snapshotReferenceToPlayback = mapping.referenceToPlayback.toList()
         _mappingVersion.value++
     }
-
 
     /** Test seam: insert a mapping directly. Must only be called from single-threaded tests. */
     @VisibleForTesting

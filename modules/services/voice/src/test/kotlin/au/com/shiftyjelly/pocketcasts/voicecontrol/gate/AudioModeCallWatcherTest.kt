@@ -11,8 +11,8 @@ import org.mockito.ArgumentCaptor
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import org.mockito.kotlin.any
-import org.mockito.kotlin.whenever
 import org.mockito.kotlin.doAnswer
+import org.mockito.kotlin.whenever
 
 /**
  * The `NotOnCall` gate used to read call state from `TelephonyManager`, which needs

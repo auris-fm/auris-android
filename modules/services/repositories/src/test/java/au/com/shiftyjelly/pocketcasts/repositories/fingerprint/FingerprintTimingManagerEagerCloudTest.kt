@@ -52,15 +52,14 @@ class FingerprintTimingManagerEagerCloudTest {
         cloudMatcher = mock(CheckpointMatcher::class.java)
         cloud = MockWebServer().also { it.start() }
         cloud.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                if (request.path!!.contains("fingerprints")) {
-                    MockResponse().setResponseCode(200)
-                        .setBody(String(FingerprintDecodeHarness.payload(ReferenceFingerprint.AURIS_FORMAT)))
-                } else {
-                    MockResponse().setResponseCode(200).setBody(
-                        """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
-                    )
-                }
+            override fun dispatch(request: RecordedRequest): MockResponse = if (request.path!!.contains("fingerprints")) {
+                MockResponse().setResponseCode(200)
+                    .setBody(String(FingerprintDecodeHarness.payload(ReferenceFingerprint.AURIS_FORMAT)))
+            } else {
+                MockResponse().setResponseCode(200).setBody(
+                    """{"access_token":"t","token_type":"Bearer","expires_in":900,"refresh_token":"r"}""",
+                )
+            }
         }
         audioFile = temp.newFile("episode.mp3").apply { writeBytes(ByteArray(4096)) }
 
@@ -72,8 +71,7 @@ class FingerprintTimingManagerEagerCloudTest {
                 episodeUuid: String,
                 podcastUuid: String,
                 cachedEtag: String?,
-            ): CloudFingerprintReferenceFetcher.Fetch =
-                realFetcher.fetchReference(baseUrl, episodeUuid, podcastUuid, cachedEtag)
+            ): CloudFingerprintReferenceFetcher.Fetch = realFetcher.fetchReference(baseUrl, episodeUuid, podcastUuid, cachedEtag)
 
             override fun buildMatcher(data: ByteArray): CheckpointMatcher {
                 builtFrom += data.size
@@ -89,17 +87,16 @@ class FingerprintTimingManagerEagerCloudTest {
         )
     }
 
-    private fun alwaysMintToken() =
-        au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
-            clientProvider = {
-                au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(
-                    cloud.url("/").toString().trimEnd('/'),
-                )
-            },
-            credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
-                override fun credential(): String = "session"
-            },
-        )
+    private fun alwaysMintToken() = au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider(
+        clientProvider = {
+            au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAuthClient(
+                cloud.url("/").toString().trimEnd('/'),
+            )
+        },
+        credentialProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisAccountCredentialProviding {
+            override fun credential(): String = "session"
+        },
+    )
 
     @After
     fun tearDown() {

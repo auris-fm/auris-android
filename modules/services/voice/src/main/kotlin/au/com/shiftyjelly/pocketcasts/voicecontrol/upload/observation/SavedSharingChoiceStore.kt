@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
-
 /**
  * The signed-in account's ORDINARY sharing choice and real enrollment provenance, held durably.
  *

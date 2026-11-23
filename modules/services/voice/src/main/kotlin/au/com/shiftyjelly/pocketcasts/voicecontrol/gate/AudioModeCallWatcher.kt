@@ -45,11 +45,12 @@ class AudioModeCallWatcher(
 
     companion object {
         /** Every mode in which a call owns the phone's audio. Ringing is not a call. */
-        fun isCall(mode: Int): Boolean =
-            mode == AudioManager.MODE_IN_CALL ||
-                mode == AudioManager.MODE_IN_COMMUNICATION ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mode == AudioManager.MODE_CALL_SCREENING) ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                    (mode == AudioManager.MODE_CALL_REDIRECT || mode == AudioManager.MODE_COMMUNICATION_REDIRECT))
+        fun isCall(mode: Int): Boolean = mode == AudioManager.MODE_IN_CALL ||
+            mode == AudioManager.MODE_IN_COMMUNICATION ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mode == AudioManager.MODE_CALL_SCREENING) ||
+            (
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    (mode == AudioManager.MODE_CALL_REDIRECT || mode == AudioManager.MODE_COMMUNICATION_REDIRECT)
+                )
     }
 }

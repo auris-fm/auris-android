@@ -178,26 +178,25 @@ class FingerprintLibraryAlignmentProof {
         return (0 until n).map { i -> array.getLong(i).toUInt() }
     }
 
-    private fun fingerprint(samples: FloatArray, rate: Int, channels: Int) =
-        StreamingWindowedFingerprinter(
-            rate.toUInt(),
-            channels.toUShort(),
-            FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
-            FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
-        ).use { streamer ->
-            val out = mutableListOf<uniffi.fingerprint_uniffi.WindowedFingerprint>()
-            // Pushed in blocks, as playback delivers them, rather than one call for the whole clip.
-            val blockFrames = 4096
-            val blockSamples = blockFrames * channels
-            var offset = 0
-            while (offset < samples.size) {
-                val end = minOf(offset + blockSamples, samples.size)
-                out += streamer.pushSamplesF32(samples.copyOfRange(offset, end).toList(), channels.toUShort())
-                offset = end
-            }
-            out += streamer.flush()
-            out
+    private fun fingerprint(samples: FloatArray, rate: Int, channels: Int) = StreamingWindowedFingerprinter(
+        rate.toUInt(),
+        channels.toUShort(),
+        FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
+        FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
+    ).use { streamer ->
+        val out = mutableListOf<uniffi.fingerprint_uniffi.WindowedFingerprint>()
+        // Pushed in blocks, as playback delivers them, rather than one call for the whole clip.
+        val blockFrames = 4096
+        val blockSamples = blockFrames * channels
+        var offset = 0
+        while (offset < samples.size) {
+            val end = minOf(offset + blockSamples, samples.size)
+            out += streamer.pushSamplesF32(samples.copyOfRange(offset, end).toList(), channels.toUShort())
+            offset = end
         }
+        out += streamer.flush()
+        out
+    }
 
     private fun readFloatsLE(file: File): FloatArray {
         val buffer = ByteBuffer.wrap(file.readBytes()).order(ByteOrder.LITTLE_ENDIAN)
@@ -208,8 +207,7 @@ class FingerprintLibraryAlignmentProof {
         File(dir, "device_result_$name.json").writeText(body.toString(2))
     }
 
-    private fun sha256(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private companion object {
         const val TAG = "FingerprintAlignment"

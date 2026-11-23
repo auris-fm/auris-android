@@ -1118,8 +1118,7 @@ class CloudRouteSink internal constructor(
      * cannot support. Null rather than an empty or invented tag when the locale has none: absence is
      * a fact the server handles (it falls through to English), while a made-up tag is a wrong claim.
      */
-    private fun uiLanguageForWire(): String? =
-        currentLocale().language.lowercase().takeIf { it.isNotBlank() }
+    private fun uiLanguageForWire(): String? = currentLocale().language.lowercase().takeIf { it.isNotBlank() }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         // The saved positions are requested FOR THIS EPISODE: a position recorded while another
@@ -1539,8 +1538,7 @@ class CloudRouteSink internal constructor(
          */
         private val PERSISTABLE_TERMINAL_MARKERS: Set<String> = setOf("done", "interrupted")
 
-        private fun isPersistableErrorCode(code: String): Boolean =
-            CloudRouteErrorCodes.isRecognised(code) || code in PERSISTABLE_TERMINAL_MARKERS
+        private fun isPersistableErrorCode(code: String): Boolean = CloudRouteErrorCodes.isRecognised(code) || code in PERSISTABLE_TERMINAL_MARKERS
 
         private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"

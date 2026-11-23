@@ -183,6 +183,7 @@ class VoiceControlService : Service() {
 
     /** The automatic-restart cap, consulted by every start decision. */
     private val captureRestartBudget = CaptureRestartBudget()
+
     // True between an unexpected capture end and the restart the spec granted being spent: the
     // release-triggered re-entry that follows the termination is that restart, and it must spend
     // the credit — a later trigger-driven attempt must not. Cleared where the budget re-arms
@@ -258,8 +259,10 @@ class VoiceControlService : Service() {
      * answer is a new situation, not the failed one.
      */
     private var failedAttemptSurfaceLeft = false
+
     /** The skip log fires once per recorded failure, not on every observer run that re-checks it. */
     private var failedAttemptSkipLogged = false
+
     // Set only when the GATE was Blocked during the attempt (rule 2's coalescing, narrowed to
     // what the spec calls a trigger): route or restart-signal emissions during an attempt are
     // normal side effects of setting SCO up, and a device-set change is already covered by

@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 
 import android.content.Context
 import android.media.AudioManager
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.AudioModeCallWatcher
 import android.os.PowerManager
 import android.speech.tts.TextToSpeech
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
@@ -16,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.AudioModeCallWatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule

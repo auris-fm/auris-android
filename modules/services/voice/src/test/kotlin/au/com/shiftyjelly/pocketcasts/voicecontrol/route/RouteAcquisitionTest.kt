@@ -38,6 +38,7 @@ class RouteAcquisitionTest {
         var streamStartResult = true
         var closeCalls = 0
         val deviceTypes = mutableMapOf<Int, Int>()
+
         /** Ordered record of routing / mode calls, so ordering can be asserted. */
         val events = mutableListOf<String>()
 
@@ -82,9 +83,9 @@ class RouteAcquisitionTest {
             return streamStartResult
         }
 
-                override fun openStreamGeneration(): Long? = null
+        override fun openStreamGeneration(): Long? = null
 
-override fun closeInputStream(generation: Long?) {
+        override fun closeInputStream(generation: Long?) {
             closeCalls++
         }
     }

@@ -14,12 +14,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingCho
 import com.automattic.eventhorizon.EventHorizon
 import dagger.Lazy
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -70,8 +70,7 @@ class Bot5f2dd8e55bFoldControlTest {
         val state = VoiceSharingAccountState()
         val store = SavedSharingChoiceStore(InMemoryChoicePersistence())
         server.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse =
-                MockResponse().setResponseCode(200).setBody(enrolledJson())
+            override fun dispatch(request: RecordedRequest): MockResponse = MockResponse().setResponseCode(200).setBody(enrolledJson())
         }
 
         val reads = java.util.concurrent.atomic.AtomicInteger()
@@ -137,7 +136,7 @@ class Bot5f2dd8e55bFoldControlTest {
         startup.initializeOnAppStart()
 
         // The old session had a live projection (as after any applied answer).
-                startup.state.publish(VoiceSharingAccountProjectionTestFixtures.enrolled()!!)
+        startup.state.publish(VoiceSharingAccountProjectionTestFixtures.enrolled()!!)
 
         // A real session end: the signed-in email disappears (logout).
         auth.signOut()

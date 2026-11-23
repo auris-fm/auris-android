@@ -192,7 +192,7 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
         // publishes what it measured instead of leaking its registry entry.
         try {
             val whenResult = when (intent) {
-            is VoiceIntent.Playback -> executePlayback(intent, onOutcome)
+                is VoiceIntent.Playback -> executePlayback(intent, onOutcome)
 
                 is VoiceIntent.Effects -> executeEffects(intent)
 
@@ -333,11 +333,11 @@ open class VoicePlaybackIntentExecutor @Inject constructor(
                     dispatched.feedback
                 }
 
-            is VoiceIntent.Queue -> executeQueue(intent, onOutcome)
+                is VoiceIntent.Queue -> executeQueue(intent, onOutcome)
 
-            is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
+                is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
 
-            is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
+                is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
             }
             // LOCAL ACTION EXECUTED, observed where the action actually ran. Only local intents run
             // this arm — a cloud turn's action is the server's, so its timing belongs to the sink. The

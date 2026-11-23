@@ -175,13 +175,10 @@ class OffTapLocalRecordControlTest {
     private class FakeVoiceSharingApi(private val projectionBody: String) : VoiceSharingAccountApi {
         private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
-        override suspend fun getVoiceSharing(bearer: String?): Response<okhttp3.ResponseBody> =
-            Response.success(200, projectionBody.toResponseBody(jsonMediaType))
+        override suspend fun getVoiceSharing(bearer: String?): Response<okhttp3.ResponseBody> = Response.success(200, projectionBody.toResponseBody(jsonMediaType))
 
-        override suspend fun putVoiceSharing(bearer: String?, body: okhttp3.RequestBody): Response<okhttp3.ResponseBody> =
-            Response.success(200, projectionBody.toResponseBody(jsonMediaType))
+        override suspend fun putVoiceSharing(bearer: String?, body: okhttp3.RequestBody): Response<okhttp3.ResponseBody> = Response.success(200, projectionBody.toResponseBody(jsonMediaType))
 
-        override suspend fun deleteData(bearer: String?): Response<okhttp3.ResponseBody> =
-            Response.success(204, "".toResponseBody(jsonMediaType))
+        override suspend fun deleteData(bearer: String?): Response<okhttp3.ResponseBody> = Response.success(204, "".toResponseBody(jsonMediaType))
     }
 }

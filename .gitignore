@@ -81,3 +81,6 @@ scratch/
 # Review and evidence notes are working process material, kept outside the repo.
 reviews/
 evidence/
+
+# Python bytecode from the repo control scripts
+__pycache__/

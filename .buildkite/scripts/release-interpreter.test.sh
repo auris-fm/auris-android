@@ -62,6 +62,17 @@ exit 0
 STUB
 chmod +x bin/buildkite-agent
 
+# The release step prepares native dependency trees before building. This suite is about the
+# interpreter gate, so stub that preparation with two already-present trees: no clone, no network,
+# and the ordering the release step uses is still exercised.
+mkdir -p native-trees/llama native-trees/oboe
+cat > .buildkite/scripts/native-deps.sh <<'NATIVESTUB'
+#!/bin/bash
+printf 'FETCHCONTENT_SOURCE_DIR_LLAMA=%s/native-trees/llama\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_OBOE=%s/native-trees/oboe\n' "$PWD"
+NATIVESTUB
+chmod +x .buildkite/scripts/native-deps.sh
+
 # A recording bundle stub: `bundle -v` reports whatever the case pins, and install/exec
 # record that they were REACHED, so a case can assert the gate ran before any gem work.
 make_bundle() { # dir reported-version

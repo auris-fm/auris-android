@@ -117,6 +117,25 @@ printf '\nbuildCache { remote<HttpBuildCache> { isEnabled = false } }\ndevelocit
 echo "--- effective Auris CI overrides in settings.gradle.kts"
 tail -n 2 settings.gradle.kts
 
+# Native dependencies BEFORE gradle: CMake would otherwise clone llama.cpp and oboe once per ABI
+# at configure time, from inside the checkout, with no cache and no bound on a stalled transfer.
+# The helper puts one tree per pin outside the checkout and hands back the source-dir overrides;
+# passing them as Gradle cmake arguments makes every ABI reuse those trees and clone nothing.
+echo "--- :package: Preparing native dependencies"
+NATIVE_EXPORTS="$(mktemp)"
+bash .buildkite/scripts/native-deps.sh > "$NATIVE_EXPORTS"
+NATIVE_CMAKE_ARGS=()
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  NATIVE_CMAKE_ARGS+=("-D${line%%=*}=${line#*=}")
+done < "$NATIVE_EXPORTS"
+rm -f "$NATIVE_EXPORTS"
+# Gradle reads cmake arguments from the module's build file, so they are passed as a project
+# property the build appends; see modules/services/voice/build.gradle.kts.
+AURIS_NATIVE_CMAKE_ARGS="$(printf '%s ' "${NATIVE_CMAKE_ARGS[@]}")"
+export AURIS_NATIVE_CMAKE_ARGS
+echo "--- native cmake args: $AURIS_NATIVE_CMAKE_ARGS"
+
 # skipSentryProguardMappingUpload: CI=true enables the mapping upload, but the
 # release secrets carry no Sentry token here; same flag as assemble-release-apk.sh.
 # --stacktrace: #70's "Tag number over 30" had no stack, so the failing

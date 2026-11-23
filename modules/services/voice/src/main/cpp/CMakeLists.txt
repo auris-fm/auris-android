@@ -21,11 +21,15 @@ set(LLAMA_BUILD_APP OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
+# The transfer bound matters more than the retry: CMake retries a clone that FAILS three times,
+# but a connection that trickles never fails, so without this a configure can wait indefinitely.
+# One release build hit both cases at once, on different ABIs.
 FetchContent_Declare(
     llama
     GIT_REPOSITORY https://github.com/ggerganov/llama.cpp.git
     GIT_TAG 0eadefebd3f8f92a86d634a0e5b8fffc9dc792c0
     GIT_SHALLOW TRUE
+    GIT_CONFIG http.lowSpeedLimit=1000 http.lowSpeedTime=120
 )
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(llama)
@@ -59,11 +63,14 @@ target_link_options(pocketcasts_voice_llm PRIVATE -Wl,--exclude-libs,ALL)
 target_compile_features(pocketcasts_voice_llm PUBLIC cxx_std_17)
 target_compile_options(pocketcasts_voice_llm PRIVATE -Wall -Werror -O2 -fvisibility=hidden)
 
+# Pinned to the commit the 1.9.0 tag points at, not the tag: a tag can be moved, and the cache is
+# keyed on this value, so a movable pin would let one revision's tree serve another's build.
 FetchContent_Declare(
     oboe
     GIT_REPOSITORY https://github.com/google/oboe.git
-    GIT_TAG 1.9.0
+    GIT_TAG 03242e9ef9495e418e6ae83954d239dc9193ec5c
     GIT_SHALLOW TRUE
+    GIT_CONFIG http.lowSpeedLimit=1000 http.lowSpeedTime=120
 )
 FetchContent_MakeAvailable(oboe)
 

@@ -17,7 +17,20 @@ REPO="${ROBOLECTRIC_MAVEN_REPO:-https://repo1.maven.org/maven2}"
 M2="${ROBOLECTRIC_M2_DIR:-$HOME/.m2/repository}"
 ATTEMPTS="${ROBOLECTRIC_SEED_ATTEMPTS:-4}"
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
+fail() {
+  echo "FAIL: $*" >&2
+  # A failed seed must not read as cacheable. GITHUB_OUTPUT may be unset outside CI.
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then echo "jar-present=no" >> "$GITHUB_OUTPUT"; fi
+  exit 1
+}
+
+# Tell the workflow whether the cache is worth saving. `hashFiles` only sees files under
+# GITHUB_WORKSPACE, so a gate written against ~/.m2 is always empty and the save never runs -- which
+# is silent, and is how the jar stayed uncached. This output is the readable signal.
+report_present() { # report_present <yes|no>
+  [ -n "${GITHUB_OUTPUT:-}" ] || return 0
+  echo "jar-present=$1" >> "$GITHUB_OUTPUT"
+}
 
 # Fetch one Maven artifact and its published SHA-512 into a staging directory, verifying the digest
 # before returning. Retries then fails closed: a partial file must never be mistaken for a complete
@@ -67,6 +80,7 @@ if [ -d "$M2_REPO" ]; then
       got="$(shasum -a 512 "$vdir/$base.jar" | awk '{print $1}')"
       if [ "$want" = "$got" ]; then
         echo "--- already present, nothing to fetch"
+        report_present yes
         exit 0
       fi
       echo "--- cached jar fails its checksum; refetching" >&2
@@ -138,3 +152,4 @@ for ext in jar jar.sha512 pom pom.sha512; do
   mv "$STAGE/$ARTIFACT-$VERSION.$ext" "$DEST/$ARTIFACT-$VERSION.$ext" || fail "cannot install $ext"
 done
 echo "--- seeded $ARTIFACT-$VERSION.jar ($(wc -c < "$DEST/$ARTIFACT-$VERSION.jar") bytes)"
+report_present yes

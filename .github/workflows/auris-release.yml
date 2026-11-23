@@ -54,6 +54,7 @@ jobs:
       # task from its build cache Robolectric never runs, so nothing lands in ~/.m2 and the save step
       # would report success while storing nothing. Seeding must not depend on the tests running.
       - name: Seed the Robolectric android-all jar
+        id: robolectric-seed
         run: bash .github/scripts/robolectric-seed.sh
       - run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
       # Same evidence the standalone workflow prints: which jar is on disk and where it came from.
@@ -68,7 +69,10 @@ jobs:
       # must still leave the jar cached for the next run. Gated on the file being present so a failed
       # seed cannot store an empty directory under the good key.
       - name: Save the Robolectric android-all jar
-        if: always() && hashFiles('~/.m2/repository/org/robolectric/**/*.jar') != ''
+        # The seed step reports whether a complete, verified jar is in place. hashFiles cannot be
+        # used here: it only sees files under GITHUB_WORKSPACE, so a ~/.m2 pattern is always empty
+        # and the save would silently never run.
+        if: always() && steps.robolectric-seed.outputs.jar-present == 'yes'
         uses: actions/cache/save@v4
         with:
           path: ~/.m2/repository/org/robolectric

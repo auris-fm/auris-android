@@ -96,6 +96,9 @@ seed() { # seed <m2dir> [extra env...]
   ROBOLECTRIC_M2_DIR="$m2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" "$@" bash "$SEED"
 }
 
+# Read the jar-present output a run wrote, if any.
+output_of() { sed -n 's/^jar-present=//p' "$1" 2>/dev/null | tail -1; }
+
 # 1 + 2. COLD CACHE: the derived coordinate is fetched into the path Robolectric reads.
 M2="$WORK/m2-cold"
 seed "$M2" > "$WORK/cold.out" 2>&1
@@ -238,6 +241,34 @@ cmp -s "$REPO/$REL.jar" "$M2/$REL.jar" \
   && ok "the unverifiable cached jar was replaced" \
   || bad "an unverifiable cached jar was trusted"
 
+# 6d. THE STEP OUTPUT THE SAVE GATE READS. hashFiles only sees files under GITHUB_WORKSPACE, so a
+#     gate written against ~/.m2 is always empty and the save silently never runs. The script must
+#     report presence itself, on every path: yes when a verified jar is in place, no when it failed.
+GHO="$WORK/gho-cold"; : > "$GHO"
+M2="$WORK/m2-out-cold"
+GITHUB_OUTPUT="$GHO" ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" \
+  bash "$SEED" > "$WORK/out-cold.out" 2>&1
+check_zero "a successful seed runs" $?
+[ "$(output_of "$GHO")" = yes ] && ok "a successful seed reports jar-present=yes" || bad "seed reported '$(output_of "$GHO")' after seeding"
+
+GHO="$WORK/gho-warm"; : > "$GHO"
+M2="$WORK/m2-out-warm"
+mkdir -p "$M2/$(dirname "$REL")"
+for ext in jar jar.sha512 pom pom.sha512; do cp "$REPO/$REL.$ext" "$M2/$REL.$ext"; done
+GITHUB_OUTPUT="$GHO" ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$WORK/no-such-repo" \
+  bash "$SEED" > "$WORK/out-warm.out" 2>&1
+check_zero "a warm cache runs" $?
+[ "$(output_of "$GHO")" = yes ] && ok "a warm cache also reports jar-present=yes" || bad "warm cache reported '$(output_of "$GHO")'"
+
+GHO="$WORK/gho-fail"; : > "$GHO"
+GITHUB_OUTPUT="$GHO" ROBOLECTRIC_M2_DIR="$WORK/m2-out-fail" \
+  ROBOLECTRIC_MAVEN_REPO="file://$RETRYREPO" ROBOLECTRIC_SEED_ATTEMPTS=1 \
+  bash "$SEED" > "$WORK/out-fail.out" 2>&1
+check_nonzero "a failed seed fails" $?
+[ "$(output_of "$GHO")" = no ] \
+  && ok "a failed seed reports jar-present=no, so nothing empty is cached" \
+  || bad "failed seed reported '$(output_of "$GHO")' instead of no"
+
 # 7. EVERY JOB THAT RUNS THE SUITE SEEDS BEFORE THE TESTS AND SAVES UNDER if: always().
 WFS="$(grep -rl ':modules:services:voice:testDebugUnitTest' "$DIR/.github/workflows" | sort)"
 [ -n "$WFS" ] || { echo "FAIL: no workflow runs the voice suite"; exit 1; }
@@ -255,7 +286,21 @@ cat > "$WORK/wf.rb" <<'RUBY'
       save = steps.find { |s| (s["uses"] || "").include?("actions/cache/save") }
       abort "#{File.basename(path)}:#{name} has no actions/cache/save" unless save
       abort "#{File.basename(path)}:#{name} saves only on success" unless save["if"].to_s.include?("always()")
-      abort "#{File.basename(path)}:#{name} save is not gated on the jar being present" unless save["if"].to_s.include?("hashFiles")
+      gate = save["if"].to_s
+      # hashFiles is WORKSPACE-relative: a pattern under ~ can never match, so such a gate is
+      # always false and the save silently never runs. Reject it outright rather than reading it
+      # as a presence check.
+      if gate.include?("hashFiles") && gate =~ /hashFiles\(\s*['"]~/
+        abort "#{File.basename(path)}:#{name} gates the save on hashFiles of a home path, which is always empty"
+      end
+      # The gate must read the seed step's own output, and that step must declare the matching id.
+      m = gate.match(/steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)/)
+      abort "#{File.basename(path)}:#{name} save is not gated on a step output" unless m
+      seed_step = steps[si]
+      abort "#{File.basename(path)}:#{name} seed step has no id" unless seed_step["id"]
+      abort "#{File.basename(path)}:#{name} gate reads '#{m[1]}' but the seed step is '#{seed_step["id"]}'" unless m[1] == seed_step["id"]
+      abort "#{File.basename(path)}:#{name} gate reads '#{m[2]}', not jar-present" unless m[2] == "jar-present"
+      abort "#{File.basename(path)}:#{name} gate does not require 'yes'" unless gate.include?("'yes'") || gate.include?('"yes"')
       restore = steps.find { |s| (s["uses"] || "").to_s.strip == "actions/cache/restore@v4" }
       abort "#{File.basename(path)}:#{name} must restore without saving (use cache/restore)" unless restore
       abort "#{File.basename(path)}:#{name} restores after seeding" unless steps.index(restore) < si

@@ -1602,19 +1602,29 @@ class FingerprintTimingManager @Inject constructor(
 
         for (window in windows) {
             val absolutePlaybackTime = startOffset + window.timestampSec.toDouble()
-            val matches = cloudMatcher.findTopMatches(window.hashes, 2)
+            val matches = cloudMatcher.findTopMatches(
+                window.hashes,
+                FingerprintConstants.CLOUD_REFERENCE_CANDIDATES,
+            )
             val best = matches.firstOrNull()
 
-            if (best == null || best.score < FingerprintConstants.MATCH_SCORE_THRESHOLD) {
+            if (best == null || best.score < FingerprintConstants.CLOUD_REFERENCE_ACCEPTANCE_SCORE) {
                 continue
             }
 
-            val runnerUpScore = matches.getOrNull(1)?.score ?: 0f
-            val dominance = best.score - runnerUpScore
+            // Competition is the best checkpoint far enough away to be a different piece of
+            // audio, not the runner-up: neighbouring checkpoints overlap this one almost
+            // entirely and score nearly the same. Enough candidates are requested that such a
+            // checkpoint is present whenever the reference has one.
+            val distantScore = matches.drop(1)
+                .firstOrNull {
+                    abs(it.timestampSeconds - best.timestampSeconds) >
+                        FingerprintConstants.CLOUD_REFERENCE_LEAD_DISTANCE_SECONDS
+                }
+                ?.score ?: 0f
+            val dominance = best.score - distantScore
 
-            if (best.score < FingerprintConstants.DRIFT_ANCHOR_SCORE_THRESHOLD ||
-                dominance < FingerprintConstants.DRIFT_SCORE_DOMINANCE_GAP
-            ) {
+            if (dominance < FingerprintConstants.DRIFT_SCORE_DOMINANCE_GAP) {
                 if (isDebug) recordDebugRejection(absolutePlaybackTime, best.score)
                 continue
             }
@@ -1624,6 +1634,7 @@ class FingerprintTimingManager @Inject constructor(
                 referenceTime = best.timestampSeconds.toDouble(),
                 score = best.score,
             )
+            cloudCandidatesForTest = cloudCandidatesForTest + candidate
             val committed = consider(candidate, isDebug)
             // Log the first mapping the drift filter actually commits, not a
             // candidate it may reject (spec: the turn's context depends on it).
@@ -1764,6 +1775,24 @@ class FingerprintTimingManager @Inject constructor(
         publishSnapshot()
         debugRejectionsSnapshot = debugRejections.toList()
     }
+
+    /** Test seam: install a cloud reference matcher without fetching one. Single-threaded tests only. */
+    @VisibleForTesting
+    internal fun stubCloudMatcher(matcher: CloudReferenceMatcher) {
+        cloudMatcher = matcher
+    }
+
+    /** Test seam: run the cloud matching path over completed windows. Single-threaded tests only. */
+    @VisibleForTesting
+    internal fun processCloudWindowsForTest(windows: List<CloudFingerprinter.Window>, startOffset: Double) {
+        cloudCandidatesForTest = emptyList()
+        processCloudMatches(windows, startOffset)
+    }
+
+    /** What the cloud path offered the drift filter on the last test run, before the filter judged it. */
+    @VisibleForTesting
+    internal var cloudCandidatesForTest: List<TimeMappingEntry> = emptyList()
+        private set
 
     companion object {
         /** Core eager-pass gate (assumes the platform check already passed). */

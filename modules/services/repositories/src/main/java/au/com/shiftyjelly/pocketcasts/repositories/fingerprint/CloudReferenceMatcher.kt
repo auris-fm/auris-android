@@ -7,8 +7,11 @@ package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
  * set-overlap score is the correct similarity measure.
  *
  * Replaces the Rust `CheckpointMatcher` for the cloud-alignment path only.
- * Score semantics match the existing pipeline: [matchScoreThreshold] 0.5,
- * anchor threshold 0.65, dominance gap 0.05 (see FingerprintConstants).
+ * Acceptance is decided by the caller, not here: score at least
+ * FingerprintConstants.CLOUD_REFERENCE_ACCEPTANCE_SCORE, leading by
+ * DRIFT_SCORE_DOMINANCE_GAP over the best checkpoint more than
+ * CLOUD_REFERENCE_LEAD_DISTANCE_SECONDS away. Ask for CLOUD_REFERENCE_CANDIDATES
+ * results so such a checkpoint is in the list (docs/specs/timeline-alignment.md#reference-matching).
  *
  * Storage (delta: fingerprint OOM): one sorted, deduplicated primitive array
  * per checkpoint, membership by binary search — no boxed HashSet<Long>. The
@@ -78,9 +81,9 @@ class CloudReferenceMatcher {
             val score = if (smallest == 0) 0f else intersection.toFloat() / smallest
             insertTop(top, Match(cp.timestampSeconds, score), maxResults)
         }
-        // The caller treats firstOrNull() as best and derives dominance from
-        // the runner-up — the result must be descending even when fewer than
-        // maxResults checkpoints exist (buffer would otherwise stay unsorted).
+        // The caller treats firstOrNull() as best and looks further down the list for
+        // competition — the result must be descending even when fewer than maxResults
+        // checkpoints exist (buffer would otherwise stay unsorted).
         top.sortByDescending { it.score }
         return top
     }

@@ -1,8 +1,31 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
 object FingerprintConstants {
-    /** Minimum match score to accept a fingerprint match result. */
+    /** Minimum match score to accept a transcript-sync fingerprint match result. */
     const val MATCH_SCORE_THRESHOLD = 0.5f
+
+    /**
+     * Acceptance mark for matching against the Auris reference, used both as the match floor and
+     * as the drift filter's anchor mark (docs/specs/timeline-alignment.md#reference-matching).
+     * Lower than the transcript-sync marks because a real window shares only part of its hashes
+     * with the nearest checkpoint. The transcript-sync matcher keeps [MATCH_SCORE_THRESHOLD] and
+     * [DRIFT_ANCHOR_SCORE_THRESHOLD].
+     */
+    const val CLOUD_REFERENCE_ACCEPTANCE_SCORE = 0.30f
+
+    /**
+     * How far from the best match a checkpoint must sit to count as competition for the lead check.
+     * Consecutive one-second checkpoints share seven of their eight seconds and score almost the
+     * same, so comparing against the runner-up rejects nearly every real window.
+     */
+    const val CLOUD_REFERENCE_LEAD_DISTANCE_SECONDS = 2.0f
+
+    /**
+     * Ranked candidates requested from the Auris-reference matcher. With one-second checkpoints
+     * this guarantees a candidate more than [CLOUD_REFERENCE_LEAD_DISTANCE_SECONDS] from the best
+     * match, so the lead check has something to compare against instead of passing vacuously.
+     */
+    const val CLOUD_REFERENCE_CANDIDATES = 6
 
     /** Duration of each windowed fingerprint during live matching, in milliseconds. */
     const val WINDOW_DURATION_MS = 8000

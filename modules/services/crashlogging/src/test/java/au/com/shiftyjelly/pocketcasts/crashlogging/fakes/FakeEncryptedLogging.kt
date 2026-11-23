@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.crashlogging.fakes
 
+import au.com.shiftyjelly.pocketcasts.crashlogging.LogQueueing
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging.UploadState.FINISHED
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging.UploadState.IN_PROGRESS
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging.UploadState.NOT_STARTED
@@ -40,4 +41,10 @@ class FakeEncryptedLogging : EncryptedLogging {
         }
         toUpload = emptyList()
     }
+}
+
+/** The SDK always accepts, so a plain fake adapts to the capability that way. */
+fun FakeEncryptedLogging.asLogQueueing(): LogQueueing = LogQueueing { uuid, file, immediately ->
+    enqueueSendingEncryptedLogs(uuid, file, immediately)
+    true
 }

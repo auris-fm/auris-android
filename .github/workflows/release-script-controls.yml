@@ -87,6 +87,11 @@ jobs:
         run: bash .buildkite/scripts/keystore-decode.test.sh
 
       - if: steps.scope.outputs.run == 'true'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+
+      - if: steps.scope.outputs.run == 'true'
         name: Robolectric cache control
         run: bash .github/scripts/robolectric-cache.test.sh
 
@@ -101,6 +106,10 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         name: Release gate wiring control
         run: ruby .buildkite/scripts/release-gates.test.rb
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Release interpreter control
+        run: bash .buildkite/scripts/release-interpreter.test.sh
 
       - if: steps.scope.outputs.run == 'true'
         name: Native dependency control

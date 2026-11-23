@@ -6,6 +6,12 @@
 
 cd "$(dirname "$0")/../.."
 
+# Assert the pinned interpreter before anything uses it: the base64 decode below runs ruby,
+# and a stock macOS ruby is too old for this repo. Fails closed rather than decoding with
+# whatever PATH happens to resolve.
+. .buildkite/commands/auris-require-interpreter.sh
+auris_require_interpreter
+
 # JVM caps: the repo's gradle.properties defaults (10 GB Gradle heap, 4 GB
 # Kotlin compiler daemon, 8 workers) exceed an 8 GB agent. A properties file
 # keeps the last value for a repeated key, so appending overrides without

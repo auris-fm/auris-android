@@ -38,6 +38,12 @@ AURIS_UPLOAD_CERT_SHA256="${AURIS_UPLOAD_CERT_SHA256:-16:89:BD:A2:5A:0B:47:DB:6D
 bash .buildkite/commands/auris-verify-bundle-signature.sh \
   app/build/outputs/bundle/release/app-release.aab \
   "$AURIS_UPLOAD_CERT_SHA256"
+
+# Same gate as the AAB step, before any gem work: an old bundler can resolve a different
+# gem set than Gemfile.lock and upload with it, which no later check would notice.
+. .buildkite/commands/auris-require-interpreter.sh
+auris_require_interpreter
+
 # Validate the carried version BEFORE uploading, not after. Play rejects a
 # duplicate versionCode, so a step that uploads and THEN discovers the carried
 # version is missing or corrupt cannot be recovered by re-running: the release

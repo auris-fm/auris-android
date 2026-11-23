@@ -3,14 +3,10 @@ name: ☢️ Trigger Danger On Buildkite
 on:
   pull_request:
     types: [labeled, unlabeled, milestoned, demilestoned, ready_for_review, edited]
-  # A merge group reports only `checks_requested`, and the event carries no pull request,
-  # so there is nothing for Danger to lint. The job below reports success instead of
-  # running, which keeps this check required without changing any branch rule.
-  merge_group:
 
 jobs:
   dangermattic:
-    if: ${{ github.event_name != 'merge_group' && github.event.pull_request.draft == false }}
+    if: ${{ github.event.pull_request.draft == false }}
     uses: Automattic/dangermattic/.github/workflows/reusable-retry-buildkite-step-on-events.yml@v1
     with:
       org-slug: automattic
@@ -19,20 +15,3 @@ jobs:
       build-commit-sha: ${{ github.event.pull_request.head.sha }}
     secrets:
       buildkite-api-token: ${{ secrets.TRIGGER_BK_BUILD_TOKEN }}
-
-  # A merge group has nothing for Danger to lint, but the check still has to report, so
-  # this job reports it and passes.
-  #
-  # The name below is the check name the pull request path reports: a job that calls a
-  # reusable workflow reports `<calling job> / <reusable job>`, and the pinned workflow
-  # defines the job `retry-buildkite-job`. One required check then covers both paths;
-  # any other name leaves the rule satisfied on one path and waiting forever on the
-  # other. The reusable half lives in another repository, so this name cannot be read
-  # from a file here: the control says so and asks for the comparison instead of
-  # guessing the half it cannot see.
-  queue-passes:
-    if: ${{ github.event_name == 'merge_group' }}
-    name: "dangermattic / retry-buildkite-job"
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "A merge group reports checks_requested only; Danger already ran on the pull request."

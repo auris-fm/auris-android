@@ -33,6 +33,12 @@ RELEASE_WORKFLOW="auris-release.yml"
 # dependency submission and Slack notifications.
 NOT_REQUIRED="claude.yml claude-code-review.yml monthly-code-review.yml upstream-sync.yml submit-gradle-dependencies.yml high-prio-issue-notify-slack.yml"
 
+# Required checks whose queue build is reported by a different workflow, so that no pull
+# request ever sees a second check with the same name. Danger is one: the pull request path
+# calls a reusable workflow, and two checks sharing a name would let a skipped copy stand in
+# for a failed run. The pairs are checked below, both ways.
+SPLIT_QUEUE_CHECKS="run-danger.yml:danger-merge-queue.yml"
+
 # A workflow listens to the queue when `merge_group` appears under its `on:` key, either
 # as a block key or inside a flow list. Checking the trigger block rather than the whole
 # file matters: the string also appears in comments explaining this very rule.
@@ -85,11 +91,49 @@ triggers_of() { # file -> sorted trigger names
   ' "$1" | sort -u | tr '\n' ' '
 }
 
+# A required check may be reported by a second, queue-only workflow so that a pull request
+# never sees two checks carrying one name. SPLIT_QUEUE_CHECKS lists those pairs as
+# `<pull request workflow> <queue-only workflow>`.
+split_queue_partner() { # workflow name -> the queue-only partner that reports its check
+  python3 - "$1" "$SPLIT_QUEUE_CHECKS" <<'PYTHON'
+import sys
+
+target, pairs = sys.argv[1], sys.argv[2].split()
+for pair in pairs:
+    a, b = pair.split(":")
+    if a == target:
+        print(b); sys.exit(0)
+    if b == target:
+        print(a); sys.exit(0)
+sys.exit(1)
+PYTHON
+}
+
+queue_partner_is_merge_group_only() { # partner file -> it triggers on merge_group and nothing else
+  python3 "$DIR/merge-queue-helper.py" merge-group-only "$1"
+}
+
+
+
+
 echo "== every workflow that can produce a required check listens to merge_group"
 for f in "$WF"/*.yml; do
   base="$(basename "$f")"
   if [ "$base" = "$RELEASE_WORKFLOW" ]; then continue; fi
   case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
+  partner="$(split_queue_partner "$base")"
+  # The two halves are one rule: the check is reported by whichever of the pair is the
+  # queue-only workflow, so the pair is tested once, from the workflow that exists only
+  # for a queue build.
+  if [ -n "$partner" ]; then
+    case "$(python3 "$DIR/merge-queue-helper.py" merge-group-only "$f" && echo queue-only || echo not)" in
+      queue-only)
+        check "$base reports its check on a queue build and on nothing else" "yes" \
+          "$(python3 "$DIR/merge-queue-helper.py" merge-group-only "$WF/$partner" && echo no || echo yes)"
+        ;;
+    esac
+    continue
+  fi
   check "$base listens to merge_group" "yes" "$(listens_to_queue "$f" && echo yes || echo no)"
 done
 
@@ -171,6 +215,11 @@ for f in "$WF"/*.yml; do
   base="$(basename "$f")"
   if [ "$base" = "$RELEASE_WORKFLOW" ]; then continue; fi
   case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
+  # A workflow whose queue build its partner reports has no queue steps of its own.
+  if partner="$(split_queue_partner "$base")"; then
+    check "$base runs a step on a queue build" "reported by $partner" "reported by $partner"
+    continue
+  fi
   check "$base runs a step on a queue build" "yes" \
     "$(unconditional_step "$f" && echo yes || echo no)"
 done
@@ -261,6 +310,19 @@ for f in "$WF"/*.yml; do
     continue
   fi
   check "$base reports one check name on both paths" "$pr_name" "$queue_name"
+done
+
+echo "== a check is reported once on each path, never twice on one"
+# Two checks with one name mean the rule can be satisfied by the copy that did nothing, so
+# the pair is split: the pull-request workflow reports the name once and never runs on a
+# queue build, and the queue-only workflow reports it once and never runs on a pull request.
+for pair in $SPLIT_QUEUE_CHECKS; do
+  pr_file="${pair%%:*}"
+  queue_file="${pair##*:}"
+  check "$queue_file triggers on merge_group only" "yes" \
+    "$(python3 "$DIR/merge-queue-helper.py" merge-group-only "$WF/$queue_file" && echo yes || echo no)"
+  check "$pr_file does not trigger on merge_group" "no" \
+    "$(listens_to_queue "$WF/$pr_file" && echo yes || echo no)"
 done
 
 echo "== the release workflow never runs for a queue build"

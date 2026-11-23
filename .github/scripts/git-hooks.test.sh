@@ -138,15 +138,28 @@ run_hook
 check_zero "a commit with no Kotlin succeeds" $?
 [ -s "$CALLS" ] && bad "Gradle ran for a commit with no Kotlin" || ok "no Gradle run for a commit with no Kotlin"
 
-# 4. The temporary file list is cleaned up, including when the check fails.
+# 4. The temporary file list is cleaned up, including when the check fails. A failing run keeps
+#    it on purpose -- the fix command the hook prints names this path -- and a passing run
+#    removes it, so the two cases are checked separately.
 new_repo cleanup
 printf 'val staged = 1\n' > Staged.kt
 git add Staged.kt
-FAKE_CHECK_EXIT=1 run_hook
+run_hook
 [ "$LIST_EXISTS_AT_RUN" = yes ] && ok "the file list existed while Gradle read it" \
   || bad "the hook passed a path that did not exist"
-[ -n "$(staged_list)" ] && [ ! -e "$(staged_list)" ] && ok "the file list is removed after a failing run" \
+[ -n "$(staged_list)" ] && [ ! -e "$(staged_list)" ] && ok "the file list is removed when the check passes" \
   || bad "the file list was left behind: $(staged_list)"
+
+# 5. A failing run hands the list to the author instead of deleting it, because the command the
+#    hook prints tells them to run spotlessApply against that exact path.
+new_repo cleanup_kept
+printf 'val staged = 1\n' > Staged.kt
+git add Staged.kt
+FAKE_CHECK_EXIT=1 run_hook
+[ -e "$(staged_list)" ] && ok "a failing run keeps the file list for the fix command" \
+  || bad "the failing run deleted the file list the fix command names"
+[ "$(cat "$(staged_list)" 2>/dev/null)" = "Staged.kt" ] && ok "the kept list still names the staged file" \
+  || bad "the kept list is wrong: $(staged_list) -> $(cat "$(staged_list)" 2>/dev/null)"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

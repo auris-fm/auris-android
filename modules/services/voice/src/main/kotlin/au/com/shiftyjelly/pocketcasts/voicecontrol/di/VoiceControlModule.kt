@@ -122,6 +122,15 @@ abstract class VoiceControlModule {
         fun provideCurrentLocale(): () -> Locale = { Locale.getDefault() }
 
         /**
+         * The engine's teardown job list. UNSCOPED on purpose: each engine must own its own list,
+         * or two engines would see and remove each other's jobs. Dagger does not apply Kotlin
+         * defaults, so this binding is required for the app to build even though the constructor
+         * parameter has a default for Kotlin call sites.
+         */
+        @Provides
+        fun provideUnfinishedProcessingJobList(): java.util.concurrent.CopyOnWriteArrayList<kotlinx.coroutines.Job> = java.util.concurrent.CopyOnWriteArrayList()
+
+        /**
          * One monotonic clock for every voice timing mark, including the early connection's 9s
          * age, so stage differences are real quantities and the two clocks cannot disagree.
          */

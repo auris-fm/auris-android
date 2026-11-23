@@ -116,6 +116,15 @@ class VoiceAsrEngine @Inject constructor(
      * the verdict then only exists at the endpoint, as before.
      */
     private val inProgressUtterance: InProgressUtteranceReader? = null,
+    /**
+     * The jobs this engine is still waiting on at teardown. A control substitutes a list that
+     * forces the completion interleaving; production gets a fresh one per engine from
+     * VoiceControlModule.provideUnfinishedProcessingJobList -- Dagger supplies every constructor
+     * parameter and never applies Kotlin defaults, so a shared or scoped binding would mix two
+     * engines' jobs.
+     */
+    private val unfinished: java.util.concurrent.CopyOnWriteArrayList<Job> =
+        java.util.concurrent.CopyOnWriteArrayList(),
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -171,7 +180,13 @@ class VoiceAsrEngine @Inject constructor(
     private val ownedProcessingJobs = java.util.concurrent.ConcurrentHashMap<Job, Unit>()
 
     internal val unfinishedProcessingJobs: List<Job>
-        get() = unfinished.toList()
+        // ONE atomic snapshot. `toList()` on a copy-on-write list reads size and then indexes, and a
+        // completion callback removes the job from this list the moment it finishes, so the element
+        // can vanish between those two reads and the index read throws. This getter is the
+        // quiescence snapshot inside stopVoiceControl, where a throw is a FAILED STOP and the
+        // surrounding contract is fail-closed -- a job finishing at the wrong microsecond would hold
+        // a session that stopped cleanly. toArray() captures the array under the list's own lock.
+        get() = unfinished.toArray().map { it as Job }
 
     /**
      * EVERY processing job this engine ever created, running or finished.
@@ -183,7 +198,6 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal val ownedJobs: Set<Job> get() = ownedProcessingJobs.keys.toSet()
 
-    private val unfinished = java.util.concurrent.CopyOnWriteArrayList<Job>()
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null

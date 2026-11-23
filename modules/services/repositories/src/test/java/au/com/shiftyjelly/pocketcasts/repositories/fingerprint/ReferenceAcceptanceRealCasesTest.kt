@@ -61,8 +61,7 @@ class ReferenceAcceptanceRealCasesTest {
             ?: error("could not parse $FILE")
     }
 
-    private fun ranked(case: Case): List<MatchResult> =
-        case.candidates.map { MatchResult(it.timestamp, it.score) }
+    private fun ranked(case: Case): List<MatchResult> = case.candidates.map { MatchResult(it.timestamp, it.score) }
 
     @Test
     fun `the shared fixture is the one both apps test`() {

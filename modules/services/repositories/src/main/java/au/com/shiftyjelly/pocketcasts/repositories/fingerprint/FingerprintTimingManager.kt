@@ -104,9 +104,8 @@ class FingerprintTimingManager @Inject constructor(
         cloudBaseUrl: String,
         episodeUuid: String,
         podcastUuid: String,
-    ): CheckpointMatcher? =
-        resolveCloudReferencePayload(cloudBaseUrl, episodeUuid, podcastUuid)
-            ?.let { cloudFetcher.buildMatcher(it) }
+    ): CheckpointMatcher? = resolveCloudReferencePayload(cloudBaseUrl, episodeUuid, podcastUuid)
+        ?.let { cloudFetcher.buildMatcher(it) }
 
     /**
      * The same resolution, stopping at the payload. Building the matcher needs the native library,
@@ -124,6 +123,7 @@ class FingerprintTimingManager @Inject constructor(
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.payload.size} bytes) for $episodeUuid")
                 return fetched.payload
             }
+
             is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
                 if (stored != null && ReferenceFingerprint.decode(stored.payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true) {
                     Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
@@ -137,6 +137,7 @@ class FingerprintTimingManager @Inject constructor(
                     return refetched.payload
                 }
             }
+
             CloudFingerprintReferenceFetcher.Fetch.Unavailable -> {
                 if (stored != null && ReferenceFingerprint.decode(stored.payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true) {
                     Timber.d("FingerprintTimingManager: revalidation failed; keeping stored cloud reference for $episodeUuid")
@@ -1620,7 +1621,9 @@ class FingerprintTimingManager @Inject constructor(
                 cloudFirstMappingLogged = true
                 Timber.d(
                     "FingerprintTimingManager: first cloud mapping committed — playback %.1fs, reference %.1fs, score %.2f",
-                    absolutePlaybackTime, accepted.referenceTimeSeconds, accepted.score,
+                    absolutePlaybackTime,
+                    accepted.referenceTimeSeconds,
+                    accepted.score,
                 )
             }
         }

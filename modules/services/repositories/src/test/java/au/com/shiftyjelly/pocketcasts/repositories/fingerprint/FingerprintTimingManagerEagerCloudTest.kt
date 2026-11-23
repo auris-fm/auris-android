@@ -23,11 +23,11 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 import org.mockito.Mockito.mock
 import org.mockito.kotlin.any
 import org.mockito.kotlin.whenever
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import uniffi.fingerprint_uniffi.CheckpointMatcher
 import uniffi.fingerprint_uniffi.MatchResult
 import uniffi.fingerprint_uniffi.WindowedFingerprint
@@ -135,7 +135,6 @@ class FingerprintTimingManagerEagerCloudTest {
     }
 
     private var delivered = false
-
 
     private fun window(second: Int) = WindowedFingerprint(
         timestampMs = (second * 1000).toUInt(),

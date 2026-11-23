@@ -195,32 +195,32 @@ class EarlyWakeStreamScoreControlTest {
     ): VoiceAsrEngine {
         whenever(grace.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
         return VoiceAsrEngine(
-        voiceAudioProcessor = mock<VoiceAudioProcessor>().also {
-            whenever(it.attachCapture()).thenReturn(true)
-            whenever(it.startProcessing()).thenReturn(
-                kotlinx.coroutines.flow.flow {
-                    (eventsOverride ?: events()).forEach {
-                        order?.add(it::class.simpleName.orEmpty())
-                        emit(it)
-                    }
-                },
-            )
-        },
-        utteranceFilter = mock<UtteranceFilter>().also {
-            whenever(it.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
-        },
-        intentRecognizer = recognizer(),
-        wakeWordDetector = detector,
-        gracePeriodSignal = grace,
-        audioFeedbackRenderer = renderer,
-        translationStage = mock(),
-        currentLocale = { java.util.Locale.US },
-        collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
-        retentionSink = org.mockito.kotlin.mock(),
-        segmentObserver = org.mockito.kotlin.mock(),
-        context = context(),
-        earlyConnectionOpener = opener,
-        inProgressUtterance = reader,
+            voiceAudioProcessor = mock<VoiceAudioProcessor>().also {
+                whenever(it.attachCapture()).thenReturn(true)
+                whenever(it.startProcessing()).thenReturn(
+                    kotlinx.coroutines.flow.flow {
+                        (eventsOverride ?: events()).forEach {
+                            order?.add(it::class.simpleName.orEmpty())
+                            emit(it)
+                        }
+                    },
+                )
+            },
+            utteranceFilter = mock<UtteranceFilter>().also {
+                whenever(it.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+            },
+            intentRecognizer = recognizer(),
+            wakeWordDetector = detector,
+            gracePeriodSignal = grace,
+            audioFeedbackRenderer = renderer,
+            translationStage = mock(),
+            currentLocale = { java.util.Locale.US },
+            collectionAuthority = { au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision(true, false) },
+            retentionSink = org.mockito.kotlin.mock(),
+            segmentObserver = org.mockito.kotlin.mock(),
+            context = context(),
+            earlyConnectionOpener = opener,
+            inProgressUtterance = reader,
         )
     }
 

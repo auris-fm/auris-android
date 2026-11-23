@@ -63,6 +63,7 @@ class VoiceSharingSettingsViewModel(
     private var deleteConfirmationOpen = false
     private var confirmationSession = 0L
     private var presentationStatus = SettingsOperationStatus.NONE
+
     /**
      * ONE LOCAL TRUTH (owner's Pixel consent bug): the switch renders the DURABLE choice — the same
      * SavedSharingChoiceStore record capture/upload admission reads — never the in-memory projection
@@ -70,6 +71,7 @@ class VoiceSharingSettingsViewModel(
      * so re-reading it here keeps the switch on exactly what admission would act on.
      */
     private var lastRenderedChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? = null
+
     /** Any durable record for the account (visibility only); null until an IO read lands. */
     private var lastKnownChoice: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoice? = null
     private val mutableState = MutableStateFlow(render())
@@ -82,7 +84,6 @@ class VoiceSharingSettingsViewModel(
                 mutableState.value = render()
                 refreshEnrolled()
             }
-
         }
         refreshProjection?.let { request ->
             scope.launch { request() }
@@ -94,7 +95,6 @@ class VoiceSharingSettingsViewModel(
                     mutableState.value = render()
                     refreshEnrolled()
                 }
-
         }
     }
 
@@ -172,6 +172,7 @@ class VoiceSharingSettingsViewModel(
                     deletionRequested = false
                     deletionFailed = true
                 }
+
                 else -> {}
             }
 
@@ -249,6 +250,7 @@ class VoiceSharingSettingsViewModel(
                 presentationStatus = SettingsOperationStatus.FAILED
                 mutableState.value = renderFrom(isEnrolled())
             }
+
             is EnrollmentOutcome.DataDeleted,
             EnrollmentOutcome.Superseded,
             -> {
@@ -265,6 +267,7 @@ class VoiceSharingSettingsViewModel(
                 presentationStatus = SettingsOperationStatus.NONE
                 mutableState.value = render(SettingsOperationStatus.NONE)
             }
+
             is EnrollmentOutcome.Failed -> {
                 if (generation != actionGeneration) return
                 lastFailedOperation = operation
@@ -272,12 +275,14 @@ class VoiceSharingSettingsViewModel(
                 presentationStatus = SettingsOperationStatus.FAILED
                 mutableState.value = render(SettingsOperationStatus.FAILED)
             }
+
             is EnrollmentOutcome.DataDeleted -> {
                 if (generation != actionGeneration) return
                 pendingOperation = PendingOperation.NONE
                 presentationStatus = SettingsOperationStatus.NONE
                 mutableState.value = render(SettingsOperationStatus.NONE)
             }
+
             is EnrollmentOutcome.Refused -> {
                 if (generation != actionGeneration) return
                 lastFailedOperation = operation
@@ -285,6 +290,7 @@ class VoiceSharingSettingsViewModel(
                 presentationStatus = SettingsOperationStatus.FAILED
                 mutableState.value = render(SettingsOperationStatus.FAILED)
             }
+
             EnrollmentOutcome.Superseded -> {
             }
         }

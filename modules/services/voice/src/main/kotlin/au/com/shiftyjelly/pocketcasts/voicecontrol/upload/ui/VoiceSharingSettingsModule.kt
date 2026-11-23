@@ -45,6 +45,7 @@ object VoiceSharingSettingsModule {
         val name = account()
         if (name.isNullOrBlank()) null else savedChoice.knownChoiceFor(name)
     }
+
     @Provides
     @Singleton
     fun provideVoiceSharingSettingsViewModel(

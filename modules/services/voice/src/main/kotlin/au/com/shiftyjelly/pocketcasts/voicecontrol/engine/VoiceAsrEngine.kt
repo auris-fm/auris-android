@@ -9,8 +9,8 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.InProgressUtteranceReader
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSegmentEndNs
@@ -201,6 +201,7 @@ class VoiceAsrEngine @Inject constructor(
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null
+
     /** Hands an intent to the executor, with the invocation token for its result attribution
      * and the admitted request id for its timing table. */
     private var onIntent: ((VoiceIntent, InvocationToken?, String?) -> Unit)? = null

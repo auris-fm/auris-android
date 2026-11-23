@@ -8,13 +8,13 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedShari
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SavedSharingChoiceStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SharingChoiceState
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -52,23 +52,22 @@ class SettingsSwitchEffectiveConsentTest {
         }
     }
 
-    private fun viewModelWith(store: SavedSharingChoiceStore): VoiceSharingSettingsViewModel =
-        VoiceSharingSettingsViewModel(
-            projection = kotlinx.coroutines.flow.MutableStateFlow(null),
-            // Injected so the rule can cancel the VM's collectors before resetMain (no leaked Main access).
-            scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
-            enrollmentController = EnrollmentController(
-                enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
-                withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
-                deleteOperation = { false },
-                clearLocalPending = {},
-                ownerSession = { 1L },
-            ),
+    private fun viewModelWith(store: SavedSharingChoiceStore): VoiceSharingSettingsViewModel = VoiceSharingSettingsViewModel(
+        projection = kotlinx.coroutines.flow.MutableStateFlow(null),
+        // Injected so the rule can cancel the VM's collectors before resetMain (no leaked Main access).
+        scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + mainDispatcher).also { scopes += it },
+        enrollmentController = EnrollmentController(
+            enrollOperation = { _, _ -> VoiceSharingMutationResult.Failure },
+            withdrawOperation = { _ -> VoiceSharingMutationResult.Failure },
+            deleteOperation = { false },
+            clearLocalPending = {},
             ownerSession = { 1L },
-            ioDispatcher = Dispatchers.Main,
-            savedChoice = VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" },
-            knownChoice = VoiceSharingSettingsModule.knownChoiceProvider(store) { "user@example.com" },
-        )
+        ),
+        ownerSession = { 1L },
+        ioDispatcher = Dispatchers.Main,
+        savedChoice = VoiceSharingSettingsModule.effectiveConsentProvider(store) { "user@example.com" },
+        knownChoice = VoiceSharingSettingsModule.knownChoiceProvider(store) { "user@example.com" },
+    )
 
     @Test
     fun `an ENROLLED record with real provenance shows the switch on`() = runTest {

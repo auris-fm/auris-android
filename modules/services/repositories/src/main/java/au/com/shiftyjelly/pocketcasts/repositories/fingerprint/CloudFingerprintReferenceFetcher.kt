@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintConstants
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -8,12 +9,11 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import uniffi.fingerprint_uniffi.CheckpointMatcher
 import timber.log.Timber
+import uniffi.fingerprint_uniffi.CheckpointMatcher
 
 /**
  * Fetches the Auris cloud reference fingerprints for an episode from

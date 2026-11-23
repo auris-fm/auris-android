@@ -131,6 +131,13 @@ jobs:
         name: Pre-commit hook control
         run: bash .github/scripts/git-hooks.test.sh
 
+      # A formatting-only change is only safe if it is PROVABLY formatting-only. This checks the
+      # working tree against HEAD, so on a clean checkout it reports nothing changed and passes;
+      # it earns its place by being runnable on any branch before a large reformat is committed.
+      - if: steps.scope.outputs.run == 'true'
+        name: Spotless formatting-equivalence checker
+        run: python3 .github/scripts/spotless-formatting-equivalence.py
+
   play-api-surface:
     name: "Play API surface (real gem)"
     runs-on: ubuntu-latest

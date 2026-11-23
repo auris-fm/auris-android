@@ -4,8 +4,9 @@
 # modes:
 #
 #   - **On a pull request** it reports only what the pull request adds, so every finding is
-#     the author's to answer. A leaked secret fails the check. The other findings are listed
-#     in the job summary and do not fail it yet (see `AUDIT_ENFORCE` below).
+#     the author's to answer. A leaked secret fails the check, and so does a new unpinned
+#     action. High-severity code and dependency findings are listed in the job summary and
+#     still do not fail it (see `AUDIT_ENFORCE` below).
 #   - **Every Monday** it scans what Auris has added to the default branch and uploads the
 #     result to the Security tab.
 #

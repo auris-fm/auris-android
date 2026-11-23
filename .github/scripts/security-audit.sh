@@ -85,6 +85,15 @@ for name in $scanners; do
   esac
 done
 
+# A misspelt scanner name here would silently enforce nothing, and a gate that enforces nothing
+# looks exactly like a gate that passes. Only "true" (every scanner) and scanner names are read.
+for name in ${AUDIT_ENFORCE:+"${AUDIT_ENFORCE//,/}"}; do
+  case "$name" in
+    true | secrets | deps | code | workflows) ;;
+    *) die "AUDIT_ENFORCE: unknown scanner '$name' (use true or a comma-separated scanner list)" ;;
+  esac
+done
+
 # Read by earlier versions of this script, as a list of the findings that were open. A caller
 # that still passes it expects them to be kept, and they would not be.
 [ -z "${AUDIT_PREVIOUS:-}" ] || die "AUDIT_PREVIOUS is no longer read: pass the last results as AUDIT_PREVIOUS_SARIF"

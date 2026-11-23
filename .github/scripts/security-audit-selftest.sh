@@ -161,6 +161,10 @@ expect "a workflow that does not parse is not reported clean" 2 "" \
 new_repo arguments
 expect "a misspelt scanner name is refused" 2 "" \
   AUDIT_SCANNERS="secret" bash "$audit" full
+# The same hazard on the enforcement side: a misspelt name enforces nothing, and an audit that
+# enforces nothing exits 0 looking exactly like one that passed.
+expect "a misspelt enforcement name is refused" 2 "" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="workflow" bash "$audit" full
 expect "an unknown history bound is refused" 2 "" \
   AUDIT_SCANNERS=secrets AUDIT_HISTORY_SINCE=no-such-tag bash "$audit" full
 expect "an unknown base commit is refused" 2 "" \
@@ -182,6 +186,11 @@ printf 'def broken(:\n    return eval(text\n' > unparsable.py
 commit_all "add code"
 expect "a risky call in changed code is reported" 0 "selftest-eval" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" bash "$audit" pr 'HEAD^1'
+# Enforcing one scanner must not make the others block: a high-severity code finding is
+# reported and still does not fail the check while only the workflows scanner is enforced.
+expect "a high-severity code finding does not block under a workflow-only enforcement" 0 \
+  "selftest-eval" \
+  AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" AUDIT_ENFORCE="workflows" bash "$audit" pr 'HEAD^1'
 expect "a file semgrep cannot parse is named" 0 "unparsable.py" \
   AUDIT_SCANNERS=code AUDIT_CODE_RULES="$work/rules.yml" bash "$audit" full
 if ! grep -q "^unparsable.py$(printf '\t')\*\$" "$last_out/unscanned.tsv"; then

@@ -123,7 +123,7 @@ class FingerprintCloudIdentityRaceTest {
 
         val manager = newManager(playbackManager, source)
 
-        // Recording what the manager installs, by watching the store writes each resolution makes.
+        // The first preparation's fetch blocks inside the source, so it is genuinely in flight below.
         manager.prepareForCurrentEpisode(FingerprintTimingManager.PrepareTrigger.PLAYBACK)
         // Wait until the slow fetch is actually in flight before switching.
         awaitUntil("the first preparation never started its fetch") { slowFetchStarted }
@@ -176,13 +176,10 @@ class FingerprintCloudIdentityRaceTest {
     @Volatile
     private var slowFetchStarted = false
 
-    /** Records which episode's reference the manager persisted, in order. */
-    private val recorded = java.util.Collections.synchronizedList(mutableListOf<String>())
-    private val recordingStore = object : CloudReferenceStore {
+    /** Nothing cached, so every preparation resolves afresh from the source. */
+    private val emptyStore = object : CloudReferenceStore {
         override suspend fun load(episodeUuid: String): CachedCloudReference? = null
-        override suspend fun save(episodeUuid: String, payload: ByteArray, etag: String?) {
-            recorded += etag ?: episodeUuid
-        }
+        override suspend fun save(episodeUuid: String, payload: ByteArray, etag: String?) = Unit
     }
 
     private fun newManager(
@@ -220,7 +217,7 @@ class FingerprintCloudIdentityRaceTest {
                 override fun baseUrl(): String = "https://auris.invalid"
             },
             cloudFetcher = source,
-            cloudReferenceStore = recordingStore,
+            cloudReferenceStore = emptyStore,
             decodePolicy = decodePolicy,
             scope = scope,
             audioStreamOpener = object : AudioStreamOpener {

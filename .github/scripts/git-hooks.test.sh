@@ -161,5 +161,84 @@ FAKE_CHECK_EXIT=1 run_hook
 [ "$(cat "$(staged_list)" 2>/dev/null)" = "Staged.kt" ] && ok "the kept list still names the staged file" \
   || bad "the kept list is wrong: $(staged_list) -> $(cat "$(staged_list)" 2>/dev/null)"
 
+# 6. The INSTALL is part of the gate. The hook is only worth having if the command the docs tell
+#    a developer to run makes git actually execute it -- and the properties that make that work
+#    (a file named exactly `pre-commit`, the executable bit, a root-relative core.hooksPath) are
+#    all invisible to reading the hook itself. Two repositories, because the worktree case is the
+#    one the old copy install could not serve at all: there `$rootDir/.git` is a file.
+#
+#    This drives the real install command, read out of install.gradle, so a change to it is tested
+#    rather than restated here.
+install_command() { sed -n "s/^ *commandLine 'sh', '-c', '\(.*\)' *$/\1/p" "$DIR/scripts/git-hooks/install.gradle"; }
+INSTALL_CMD="$(install_command)"
+[ -n "$INSTALL_CMD" ] && ok "the install command is readable from install.gradle" \
+  || bad "could not read the install command from install.gradle"
+
+# A repository shaped like the project: the tracked hook where the install expects it, and a
+# gradlew that refuses to format anything.
+install_repo() {
+  R="$WORK/$1"
+  mkdir -p "$R/scripts/git-hooks"
+  cd "$R" || exit 1
+  # The tracked hook is committed as 100755, so a fresh checkout already has the exec bit and
+  # the install's chmod is belt-and-braces. Copying it executable is therefore the realistic
+  # fixture; the non-executable case below covers the other state, where only the install can
+  # make it runnable.
+  cp "$HOOK" scripts/git-hooks/pre-commit
+  chmod +x scripts/git-hooks/pre-commit
+  cat > gradlew <<'GRADLE'
+#!/bin/sh
+exit 1
+GRADLE
+  chmod +x gradlew
+  git init -q -b main .
+  git config user.email t@example.invalid
+  git config user.name t
+  git config commit.gpgsign false
+  printf 'val base = 1\n' > Base.kt
+  git add -A && git commit -qm base
+}
+
+install_repo install-main
+[ -n "$INSTALL_CMD" ] && sh -c "$INSTALL_CMD" >/dev/null 2>&1
+[ "$(git config --get core.hooksPath)" = scripts/git-hooks ] && ok "the install points git at the tracked directory" \
+  || bad "core.hooksPath is '$(git config --get core.hooksPath)' after the install"
+printf 'val staged = 2\n' > Base.kt
+git add Base.kt
+printf 'val untouched = 2\n' > Other.kt
+git add Other.kt
+# A real commit: git itself decides whether to run the hook, which is the thing being tested.
+git commit -qm probe >/dev/null 2>&1
+rc=$?
+check_nonzero "a commit in the main checkout is refused by the installed hook" "$rc"
+[ "$(git rev-list --count HEAD)" = 1 ] && ok "the refused commit did not land" || bad "the commit landed anyway"
+
+# The same install in a LINKED WORKTREE, where .git is a file. The old copy install wrote to a
+# path that is not a directory here, so the hook silently never ran.
+install_repo install-worktree
+[ -n "$INSTALL_CMD" ] && sh -c "$INSTALL_CMD" >/dev/null 2>&1
+git worktree add -q ../wt -b wtbranch >/dev/null 2>&1
+if [ -d ../wt ]; then
+  ( cd ../wt && printf 'val staged = 3\n' > Base.kt && git add Base.kt && git commit -qm probe >/dev/null 2>&1 )
+  rc=$?
+  check_nonzero "a commit in a linked worktree is refused by the installed hook" "$rc"
+  ( cd ../wt && [ "$(git rev-list --count HEAD)" = 1 ] ) && ok "the refused worktree commit did not land" \
+    || bad "the worktree commit landed anyway"
+else
+  bad "could not create a linked worktree to test against"
+fi
+
+# 7. A hook that arrived without its exec bit (an archive copy, a checkout with core.fileMode
+#    off) must still end up runnable: the install's chmod is the only thing that fixes it, so
+#    this is the case that holds the install to doing it.
+install_repo install-noexec
+chmod -x scripts/git-hooks/pre-commit
+[ -n "$INSTALL_CMD" ] && sh -c "$INSTALL_CMD" >/dev/null 2>&1
+printf 'val staged = 4\n' > Base.kt
+git add Base.kt
+git commit -qm probe >/dev/null 2>&1
+rc=$?
+check_nonzero "the install makes a non-executable hook runnable" "$rc"
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

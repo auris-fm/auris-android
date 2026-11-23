@@ -129,16 +129,17 @@ class FingerprintCloudIdentityRaceTest {
         awaitUntil("the first preparation never started its fetch") { slowFetchStarted }
         currentEpisode.set("ep_fast")
         manager.prepareForCurrentEpisode(FingerprintTimingManager.PrepareTrigger.PLAYBACK)
-        awaitUntil("the second preparation never installed its reference") { recorded.isNotEmpty() }
+
+        // Release the superseded fetch only once the current preparation has CONFIGURED, which is
+        // after it installs. Waiting on the store write instead is too early: that happens before
+        // the install, so the latch could open inside the window and the case could pass unfixed.
+        awaitUntil("the current episode never configured its reference") {
+            File(FingerprintReferenceRetriever.referencePath(audioFast.absolutePath)).exists()
+        }
         secondInstalled.countDown()
 
         // Give the superseded preparation every chance to overwrite.
         Thread.sleep(SETTLE_MS)
-
-        // Let the current episode finish configuring, so the manager holds its reference.
-        awaitUntil("the current episode never configured its reference") {
-            File(FingerprintReferenceRetriever.referencePath(audioFast.absolutePath)).exists()
-        }
 
         // A full mapping so the persist actually writes; its identity comes from the manager's state.
         manager.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 99.0, referenceTime = 99.0, score = 0.9f))

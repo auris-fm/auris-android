@@ -47,6 +47,33 @@ fetch() {
   return 1
 }
 
+M2_REPO="$M2/org/robolectric/android-all-instrumented"
+if [ -d "$M2_REPO" ]; then
+  # Exactly one version directory, holding a complete artifact, means the cache already has what the
+  # pins select: the workflow keys this cache on those same two pins, so a restored entry cannot
+  # belong to different ones. Verify the digest rather than trusting the file's presence -- a
+  # truncated jar is exactly what this change exists to prevent.
+  found="$(find "$M2_REPO" -mindepth 1 -maxdepth 1 -type d | sort)"
+  if [ "$(printf '%s\n' "$found" | sed '/^$/d' | wc -l | tr -d ' ')" = 1 ] && [ -n "$found" ]; then
+    vdir="$found"
+    stem="$vdir/$(basename "$vdir")"
+    # The directory is named by VERSION; the files are android-all-instrumented-<VERSION>.
+    base="android-all-instrumented-$(basename "$vdir")"
+    # A cached jar is reused only if its published digest is there AND matches. Missing digest means
+    # refetch-and-verify, which is safe, so requiring the file here is an optimisation, not a guard;
+    # the comparison below is the guard. The POM is Maven metadata and is not needed to load classes.
+    if [ -s "$vdir/$base.jar" ] && [ -s "$vdir/$base.jar.sha512" ]; then
+      want="$(tr -d ' \t\r\n' < "$vdir/$base.jar.sha512")"
+      got="$(shasum -a 512 "$vdir/$base.jar" | awk '{print $1}')"
+      if [ "$want" = "$got" ]; then
+        echo "--- already present, nothing to fetch"
+        exit 0
+      fi
+      echo "--- cached jar fails its checksum; refetching" >&2
+    fi
+  fi
+fi
+
 RV="$(sed -n 's/^robolectric = "org\.robolectric:robolectric:\([0-9.]*\)".*/\1/p' "$DIR/gradle/libs.versions.toml")"
 [ -n "$RV" ] || fail "no org.robolectric:robolectric pin in gradle/libs.versions.toml"
 SDK="$(sed -n 's/^sdk=\([0-9][0-9]*\).*/\1/p' "$DIR/modules/services/voice/src/test/resources/robolectric.properties")"
@@ -99,11 +126,6 @@ mkdir -p "$DEST" || fail "cannot create $DEST"
 # can never leave a truncated jar that Robolectric would treat as cached.
 STAGE="$TMP/stage"
 mkdir -p "$STAGE"
-if [ -s "$DEST/$ARTIFACT-$VERSION.jar" ]; then
-  echo "--- already present, nothing to fetch"
-  exit 0
-fi
-
 # The jar (verified inside fetch), then the POM and its digest. Robolectric reads all four files
 # from this directory, so all four are installed -- but only after every one of them is complete.
 fetch "$REL" "$ARTIFACT-$VERSION" "$STAGE" jar \

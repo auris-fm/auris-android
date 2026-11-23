@@ -131,12 +131,23 @@ jobs:
         name: Pre-commit hook control
         run: bash .github/scripts/git-hooks.test.sh
 
-      # A formatting-only change is only safe if it is PROVABLY formatting-only. This checks the
-      # working tree against HEAD, so on a clean checkout it reports nothing changed and passes;
-      # it earns its place by being runnable on any branch before a large reformat is committed.
+      # A formatting-only change is only safe if it is PROVABLY formatting-only. Diffing against
+      # HEAD would compare a clean checkout with itself and always pass, so this uses the same
+      # base the scope step uses: the PR base, or the queue's merge base.
       - if: steps.scope.outputs.run == 'true'
         name: Spotless formatting-equivalence checker
-        run: python3 .github/scripts/spotless-formatting-equivalence.py
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = merge_group ]; then base="$MERGE_GROUP_BASE"; else base="$BASE_SHA"; fi
+          if [ -z "$base" ]; then
+            echo "::error::No base SHA available; refusing to report an unverified pass."
+            exit 1
+          fi
+          python3 .github/scripts/spotless-formatting-equivalence.py "$base"
 
   play-api-surface:
     name: "Play API surface (real gem)"

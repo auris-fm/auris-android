@@ -8,13 +8,18 @@ anything it cannot account for.
 
 A file passes if EITHER holds:
 
-  A. Its whitespace-insensitive LINE MULTISET is unchanged. Tolerates reordering (ktlint sorts
-     imports and moves a misplaced comment above its annotation) while catching any added,
-     removed or altered line.
-  B. Its token stream is unchanged after removing whitespace, `;` separators inside one-line
-     lambdas and trailing commas -- with the import block compared as a sorted set, and two
-     known ktlint edits allowed: braces added around a single-expression `else`, and a redundant
-     `: Unit` return type dropped from a block-bodied function.
+  A. Its lines are the same, IN ORDER, with layout whitespace removed. Import lines are compared
+     separately as a set, because ktlint sorts them.
+  B. Its token stream is unchanged after removing layout whitespace, `;` separators inside
+     one-line lambdas and trailing commas, allowing two named ktlint edits: braces added around a
+     single-expression `else`, and a redundant `: Unit` dropped from a block-bodied function.
+     This path exists because ktlint also joins and splits statements across lines.
+  C. Failing those, its CODE tokens are unchanged in order and its comment lines are the same
+     multiset -- which permits only a comment moving (ktlint puts a misplaced comment above its
+     annotation), not a comment being reworded or deleted.
+
+Whitespace INSIDE a string literal is never treated as layout, so editing a message cannot pass
+as formatting. Root-level `.kts` files are included, mirroring Spotless's `kotlinGradle` target.
 
 Anything else is reported and exits non-zero, so a real edit cannot ride in on a formatting PR.
 
@@ -35,7 +40,8 @@ def squeeze(text):
 
 
 def tokens(text):
-    t = squeeze(text).replace(";", "")
+    # Layout-only squeeze, line by line, so string contents survive; then join.
+    t = "".join(strip_layout(l) for l in text.split("\n")).replace(";", "")
     t = re.sub(r",([)}])", r"\1", t)          # trailing commas ktlint adds
     t = t.replace("):Unit{", "){")            # redundant Unit on a block body
     # ktlint wraps a single-expression `else` in braces. Removing ALL block braces is too blunt
@@ -55,13 +61,66 @@ def split_imports(text):
     return imports, rest
 
 
-def line_multiset(text):
-    return collections.Counter(squeeze(l) for l in text.split("\n") if l.strip())
+def strip_layout(line):
+    """Remove layout whitespace from a line, but never inside a string literal.
+
+    Squeezing the whole line would make `"a b"` and `"ab"` compare equal, so a real edit to a
+    message could pass as formatting. Only whitespace outside quotes is layout.
+    """
+    out = []
+    quote = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(line):
+                out.append(line[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            out.append(ch)
+        elif not ch.isspace():
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def ordered_lines(text):
+    """The file's non-blank lines, in order, with layout whitespace removed.
+
+    Order matters: a statement moved between blocks keeps the same multiset of lines but changes
+    the sequence, and that is a behaviour change, not formatting. Import lines are excluded here
+    because ktlint sorts them; they are compared separately as a set.
+    """
+    return [strip_layout(l) for l in text.split("\n") if l.strip() and not l.strip().startswith("import ")]
+
+
+def is_comment(line):
+    stripped = line.strip()
+    return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*")
+
+
+def code_tokens(text):
+    return tokens("\n".join(l for l in text.split("\n") if not is_comment(l)))
+
+
+def comment_multiset(text):
+    return collections.Counter(strip_layout(l) for l in text.split("\n") if is_comment(l))
 
 
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
-    files = [f for f in git("diff", "--name-only", base).split("\n") if f.endswith(".kt")]
+    # Mirror Spotless's targets: `kotlin` covers .kt under the source roots, `kotlinGradle`
+    # covers root-level .kts. Missing .kts would let a build-script edit pass unchecked.
+    files = [
+        f
+        for f in git("diff", "--name-only", base).split("\n")
+        if f.endswith(".kt") or (f.endswith(".kts") and "/" not in f)
+    ]
     if not files:
         print("no Kotlin files changed")
         return 0
@@ -70,11 +129,24 @@ def main():
         before = git("show", f"{base}:{path}")
         with open(path, encoding="utf-8") as handle:
             after = handle.read()
-        if line_multiset(before) == line_multiset(after):
-            continue
         imports_before, rest_before = split_imports(before)
         imports_after, rest_after = split_imports(after)
-        if imports_before == imports_after and tokens(rest_before) == tokens(rest_after):
+        if imports_before != imports_after:
+            unexplained.append(path)
+            continue
+        # Path A: same lines in the same order (imports excluded, compared as a set above).
+        if ordered_lines(before) == ordered_lines(after):
+            continue
+        # Path B: ktlint also joins and splits statements across lines, so line order alone
+        # cannot decide. Compare the token stream instead -- still ordered, still literal-safe.
+        if tokens(rest_before) == tokens(rest_after):
+            continue
+        # Path C: a comment ktlint moves above its annotation keeps its text but changes position.
+        # Allow that ONLY for whole comment lines: compare code tokens in order, and comment
+        # lines as a multiset. Anything else about a comment (wording, deletion) still fails.
+        if code_tokens(rest_before) == code_tokens(rest_after) and comment_multiset(
+            before
+        ) == comment_multiset(after):
             continue
         unexplained.append(path)
     print(f"{len(files)} Kotlin file(s) checked, {len(unexplained)} not accounted for")

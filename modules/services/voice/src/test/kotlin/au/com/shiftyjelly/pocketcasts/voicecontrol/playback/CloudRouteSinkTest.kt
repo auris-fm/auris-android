@@ -1902,8 +1902,8 @@ class CloudRouteSinkTest {
     fun `a no-answer error from the service is spoken rather than left silent`() = runTest {
         // The service ends with `error no_answer`. Its line used to be word-for-word the generic
         // one, so this case could not tell "the code has a line" from "the code fell through" --
-        // the approved wording (spec 5ab7b0aa) makes the two distinguishable, and this asserts the
-        // code's own sentence.
+        // approved wording (docs/specs/cloud-assistant.md#error-codes) makes them distinguishable,
+        // and this asserts the code's own sentence.
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Error(code = CloudRouteErrorCodes.NO_ANSWER, message = ""),

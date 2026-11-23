@@ -244,7 +244,8 @@ class SpokenTemplateResolverLocaleTest {
     fun `the approved wording replaces the old no-answer and budget lines`() {
         // Both used to be indistinguishable from a fall-through: no_answer was word-for-word the
         // generic line, and budget_exceeded named a limit rather than the shared deadline. The
-        // approved set (spec 5ab7b0aa) is both apps' copy, so a revert to either old line fails here.
+        // approved set (docs/specs/cloud-assistant.md#error-codes) is both apps' copy, so a revert
+        // to either old line fails here.
         Locale.setDefault(Locale.ENGLISH)
         RuntimeEnvironment.setQualifiers("en")
         val resolver = SpokenTemplateResolver(getApplicationContext<Context>())

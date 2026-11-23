@@ -27,8 +27,9 @@ import retrofit2.HttpException
 import retrofit2.Response
 import retrofit2.Retrofit
 
-/** Minimal account owner for the operations suite: an account name, a session token and a bearer. */
 /**
+ * Minimal account owner for the operations suite: an account name, a session token and a bearer.
+ *
  * Full-shape test CredentialOwnershipOwner: mirrors the real owner's contract (one lock, one
  * immutable snapshot, conditional refresh, owner-transaction 401, narrow binding) so the
  * focused controls run against the ACTUAL shape of the production boundary.
@@ -38,6 +39,7 @@ internal class TestOwner(
 ) {
     private val lock = Any()
     private var session = 1L
+
     @Volatile var token: AccessToken? = null
     val invalidations = java.util.concurrent.atomic.AtomicInteger(0)
 
@@ -61,7 +63,6 @@ internal class TestOwner(
         token = null
         session += 1
     }
-
 }
 
 internal fun ownerToken(owner: TestOwner): au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisScopedTokenProviding {
@@ -115,7 +116,6 @@ class VoiceSharingAccountOperationsTest {
             aurisToken = ownerToken(owner),
             onCredentialInvalid = { owner.invalidations.incrementAndGet() },
         )
-
     }
 
     @After

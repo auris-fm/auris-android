@@ -12,12 +12,13 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.AurisTokenProvider
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import uniffi.fingerprint_uniffi.CheckpointMatcher
 import timber.log.Timber
 
 /**
  * Fetches the Auris cloud reference fingerprints for an episode from
  * `GET /api/v1/episodes/{episode_uuid}/fingerprints` (cloud-ingestion.md) and
- * parses the `fingerprint-compact-v2` payload into a [CloudReferenceMatcher].
+ * parses the `fingerprint-compact-v3` payload into the inherited library's [CheckpointMatcher].
  *
  * Returns null on any failure (unconfigured, network, decode, no checkpoints)
  * so callers degrade gracefully to the transcript-sync path.
@@ -41,8 +42,8 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
      * caller degrades exactly as before.
      */
     sealed interface Fetch {
-        /** A 200: new payload, decoded matcher, and the ETag to store for the next revalidation. */
-        data class Fresh(val matcher: CloudReferenceMatcher, val payload: ByteArray, val etag: String?) : Fetch
+        /** A 200: a decodable payload with usable checkpoints, and the ETag for the next revalidation. */
+        data class Fresh(val payload: ByteArray, val etag: String?) : Fetch
 
         /** A 304 against [cachedEtag]: keep the stored payload; [etag] is the validated one. */
         data class NotModified(val etag: String) : Fetch
@@ -81,19 +82,19 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
 
     /** One request's outcome; a 401 is distinguishable so the caller can retry once. */
     private sealed interface Attempt {
-        /** matcher null = any non-304 non-401 outcome without a usable reference. */
-        data class Done(val matcher: CloudReferenceMatcher?, val payload: ByteArray?, val etag: String?) : Attempt
+        /** payload null = any non-304 non-401 outcome without a usable reference. */
+        data class Done(val payload: ByteArray?, val etag: String?) : Attempt
         data class NotModified(val etag: String) : Attempt
         data object Unauthorized : Attempt
     }
 
     private fun Attempt.toFetch(): Fetch {
-        if (this is Attempt.Done && matcher != null && payload != null) return Fetch.Fresh(matcher, payload, etag)
+        if (this is Attempt.Done && payload != null) return Fetch.Fresh(payload, etag)
         if (this is Attempt.NotModified) return Fetch.NotModified(etag)
         return Fetch.Unavailable
     }
 
-    private fun deadAttempt(): Attempt = Attempt.Done(null, null, null)
+    private fun deadAttempt(): Attempt = Attempt.Done(null, null)
 
     private fun fetchReferenceOnce(
         baseUrl: String,
@@ -152,15 +153,17 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
 
                     else -> {
                         val payload = response.body.bytes()
-                        val matcher = buildMatcher(payload)
+                        // Decodability is decided here; building the matcher is the caller's job,
+                        // because that needs the native library.
+                        val usable = ReferenceFingerprint.decode(payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true
                         // Diagnosability (spec: a failed retest must be readable
                         // from the phone alone): one line per fetch outcome.
-                        if (matcher == null) {
+                        if (!usable) {
                             Timber.w("CloudFingerprintReferenceFetcher: 200 but undecodable reference (${payload.size} bytes) for $episodeUuid")
-                            Attempt.Done(null, null, null)
+                            deadAttempt()
                         } else {
-                            Timber.d("CloudFingerprintReferenceFetcher: fetched ${payload.size} bytes, ${matcher.count} checkpoints for $episodeUuid")
-                            Attempt.Done(matcher, payload, response.header("ETag"))
+                            Timber.d("CloudFingerprintReferenceFetcher: fetched ${payload.size} bytes for $episodeUuid")
+                            Attempt.Done(payload, response.header("ETag"))
                         }
                     }
                 }
@@ -171,18 +174,22 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         }
     }
 
-    /** Parses compact-v2 bytes into a matcher, or null when unusable. */
-    internal fun buildMatcher(data: ByteArray): CloudReferenceMatcher? {
-        val reference = ReferenceFingerprint.decode(data) ?: return null
+    /** Parses compact-v3 bytes into the inherited library's matcher, or null when unusable. */
+    internal fun buildMatcher(data: ByteArray): CheckpointMatcher? {
+        val reference = ReferenceFingerprint.decode(data, ReferenceFingerprint.AURIS_FORMAT) ?: return null
         val checkpoints = reference.libraryCheckpoints()
         if (checkpoints.isEmpty()) return null
 
-        val matcher = CloudReferenceMatcher()
+        val matcher = CheckpointMatcher()
         for (checkpoint in checkpoints) {
-            // libraryCheckpoints decodes hashes as signed Ints; the uint32
-            // value is the bit pattern, so re-interpret as an unsigned Long.
-            val hashes = checkpoint.hashes.map { it.toLong() and 0xFFFFFFFFL }.toLongArray()
-            matcher.add(checkpoint.timestampSeconds, hashes)
+            // The values are a TIME-ORDERED sequence with duplicates kept: the library compares
+            // position by position, so sorting or deduplicating here would change every score.
+            // libraryCheckpoints decodes them as signed Ints holding the uint32 bit pattern.
+            matcher.add(
+                checkpoint.timestampSeconds,
+                checkpoint.hashes.map { it.toUInt() },
+                reference.checkpointDurationSeconds,
+            )
         }
         return matcher
     }

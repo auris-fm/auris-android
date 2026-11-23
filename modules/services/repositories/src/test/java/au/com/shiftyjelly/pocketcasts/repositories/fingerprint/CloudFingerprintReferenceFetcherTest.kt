@@ -58,26 +58,31 @@ class CloudFingerprintReferenceFetcherTest {
     }
 
 
-    /** Convenience: fetch and unwrap Fresh, else null — the pre-ETag matcher contract. */
-    private fun fetchMatcher(
+    /** Convenience: fetch and unwrap Fresh's payload, else null. */
+    private fun fetchPayload(
         fetcher: CloudFingerprintReferenceFetcher,
         server: MockWebServer,
         episodeUuid: String = "ep_1",
         cachedEtag: String? = null,
-    ): CloudReferenceMatcher? = runBlocking {
+    ): ByteArray? = runBlocking {
         val outcome = fetcher.fetchReference(server.url("/").toString().trimEnd('/'), episodeUuid, "pod_1", cachedEtag)
-        (outcome as? CloudFingerprintReferenceFetcher.Fetch.Fresh)?.matcher
+        (outcome as? CloudFingerprintReferenceFetcher.Fetch.Fresh)?.payload
     }
 
     private fun mintResponse(access: String): MockResponse = MockResponse().setResponseCode(200)
         .setBody("""{"access_token":"$access","token_type":"Bearer","expires_in":900,"refresh_token":"r-1"}""")
 
-    private fun compactV2Json(): String {
-        val windows = CloudFingerprintParityData.signal16kMonoWindows
+    /** Three one-second checkpoints; the values are placeholders, since these cases pin transport. */
+    private fun compactV3Json(format: String = ReferenceFingerprint.AURIS_FORMAT): String {
+        val windows = listOf(
+            longArrayOf(7L, 9L, 11L),
+            longArrayOf(7L, 9L, 11L),
+            longArrayOf(7L, 9L, 11L),
+        )
         val checkpoints = windows.mapIndexed { index, window -> encodeCheckpoint(window, index) }.joinToString(",")
         return """
             {
-              "format": "fingerprint-compact-v2",
+              "format": "$format",
               "total_duration": 10.0,
               "checkpoint_interval": 1,
               "checkpoint_duration": 8,
@@ -96,35 +101,17 @@ class CloudFingerprintReferenceFetcherTest {
     }
 
     @Test
-    fun `buildMatcher parses compact-v2 checkpoints with correct hashes`() {
-        val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
-            .buildMatcher(compactV2Json().toByteArray())
-
-        assertNotNull(matcher)
-        assertEquals(3, matcher!!.count)
-
-        // The parity window hashes must match the parsed reference checkpoints
-        // exactly — this is the client/server matching contract. The signal is
-        // stationary so every window carries the same hashes; the matcher must
-        // score 1.0 against checkpoints at their accumulated timestamps.
-        val matches = matcher.findTopMatches(CloudFingerprintParityData.signal16kMonoWindows[1], 3)
-        assertTrue(matches.size == 3)
-        assertTrue(matches.all { it.score == 1.0f })
-        assertTrue(matches.any { it.timestampSeconds == 1f })
+    fun `an undecodable body is not a usable reference`() {
+        // The fetch decides usability from the payload alone; building the matcher needs the
+        // native library and happens where the reference is used.
+        assertNull(ReferenceFingerprint.decode("not json".toByteArray()))
     }
 
     @Test
-    fun `buildMatcher returns null for invalid payload`() {
-        val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
-            .buildMatcher("not json".toByteArray())
-        assertNull(matcher)
-    }
-
-    @Test
-    fun `buildMatcher returns null for empty checkpoints`() {
+    fun `a reference with no checkpoints is not usable`() {
         val json = """
             {
-              "format": "fingerprint-compact-v2",
+              "format": "fingerprint-compact-v3",
               "total_duration": 10.0,
               "checkpoint_interval": 1,
               "checkpoint_duration": 8,
@@ -132,25 +119,48 @@ class CloudFingerprintReferenceFetcherTest {
               "checkpoints": []
             }
         """.trimIndent()
-        val matcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
-            .buildMatcher(json.toByteArray())
-        assertNull(matcher)
+        val decoded = ReferenceFingerprint.decode(json.toByteArray())
+        assertNotNull(decoded)
+        assertTrue(decoded!!.libraryCheckpoints().isEmpty())
+    }
+
+    @Test
+    fun `a 200 in another format is not a usable Auris reference`() {
+        // Only the Auris endpoint's own format counts here. A body in the transcript host's format
+        // parses, but it is not what this endpoint serves, so the fetch treats it as unusable.
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody(compactV3Json(ReferenceFingerprint.TRANSCRIPT_FORMAT)))
+        server.start()
+
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "token", auth))
+
+            assertNull(
+                "a payload in another format must not be accepted at the Auris site",
+                fetchPayload(fetcher, server),
+            )
+            auth.shutdown()
+        } finally {
+            server.shutdown()
+        }
     }
 
     @Test
     fun `fetchReference sends the Auris access token and the podcast id`() {
         val server = MockWebServer()
-        server.enqueue(MockResponse().setBody(compactV2Json()))
+        server.enqueue(MockResponse().setBody(compactV3Json()))
         server.start()
 
         try {
             val auth = MockWebServer()
             auth.start()
             val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "auris-access-token-1", auth))
-            val matcher = fetchMatcher(fetcher, server)
+            val payload = fetchPayload(fetcher, server)
 
-            assertNotNull(matcher)
-            assertEquals(3, matcher!!.count)
+            assertNotNull(payload)
+            assertEquals(3, ReferenceFingerprint.decode(payload!!)!!.libraryCheckpoints().size)
 
             val request = server.takeRequest()
             assertEquals("/api/v1/episodes/ep_1/fingerprints?podcast_id=pod_1", request.path)
@@ -166,16 +176,16 @@ class CloudFingerprintReferenceFetcherTest {
     fun `a 401 refreshes the token and retries the request exactly once`() {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(401))
-        server.enqueue(MockResponse().setBody(compactV2Json()))
+        server.enqueue(MockResponse().setBody(compactV3Json()))
         server.start()
 
         try {
             val auth = MockWebServer()
             auth.start()
             val fetcher = CloudFingerprintReferenceFetcher(refreshingProvider(auth))
-            val matcher = fetchMatcher(fetcher, server)
+            val payload = fetchPayload(fetcher, server)
 
-            assertNotNull("the retry with the replacement token must succeed", matcher)
+            assertNotNull("the retry with the replacement token must succeed", payload)
             assertEquals(2, server.requestCount)
             assertEquals("Bearer stale-token", server.takeRequest().getHeader("Authorization"))
             assertEquals("Bearer fresh-token", server.takeRequest().getHeader("Authorization"))
@@ -197,8 +207,8 @@ class CloudFingerprintReferenceFetcherTest {
             val auth = MockWebServer()
             auth.start()
             val fetcher = CloudFingerprintReferenceFetcher(refreshingProvider(auth))
-            val matcher = fetchMatcher(fetcher, server)
-            assertNull(matcher)
+            val payload = fetchPayload(fetcher, server)
+            assertNull(payload)
             assertEquals("one retry, never a loop", 2, server.requestCount)
             assertEquals(2, auth.requestCount)
             auth.shutdown()
@@ -214,8 +224,8 @@ class CloudFingerprintReferenceFetcherTest {
 
         try {
             val fetcher = CloudFingerprintReferenceFetcher(providerFor(null, "unused", null))
-            val matcher = fetchMatcher(fetcher, server)
-            assertNull(matcher)
+            val payload = fetchPayload(fetcher, server)
+            assertNull(payload)
             assertEquals("no request may leave without a credential", 0, server.requestCount)
         } finally {
             server.shutdown()
@@ -266,7 +276,7 @@ fun `a cached etag is sent as If-None-Match and a 304 yields NotModified`() {
 @Test
 fun `a 200 after revalidation carries the payload and the new etag`() {
     val server = MockWebServer()
-    server.enqueue(MockResponse().setBody(compactV2Json()).setHeader("ETag", "\"v8\""))
+    server.enqueue(MockResponse().setBody(compactV3Json()).setHeader("ETag", "\"v8\""))
     server.start()
 
     try {
@@ -278,7 +288,7 @@ fun `a 200 after revalidation carries the payload and the new etag`() {
         } as CloudFingerprintReferenceFetcher.Fetch.Fresh
 
         assertEquals("\"v8\"", fresh.etag)
-        assertEquals(3, fresh.matcher.count)
+        assertEquals(3, ReferenceFingerprint.decode(fresh.payload)!!.libraryCheckpoints().size)
         assertEquals("the stored etag was still sent", "\"v7\"", server.takeRequest().getHeader("If-None-Match"))
         auth.shutdown()
     } finally {

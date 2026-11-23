@@ -82,6 +82,18 @@ object FingerprintConstants {
     /** Budget for the cloud reference fingerprint download (cloud-ingestion.md). */
     const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 10_000L
 
+    /** Minimum matcher score for a local window to match an Auris reference. */
+    const val REFERENCE_ACCEPTANCE_SCORE = 0.65f
+
+    /** How far from the best match a candidate must lie to count as competition rather than a neighbour. */
+    const val REFERENCE_LEAD_DISTANCE_SECONDS = 2.0f
+
+    /** Minimum score lead over the best distant candidate. */
+    const val REFERENCE_LEAD_GAP = 0.05f
+
+    /** Candidates asked of the matcher: at most five lie within the lead distance, so the sixth is farther. */
+    const val REFERENCE_CANDIDATES = 6
+
     /** Budget for the decode of an on-demand resolve; opening a remote source alone can take seconds. */
     const val ON_DEMAND_DECODE_TIMEOUT_MS = 8_000L
 

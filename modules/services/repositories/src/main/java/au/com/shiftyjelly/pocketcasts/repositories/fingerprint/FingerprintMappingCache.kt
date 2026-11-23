@@ -25,6 +25,11 @@ object FingerprintMappingCache {
         val audioMTime: Long,
         val audioContentHash: String,
         val referenceDuration: Double,
+        /**
+         * Which reference format produced these entries. Absent on a cache written before this was
+         * recorded, which is unknown provenance rather than a supported one.
+         */
+        val referenceFormat: String? = null,
         val entries: List<CachedEntry>,
     )
 
@@ -56,6 +61,17 @@ object FingerprintMappingCache {
 
         if (cached.schemaVersion != FingerprintConstants.MAPPING_CACHE_SCHEMA_VERSION) {
             Timber.d("FingerprintMappingCache: schema version mismatch at $path — discarding")
+            return null
+        }
+
+        // The byte guards below cannot tell WHICH FORMAT produced these reference times. A mapping
+        // built from values this build no longer computes would resume alignment on a timeline it
+        // cannot reproduce, so the format is checked first and an unrecorded one counts as unknown.
+        // It must be the format of the reference the caller is holding: a transcript-derived mapping
+        // stays reusable, while one built from an Auris reference in another format is not.
+        val expectedFormat = ReferenceFingerprint.decode(referenceData)?.format
+        if (expectedFormat == null || cached.referenceFormat != expectedFormat) {
+            Timber.d("FingerprintMappingCache: reference format '${cached.referenceFormat}' at $path — discarding")
             return null
         }
 
@@ -139,6 +155,7 @@ object FingerprintMappingCache {
             audioMTime = audioFile.lastModified(),
             audioContentHash = audioContentHash,
             referenceDuration = referenceDuration,
+            referenceFormat = ReferenceFingerprint.decode(referenceData)?.format,
             entries = entries.map { CachedEntry(it.playbackTime, it.referenceTime, it.score) },
         )
 

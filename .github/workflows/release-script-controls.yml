@@ -9,7 +9,18 @@ on:
       - ".buildkite/scripts/**"
       - ".buildkite/commands/**"
       - ".github/workflows/release-script-controls.yml"
-      - ".github/workflows/auris-release.yml"
+      - ".github/scripts/merge-queue.test.sh"
+      - ".github/workflows/**"
+
+  # The queue's combined commit gets the same controls a pull request does: a
+  # release-script change must fail in the queue rather than only after merging.
+  merge_group:
+    paths:
+      - ".buildkite/scripts/**"
+      - ".buildkite/commands/**"
+      - ".github/workflows/release-script-controls.yml"
+      - ".github/scripts/merge-queue.test.sh"
+      - ".github/workflows/**"
 
 jobs:
   controls:
@@ -17,6 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # The queue's trigger rule is checked here, with the other repo-level controls: it
+      # edits workflow triggers, and this job runs for exactly that kind of change.
+      - run: bash .github/scripts/merge-queue.test.sh
       - run: bash .buildkite/scripts/trigger-release.test.sh
       - uses: actions/setup-java@v4
         with:

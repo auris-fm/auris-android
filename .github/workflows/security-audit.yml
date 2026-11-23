@@ -36,6 +36,11 @@ name: Security audit
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # The queue's combined commit is a new head arriving without a pull request event,
+  # so it needs the same types: a secret or unsafe pattern the queue introduces must
+  # fail there, not be discovered after the merge.
+  merge_group:
+    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron: "0 1 * * 1" # Mondays 01:00 UTC (09:00 UTC+8)
   workflow_dispatch:

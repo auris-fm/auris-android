@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -67,6 +68,7 @@ class FingerprintTimingManagerTranscriptFormatTest {
     private lateinit var audioFile: File
     private lateinit var episode: PodcastEpisode
     private val eventHorizon = mock(EventHorizon::class.java)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Before
     fun setUp() {
@@ -115,9 +117,8 @@ class FingerprintTimingManagerTranscriptFormatTest {
             cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
             cloudReferenceStore = mock(CloudReferenceStore::class.java),
             decodePolicy = decodePolicy,
+            scope = scope,
         )
-        // The preparation runs on this scope; the teardown cancels it, so nothing outlives the test.
-        manager.scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 
     /** A compact reference in [format] with three one-second checkpoints carrying real values. */
@@ -193,11 +194,11 @@ class FingerprintTimingManagerTranscriptFormatTest {
     }
 
     /**
-     * The preparation runs on the manager's own scope; leaving it alive lets its failure — on the
+     * The caller owns the scope the preparation runs on; leaving it alive lets its failure — on the
      * JVM, the native library's — surface in whichever test class runs next.
      */
     @After
-    fun tearDown() = runBlocking { manager.shutdownForTest() }
+    fun tearDown() = scope.cancel()
 
     @Test
     fun `a transcript-format reference is still accepted`() {

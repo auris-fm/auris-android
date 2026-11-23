@@ -16,7 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.runTest
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -37,16 +37,17 @@ import uniffi.fingerprint_uniffi.CheckpointMatcher
  * The Auris reference reaches the manager from the endpoint — through the fetcher and the store —
  * not through a matcher handed to it from outside.
  *
- * PR 125 left an `installCloudMatcherForTest` hook so these paths could be driven without the
- * native library. That seam proved the acceptance rule but bypassed the resolution deciding WHICH
- * reference survives, so nothing would have noticed if it stopped finding a reference at all. These
- * cases drive the real resolution against a real fetcher and assert on the payload it chose.
+ * A seam that hands the manager a ready-made matcher proves the acceptance rule but bypasses the
+ * resolution deciding WHICH reference survives, so nothing would notice if it stopped finding a
+ * reference at all. These cases drive the real resolution against a real fetcher and assert on the
+ * payload it chose.
  */
 class FingerprintCloudReferenceSourceTest {
 
     private lateinit var manager: FingerprintTimingManager
     private lateinit var store: FakeCloudReferenceStore
     private lateinit var cloud: MockWebServer
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Before
     fun setUp() {
@@ -70,9 +71,8 @@ class FingerprintCloudReferenceSourceTest {
             cloudFetcher = CloudFingerprintReferenceFetcher(alwaysMintToken()),
             cloudReferenceStore = store,
             decodePolicy = mock(FingerprintDecodePolicy::class.java),
+            scope = scope,
         )
-        // Nothing this manager launches may outlive the test.
-        manager.scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 
     private fun alwaysMintToken() =
@@ -122,11 +122,12 @@ class FingerprintCloudReferenceSourceTest {
         }
     }
 
+    /** The caller owns the scope, so nothing the manager launched outlives the test. */
     @After
-    fun tearDown() = runBlocking { manager.shutdownForTest() }
-
-    /** Off Default: a preparation that outlives the test must not surface in the next class. */
-    private fun CoroutineScope.separate() = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+    fun tearDown() {
+        scope.cancel()
+        runCatching { cloud.shutdown() }
+    }
 
     @Test
     fun `a freshly fetched Auris reference is kept as the reference in use`() = runTest {

@@ -66,6 +66,179 @@ import uniffi.fingerprint_uniffi.CheckpointMatcher
 import uniffi.fingerprint_uniffi.StreamingWindowedFingerprinter
 import uniffi.fingerprint_uniffi.WindowedFingerprint
 
+/**
+ * Opens audio through MediaExtractor/MediaCodec, following the player's on-disk cache when one
+ * applies. The caller's liveness predicate lets an open abandon itself when the episode it was
+ * started for has been superseded.
+ */
+class MediaCodecAudioStreamOpener(
+    private val dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>,
+) : AudioStreamOpener {
+
+    override suspend fun open(
+        audioFilePath: String,
+        startingAt: Double,
+        sharedCacheKey: String?,
+        isCurrent: () -> Boolean,
+        followPlayerCache: Boolean,
+    ): FingerprintTimingManager.AudioStream {
+
+        val isRemoteUrl = audioFilePath.startsWith("http://") || audioFilePath.startsWith("https://")
+        if (!isRemoteUrl && !File(audioFilePath).exists()) {
+            throw FingerprintTimingManager.AudioUnavailableException("audio file not found at $audioFilePath")
+        }
+
+        val factory = dataSourceFactory.get()
+        // Only follow the player's on-disk cache when it actually exists; otherwise read the URL
+        // through the app's HTTP stack so requests carry the player's headers and connection pool.
+        val cacheKey = sharedCacheKey?.takeIf { isRemoteUrl && factory.isCacheAvailable }
+        val isActive = isCurrent
+        val extractor = MediaExtractor()
+        val cacheSource = when {
+            cacheKey != null && followPlayerCache -> StreamingMediaDataSource(
+                dataSourceFactory = factory.blockingCacheFactory,
+                uri = audioFilePath.toUri(),
+                cacheKey = cacheKey,
+                isActive = isActive,
+                cachedLengthAt = { position, length -> factory.cachedLengthAt(cacheKey, position, length) },
+            )
+
+            // Bounded resolves target regions the player may not have cached yet; read through
+            // the cache instead of waiting for the player to fill it.
+            cacheKey != null -> StreamingMediaDataSource(
+                dataSourceFactory = factory.cacheFactory,
+                uri = audioFilePath.toUri(),
+                cacheKey = cacheKey,
+                isActive = isActive,
+            )
+
+            isRemoteUrl -> StreamingMediaDataSource(
+                dataSourceFactory = factory.upstreamFactory,
+                uri = audioFilePath.toUri(),
+                isActive = isActive,
+            )
+
+            else -> null
+        }
+        try {
+            if (cacheSource != null) {
+                extractor.setDataSource(cacheSource)
+            } else {
+                extractor.setDataSource(audioFilePath)
+            }
+        } catch (e: CancellationException) {
+            // Cancellation is not an open failure, don't let it reach markFailed.
+            extractor.release()
+            cacheSource?.close()
+            throw e
+        } catch (e: Exception) {
+            extractor.release()
+            cacheSource?.close()
+            throw FingerprintTimingManager.AudioOpenException(e)
+        }
+
+        val audioTrackIndex = (0 until extractor.trackCount).firstOrNull { i ->
+            extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
+        }
+        if (audioTrackIndex == null) {
+            extractor.release()
+            cacheSource?.close()
+            throw FingerprintTimingManager.AudioUnavailableException("no audio track found")
+        }
+
+        try {
+            extractor.selectTrack(audioTrackIndex)
+            val format = extractor.getTrackFormat(audioTrackIndex)
+            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+            val mime = format.getString(MediaFormat.KEY_MIME) ?: "audio/mpeg"
+
+            var startSec = startingAt
+            if (startingAt > 0) {
+                extractor.seekTo((startingAt * 1_000_000).toLong(), MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                val landedUs = extractor.sampleTime
+                if (landedUs >= 0) {
+                    startSec = landedUs / 1_000_000.0
+                }
+                Timber.d(
+                    "FingerprintTimingManager: extractor seek requested=%.2fs landed=%.2fs",
+                    startingAt,
+                    startSec,
+                )
+            }
+
+            val codec = MediaCodec.createDecoderByType(mime)
+            return FingerprintTimingManager.AudioStream(extractor, codec, format, sampleRate, channelCount, startSec, cacheSource)
+        } catch (e: CancellationException) {
+            // Cancellation is not an open failure, don't let it reach markFailed.
+            extractor.release()
+            cacheSource?.close()
+            throw e
+        } catch (e: Exception) {
+            extractor.release()
+            cacheSource?.close()
+            throw FingerprintTimingManager.AudioOpenException(e)
+        }
+    }
+}
+
+/**
+ * Opens one audio stream for decoding, positioned at [startingAt] seconds. Throws
+ * [FingerprintTimingManager.AudioUnavailableException] when the audio cannot be read at all, and
+ * [FingerprintTimingManager.AudioOpenException] when opening it fails.
+ */
+interface AudioStreamOpener {
+    /**
+     * [sharedCacheKey] follows the player's on-disk cache when one applies; [isCurrent] lets an open
+     * abandon itself once the episode it was started for has been superseded.
+     */
+    suspend fun open(
+        audioFilePath: String,
+        startingAt: Double,
+        sharedCacheKey: String?,
+        isCurrent: () -> Boolean,
+        followPlayerCache: Boolean = true,
+    ): FingerprintTimingManager.AudioStream
+}
+
+/** Builds a checkpoint matcher holding a reference's checkpoints, or null when it has none. */
+fun interface CheckpointMatcherFactory {
+    fun create(reference: ReferenceFingerprint): CheckpointMatcher?
+}
+
+/** The inherited library's matcher. Needs the native library, so it is injected, not constructed inline. */
+class NativeCheckpointMatcherFactory : CheckpointMatcherFactory {
+    override fun create(reference: ReferenceFingerprint): CheckpointMatcher? {
+        val checkpoints = reference.libraryCheckpoints()
+        if (checkpoints.isEmpty()) return null
+        val matcher = CheckpointMatcher()
+        for (checkpoint in checkpoints) {
+            matcher.add(
+                checkpoint.timestampSeconds,
+                checkpoint.hashes.map { it.toUInt() },
+                reference.checkpointDurationSeconds,
+            )
+        }
+        return matcher
+    }
+}
+
+/** Builds the windowed fingerprinter for a stream's sample rate and channel count. */
+fun interface WindowedFingerprinterFactory {
+    fun create(sampleRate: Int, channelCount: Int): StreamingWindowedFingerprinter
+}
+
+/** The inherited library's fingerprinter. Needs the native library, so it is injected, not constructed inline. */
+class NativeWindowedFingerprinterFactory : WindowedFingerprinterFactory {
+    override fun create(sampleRate: Int, channelCount: Int): StreamingWindowedFingerprinter =
+        StreamingWindowedFingerprinter(
+            sampleRate.toUInt(),
+            channelCount.toUShort(),
+            FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
+            FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
+        )
+}
+
 @Singleton
 class FingerprintTimingManager @Inject constructor(
     private val playbackManager: PlaybackManager,
@@ -80,6 +253,19 @@ class FingerprintTimingManager @Inject constructor(
     private val cloudFetcher: CloudReferenceSource,
     private val cloudReferenceStore: CloudReferenceStore,
     private val decodePolicy: FingerprintDecodePolicy,
+    /**
+     * Where preparation and decoding run. Injected so a caller can own the lifetime of that work;
+     * production gets its own supervisor scope on [Dispatchers.Default].
+     */
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    /** Opens the audio to decode. Injected so decoding can be driven without a media stack. */
+    private val audioStreamOpener: AudioStreamOpener = MediaCodecAudioStreamOpener(dataSourceFactory),
+    /** Builds the windowed fingerprinter for one stream. Injected because it needs the native library. */
+    private val fingerprinterFactory: WindowedFingerprinterFactory = NativeWindowedFingerprinterFactory(),
+    /** Builds a checkpoint matcher from a decoded reference. Also needs the native library. */
+    private val matcherFactory: CheckpointMatcherFactory = NativeCheckpointMatcherFactory(),
+    /** Where transcript references are served. Injected so a caller can point it at its own host. */
+    private val transcriptBaseUrl: String = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/",
 ) {
 
     /** Who asked for preparation; decides whether streaming over a metered network is acceptable. */
@@ -211,12 +397,6 @@ class FingerprintTimingManager @Inject constructor(
     var activeEpisodeUuid: String? = null
         private set
 
-    /**
-     * Test seam: replace the scope work is launched on, so a test can guarantee nothing outlives it.
-     * Production work runs on [Dispatchers.Default].
-     */
-    @VisibleForTesting
-    internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val decodeDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val mutex = Mutex()
     private val activeResolves = AtomicInteger(0)
@@ -602,7 +782,7 @@ class FingerprintTimingManager @Inject constructor(
         } else {
             referenceRetriever.loadCachedReference(episodeUuid)?.let { return FingerprintReferenceRetriever.FetchResult.Success(it) }
         }
-        val baseUrl = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/"
+        val baseUrl = transcriptBaseUrl
         val fetched = referenceRetriever.fetchReferenceData(baseUrl, podcastUuid, episodeUuid)
         if (fetched is FingerprintReferenceRetriever.FetchResult.Success) {
             if (isDownloaded) {
@@ -614,19 +794,8 @@ class FingerprintTimingManager @Inject constructor(
         return fetched
     }
 
-    private fun buildMatcher(reference: ReferenceFingerprint): CheckpointMatcher? {
-        val checkpoints = reference.libraryCheckpoints()
-        if (checkpoints.isEmpty()) return null
-        val matcher = CheckpointMatcher()
-        for (checkpoint in checkpoints) {
-            matcher.add(
-                checkpoint.timestampSeconds,
-                checkpoint.hashes.map { it.toUInt() },
-                reference.checkpointDurationSeconds,
-            )
-        }
-        return matcher
-    }
+    private fun buildMatcher(reference: ReferenceFingerprint): CheckpointMatcher? =
+        matcherFactory.create(reference)
 
     private suspend fun streamFingerprintBounded(
         audioFilePath: String,
@@ -642,15 +811,10 @@ class FingerprintTimingManager @Inject constructor(
         val gen = generation
         val callerJob = currentCoroutineContext().job
         val isRemoteUrl = audioFilePath.startsWith("http://") || audioFilePath.startsWith("https://")
-        openAudioStream(gen, audioFilePath, startingAt, cacheKey, followPlayerCache = followPlayerCache, isCallerActive = { callerJob.isActive }).use { stream ->
+        audioStreamOpener.open(audioFilePath, startingAt, cacheKey, { gen == generation && callerJob.isActive }, followPlayerCache = followPlayerCache).use { stream ->
             stream.start()
 
-            val streamer = StreamingWindowedFingerprinter(
-                stream.sampleRate.toUInt(),
-                stream.channelCount.toUShort(),
-                FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
-                FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
-            )
+            val streamer = fingerprinterFactory.create(stream.sampleRate, stream.channelCount)
             try {
                 decodeAndFingerprint(
                     stream = stream,
@@ -936,7 +1100,7 @@ class FingerprintTimingManager @Inject constructor(
         _stateFlow.value = State.Preparing
         Timber.d("FingerprintTimingManager: fetching reference from server for $episodeUuid")
 
-        val baseUrl = "${BuildConfig.SERVER_SHOW_NOTES_URLS}/generated_transcripts/"
+        val baseUrl = transcriptBaseUrl
         val fetchResult = referenceRetriever.fetchReferenceData(baseUrl, podcastUuid, episodeUuid)
         if (gen != generation) return
 
@@ -1120,12 +1284,7 @@ class FingerprintTimingManager @Inject constructor(
                         // Auris matcher score the same windows, because both hold the values this
                         // library computes.
                         streamer = if (matcher != null || cloudMatcher != null) {
-                            StreamingWindowedFingerprinter(
-                                chunk.sampleRate.toUInt(),
-                                chunk.channelCount.toUShort(),
-                                FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
-                                FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
-                            )
+                            fingerprinterFactory.create(chunk.sampleRate, chunk.channelCount)
                         } else {
                             null
                         }
@@ -1284,10 +1443,10 @@ class FingerprintTimingManager @Inject constructor(
         }
     }
 
-    private class AudioOpenException(cause: Exception) : Exception(cause)
-    private class AudioUnavailableException(message: String) : Exception(message)
+    class AudioOpenException(cause: Exception) : Exception(cause)
+    class AudioUnavailableException(message: String) : Exception(message)
 
-    private class AudioStream(
+    class AudioStream(
         val extractor: MediaExtractor,
         val codec: MediaCodec,
         val format: MediaFormat,
@@ -1312,112 +1471,6 @@ class FingerprintTimingManager @Inject constructor(
         }
     }
 
-    private fun openAudioStream(
-        gen: Long,
-        audioFilePath: String,
-        startingAt: Double,
-        sharedCacheKey: String?,
-        followPlayerCache: Boolean = true,
-        isCallerActive: () -> Boolean = { true },
-    ): AudioStream {
-        val isRemoteUrl = audioFilePath.startsWith("http://") || audioFilePath.startsWith("https://")
-        if (!isRemoteUrl && !File(audioFilePath).exists()) {
-            throw AudioUnavailableException("audio file not found at $audioFilePath")
-        }
-
-        val factory = dataSourceFactory.get()
-        // Only follow the player's on-disk cache when it actually exists; otherwise read the URL
-        // through the app's HTTP stack so requests carry the player's headers and connection pool.
-        val cacheKey = sharedCacheKey?.takeIf { isRemoteUrl && factory.isCacheAvailable }
-        val isActive = { gen == generation && isCallerActive() }
-        val extractor = MediaExtractor()
-        val cacheSource = when {
-            cacheKey != null && followPlayerCache -> StreamingMediaDataSource(
-                dataSourceFactory = factory.blockingCacheFactory,
-                uri = audioFilePath.toUri(),
-                cacheKey = cacheKey,
-                isActive = isActive,
-                cachedLengthAt = { position, length -> factory.cachedLengthAt(cacheKey, position, length) },
-            )
-
-            // Bounded resolves target regions the player may not have cached yet; read through
-            // the cache instead of waiting for the player to fill it.
-            cacheKey != null -> StreamingMediaDataSource(
-                dataSourceFactory = factory.cacheFactory,
-                uri = audioFilePath.toUri(),
-                cacheKey = cacheKey,
-                isActive = isActive,
-            )
-
-            isRemoteUrl -> StreamingMediaDataSource(
-                dataSourceFactory = factory.upstreamFactory,
-                uri = audioFilePath.toUri(),
-                isActive = isActive,
-            )
-
-            else -> null
-        }
-        try {
-            if (cacheSource != null) {
-                extractor.setDataSource(cacheSource)
-            } else {
-                extractor.setDataSource(audioFilePath)
-            }
-        } catch (e: CancellationException) {
-            // Cancellation is not an open failure, don't let it reach markFailed.
-            extractor.release()
-            cacheSource?.close()
-            throw e
-        } catch (e: Exception) {
-            extractor.release()
-            cacheSource?.close()
-            throw AudioOpenException(e)
-        }
-
-        val audioTrackIndex = (0 until extractor.trackCount).firstOrNull { i ->
-            extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-        }
-        if (audioTrackIndex == null) {
-            extractor.release()
-            cacheSource?.close()
-            throw AudioUnavailableException("no audio track found")
-        }
-
-        try {
-            extractor.selectTrack(audioTrackIndex)
-            val format = extractor.getTrackFormat(audioTrackIndex)
-            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-            val mime = format.getString(MediaFormat.KEY_MIME) ?: "audio/mpeg"
-
-            var startSec = startingAt
-            if (startingAt > 0) {
-                extractor.seekTo((startingAt * 1_000_000).toLong(), MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                val landedUs = extractor.sampleTime
-                if (landedUs >= 0) {
-                    startSec = landedUs / 1_000_000.0
-                }
-                Timber.d(
-                    "FingerprintTimingManager: extractor seek requested=%.2fs landed=%.2fs",
-                    startingAt,
-                    startSec,
-                )
-            }
-
-            val codec = MediaCodec.createDecoderByType(mime)
-            return AudioStream(extractor, codec, format, sampleRate, channelCount, startSec, cacheSource)
-        } catch (e: CancellationException) {
-            // Cancellation is not an open failure, don't let it reach markFailed.
-            extractor.release()
-            cacheSource?.close()
-            throw e
-        } catch (e: Exception) {
-            extractor.release()
-            cacheSource?.close()
-            throw AudioOpenException(e)
-        }
-    }
-
     private suspend fun streamFingerprint(
         gen: Long,
         audioFilePath: String,
@@ -1426,15 +1479,10 @@ class FingerprintTimingManager @Inject constructor(
         startingAt: Double,
         openStream: suspend () -> AudioStream = {
             val callerJob = currentCoroutineContext().job
-            openAudioStream(gen, audioFilePath, startingAt, currentSharedCacheKey, isCallerActive = { callerJob.isActive })
+            audioStreamOpener.open(audioFilePath, startingAt, currentSharedCacheKey, { gen == generation && callerJob.isActive })
         },
         newStreamer: (AudioStream) -> StreamingWindowedFingerprinter = { stream ->
-            StreamingWindowedFingerprinter(
-                stream.sampleRate.toUInt(),
-                stream.channelCount.toUShort(),
-                FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
-                FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
-            )
+            fingerprinterFactory.create(stream.sampleRate, stream.channelCount)
         },
     ) {
         val isRemoteUrl = audioFilePath.startsWith("http://") || audioFilePath.startsWith("https://")
@@ -1786,72 +1834,6 @@ class FingerprintTimingManager @Inject constructor(
         _mappingVersion.value++
     }
 
-    /**
-     * Test seam: prepare for one episode against a supplied audio stream and fingerprinter, the way
-     * a download or a transcript request does. Everything after the audio boundary — both
-     * references, the acceptance rule, the mapping cache, the drift filter — is the real code, and
-     * the Auris reference arrives through the real fetch path rather than a matcher handed in.
-     */
-    @VisibleForTesting
-    internal suspend fun prepareForTest(
-        episodeUuid: String,
-        audioFilePath: String,
-        extractor: MediaExtractor,
-        codec: MediaCodec,
-        format: MediaFormat,
-        sampleRate: Int,
-        channelCount: Int,
-        streamer: StreamingWindowedFingerprinter,
-    ) {
-        generation++
-        val gen = generation
-        // The Auris reference arrives the way it does in production: resolved from the endpoint,
-        // stored, and only then turned into a matcher.
-        val cloudBaseUrl = cloudConfig.baseUrl()
-        if (cloudBaseUrl.isNotBlank()) {
-            val resolved = resolveCloudReference(cloudBaseUrl, episodeUuid, "podcast")
-            cloudReferenceInUse = resolved
-            cloudMatcher = resolved?.let { cloudFetcher.buildMatcher(it.payload) }
-        }
-        withContext(decodeDispatcher) {
-            streamFingerprint(
-                gen = gen,
-                audioFilePath = audioFilePath,
-                matcher = null,
-                episodeUuid = episodeUuid,
-                startingAt = 0.0,
-                openStream = { AudioStream(extractor, codec, format, sampleRate, channelCount, startSec = 0.0) },
-                newStreamer = { streamer },
-            )
-        }
-    }
-
-    /**
-     * Test seam: abandon all work and stop the scope, waiting for it to finish. A test that leaves a
-     * decode running lets its failure surface in the NEXT test class, where it reads as an unrelated
-     * uncaught exception.
-     */
-    @VisibleForTesting
-    internal suspend fun shutdownForTest() {
-        generation++
-        generationJob?.cancel()
-        downloadObserverJob?.cancel()
-        catchUpJob?.cancel()
-        scope.cancel()
-        scope.coroutineContext.job.join()
-    }
-
-    /** Test seam: drive the cloud match pass over supplied windows. Single-threaded tests only. */
-    @VisibleForTesting
-    internal fun processCloudWindowsForTest(windows: List<WindowedFingerprint>, startOffset: Double) {
-        processCloudMatches(windows, startOffset)
-    }
-
-    /** Test seam: set the Auris matcher the resolution would have produced. Single-threaded tests only. */
-    @VisibleForTesting
-    internal fun installCloudMatcher(matcher: CheckpointMatcher) {
-        cloudMatcher = matcher
-    }
 
     /** Test seam: insert a mapping directly. Must only be called from single-threaded tests. */
     @VisibleForTesting

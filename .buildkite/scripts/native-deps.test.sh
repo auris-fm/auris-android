@@ -144,34 +144,110 @@ run_deps "$CACHE" "$LLAMA_URL" "$LLAMA_SHA2" "$OBOE_URL" "$OBOE_SHA"; RC=$?
 check "a cache entry with no git metadata is repaired" 0 "$RC"
 check "the repaired tree is at the pinned revision" "$OBOE_SHA" "$(git -C "$OBOE_DIR" rev-parse HEAD 2>/dev/null)"
 
-# --- 6. A TRICKLING transfer must FAIL, not hang. This is the arm64 case. -----------------------
+# --- 6. A STALLED transfer must FAIL, not hang. This is the arm64 case. -------------------------
 #     CMake's own loop retries a clone that fails and waits forever on one that trickles, so the
-#     bound has to be on the transfer itself.
-mkdir -p "$WORK/trickle"
-cat > "$WORK/trickle/git" <<'TRICKLE'
+#     bound has to be on the transfer itself. The bound under test is GIT'S OWN stall detection
+#     (http.lowSpeedLimit / http.lowSpeedTime), which the script exports as runtime config -- so
+#     this case runs a REAL git against a REAL endpoint that accepts the connection and then never
+#     answers. A wrapper that merely sleeps would test the wrapper, not the bound.
+STALL_PORT_FILE="$WORK/stall-port"
+ruby -rsocket -e '
+  s = TCPServer.new("127.0.0.1", 0)
+  File.write(ARGV[0], s.addr[1].to_s)
+  # Accept and hold: the request is read but never answered, so throughput stays at zero.
+  Thread.new { loop { c = s.accept; Thread.new(c) { |c| c.gets; sleep 600 } } }
+  sleep 600
+' "$STALL_PORT_FILE" &
+STALL_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$STALL_PORT_FILE" ] && break; sleep 0.3; done
+STALL_PORT="$(cat "$STALL_PORT_FILE" 2>/dev/null || true)"
+if [ -z "$STALL_PORT" ]; then
+  bad "could not start the stalling endpoint"
+else
+  FRESH="$WORK/fresh-cache"
+  START=$(date +%s)
+  run_deps "$FRESH" "http://127.0.0.1:$STALL_PORT/repo.git" "$LLAMA_SHA" "$OBOE_URL" "$OBOE_SHA" \
+    AURIS_NATIVE_FETCH_TIMEOUT=3 AURIS_NATIVE_ATTEMPTS=1; RC=$?
+  ELAPSED=$(( $(date +%s) - START ))
+  check_nonzero "a stalled transfer fails instead of hanging" "$RC"
+  if [ "$ELAPSED" -lt 60 ]; then ok "the stall is bounded (${ELAPSED}s)"; else bad "the stall was not bounded (${ELAPSED}s)"; fi
+  check "a timed-out fetch leaves no tree" 0 "$(find "$FRESH" -type f 2>/dev/null | wc -l | tr -d ' ')"
+fi
+kill "$STALL_PID" 2>/dev/null || true
+wait "$STALL_PID" 2>/dev/null || true
+
+# --- 6b. A SLOW BUT STEADY transfer must SUCCEED. The other half of the bound. ------------------
+#     Case 6 proves a stall becomes a failure. That is only half the contract: a cap on TOTAL
+#     duration also kills a transfer that is still moving and would have finished, which is what
+#     happened on the runner -- a large repo cloned past a 240 s watchdog, four times, and every
+#     release build failed. A control that only proves the bound fires cannot see that.
+#
+#     The wrapper delays a real fetch past the old cap (TIMEOUT*2 = 6 s here) and then performs it,
+#     so the transfer is genuinely slow and genuinely completes.
+mkdir -p "$WORK/slow"
+cat > "$WORK/slow/git" <<'SLOW'
 #!/bin/bash
 for a in "$@"; do
-  if [ "$a" = clone ] || [ "$a" = fetch ]; then sleep 300; exit 0; fi
+  if [ "$a" = clone ] || [ "$a" = fetch ]; then sleep "$SLOW_SECONDS"; break; fi
 done
 exec REAL_GIT_PLACEHOLDER "$@"
-TRICKLE
-sed -i.bak "s|REAL_GIT_PLACEHOLDER|$(command -v git)|" "$WORK/trickle/git" && rm -f "$WORK/trickle/git.bak"
-chmod +x "$WORK/trickle/git"
-FRESH="$WORK/fresh-cache"
-START=$(date +%s)
-run_deps "$FRESH" "$LLAMA_URL" "$LLAMA_SHA" "$OBOE_URL" "$OBOE_SHA" \
-  PATH="$WORK/trickle:$PATH" AURIS_NATIVE_FETCH_TIMEOUT=3 AURIS_NATIVE_ATTEMPTS=2; RC=$?
-ELAPSED=$(( $(date +%s) - START ))
-check_nonzero "a trickling transfer fails instead of hanging" "$RC"
-if [ "$ELAPSED" -lt 60 ]; then ok "the stall is bounded (${ELAPSED}s)"; else bad "the stall was not bounded (${ELAPSED}s)"; fi
-check "a timed-out fetch leaves no tree" 0 "$(find "$FRESH" -type f 2>/dev/null | wc -l | tr -d ' ')"
+SLOW
+sed -i.bak "s|REAL_GIT_PLACEHOLDER|$(command -v git)|" "$WORK/slow/git" && rm -f "$WORK/slow/git.bak"
+chmod +x "$WORK/slow/git"
+SLOWCACHE="$WORK/slow-cache"
+run_deps "$SLOWCACHE" "$LLAMA_URL" "$LLAMA_SHA" "$OBOE_URL" "$OBOE_SHA" \
+  PATH="$WORK/slow:$PATH" SLOW_SECONDS=8 AURIS_NATIVE_FETCH_TIMEOUT=3 AURIS_NATIVE_ATTEMPTS=1; RC=$?
+check "a steady transfer slower than the old total-duration cap succeeds" 0 "$RC"
+check "the slow transfer's tree is at the pinned revision" "$LLAMA_SHA" \
+  "$(git -C "$SLOWCACHE/llama/$LLAMA_SHA" rev-parse HEAD 2>/dev/null)"
+
+# --- 6c. Only the PINNED commit is fetched, not every branch tip. -------------------------------
+#     `clone --depth 1 --no-single-branch` downloads the tip of every branch before the pin is
+#     asked for. On a repository with many branches that is most of the transfer, and it is what
+#     made the cold fetch too slow to finish. A remote with a second, unrelated branch proves the
+#     fetch asks for the pin alone.
+BRANCHY="$WORK/branchy-remote"
+mkdir -p "$BRANCHY"
+(
+  cd "$BRANCHY"
+  git init -q -b main
+  git config user.email t@t; git config user.name t; git config commit.gpgsign false
+  printf 'wanted\n' > MARKER; git add -A; git commit -qm wanted
+  git checkout -q -b other
+  # Unrelated history with content the pin does not contain.
+  git checkout -q --orphan unrelated
+  git rm -rq --cached . 2>/dev/null || true
+  printf 'unwanted\n' > OTHER_MARKER; git add -A; git commit -qm other
+  git checkout -q main
+)
+BRANCHY_SHA="$(git -C "$BRANCHY" rev-parse main)"
+mkdir -p "$WORK/argspy"
+cat > "$WORK/argspy/git" <<'ARGSPY'
+#!/bin/bash
+printf '%s\n' "$*" >> "$GIT_ARG_LOG"
+exec REAL_GIT_PLACEHOLDER "$@"
+ARGSPY
+sed -i.bak "s|REAL_GIT_PLACEHOLDER|$(command -v git)|" "$WORK/argspy/git" && rm -f "$WORK/argspy/git.bak"
+chmod +x "$WORK/argspy/git"
+: > "$WORK/args.log"
+BCACHE="$WORK/branchy-cache"
+run_deps "$BCACHE" "file://$BRANCHY" "$BRANCHY_SHA" "$OBOE_URL" "$OBOE_SHA" \
+  PATH="$WORK/argspy:$PATH" GIT_ARG_LOG="$WORK/args.log"; RC=$?
+check "a multi-branch remote succeeds" 0 "$RC"
+check "the pinned commit's content is present" wanted "$(cat "$BCACHE/llama/$BRANCHY_SHA/MARKER" 2>/dev/null)"
+check "no other branch's content was transferred" no "$([ -e "$BCACHE/llama/$BRANCHY_SHA/OTHER_MARKER" ] && echo yes || echo no)"
+# The fetch must NAME the pin. A clone of all branch tips never mentions it.
+check "the transfer asks for the pinned commit by sha" yes \
+  "$(grep -q "fetch.*$BRANCHY_SHA" "$WORK/args.log" && echo yes || echo no)"
+check "no all-branches clone is attempted" no \
+  "$(grep -q -- '--no-single-branch' "$WORK/args.log" && echo yes || echo no)"
 
 # --- 7. A failed attempt is RETRIED, and a later success is used. -------------------------------
 mkdir -p "$WORK/flaky"
 cat > "$WORK/flaky/git" <<'FLAKY'
 #!/bin/bash
 for a in "$@"; do
-  if [ "$a" = clone ]; then
+  if [ "$a" = fetch ]; then
     n=$(cat "$FLAKY_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FLAKY_COUNT"
     if [ "$n" -lt 2 ]; then exit 128; fi
     break
@@ -184,8 +260,8 @@ chmod +x "$WORK/flaky/git"
 echo 0 > "$WORK/flaky-count"
 run_deps "$WORK/flaky-cache" "$LLAMA_URL" "$LLAMA_SHA" "$OBOE_URL" "$OBOE_SHA" \
   PATH="$WORK/flaky:$PATH" FLAKY_COUNT="$WORK/flaky-count" AURIS_NATIVE_ATTEMPTS=3; RC=$?
-check "a transient clone failure is retried and then succeeds" 0 "$RC"
-# Two dependencies are fetched, so a single failed attempt means three clones in total. The count
+check "a transient fetch failure is retried and then succeeds" 0 "$RC"
+# Two dependencies are fetched, so a single failed attempt means three fetches in total. The count
 # is asserted rather than assumed: "it succeeded" alone would also pass with no retry at all.
 check "exactly one attempt failed and was retried" 3 "$(cat "$WORK/flaky-count")"
 

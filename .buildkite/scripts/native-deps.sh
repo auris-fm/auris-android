@@ -53,19 +53,10 @@ export GIT_CONFIG_KEY_0=http.lowSpeedLimit  GIT_CONFIG_VALUE_0=1000
 export GIT_CONFIG_KEY_1=http.lowSpeedTime   GIT_CONFIG_VALUE_1="$TIMEOUT"
 export GIT_CONFIG_KEY_2=advice.detachedHead GIT_CONFIG_VALUE_2=false
 
-# `timeout` is not on stock macOS, so the bound is enforced with a background watchdog.
-run_bounded() { # run_bounded <seconds> <command...>
-  local limit="$1"; shift
-  "$@" &
-  local pid=$!
-  ( sleep "$limit"; kill -TERM "$pid" 2>/dev/null ) &
-  local watcher=$!
-  local rc=0
-  wait "$pid" || rc=$?
-  kill -TERM "$watcher" 2>/dev/null || true
-  wait "$watcher" 2>/dev/null || true
-  return "$rc"
-}
+# The ONLY bound is git's own stall detection (http.lowSpeedLimit / http.lowSpeedTime above): a
+# transfer that stops moving fails and is retried. There is deliberately no cap on TOTAL duration --
+# one killed a large clone that was still progressing and would have finished, failing every release
+# build. "Slow" and "hung" are different states and only the stall bound tells them apart.
 
 prepare() { # prepare <name> <url> <sha>
   local name="$1" url="$2" sha="$3"
@@ -89,15 +80,15 @@ prepare() { # prepare <name> <url> <sha>
   while [ "$attempt" -le "$ATTEMPTS" ]; do
     rm -rf "$stage/src"
     rc=0
-    run_bounded "$((TIMEOUT * 2))" \
-      git clone --quiet --depth 1 --no-single-branch "$url" "$stage/src" || rc=$?
-    if [ "$rc" -eq 0 ]; then
-      # A shallow clone of the current tip need not contain an older pinned commit; ask for it.
-      git -C "$stage/src" checkout --quiet "$sha" 2>/dev/null || \
-        run_bounded "$((TIMEOUT * 2))" \
-          git -C "$stage/src" fetch --quiet --depth 1 origin "$sha" || rc=$?
-      [ "$rc" -eq 0 ] && { git -C "$stage/src" checkout --quiet "$sha" || rc=$?; }
-    fi
+    # Fetch ONLY the pinned commit. `clone --depth 1 --no-single-branch` downloads the tip of every
+    # branch before the pin is asked for, which on llama.cpp is most of the transfer and is what made
+    # a cold fetch too slow to finish. GitHub serves a fetch by sha, so this is one commit's tree --
+    # the minimum -- and it needs no separate fallback fetch.
+    mkdir -p "$stage/src"
+    git -C "$stage/src" init --quiet || rc=$?
+    [ "$rc" -eq 0 ] && { git -C "$stage/src" remote add origin "$url" || rc=$?; }
+    [ "$rc" -eq 0 ] && { git -C "$stage/src" fetch --quiet --depth 1 origin "$sha" || rc=$?; }
+    [ "$rc" -eq 0 ] && { git -C "$stage/src" checkout --quiet "$sha" || rc=$?; }
     if [ "$rc" -eq 0 ] && [ "$(git -C "$stage/src" rev-parse HEAD 2>/dev/null || true)" = "$sha" ]; then
       mv "$stage/src" "$dest"
       rm -rf "$stage"

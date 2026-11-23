@@ -131,23 +131,14 @@ jobs:
         name: Pre-commit hook control
         run: bash .github/scripts/git-hooks.test.sh
 
-      # A formatting-only change is only safe if it is PROVABLY formatting-only. Diffing against
-      # HEAD would compare a clean checkout with itself and always pass, so this uses the same
-      # base the scope step uses: the PR base, or the queue's merge base.
+      # The checker itself is guarded like any other control script: it must still accept a
+      # purely formatting change and still reject a behaviour edit. It is NOT run over the PR's
+      # own diff -- most guarded PRs contain real Kotlin changes, and demanding those be
+      # formatting-only would fail every one of them. Reformatting PRs run it locally against
+      # their base before committing; this proves the tool they used still works.
       - if: steps.scope.outputs.run == 'true'
-        name: Spotless formatting-equivalence checker
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT" = merge_group ]; then base="$MERGE_GROUP_BASE"; else base="$BASE_SHA"; fi
-          if [ -z "$base" ]; then
-            echo "::error::No base SHA available; refusing to report an unverified pass."
-            exit 1
-          fi
-          python3 .github/scripts/spotless-formatting-equivalence.py "$base"
+        name: Spotless formatting-equivalence checker controls
+        run: bash .github/scripts/spotless-formatting-equivalence.test.sh
 
   play-api-surface:
     name: "Play API surface (real gem)"

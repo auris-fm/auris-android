@@ -3,25 +3,27 @@
 
 A whole-repository `spotlessApply` touches dozens of files at once, and "the diff looks like
 whitespace" is not evidence: an import can be dropped, a statement can move between blocks, a
-comment can be lost. This checks every changed file against its committed version and refuses
-anything it cannot account for.
+comment can be lost, a space can vanish from a message. This checks every changed file against
+its committed version and refuses anything it cannot account for.
 
-A file passes if EITHER holds:
+The file is split into CODE and LITERAL spans first. Everything below applies to code only;
+literal text is carried through untouched, so no transform can reach inside a string -- including
+triple-quoted raw strings, `${...}` templates and backtick identifiers, which a per-line quote scanner
+would mis-read.
+
+A file passes if any of these holds:
 
   A. Its lines are the same, IN ORDER, with layout whitespace removed. Import lines are compared
      separately as a set, because ktlint sorts them.
-  B. Its token stream is unchanged after removing layout whitespace, `;` separators inside
+  B. Its code token stream is unchanged after removing layout whitespace, `;` separators inside
      one-line lambdas and trailing commas, allowing two named ktlint edits: braces added around a
      single-expression `else`, and a redundant `: Unit` dropped from a block-bodied function.
      This path exists because ktlint also joins and splits statements across lines.
-  C. Failing those, its CODE tokens are unchanged in order and its comment lines are the same
-     multiset -- which permits only a comment moving (ktlint puts a misplaced comment above its
+  C. Failing those, its code tokens are unchanged in order and its comment lines are the same
+     multiset -- permitting only a comment MOVING (ktlint puts a misplaced comment above its
      annotation), not a comment being reworded or deleted.
 
-Whitespace INSIDE a string literal is never treated as layout, so editing a message cannot pass
-as formatting. Root-level `.kts` files are included, mirroring Spotless's `kotlinGradle` target.
-
-Anything else is reported and exits non-zero, so a real edit cannot ride in on a formatting PR.
+Root-level `.kts` files are included, mirroring the Spotless `kotlinGradle` target.
 
 Usage: spotless-formatting-equivalence.py [<base-ref>]   (default HEAD)
 """
@@ -35,23 +37,95 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
-def squeeze(text):
-    return re.sub(r"\s+", "", text)
+TRIPLE = chr(34) * 3
+
+
+def split_spans(text):
+    '''Split source into [('code', s) | ('lit', s)] spans.
+
+    Handles // and /* */ comments (comments are code here; they are handled separately),
+    ordinary quoted strings with escapes, triple-quoted raw strings (no escapes inside), and
+    backtick identifiers. A `${...}` template inside a string stays part of the literal: its
+    contents are compared verbatim, which is stricter than needed and never wrong.
+    '''
+    spans = []
+    buf = []
+    i = 0
+    n = len(text)
+
+    def flush_code():
+        if buf:
+            spans.append(("code", "".join(buf)))
+            buf.clear()
+
+    while i < n:
+        ch = text[i]
+        if text.startswith(TRIPLE, i):
+            flush_code()
+            end = text.find(TRIPLE, i + 3)
+            end = n if end == -1 else end + 3
+            spans.append(("lit", text[i:end]))
+            i = end
+            continue
+        if ch in '"`':
+            flush_code()
+            j = i + 1
+            while j < n:
+                if ch == '"' and text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == ch:
+                    j += 1
+                    break
+                if text[j] == "\n" and ch == '"':
+                    break  # unterminated on this line; stop rather than swallow the file
+                j += 1
+            spans.append(("lit", text[i:j]))
+            i = j
+            continue
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            buf.append(text[i:end])
+            i = end
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end == -1 else end + 2
+            buf.append(text[i:end])
+            i = end
+            continue
+        buf.append(ch)
+        i += 1
+    flush_code()
+    return spans
+
+
+def strip_code_whitespace(code):
+    return re.sub(r"\s+", "", code)
+
+
+def render(text, transform):
+    """Apply `transform` to code spans only; literals pass through verbatim."""
+    return "".join(transform(s) if kind == "code" else s for kind, s in split_spans(text))
+
+
+def strip_layout(text):
+    return render(text, strip_code_whitespace)
 
 
 def tokens(text):
-    # Layout-only squeeze, line by line, so string contents survive; then join.
-    t = "".join(strip_layout(l) for l in text.split("\n")).replace(";", "")
-    t = re.sub(r",([)}])", r"\1", t)          # trailing commas ktlint adds
-    t = t.replace("):Unit{", "){")            # redundant Unit on a block body
-    # ktlint wraps a single-expression `else` in braces. Removing ALL block braces is too blunt
-    # (it would hide a statement moved between blocks), so match only that shape: `} else X }`
-    # becomes `} else { X }`. The inner expression must not itself contain a brace.
-    # ktlint wraps a single-expression `else` in braces. Strip that ONE added pair from the new
-    # spelling so it compares against the old one; an unbraced `else` is left as it is. The inner
-    # expression may not contain braces, so this cannot swallow a real block.
-    t = re.sub(r"\}else\{([^{}]*?)\}\}", r"}else\1}", t)
-    return t
+    def transform(code):
+        t = strip_code_whitespace(code).replace(";", "")
+        t = re.sub(r",([)}])", r"\1", t)          # trailing commas ktlint adds
+        t = t.replace("):Unit{", "){")            # redundant Unit on a block body
+        # ktlint wraps a single-expression `else` in braces. Strip that ONE added pair so the
+        # braced spelling compares against the unbraced one. The inner expression may not contain
+        # braces, so this cannot swallow a real block.
+        t = re.sub(r"\}else\{([^{}]*?)\}", r"}else\1", t)
+        return t
+
+    return render(text, transform)
 
 
 def split_imports(text):
@@ -61,42 +135,43 @@ def split_imports(text):
     return imports, rest
 
 
-def strip_layout(line):
-    """Remove layout whitespace from a line, but never inside a string literal.
-
-    Squeezing the whole line would make `"a b"` and `"ab"` compare equal, so a real edit to a
-    message could pass as formatting. Only whitespace outside quotes is layout.
-    """
-    out = []
-    quote = None
-    i = 0
-    while i < len(line):
-        ch = line[i]
-        if quote:
-            out.append(ch)
-            if ch == "\\" and i + 1 < len(line):
-                out.append(line[i + 1])
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "\"'":
-            quote = ch
-            out.append(ch)
-        elif not ch.isspace():
-            out.append(ch)
-        i += 1
-    return "".join(out)
-
-
 def ordered_lines(text):
-    """The file's non-blank lines, in order, with layout whitespace removed.
+    """Non-blank lines in order, layout whitespace removed -- except inside a multi-line literal.
 
-    Order matters: a statement moved between blocks keeps the same multiset of lines but changes
-    the sequence, and that is a behaviour change, not formatting. Import lines are excluded here
-    because ktlint sorts them; they are compared separately as a set.
+    A raw string's interior lines ARE content: squeezing them there would make an edited message
+    compare equal. Walk the spans so each line knows which parts of it are literal.
     """
-    return [strip_layout(l) for l in text.split("\n") if l.strip() and not l.strip().startswith("import ")]
+    # Mark every character position that belongs to a literal.
+    inside = [False] * len(text)
+    pos = 0
+    for kind, chunk in split_spans(text):
+        if kind == "lit":
+            for k in range(pos, pos + len(chunk)):
+                inside[k] = True
+        pos += len(chunk)
+    out = []
+    pos = 0
+    for line in text.split("\n"):
+        if line.strip() and not line.strip().startswith("import "):
+            kept = []
+            quote = None
+            for offset, ch in enumerate(line):
+                index = pos + offset
+                if inside[index]:
+                    kept.append(ch)
+                    continue
+                if quote:
+                    kept.append(ch)
+                    if ch == quote:
+                        quote = None
+                elif ch in '"`':
+                    quote = ch
+                    kept.append(ch)
+                elif not ch.isspace():
+                    kept.append(ch)
+            out.append("".join(kept))
+        pos += len(line) + 1
+    return out
 
 
 def is_comment(line):
@@ -112,10 +187,22 @@ def comment_multiset(text):
     return collections.Counter(strip_layout(l) for l in text.split("\n") if is_comment(l))
 
 
+def equivalent(before, after):
+    imports_before, rest_before = split_imports(before)
+    imports_after, rest_after = split_imports(after)
+    if imports_before != imports_after:
+        return False
+    if ordered_lines(before) == ordered_lines(after):
+        return True
+    if tokens(rest_before) == tokens(rest_after):
+        return True
+    return code_tokens(rest_before) == code_tokens(rest_after) and comment_multiset(
+        before
+    ) == comment_multiset(after)
+
+
 def main():
     base = sys.argv[1] if len(sys.argv) > 1 else "HEAD"
-    # Mirror Spotless's targets: `kotlin` covers .kt under the source roots, `kotlinGradle`
-    # covers root-level .kts. Missing .kts would let a build-script edit pass unchecked.
     files = [
         f
         for f in git("diff", "--name-only", base).split("\n")
@@ -129,26 +216,8 @@ def main():
         before = git("show", f"{base}:{path}")
         with open(path, encoding="utf-8") as handle:
             after = handle.read()
-        imports_before, rest_before = split_imports(before)
-        imports_after, rest_after = split_imports(after)
-        if imports_before != imports_after:
+        if not equivalent(before, after):
             unexplained.append(path)
-            continue
-        # Path A: same lines in the same order (imports excluded, compared as a set above).
-        if ordered_lines(before) == ordered_lines(after):
-            continue
-        # Path B: ktlint also joins and splits statements across lines, so line order alone
-        # cannot decide. Compare the token stream instead -- still ordered, still literal-safe.
-        if tokens(rest_before) == tokens(rest_after):
-            continue
-        # Path C: a comment ktlint moves above its annotation keeps its text but changes position.
-        # Allow that ONLY for whole comment lines: compare code tokens in order, and comment
-        # lines as a multiset. Anything else about a comment (wording, deletion) still fails.
-        if code_tokens(rest_before) == code_tokens(rest_after) and comment_multiset(
-            before
-        ) == comment_multiset(after):
-            continue
-        unexplained.append(path)
     print(f"{len(files)} Kotlin file(s) checked, {len(unexplained)} not accounted for")
     for path in unexplained:
         print(f"  NOT FORMATTING-ONLY: {path}")

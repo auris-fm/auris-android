@@ -7,7 +7,6 @@ import com.automattic.android.tracks.crashlogging.EventLevel
 import com.automattic.android.tracks.crashlogging.ExtraKnownKey
 import com.automattic.android.tracks.crashlogging.PerformanceMonitoringConfig
 import com.automattic.android.tracks.crashlogging.ReleaseName
-import com.automattic.encryptedlogging.EncryptedLogging
 import java.io.File
 import java.util.Locale
 import java.util.UUID
@@ -20,7 +19,7 @@ internal class PocketCastsCrashLoggingDataProvider @Inject constructor(
     observeUser: ObserveUser,
     private val crashReportPermissionCheck: CrashReportPermissionCheck,
     private val buildDataProvider: BuildDataProvider,
-    private val encryptedLogging: EncryptedLogging,
+    private val logQueueing: LogQueueing,
     private val applicationFilesDir: File,
     private val connectionStatusProvider: ConnectionStatusProvider,
     localeProvider: LocaleProvider,
@@ -74,13 +73,17 @@ internal class PocketCastsCrashLoggingDataProvider @Inject constructor(
 
     private fun appendEncryptedLogsUuid(eventLevel: EventLevel): Map<ExtraKnownKey, String> {
         val uuid = UUID.randomUUID().toString()
-        encryptedLogging.enqueueSendingEncryptedLogs(
+        // Attach the uuid only when a log was actually accepted. Asking the queue
+        // rather than recognising a wrapper type means ANY refusing implementation
+        // suppresses the extra, so triage is never pointed at a log that does not
+        // exist.
+        val queued = logQueueing.tryEnqueueLog(
             uuid,
             File(applicationFilesDir, "debug.log"),
             shouldUploadImmediately = eventLevel != EventLevel.FATAL &&
                 connectionStatusProvider.isConnected(),
         )
-        return mapOf(EXTRA_UUID to uuid)
+        return if (queued) mapOf(EXTRA_UUID to uuid) else emptyMap()
     }
 
     override fun shouldDropWrappingException(module: String, type: String, value: String): Boolean {

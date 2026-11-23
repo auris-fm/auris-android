@@ -7,7 +7,9 @@ import au.com.shiftyjelly.pocketcasts.crashlogging.BuildConfig
 import au.com.shiftyjelly.pocketcasts.crashlogging.BuildDataProvider
 import au.com.shiftyjelly.pocketcasts.crashlogging.ContextBasedLocaleProvider
 import au.com.shiftyjelly.pocketcasts.crashlogging.FilteringCrashLogging
+import au.com.shiftyjelly.pocketcasts.crashlogging.KeyGuardedEncryptedLogging
 import au.com.shiftyjelly.pocketcasts.crashlogging.LocaleProvider
+import au.com.shiftyjelly.pocketcasts.crashlogging.LogQueueing
 import au.com.shiftyjelly.pocketcasts.crashlogging.PocketCastsCrashLoggingDataProvider
 import com.automattic.android.tracks.crashlogging.CrashLogging
 import com.automattic.android.tracks.crashlogging.CrashLoggingProvider
@@ -32,11 +34,28 @@ abstract class CrashLoggingModule {
     companion object {
         @Provides
         fun provideEncryptedLogging(@ApplicationContext context: Context): EncryptedLogging {
-            return EncryptedLogging.getInstance(
-                context = context,
+            // Guard the key BEFORE the SDK can use it: an unconfigured release
+            // carries "", and the SDK's upload path throws on any key that is not
+            // exactly 32 bytes, on a scope with no exception handler.
+            return KeyGuardedEncryptedLogging(
+                delegate = EncryptedLogging.getInstance(
+                    context = context,
+                    encryptedLoggingKey = BuildConfig.ENCRYPTION_KEY,
+                    clientSecret = BuildConfig.APP_SECRET,
+                ),
                 encryptedLoggingKey = BuildConfig.ENCRYPTION_KEY,
-                clientSecret = BuildConfig.APP_SECRET,
             )
+        }
+
+        @Provides
+        fun provideLogQueueing(encryptedLogging: EncryptedLogging): LogQueueing {
+            // The guarded instance answers for itself; anything else always accepts.
+            return encryptedLogging as? LogQueueing ?: object : LogQueueing {
+                override fun tryEnqueueLog(uuid: String, file: File, shouldUploadImmediately: Boolean): Boolean {
+                    encryptedLogging.enqueueSendingEncryptedLogs(uuid, file, shouldUploadImmediately)
+                    return true
+                }
+            }
         }
 
         @Provides

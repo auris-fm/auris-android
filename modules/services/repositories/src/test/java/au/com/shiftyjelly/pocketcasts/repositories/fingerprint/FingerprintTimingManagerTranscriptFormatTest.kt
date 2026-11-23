@@ -23,6 +23,7 @@ import java.util.Base64
 import java.util.Collections
 import java.util.Date
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -68,7 +69,21 @@ class FingerprintTimingManagerTranscriptFormatTest {
     private lateinit var audioFile: File
     private lateinit var episode: PodcastEpisode
     private val eventHorizon = mock(EventHorizon::class.java)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Set when the preparation reaches the native library, which no JVM host can load. The handler
+     * lives in the scope so the failure is handled inside the coroutine: an uncaught throwable is
+     * recorded by kotlinx-coroutines-test's global collector before any thread handler sees it, and
+     * the next class to call `runTest` would fail on it.
+     */
+    private val reachedLibrary = AtomicBoolean(false)
+    private val libraryAttempt = CoroutineExceptionHandler { _, error ->
+        if (error is UnsatisfiedLinkError || error is NoClassDefFoundError) {
+            reachedLibrary.set(true)
+        } else {
+            throw error
+        }
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + libraryAttempt)
 
     @Before
     fun setUp() {
@@ -168,28 +183,15 @@ class FingerprintTimingManagerTranscriptFormatTest {
             null
         }.whenever(eventHorizon).track(any())
 
-        // The accepted path ends at the native matcher, which cannot load on a JVM host. That
-        // attempt escapes the preparation coroutine, so watch for it without swallowing anything
-        // else: unrelated errors go to the handler that was already installed.
-        val reachedLibrary = AtomicBoolean(false)
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            if (error is UnsatisfiedLinkError || error is NoClassDefFoundError) {
-                reachedLibrary.set(true)
-            } else {
-                previous?.uncaughtException(thread, error)
-            }
-        }
-        try {
-            manager.prepareForCurrentEpisode(FingerprintTimingManager.PrepareTrigger.PLAYBACK)
-            val deadline = System.currentTimeMillis() + PREPARATION_BUDGET_MS
-            while (System.currentTimeMillis() < deadline) {
-                if (reasons.contains("reference_decode_failed")) return true
-                if (reachedLibrary.get()) return false
-                Thread.sleep(POLL_MS)
-            }
-        } finally {
-            Thread.setDefaultUncaughtExceptionHandler(previous)
+        // The accepted path ends at the native matcher, which cannot load on a JVM host; the scope's
+        // handler records that attempt. Nothing is caught on the thread, so no throwable escapes.
+        reachedLibrary.set(false)
+        manager.prepareForCurrentEpisode(FingerprintTimingManager.PrepareTrigger.PLAYBACK)
+        val deadline = System.currentTimeMillis() + PREPARATION_BUDGET_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (reasons.contains("reference_decode_failed")) return true
+            if (reachedLibrary.get()) return false
+            Thread.sleep(POLL_MS)
         }
         throw AssertionError("preparation published neither a refusal nor a library attempt: ${manager.state}")
     }

@@ -259,10 +259,13 @@ class CloudRouteSink internal constructor(
     /**
      * Prepares a turn ONCE, for a controller that may dispatch it more than once.
      *
-     * The returned turn is immutable and already carries its identity: request ID, conversation handle
-     * and mode were fixed when it was prepared. A RETRY reuses it unchanged -- it must not re-prepare,
-     * because re-preparing would mint a second conversation and consume the wake selection a second
-     * time, so a retried request would look like a new user act.
+     * The returned turn carries its REQUEST IDENTITY fixed: a RETRY reuses it unchanged -- it must not
+     * re-prepare, because re-preparing would mint a second conversation and consume the wake selection a
+     * second time, so a retried request would look like a new user act.
+     *
+     * The CONVERSATION PAIR is provisional until the turn is sent. A first dispatch re-decides it against
+     * what the worker has acknowledged by then, since the predecessor's handshake can arrive between this
+     * prepare and that dispatch. A retry keeps the pair it was prepared with.
      *
      * Returns null when the origin has been superseded: nothing is sent, so no conversation is created
      * on behalf of a turn that has already been replaced.
@@ -280,7 +283,12 @@ class CloudRouteSink internal constructor(
         isRetry: Boolean,
         sourceLanguage: String?,
     ): CloudRouteTurn? {
-        return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
+        return conversationAdmission.retainOrPrepare(
+            logicalRequestId,
+            isRetry,
+            continuesGraceWindow = isLiveGraceTurn,
+            wakeOriginated = isWakeOriginated,
+        ) {
             // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
             // at admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
             // refusing here means no wire request exists that client logs cannot name. Never mint here.
@@ -588,6 +596,9 @@ class CloudRouteSink internal constructor(
             // From here until the turn ends, FIRST AUDIBLE belongs to this request.
             myTimingRequestId = turn.requestId
             activeTimingRequestId.set(turn.requestId)
+            // The pair this turn carries is now the LIVE one: a create establishes the conversation, and
+            // recording it here covers both entry paths, including a replacement after a failed create.
+            conversationAdmission.noteSending(turn)
             val events = openRoute(turn)
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
@@ -642,6 +653,10 @@ class CloudRouteSink internal constructor(
                         // server negotiated. Propagate it so the player builds the right decoder
                         // and sample rate before any binary frame arrives.
                         audioPlayer?.setCodec(event.codec)
+                        // THE HANDSHAKE IS WHAT MAKES THE CONVERSATION RESUMABLE. Until it arrives the
+                        // worker has no conversation for the id this client minted, so a follow-up
+                        // creates a fresh one rather than resuming something that does not exist.
+                        conversationAdmission.acknowledge(turn.conversationId)
                         // Auth/socket diagnostics are recorded by the transport observer at
                         // actual onOpen/send callbacks, not here at the sink's Connected event.
                     }

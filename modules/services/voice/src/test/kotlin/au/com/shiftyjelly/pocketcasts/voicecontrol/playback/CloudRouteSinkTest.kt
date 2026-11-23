@@ -1312,7 +1312,8 @@ class CloudRouteSinkTest {
     @Test
     fun `a wake-free request in the same live window resumes, and a stale origin is refused`() = runTest {
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            // The handshake first: only an ACKNOWLEDGED conversation may be resumed.
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(1, 0)) },
         )
         val sink = deps.sink()
         deps.conversationAdmission.beginOrigin(7)
@@ -1363,9 +1364,10 @@ class CloudRouteSinkTest {
     @Test
     fun `the first turn CREATES a client-minted conversation and a later grace turn RESUMES it`() = runTest {
         // admission contract: the client generates the handle, create carries it, and a later
-        // turn inside the live grace window resumes the SAME conversation.
+        // turn inside the live grace window resumes the SAME conversation -- once the worker has
+        // ACKNOWLEDGED it with `connected`. Without that frame there is no conversation to resume.
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(1, 0)) },
         )
         val sink = deps.sink()
 
@@ -1900,7 +1902,10 @@ class CloudRouteSinkTest {
 
     @Test
     fun `a no-answer error from the service is spoken rather than left silent`() = runTest {
-        // The service ends with `error no_answer`; the existing code-to-template mapping carries it.
+        // The service ends with `error no_answer`. Its line used to be word-for-word the generic
+        // one, so this case could not tell "the code has a line" from "the code fell through" --
+        // approved wording (docs/specs/cloud-assistant.md#error-codes) makes them distinguishable,
+        // and this asserts the code's own sentence.
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Error(code = CloudRouteErrorCodes.NO_ANSWER, message = ""),
@@ -1910,7 +1915,56 @@ class CloudRouteSinkTest {
 
         val response = deps.sink().routeToCloud("what?", playbackContext, admitted = testWireId).feedback
 
-        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+        assertEquals(
+            VoiceResponse.Spoken("Sorry, I couldn't find an answer to that. Please try asking another way."),
+            response,
+        )
+    }
+
+    /**
+     * A Required code must have a line of its OWN (cloud-assistant.md, error table). These three
+     * were recognised for logging only, so the sink fell through to `cloud_error_generic`: the user
+     * heard a translated apology that named neither what happened nor what to do next, and no test
+     * noticed because the fixture supplied lines the resources did not carry.
+     *
+     * Each case asserts the code's own sentence AND that it is not the generic one, so a future
+     * edit that collapses a code back into the catch-all fails here rather than sounding plausible.
+     */
+    private suspend fun assertOwnLine(code: String, expected: String) {
+        val deps = TestDeps(events = flowOf(CloudRouteEvent.Error(code = code, message = "")))
+
+        val response = deps.sink().routeToCloud("x", playbackContext, admitted = testWireId).feedback
+
+        assertEquals(VoiceResponse.Spoken(expected), response)
+        assertNotEquals(
+            "$code must not collapse into the generic line",
+            VoiceResponse.Spoken("Sorry, I couldn't complete that request."),
+            response,
+        )
+    }
+
+    @Test
+    fun `an audio queue overflow speaks its own line rather than the generic one`() = runTest {
+        assertOwnLine(
+            CloudRouteErrorCodes.QUEUE_OVERFLOW,
+            "Sorry, I couldn't finish answering that. Please try again.",
+        )
+    }
+
+    @Test
+    fun `a turn conflict tells the user an answer is still running`() = runTest {
+        assertOwnLine(
+            CloudRouteErrorCodes.TURN_CONFLICT,
+            "I'm still answering your last question. Please try again in a moment.",
+        )
+    }
+
+    @Test
+    fun `an unreadable record asks the user to ask again rather than naming storage`() = runTest {
+        assertOwnLine(
+            CloudRouteErrorCodes.CORRUPT_RECORD,
+            "Sorry, I've lost track of our conversation. Please ask again to start a new one.",
+        )
     }
 
     @Test
@@ -2231,7 +2285,7 @@ class CloudRouteSinkTest {
         val response = deps.sink().routeToCloud("x", playbackContext, admitted = testWireId).feedback
 
         assertEquals(
-            VoiceResponse.Spoken("The assistant has reached its limit right now."),
+            VoiceResponse.Spoken("Sorry, that took too long to answer. Please try again."),
             response,
         )
         assertNotEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
@@ -2489,9 +2543,9 @@ class CloudRouteSinkTest {
             "the executed seek is the MAPPED sink position (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:545"),
         )
-        // Deliberately changed: the client speaks its own words for the code, never the
-        // server's message (which here was the same sentence by coincidence).
-        assertEquals(VoiceResponse.Spoken("The assistant couldn't finish that request."), response)
+        // The client speaks its own words, never the server's message. provider_error is a
+        // Generic code in the contract, so its own words ARE the generic line.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
         // Auto-pause is restored exactly once.
         assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
@@ -2502,8 +2556,8 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = { _ ->
                 if (token == null) {
-                    // Client-minted code, no prose: the sink localises it, and
-                    // `unauthorized` has no template by design, so it earcons.
+                    // Client-minted code, no prose: the sink localises it. unauthorized is a
+                    // Generic code, so it resolves to the generic line.
                     flowOf(CloudRouteEvent.Error("unauthorized", ""))
                 } else {
                     flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(1, 1))
@@ -2523,9 +2577,9 @@ class CloudRouteSinkTest {
         token = null
         val second = sink.routeToCloud("second", playbackContext, admitted = testWireId).feedback
 
-        // Deliberately changed: a rejected credential is the service being unavailable, which the
-        // owner asked to hear as words rather than a tone.
-        assertEquals(VoiceResponse.Spoken("Service is unavailable at the moment."), second)
+        // A rejected credential still speaks rather than earcons: unauthorized is Generic, so it
+        // gets the same localized catch-all as any other code with no line of its own.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), second)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
     }
 
@@ -2792,10 +2846,11 @@ class CloudRouteSinkTest {
         // resumed the same dead id and failed the same way until a wake began a new conversation.
         val deps = TestDeps(
             routeInvoker = { turn ->
+                // The handshake precedes the outcome: it is what makes the conversation resumable at all.
                 if (turn.conversationMode == CloudConversationMode.Resume) {
-                    flowOf(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                    flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Error(code = "conversation_expired", message = ""))
                 } else {
-                    flowOf(CloudRouteEvent.Done(0, 0))
+                    flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(0, 0))
                 }
             },
         )
@@ -2829,6 +2884,9 @@ class CloudRouteSinkTest {
         admission.beginOrigin(1)
         val old = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = false)!!
         val replacement = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = true)!!
+        // The replacement was ACKNOWLEDGED, which is what makes it resumable at all; without this the
+        // case would pass for the wrong reason, since an unacknowledged handle is never resumed.
+        admission.acknowledge(replacement.conversationId)
 
         admission.forgetConversation(old.conversationId)
 
@@ -3376,28 +3434,16 @@ class CloudRouteSinkTest {
         var privacyClosures: Long = 0,
         var playbackStopClosures: Long = 0,
         private val episodeDurationSeconds: Int = 0,
-        // Keys built from the same constant the sink uses, so renaming the
-        // wire code breaks these tests rather than silently detaching the
-        // template from it.
+        // THE SHIPPED RESOLVER, not a hand copy of it. This map used to restate
+        // strings_voice_templates.xml, which made every wording assertion below an assertion about
+        // the test's own copy: the app could speak something else entirely and the suite stayed
+        // green. That is how three Required codes sat with no line at all while this fixture
+        // supplied lines for codes the resources did not carry.
         //
-        // This map is a hand copy of strings_voice_templates.xml. When a code gains a line
-        // there, it needs one here too, or the suite stays green while the shipped app speaks
-        // something else — which is how the quota lines nearly landed untested.
-        private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
-            mapOf(
-                "general.cloud_coming_soon" to "Cloud processing is coming soon",
-                "cloud_error_" + CloudRouteErrorCodes.CONNECTION_LOST to "Connection lost. Please try again.",
-                "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
-                "cloud_error_" + CloudRouteErrorCodes.NO_ANSWER to "Sorry, I couldn't complete that request.",
-                "cloud_error_generic" to "Sorry, I couldn't complete that request.",
-                "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
-                "cloud_error_" + CloudRouteErrorCodes.PROVIDER_ERROR to "The assistant couldn't finish that request.",
-                "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
-                "cloud_error_conversation_expired" to "That conversation has ended.",
-                "cloud_error_budget_exceeded" to "The assistant has reached its limit right now.",
-                "cloud_error_" + CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE to "I can't reach the podcast evidence right now.",
-            ),
-        ),
+        // Reading the real resources means a case asserts what a LISTENER hears. Cases that need a
+        // deliberately broken table (a blank line, a missing key) still pass their own resolver.
+        private val templateResolver: SpokenTemplateResolver =
+            SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
         transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     ) {
@@ -4180,6 +4226,105 @@ class CloudRouteSinkTest {
             (result.feedback as VoiceResponse.Spoken).text,
         )
         assertEquals("en", result.feedbackLanguage)
+    }
+
+    /**
+     * A Required code's line must reach the user in the language they SPOKE, not in English
+     * (cloud-assistant.md). These codes lived as entries of `voice_spoken_templates`, and no
+     * `values-*` redefines that array — so a German speaker asking in German heard English while
+     * every test passed, because the fixture handed the sink its own English map.
+     *
+     * Driven through prepareTurn/dispatchPrepared with the REAL resource resolver on an ENGLISH UI
+     * context: the utterance language is the only thing that can select the localized line, so a
+     * UI-locale leak or a missing translation fails here.
+     */
+    private suspend fun assertSpokenInLanguage(code: String, language: String, expected: String) {
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+            locale = java.util.Locale.ENGLISH,
+            routeInvoker = { _ -> flowOf(CloudRouteEvent.Error(code = code, message = "")) },
+        )
+        val sink = deps.sink()
+        val prepared = sink.prepareTurn(
+            request = "question",
+            context = playbackContext,
+            isLiveGraceTurn = false,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+            hint = null,
+            logicalRequestId = testWireId,
+            isRetry = false,
+            sourceLanguage = language,
+        )!!
+
+        val result = sink.dispatchPrepared(prepared, isRetry = false)
+
+        assertEquals(expected, (result.feedback as VoiceResponse.Spoken).text)
+        assertEquals("the voice must match the text", language, result.feedbackLanguage)
+    }
+
+    /**
+     * A Generic code reaches the listener as the LOCALIZED generic line, driven through the real
+     * dispatch with the real resource resolver on an ENGLISH UI context.
+     *
+     * unauthorized and provider_error are Generic in the contract's error table, so they have no
+     * dedicated string: the sink substitutes cloud_error_generic in the UTTERANCE's language. Giving
+     * either an English-only line of its own would make a German listener hear English, which is the
+     * defect this whole change removes -- so the assertion is on the German sentence, not on "some
+     * text was spoken".
+     */
+    @Test
+    fun `a german unauthorized hears the german generic line`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.UNAUTHORIZED,
+            "de",
+            "Entschuldigung, ich konnte diese Anfrage nicht abschließen.",
+        )
+    }
+
+    @Test
+    fun `a german provider error hears the german generic line`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.PROVIDER_ERROR,
+            "de",
+            "Entschuldigung, ich konnte diese Anfrage nicht abschließen.",
+        )
+    }
+
+    @Test
+    fun `a german no-answer refusal is spoken in german`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.NO_ANSWER,
+            "de",
+            "Entschuldigung, ich konnte darauf keine Antwort finden. Bitte versuche es anders zu fragen.",
+        )
+    }
+
+    @Test
+    fun `a japanese connection-lost refusal is spoken in japanese`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.CONNECTION_LOST,
+            "ja",
+            "接続が切れました。もう一度お試しください。",
+        )
+    }
+
+    @Test
+    fun `a french budget refusal is spoken in french`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.BUDGET_EXCEEDED,
+            "fr",
+            "Désolé, la réponse a pris trop de temps. Veuillez réessayer.",
+        )
+    }
+
+    @Test
+    fun `a korean retrieval refusal is spoken in korean`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE,
+            "ko",
+            "죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.",
+        )
     }
 
     @Test
@@ -5011,7 +5156,6 @@ class CloudRouteSinkTest {
             userId = "", // No token.
             templateResolver = SpokenTemplateResolver(
                 mapOf(
-                    "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
                     "general.cloud_coming_soon" to "Cloud processing is coming soon",
                     "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
                     "cloud_error_generic" to "Sorry, I couldn't complete that request.",
@@ -5031,10 +5175,12 @@ class CloudRouteSinkTest {
         // Transport exchange never reached — missing token stops before socket.
         assertFalse("exchange should not be called when token is missing", exchangeCalled)
 
-        // Localized unauthorized feedback, not silence.
+        // Localized feedback, not silence. unauthorized is Generic, so the generic line is what
+        // this listener hears. The expected sentence is written out rather than read back from the
+        // resolver: comparing the resolver to itself would pass whatever it returned.
         val feedback = result.feedback
         assertTrue("expected localized Spoken refusal, got $feedback", feedback is VoiceResponse.Spoken)
-        assertEquals("Service is unavailable at the moment.", (feedback as VoiceResponse.Spoken).text)
+        assertEquals("Sorry, I couldn't complete that request.", (feedback as VoiceResponse.Spoken).text)
     }
 
     @Test

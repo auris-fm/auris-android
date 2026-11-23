@@ -210,30 +210,41 @@ class RealServiceLifecycleControlTest {
             AudioRoute.BluetoothA2dpOnly,
             routeMonitor.availability.value,
         )
+        assertFalse(
+            "precondition: this instance has no watcher before it is started",
+            watcherIsActive(service),
+        )
+
         // The FIRST start command establishes whatever watching this service does. What must not
         // happen is growth: the controller starts the service again whenever the gate allows while it
         // believes the service is not running, and each of those arrives here as another command on
         // the same live instance.
         service.onStartCommand(Intent(), 0, 1)
-        shadowOf(Looper.getMainLooper()).idle()
-        val afterFirstStart = offeredSurfaceSubscribers()
+        awaitWatcherRegistered(service)
+
         assertTrue(
             "precondition: the first start watches the offered surface",
-            afterFirstStart > 0,
+            offeredSurfaceSubscribers() > 0,
         )
 
         service.onStartCommand(Intent(), 0, 2)
         service.onStartCommand(Intent(), 0, 3)
 
-        // A collector registers and deregisters asynchronously, so the count is read once it has
-        // stopped moving rather than at an arbitrary instant. Waiting for it to SETTLE cannot hide
-        // the defect: an extra watcher per command raises the count and keeps it raised.
-        val settled = settleSubscriberCount(afterFirstStart)
+        // THE OBSERVABLE IS THIS INSTANCE'S OWN WATCHERS, not the flow's subscriber total. The
+        // monitor is a graph singleton: another instance's watcher may still be subscribed while
+        // its teardown finishes, and a StateFlow counts a collector twice while it registers. Both
+        // move the total for reasons that have nothing to do with these commands, which is what
+        // made a total-based reading depend on the machine's speed. Counting the watcher jobs this
+        // service launched does not: a guard that lets each command launch one shows up as three.
+        //
+        // The wait ends when the main queue has drained with the commands delivered, so any watcher
+        // they launched exists by then. It waits on that state, never on a duration.
+        val watchers = awaitWatchersSettled(service)
         assertEquals(
-            "later start commands must add NO watcher of the offered surface; one launched per " +
+            "later start commands must launch NO watcher of the offered surface; one launched per " +
                 "command accumulates a collector for every later start of this instance",
-            afterFirstStart,
-            settled,
+            1,
+            watchers,
         )
 
         // And the watcher still does its job after the repeated start: a failed attempt's record
@@ -273,25 +284,88 @@ class RealServiceLifecycleControlTest {
     }
 
     /**
-     * The subscriber count once it has stopped changing, or the last reading if it never settles.
-     * Returns early when [expected] is reached and holds, so a correct tree does not pay the budget.
+     * Wait until the FIRST watcher has really registered.
+     *
+     * The condition awaited is the service's own watcher becoming active AND the flow reporting a
+     * subscriber — both facts, not a duration. A collector registers asynchronously, so the count
+     * immediately after `onStartCommand` can still be zero; waiting for the registration itself
+     * removes that race without measuring how long the machine takes.
+     *
+     * The bound is a failure guard, not the mechanism: reaching it fails the test outright rather
+     * than returning a stale reading, which is what made the previous settling wait report a
+     * transient count as the answer under load.
      */
-    private fun settleSubscriberCount(expected: Int): Int {
-        val deadline = System.currentTimeMillis() + 5_000
-        var last = offeredSurfaceSubscribers()
-        var stableSince = System.currentTimeMillis()
+    private fun awaitWatcherRegistered(service: VoiceControlService) {
+        val deadline = System.currentTimeMillis() + 30_000
         while (System.currentTimeMillis() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            val now = offeredSurfaceSubscribers()
-            if (now != last) {
-                last = now
-                stableSince = System.currentTimeMillis()
-            } else if (now == expected && System.currentTimeMillis() - stableSince >= 200) {
-                return now
-            }
+            if (watcherIsActive(service) && offeredSurfaceSubscribers() > 0) return
+            Thread.sleep(10)
         }
-        return last
+        throw AssertionError(
+            "the first start command did not establish a watcher of the offered surface " +
+                "(watcherActive=${watcherIsActive(service)}, subscribers=${offeredSurfaceSubscribers()})",
+        )
+    }
+
+    /**
+     * How many of THIS service's coroutines are watching the offered surface, once the later start
+     * commands' work has been drained.
+     *
+     * Read from the service's own job tree rather than the flow's subscriber total, so another
+     * instance's watcher leaving cannot change the answer. The wait ends on a stable reading with
+     * the main queue idle — a count of consecutive identical READINGS, not of milliseconds — so a
+     * slow machine changes how long this takes and never what it concludes.
+     */
+    private fun awaitWatchersSettled(service: VoiceControlService): Int {
+        val deadline = System.currentTimeMillis() + 30_000
+        var last = watcherCount(service)
+        var stableReads = 0
+        val readings = mutableListOf(last)
+        while (System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            val now = watcherCount(service)
+            stableReads = if (now == last) stableReads + 1 else 0
+            last = now
+            readings += now
+            if (stableReads >= 3) return now
+            Thread.sleep(10)
+        }
+        // Running out of the bound is NOT an answer. Returning the last reading here would let a
+        // count that never settled pass on whatever it happened to read at the deadline, which is
+        // the failure this control exists to remove.
+        throw AssertionError(
+            "the watcher count never settled; readings=${readings.takeLast(20)}",
+        )
+    }
+
+    /**
+     * How many watchers this service has launched directly on its own scope.
+     *
+     * `watchOfferedSurface` launches straight onto the service scope, while everything else a start
+     * command runs is nested inside that command's start job. So the watcher count is the number of
+     * ACTIVE DIRECT children of the scope other than the start and stop jobs — identified by
+     * structure, not by name, and independent of how many collectors the shared flow happens to
+     * have at that moment.
+     */
+    private fun watcherCount(service: VoiceControlService): Int {
+        val scope = service.javaClass.getDeclaredField("serviceScope")
+            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.CoroutineScope
+        val root = scope.coroutineContext[kotlinx.coroutines.Job] ?: return 0
+        val startJob = service.javaClass.getDeclaredField("startInFlightJob")
+            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.Job?
+        val stopJob = service.javaClass.getDeclaredField("stopInFlightJob")
+            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.Job?
+        return root.children.count { child ->
+            child.isActive && child !== startJob && child !== stopJob
+        }
+    }
+
+    /** Whether the service's one watcher job is running, read from its own state. */
+    private fun watcherIsActive(service: VoiceControlService): Boolean {
+        val job = service.javaClass.getDeclaredField("offeredSurfaceJob")
+            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.Job?
+        return job?.isActive == true
     }
 
     /** Let the monitor's own debounced read publish [expected]; the debounce runs on real threads. */

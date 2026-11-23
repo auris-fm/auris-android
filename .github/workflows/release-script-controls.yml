@@ -19,6 +19,10 @@ on:
       # that control runs at all.
       - ".github/scripts/**"
       - ".github/workflows/**"
+      # The Play-API control reads its pin from the lock, so a gem bump must run
+      # it: otherwise a renamed or removed API is first discovered after merge.
+      - "Gemfile"
+      - "Gemfile.lock"
   merge_group:
 
 jobs:
@@ -56,7 +60,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/workflows/(release-script-controls|auris-release)\.yml$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^Gemfile(\.lock)?$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -68,7 +72,6 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-
       - if: steps.scope.outputs.run == 'true'
         name: Trigger control
         run: bash .buildkite/scripts/trigger-release.test.sh
@@ -83,5 +86,46 @@ jobs:
           ruby-version: "3.4"
 
       - if: steps.scope.outputs.run == 'true'
+        name: Robolectric cache control
+        run: bash .github/scripts/robolectric-cache.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: R2 publish control
+        run: bash .buildkite/scripts/r2-publish.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Play APK verification control
+        run: bash .buildkite/scripts/verify-play-apk.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Release gate wiring control
+        run: ruby .buildkite/scripts/release-gates.test.rb
+
+      - if: steps.scope.outputs.run == 'true'
         name: Release interpreter control
         run: bash .buildkite/scripts/release-interpreter.test.sh
+
+  play-api-surface:
+    name: "Play API surface (real gem)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Checks the fetcher's Play API names against the real gem classes, so a
+      # renamed method or changed property fails here rather than at the first
+      # upload. Install JUST that gem at the locked version -- a full
+      # `bundle install` pulls fastlane and takes minutes, and this control needs
+      # one gem, not the release toolchain.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      # Install the version Gemfile.lock pins, read from the lock itself: a
+      # hardcoded literal here would drift on a lockfile bump and certify a gem
+      # nobody ships. The control also asserts loaded == pinned.
+      - name: "Install the locked Play API gem"
+        run: |
+          PIN="$(sed -n 's/^    google-apis-androidpublisher_v3 (\([0-9.]*\))/\1/p' Gemfile.lock | head -1)"
+          [ -n "$PIN" ] || { echo "FAIL: no google-apis-androidpublisher_v3 pin in Gemfile.lock" >&2; exit 1; }
+          echo "Installing pinned version $PIN"
+          gem install google-apis-androidpublisher_v3 -v "$PIN" --no-document
+      - run: ruby .buildkite/scripts/fetch-play-apk-api.test.rb
+

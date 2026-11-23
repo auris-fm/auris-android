@@ -49,14 +49,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -111,6 +112,14 @@ class VoiceControlModeObserverAvailabilityTest {
          * waits it carries.
          */
         private const val PUMP_BUDGET_MS = 180_000L
+
+        /**
+         * How long the teardown itself may take to finish before the stop reports it as unfinished.
+         * Sized above the teardown's own worst case: it joins barrier-owned work in five-second
+         * rounds and then the engine's processing jobs in up to eight more, so a loaded host can
+         * legitimately need far more than any single round.
+         */
+        private const val TEARDOWN_JOIN_BUDGET_MS = 60_000L
     }
 
     private lateinit var context: Context
@@ -1767,7 +1776,7 @@ assertEquals(
         val barrierObj = getField(harness.service, "shutdownBarrier")!!
         val barrierClosed = barrierObj.javaClass.getDeclaredMethod("isClosed").apply { isAccessible = true }
         val lateDial = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-            val shutdownStarted = kotlinx.coroutines.withTimeoutOrNull(30_000) {
+            val shutdownStarted = withTimeoutOrNull(30_000) {
                 while (!(barrierClosed.invoke(barrierObj) as Boolean)) kotlinx.coroutines.yield()
                 true
             } == true
@@ -1785,7 +1794,7 @@ assertEquals(
             // host artifact), but expiry is a FAILURE, not a pass -- the test must not pass
             // without ever exercising the teardown against a live connection.
             // The TEST tag specifically: a stray open from any other path must not satisfy this.
-            val firstOpened = kotlinx.coroutines.withTimeoutOrNull(30_000) {
+            val firstOpened = withTimeoutOrNull(30_000) {
                 while (synchronized(opened) { opened.toList() }.none { it.ownerTag == "utt-stop-test" }) {
                     kotlinx.coroutines.yield()
                 }
@@ -1839,6 +1848,29 @@ assertEquals(
         // release has finished, so an admission that succeeds means the previous session is really
         // done -- which is exactly what must be true before the next test installs its main
         // dispatcher. ADMISSION IS THE PROBE, so the session it hands back is given up immediately.
+        // READ THE TEARDOWN'S OWN OUTCOME BEFORE PROBING THE GATE. A held teardown keeps the
+        // session on purpose -- only a proven-settled engine permits the release -- so the gate
+        // cannot open and polling it spends the whole budget rediscovering a decision already
+        // taken. What was left unsettled is the diagnosis worth having; "still held after 60000ms"
+        // is not. Joining first matters: onDestroy only STARTS the teardown, so reading its result
+        // immediately would see an unfinished job and skip the very case this is here for. An
+        // expired join is reported as an unfinished teardown, which is a different fact again.
+        service.currentTeardown?.let { teardown ->
+            val joined = runBlocking {
+                withTimeoutOrNull(TEARDOWN_JOIN_BUDGET_MS) { teardown.await() }
+            }
+            when {
+                joined == null -> error(
+                    "the teardown had not finished ${TEARDOWN_JOIN_BUDGET_MS}ms after onDestroy; " +
+                        "it is still joining its own work, so the session is legitimately held",
+                )
+                joined is TeardownResult.Held -> error(
+                    "the teardown HELD the shared resources, so the session cannot come back: " +
+                        "${joined.failure.reason}. The engine was not proven settled; this is " +
+                        "not a slow host.",
+                )
+            }
+        }
         val gate = getField(service, "voiceSessionGate") as VoiceSessionGate
         // The bound has to cover the teardown's OWN worst case, not a guess: it joins the engine's
         // work in rounds of up to five seconds each, so on a loaded machine five seconds total can

@@ -19,6 +19,9 @@ on:
       # that control runs at all.
       - ".github/scripts/**"
       - ".github/workflows/**"
+      # The seed control derives its coordinate from these two pins, so a bump has to run it.
+      - "gradle/libs.versions.toml"
+      - "modules/services/voice/src/test/resources/robolectric.properties"
       # The Play-API control reads its pin from the lock, so a gem bump must run
       # it: otherwise a renamed or removed API is first discovered after merge.
       - "Gemfile"
@@ -63,7 +66,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^Gemfile(\.lock)?$|^modules/services/voice/(src/main/cpp/CMakeLists\.txt|build\.gradle\.kts)$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^gradle/libs\.versions\.toml$|^modules/services/voice/src/test/resources/robolectric\.properties$|^Gemfile(\.lock)?$|^modules/services/voice/(src/main/cpp/CMakeLists\.txt|build\.gradle\.kts)$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -103,6 +106,13 @@ jobs:
         name: Native dependency control
         run: bash .buildkite/scripts/native-deps.test.sh
 
+      # No Gradle step here on purpose: the seed control exercises the cold-runner path itself, with
+      # an empty Gradle home, so it proves the script fetches what it needs rather than assuming a
+      # prior build supplied it.
+      - if: steps.scope.outputs.run == 'true'
+        name: Robolectric seed control
+        run: bash .github/scripts/robolectric-seed.test.sh
+
   play-api-surface:
     name: "Play API surface (real gem)"
     runs-on: ubuntu-latest
@@ -126,4 +136,3 @@ jobs:
           echo "Installing pinned version $PIN"
           gem install google-apis-androidpublisher_v3 -v "$PIN" --no-document
       - run: ruby .buildkite/scripts/fetch-play-apk-api.test.rb
-

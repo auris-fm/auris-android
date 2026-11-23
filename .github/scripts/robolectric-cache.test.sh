@@ -7,7 +7,8 @@
 #      workflow has its own copy of the job and gates the release trigger, so a job
 #      without the cache holds releases back while the other workflow stays green.
 #
-# Nothing else is asserted, because nothing else is done: there is no prefetch step.
+# The seed step and its save-on-failure behaviour are controlled by robolectric-seed.test.sh;
+# this file owns the KEY, the PATH and the COVERAGE, which both designs share.
 set -u
 DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WF="$DIR/.github/workflows/voice-unit-tests.yml"
@@ -84,18 +85,19 @@ else
   PASS=$((PASS+1)); echo "ok: the build does not redirect maven.repo.local"
 fi
 
-# 3. NO PREFETCH. The design is cache-only; a reintroduced download step would restore the
-#    failure modes this PR removed (unconditional fetch, cold-Gradle-home dependency).
+# 3. THE ONLY FETCH IS THE SHARED SEED SCRIPT. An inline curl in a workflow would duplicate the
+#    coordinate derivation and drift from it; the plain-JUnit job must still carry no cache at all.
 cat > /tmp/rc-noprefetch.rb <<'RUBY'
   wf = YAML.load_file(ARGV[0])
   wf["jobs"].each do |name, job|
     (job["steps"] || []).each do |s|
       run = s["run"].to_s
+      next if run.include?("robolectric-seed.sh")
       # A DOWNLOAD is a curl/wget against Maven, not any mention of the artifact: the evidence
-      # step legitimately inspects the cached files and must not be mistaken for a prefetch.
-      abort "#{name} still fetches from Maven" if run.include?("repo1.maven.org")
+      # step legitimately inspects the cached files and must not be mistaken for a fetch.
+      abort "#{name} fetches from Maven outside the seed script" if run.include?("repo1.maven.org")
       if run =~ /(curl|wget)/ && run.include?("android-all")
-        abort "#{name} still downloads android-all"
+        abort "#{name} downloads android-all outside the seed script"
       end
     end
   end
@@ -108,7 +110,7 @@ cat > /tmp/rc-noprefetch.rb <<'RUBY'
 RUBY
 for wf in $WFS; do
   ruby -ryaml /tmp/rc-noprefetch.rb "$wf" > /tmp/rc-noprefetch.out 2>&1
-  check "no job downloads android-all, and the plain-JUnit job has no cache ($(basename "$wf"))" 0 $?
+  check "the seed script is the only fetch, and the plain-JUnit job has no cache ($(basename "$wf"))" 0 $?
   sed 's/^/    /' /tmp/rc-noprefetch.out
 done
 
@@ -122,13 +124,14 @@ cat > /tmp/rc-coverage.rb <<'RUBY'
       steps = job["steps"] || []
       runs_suite = steps.any? { |s| s["run"].to_s.include?(":modules:services:voice:testDebugUnitTest") }
       next unless runs_suite
-      cache = steps.find { |s| (s["uses"] || "").include?("actions/cache") }
-      abort "#{File.basename(path)}:#{name} runs the voice suite with NO android-all cache" unless cache
-      keys["#{File.basename(path)}:#{name}"] = cache["with"]["key"].to_s
+      cache = steps.select { |s| (s["uses"] || "").include?("actions/cache") }
+      abort "#{File.basename(path)}:#{name} runs the voice suite with NO android-all cache" if cache.empty?
+      keys["#{File.basename(path)}:#{name}"] = cache.map { |s| s["with"]["key"].to_s }.uniq
     end
   end
   abort "no job found running the voice suite" if keys.empty?
-  abort "cache keys disagree across jobs: #{keys.inspect}" if keys.values.uniq.size != 1
+  abort "cache keys disagree across jobs: #{keys.inspect}" if keys.values.flatten.uniq.size != 1
+  abort "a job uses different keys for restore and save: #{keys.inspect}" if keys.values.any? { |v| v.size != 1 }
   puts "#{keys.size} job(s) run the suite, all cached with the same key"
 RUBY
 ruby -ryaml /tmp/rc-coverage.rb $WFS > /tmp/rc-coverage.out 2>&1

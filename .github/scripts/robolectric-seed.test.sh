@@ -1,0 +1,344 @@
+#!/bin/bash
+# Controls for the android-all seed. Each drives the REAL script with a fake Maven repository on
+# disk (file:// via a local HTTP server is not needed: curl reads file:// URLs), so no test depends
+# on Maven being reachable -- which is the whole point of the change.
+#
+# The claims:
+#   1. The coordinate is DERIVED from the repo's pins, not hardcoded.
+#   2. A cold cache is seeded, and the jar lands where Robolectric reads it.
+#   3. A corrupt download is refused and nothing is installed.
+#   4. An interrupted download leaves no partial jar behind.
+#   5. Retries happen, and exhaustion fails closed.
+#   6. A present jar means no fetch at all.
+#   7. Every workflow job that runs the suite seeds AND saves under if: always().
+set -u
+DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+SEED="$DIR/.github/scripts/robolectric-seed.sh"
+PASS=0; FAIL=0
+ok()   { PASS=$((PASS+1)); echo "ok: $1"; }
+bad()  { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
+check_zero() { if [ "$2" = 0 ]; then ok "$1"; else bad "$1 (exit $2)"; fi; }
+check_nonzero() { if [ "$2" != 0 ]; then ok "$1"; else bad "$1 (unexpectedly succeeded)"; fi; }
+
+command -v ruby >/dev/null 2>&1 || { echo "FAIL: ruby required"; exit 1; }
+[ -x "$SEED" ] || { echo "FAIL: $SEED missing or not executable"; exit 1; }
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# The coordinate the repo's own pins select, computed independently of the script under test.
+RV="$(sed -n 's/^robolectric = "org\.robolectric:robolectric:\([0-9.]*\)".*/\1/p' "$DIR/gradle/libs.versions.toml")"
+SDK="$(sed -n 's/^sdk=\([0-9][0-9]*\).*/\1/p' "$DIR/modules/services/voice/src/test/resources/robolectric.properties")"
+# The control must work on a COLD runner too, where Gradle has fetched nothing. Requiring a cached
+# jar here would make the control fail exactly where the behaviour under test matters most -- and it
+# did, on CI. So fetch it independently when absent, verifying its published checksum, from Maven
+# directly rather than through the script under test: an oracle that shares the script's code would
+# agree with any bug in it.
+RJAR="$(find "${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2/files-2.1/org.robolectric/robolectric/$RV" -name "robolectric-$RV.jar" 2>/dev/null | head -1)"
+if [ -z "$RJAR" ]; then
+  ORACLE="$WORK/oracle"; mkdir -p "$ORACLE"
+  RREL="org/robolectric/robolectric/$RV/robolectric-$RV"
+  MAVEN="${ROBOLECTRIC_TEST_MAVEN_REPO:-https://repo1.maven.org/maven2}"
+  ok_fetch=0
+  for attempt in 1 2 3 4; do
+    if curl -fsS --retry 2 --connect-timeout 20 --max-time 300 -o "$ORACLE/r.jar" "$MAVEN/$RREL.jar" \
+       && curl -fsS --retry 2 --connect-timeout 20 --max-time 120 -o "$ORACLE/r.sha512" "$MAVEN/$RREL.jar.sha512"; then
+      want="$(tr -d ' \t\r\n' < "$ORACLE/r.sha512")"
+      got="$(shasum -a 512 "$ORACLE/r.jar" | awk '{print $1}')"
+      if [ "$want" = "$got" ]; then ok_fetch=1; break; fi
+      echo "--- oracle: checksum mismatch on attempt $attempt" >&2
+    fi
+    rm -f "$ORACLE/r.jar" "$ORACLE/r.sha512"
+    sleep $((attempt * 3))
+  done
+  if [ "$ok_fetch" != 1 ]; then
+    echo "FAIL: could not fetch robolectric-$RV.jar to compute the expected coordinate independently"
+    exit 1
+  fi
+  RJAR="$ORACLE/r.jar"
+fi
+T="$WORK/probe"; mkdir -p "$T"
+(cd "$T" && unzip -o -q "$RJAR" 'org/robolectric/plugins/DefaultSdkProvider*.class')
+javap -p -c "$T/org/robolectric/plugins/DefaultSdkProvider.class" > "$T/prov.txt" 2>&1
+AV="$(awk -v sdk="$SDK" '$0 ~ ("bipush *" sdk "$"){w=1;n=0;next} w && /\/\/ String /{n++; if(n==1){print $NF; exit}}' "$T/prov.txt")"
+BID="$(awk -v sdk="$SDK" '$0 ~ ("bipush *" sdk "$"){w=1;n=0;next} w && /\/\/ String /{n++; if(n==2){print $NF; exit}}' "$T/prov.txt")"
+VERSION="$AV-robolectric-$BID-i7"
+ART="android-all-instrumented"
+REL="org/robolectric/$ART/$VERSION/$ART-$VERSION"
+echo "--- pins: robolectric $RV, sdk $SDK -> $ART $VERSION"
+
+# A fake Maven repository holding a small stand-in jar plus its true checksum. The script must not
+# care that the payload is small: it verifies the checksum, not a size. It also serves the real
+# Robolectric jar, so a cold Gradle home can derive the coordinate from this repository alone -- no
+# case may depend on the machine having run a build.
+REPO="$WORK/repo"
+RREL="org/robolectric/robolectric/$RV/robolectric-$RV"
+mkdir -p "$REPO/$(dirname "$RREL")"
+cp "$RJAR" "$REPO/$RREL.jar"
+( cd "$REPO/$(dirname "$RREL")" && shasum -a 512 "robolectric-$RV.jar" | awk '{print $1}' > "robolectric-$RV.jar.sha512" )
+mkdir -p "$REPO/$(dirname "$REL")"
+printf 'stand-in android-all payload\n' > "$REPO/$REL.jar"
+( cd "$REPO/$(dirname "$REL")" && shasum -a 512 "$ART-$VERSION.jar" | awk '{print $1}' > "$ART-$VERSION.jar.sha512" )
+printf '<project/>\n' > "$REPO/$REL.pom"
+( cd "$REPO/$(dirname "$REL")" && shasum -a 512 "$ART-$VERSION.pom" | awk '{print $1}' > "$ART-$VERSION.pom.sha512" )
+
+# Any fake repository used by a case must also serve the Robolectric jar: on a cold runner the
+# script derives the coordinate from it, and a case that omits it would fail for the wrong reason.
+serve_robolectric() { # serve_robolectric <repo-dir>
+  local r="$1"
+  mkdir -p "$r/$(dirname "$RREL")"
+  cp "$RJAR" "$r/$RREL.jar"
+  ( cd "$r/$(dirname "$RREL")" && shasum -a 512 "robolectric-$RV.jar" | awk '{print $1}' > "robolectric-$RV.jar.sha512" )
+}
+
+seed() { # seed <m2dir> [extra env...]
+  local m2="$1"; shift
+  ROBOLECTRIC_M2_DIR="$m2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" "$@" bash "$SEED"
+}
+
+# Read the jar-present output a run wrote, if any.
+output_of() { sed -n 's/^jar-present=//p' "$1" 2>/dev/null | tail -1; }
+
+# 1 + 2. COLD CACHE: the derived coordinate is fetched into the path Robolectric reads.
+M2="$WORK/m2-cold"
+seed "$M2" > "$WORK/cold.out" 2>&1
+check_zero "a cold cache is seeded" $?
+if [ -s "$M2/$REL.jar" ]; then ok "the jar lands at \$M2/$REL.jar"; else bad "no jar at $M2/$REL.jar"; fi
+grep -q "$ART $VERSION" "$WORK/cold.out" && ok "the coordinate comes from the repo's pins ($VERSION)" || bad "coordinate not derived: $(cat "$WORK/cold.out")"
+for ext in pom pom.sha512 jar.sha512; do
+  [ -s "$M2/$REL.$ext" ] && ok "the $ext sidecar is installed too" || bad "missing $ext sidecar"
+done
+
+# 1b. THE DERIVATION IS LIVE, not a constant that happens to match today's pins. A copy of the repo
+#     with a different sdk pin must ask for that SDK's jar. Without this, hardcoding today's
+#     coordinate passes every other case here.
+ALT="$WORK/alt"
+mkdir -p "$ALT/.github/scripts" "$ALT/gradle" "$ALT/modules/services/voice/src/test/resources"
+cp "$SEED" "$ALT/.github/scripts/robolectric-seed.sh"
+cp "$DIR/gradle/libs.versions.toml" "$ALT/gradle/libs.versions.toml"
+ALT_SDK=34
+printf 'sdk=%s\n' "$ALT_SDK" > "$ALT/modules/services/voice/src/test/resources/robolectric.properties"
+ALT_AV="$(awk -v sdk="$ALT_SDK" '$0 ~ ("bipush *" sdk "$"){w=1;n=0;next} w && /\/\/ String /{n++; if(n==1){print $NF; exit}}' "$T/prov.txt")"
+ALT_BID="$(awk -v sdk="$ALT_SDK" '$0 ~ ("bipush *" sdk "$"){w=1;n=0;next} w && /\/\/ String /{n++; if(n==2){print $NF; exit}}' "$T/prov.txt")"
+ALT_VERSION="$ALT_AV-robolectric-$ALT_BID-i7"
+if [ -z "$ALT_AV" ] || [ "$ALT_VERSION" = "$VERSION" ]; then
+  bad "cannot exercise the derivation: SDK $ALT_SDK yields no distinct coordinate"
+else
+  ALTREPO="$WORK/repo-alt"
+  ALT_REL="org/robolectric/$ART/$ALT_VERSION/$ART-$ALT_VERSION"
+  mkdir -p "$ALTREPO/$(dirname "$ALT_REL")"
+  serve_robolectric "$ALTREPO"
+  printf 'stand-in payload for the alternate sdk\n' > "$ALTREPO/$ALT_REL.jar"
+  ( cd "$ALTREPO/$(dirname "$ALT_REL")" && shasum -a 512 "$ART-$ALT_VERSION.jar" | awk '{print $1}' > "$ART-$ALT_VERSION.jar.sha512" )
+  printf '<project/>\n' > "$ALTREPO/$ALT_REL.pom"
+  ( cd "$ALTREPO/$(dirname "$ALT_REL")" && shasum -a 512 "$ART-$ALT_VERSION.pom" | awk '{print $1}' > "$ART-$ALT_VERSION.pom.sha512" )
+  ROBOLECTRIC_M2_DIR="$WORK/m2-alt" ROBOLECTRIC_MAVEN_REPO="file://$ALTREPO" \
+    ROBOLECTRIC_SEED_ATTEMPTS=1 bash "$ALT/.github/scripts/robolectric-seed.sh" > "$WORK/alt.out" 2>&1
+  if grep -q "$ART $ALT_VERSION" "$WORK/alt.out" && [ -s "$WORK/m2-alt/$ALT_REL.jar" ]; then
+    ok "a different sdk pin selects and seeds a different coordinate ($ALT_VERSION)"
+  else
+    bad "the coordinate did not follow the sdk pin: $(head -2 "$WORK/alt.out")"
+  fi
+fi
+
+# 2b. THE REAL CI START STATE: an EMPTY Gradle home AND an empty ~/.m2. Gradle has not fetched the
+#     Robolectric jar yet, so the script must fetch that too -- with the same retries and checksum
+#     discipline -- rather than depending on a prior build. This is the case that broke an earlier
+#     version of the cache change, so it is asserted, not assumed.
+COLD="$WORK/cold-gradle"
+mkdir -p "$COLD"
+M2="$WORK/m2-coldgradle"
+GRADLE_USER_HOME="$COLD" ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" \
+  bash "$SEED" > "$WORK/coldgradle.out" 2>&1
+check_zero "an empty Gradle home and empty ~/.m2 still seed" $?
+if [ -s "$M2/$REL.jar" ]; then ok "the jar lands even with no prior Gradle build"; else bad "cold Gradle home produced no jar"; fi
+grep -q "not in the Gradle cache; fetching it" "$WORK/coldgradle.out" \
+  && ok "the Robolectric jar is fetched when Gradle has not resolved it" \
+  || bad "the script did not fetch the Robolectric jar itself"
+
+# 2c. That fetch FAILS CLOSED too: an unreachable repository with a cold Gradle home must not
+#     silently fall back to a guessed coordinate.
+GRADLE_USER_HOME="$COLD" ROBOLECTRIC_M2_DIR="$WORK/m2-coldfail" \
+  ROBOLECTRIC_MAVEN_REPO="file://$WORK/no-such-repo" ROBOLECTRIC_SEED_ATTEMPTS=2 \
+  bash "$SEED" > "$WORK/coldfail.out" 2>&1
+check_nonzero "a cold Gradle home with an unreachable repository fails closed" $?
+grep -q "robolectric-$RV.jar" "$WORK/coldfail.out" \
+  && ok "the failure names the Robolectric jar it could not fetch" \
+  || bad "failure does not name the Robolectric jar"
+
+# 3. CORRUPT PAYLOAD: the checksum disagrees, so nothing may be installed.
+BADREPO="$WORK/repo-bad"
+mkdir -p "$BADREPO/$(dirname "$REL")"
+serve_robolectric "$BADREPO"
+cp "$REPO/$REL.pom" "$REPO/$REL.pom.sha512" "$REPO/$REL.jar.sha512" "$BADREPO/$(dirname "$REL")/"
+printf 'truncated payload\n' > "$BADREPO/$REL.jar"
+M2="$WORK/m2-corrupt"
+ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$BADREPO" bash "$SEED" > "$WORK/corrupt.out" 2>&1
+check_nonzero "a checksum mismatch fails the step" $?
+if [ ! -e "$M2/$REL.jar" ]; then ok "a corrupt jar is never installed"; else bad "a corrupt jar was installed"; fi
+grep -qi "SHA-512" "$WORK/corrupt.out" && ok "the failure names the checksum" || bad "failure does not name the checksum"
+
+# 4. INTERRUPTED DOWNLOAD: the jar is absent from the repository, so the fetch cannot complete.
+PARTREPO="$WORK/repo-partial"
+mkdir -p "$PARTREPO/$(dirname "$REL")"
+serve_robolectric "$PARTREPO"
+cp "$REPO/$REL.pom" "$REPO/$REL.pom.sha512" "$REPO/$REL.jar.sha512" "$PARTREPO/$(dirname "$REL")/"
+M2="$WORK/m2-partial"
+ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$PARTREPO" ROBOLECTRIC_SEED_ATTEMPTS=2 \
+  bash "$SEED" > "$WORK/partial.out" 2>&1
+check_nonzero "an incomplete fetch fails the step" $?
+if [ -z "$(find "$M2" -name '*.jar' 2>/dev/null)" ]; then ok "no partial jar is left behind"; else bad "a partial jar was left in the cache"; fi
+# The sidecars must not be installed either: a half-populated directory is what a later run would
+# mistake for a complete artifact. Downloading straight into the cache leaves these behind.
+leftovers="$(find "$M2" -type f 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$leftovers" = 0 ]; then ok "an incomplete fetch installs nothing at all"; else bad "an incomplete fetch left $leftovers file(s) in the cache"; fi
+
+# 5. RETRIES on the ANDROID-ALL fetch itself: the coordinate must be derivable (so the repository
+#    serves the Robolectric jar) while the android-all artifact is absent. An entirely unreachable
+#    repository would fail earlier, on the Robolectric jar, and prove nothing about this fetch.
+RETRYREPO="$WORK/repo-noretryjar"
+mkdir -p "$RETRYREPO"
+serve_robolectric "$RETRYREPO"
+M2="$WORK/m2-unreachable"
+ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$RETRYREPO" ROBOLECTRIC_SEED_ATTEMPTS=3 \
+  bash "$SEED" > "$WORK/retry.out" 2>&1
+check_nonzero "an unreachable repository fails closed" $?
+tries="$(grep -c 'attempt .* for android-all-instrumented-.*\.jar failed' "$WORK/retry.out" || true)"
+if [ "$tries" -ge 2 ]; then ok "the fetch is retried ($tries attempts logged)"; else bad "no retries logged ($tries)"; fi
+grep -q "$ART-$VERSION" "$WORK/retry.out" && ok "the failure names the artifact it could not fetch" || bad "failure does not name the artifact"
+
+# 6. WARM CACHE: a present jar means NO fetch, proven against a repository that does not exist.
+M2="$WORK/m2-warm"
+mkdir -p "$M2/$(dirname "$REL")"
+for ext in jar jar.sha512 pom pom.sha512; do cp "$REPO/$REL.$ext" "$M2/$REL.$ext"; done
+ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$WORK/no-such-repo" bash "$SEED" > "$WORK/warm.out" 2>&1
+check_zero "a warm cache needs no repository" $?
+grep -q "already present" "$WORK/warm.out" && ok "a warm cache performs no fetch" || bad "a warm cache still fetched"
+
+# 6b. A CACHED JAR THAT FAILS ITS DIGEST IS NOT WARM. Presence alone is what let a truncated file be
+#     treated as cached in the first place, so the warm short circuit must verify, and refetch when
+#     the digest disagrees.
+M2="$WORK/m2-warmcorrupt"
+mkdir -p "$M2/$(dirname "$REL")"
+for ext in jar jar.sha512 pom pom.sha512; do cp "$REPO/$REL.$ext" "$M2/$REL.$ext"; done
+printf 'truncated after a restore\n' > "$M2/$REL.jar"
+ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" bash "$SEED" > "$WORK/warmcorrupt.out" 2>&1
+check_zero "a cached jar failing its digest is refetched" $?
+grep -q "fails its checksum; refetching" "$WORK/warmcorrupt.out" \
+  && ok "the warm check verifies the digest rather than trusting presence" \
+  || bad "the warm check did not notice the corrupt cached jar"
+cmp -s "$REPO/$REL.jar" "$M2/$REL.jar" && ok "the refetched jar matches the repository" || bad "the corrupt jar was left in place"
+
+# 6c. A cached jar with NO DIGEST cannot be verified, so it must be refetched, not trusted. This is
+#     the state an interrupted download leaves, and treating it as warm is how a truncated jar gets
+#     used.
+M2="$WORK/m2-warmpartial"
+mkdir -p "$M2/$(dirname "$REL")"
+printf 'jar with no digest beside it\n' > "$M2/$REL.jar"
+ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" bash "$SEED" > "$WORK/warmpartial.out" 2>&1
+check_zero "a cached jar with no digest is refetched" $?
+cmp -s "$REPO/$REL.jar" "$M2/$REL.jar" \
+  && ok "the unverifiable cached jar was replaced" \
+  || bad "an unverifiable cached jar was trusted"
+
+# 6d. THE STEP OUTPUT THE SAVE GATE READS. hashFiles only sees files under GITHUB_WORKSPACE, so a
+#     gate written against ~/.m2 is always empty and the save silently never runs. The script must
+#     report presence itself, on every path: yes when a verified jar is in place, no when it failed.
+GHO="$WORK/gho-cold"; : > "$GHO"
+M2="$WORK/m2-out-cold"
+GITHUB_OUTPUT="$GHO" ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" \
+  bash "$SEED" > "$WORK/out-cold.out" 2>&1
+check_zero "a successful seed runs" $?
+[ "$(output_of "$GHO")" = yes ] && ok "a successful seed reports jar-present=yes" || bad "seed reported '$(output_of "$GHO")' after seeding"
+
+GHO="$WORK/gho-warm"; : > "$GHO"
+M2="$WORK/m2-out-warm"
+mkdir -p "$M2/$(dirname "$REL")"
+for ext in jar jar.sha512 pom pom.sha512; do cp "$REPO/$REL.$ext" "$M2/$REL.$ext"; done
+GITHUB_OUTPUT="$GHO" ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$WORK/no-such-repo" \
+  bash "$SEED" > "$WORK/out-warm.out" 2>&1
+check_zero "a warm cache runs" $?
+[ "$(output_of "$GHO")" = yes ] && ok "a warm cache also reports jar-present=yes" || bad "warm cache reported '$(output_of "$GHO")'"
+
+GHO="$WORK/gho-fail"; : > "$GHO"
+GITHUB_OUTPUT="$GHO" ROBOLECTRIC_M2_DIR="$WORK/m2-out-fail" \
+  ROBOLECTRIC_MAVEN_REPO="file://$RETRYREPO" ROBOLECTRIC_SEED_ATTEMPTS=1 \
+  bash "$SEED" > "$WORK/out-fail.out" 2>&1
+check_nonzero "a failed seed fails" $?
+[ "$(output_of "$GHO")" = no ] \
+  && ok "a failed seed reports jar-present=no, so nothing empty is cached" \
+  || bad "failed seed reported '$(output_of "$GHO")' instead of no"
+
+# 7. EVERY JOB THAT RUNS THE SUITE SEEDS BEFORE THE TESTS AND SAVES UNDER if: always().
+WFS="$(grep -rl ':modules:services:voice:testDebugUnitTest' "$DIR/.github/workflows" | sort)"
+[ -n "$WFS" ] || { echo "FAIL: no workflow runs the voice suite"; exit 1; }
+cat > "$WORK/wf.rb" <<'RUBY'
+  keys = {}
+  ARGV.each do |path|
+    wf = YAML.load_file(path)
+    wf["jobs"].each do |name, job|
+      steps = job["steps"] || []
+      ti = steps.index { |s| s["run"].to_s.include?(":modules:services:voice:testDebugUnitTest") }
+      next unless ti
+      si = steps.index { |s| s["run"].to_s.include?("robolectric-seed.sh") }
+      abort "#{File.basename(path)}:#{name} runs the suite with NO seed step" unless si
+      abort "#{File.basename(path)}:#{name} seeds AFTER the tests" unless si < ti
+      save = steps.find { |s| (s["uses"] || "").include?("actions/cache/save") }
+      abort "#{File.basename(path)}:#{name} has no actions/cache/save" unless save
+      abort "#{File.basename(path)}:#{name} saves only on success" unless save["if"].to_s.include?("always()")
+      gate = save["if"].to_s
+      # hashFiles is WORKSPACE-relative: a pattern under ~ can never match, so such a gate is
+      # always false and the save silently never runs. Reject it outright rather than reading it
+      # as a presence check.
+      if gate.include?("hashFiles") && gate =~ /hashFiles\(\s*['"]~/
+        abort "#{File.basename(path)}:#{name} gates the save on hashFiles of a home path, which is always empty"
+      end
+      # The gate must read the seed step's own output, and that step must declare the matching id.
+      m = gate.match(/steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)/)
+      abort "#{File.basename(path)}:#{name} save is not gated on a step output" unless m
+      seed_step = steps[si]
+      abort "#{File.basename(path)}:#{name} seed step has no id" unless seed_step["id"]
+      abort "#{File.basename(path)}:#{name} gate reads '#{m[1]}' but the seed step is '#{seed_step["id"]}'" unless m[1] == seed_step["id"]
+      abort "#{File.basename(path)}:#{name} gate reads '#{m[2]}', not jar-present" unless m[2] == "jar-present"
+      abort "#{File.basename(path)}:#{name} gate does not require 'yes'" unless gate.include?("'yes'") || gate.include?('"yes"')
+      restore = steps.find { |s| (s["uses"] || "").to_s.strip == "actions/cache/restore@v4" }
+      abort "#{File.basename(path)}:#{name} must restore without saving (use cache/restore)" unless restore
+      abort "#{File.basename(path)}:#{name} restores after seeding" unless steps.index(restore) < si
+      keys["#{File.basename(path)}:#{name}"] = [restore["with"]["key"], save["with"]["key"]]
+    end
+  end
+  abort "no job found running the voice suite" if keys.empty?
+  flat = keys.values.flatten.uniq
+  abort "restore/save keys disagree: #{keys.inspect}" if flat.size != 1
+  puts "#{keys.size} job(s): restore -> seed -> tests -> save(always, if jar present), one key"
+RUBY
+ruby -ryaml "$WORK/wf.rb" $WFS > "$WORK/wf.out" 2>&1
+check_zero "every voice job restores, seeds before the tests, and saves unconditionally" $?
+sed 's/^/    /' "$WORK/wf.out"
+
+# 8. THE CONTROLS RUN WHEN THE PINS CHANGE. The seed derives its coordinate from the version catalog
+#    and robolectric.properties; if a bump does not trigger this job, the derivation is unguarded
+#    exactly when it matters. Both the PR path filter and the in-job queue scope must cover them.
+cat > "$WORK/scope.rb" <<'RUBY'
+  wf = YAML.load_file(ARGV[0])
+  on = wf["on"] || wf[true]
+  paths = on["pull_request"]["paths"]
+  pins = %w[gradle/libs.versions.toml modules/services/voice/src/test/resources/robolectric.properties]
+  pins.each do |p|
+    abort "PR path filter misses #{p}" unless paths.include?(p)
+  end
+  # The in-job scope decides for merge_group, where there is no path filter at all.
+  scope = wf["jobs"]["controls"]["steps"].map { |s| s["run"].to_s }.find { |r| r.include?("run=true") }
+  abort "no in-job scope decision found" unless scope
+  regex = scope[/'(\^[^']*)'/, 1]
+  abort "cannot read the scope regex" unless regex
+  re = Regexp.new(regex)
+  pins.each { |p| abort "queue scope misses #{p}" unless re.match?(p) }
+  puts "both pins trigger the controls, on PRs and in the queue"
+RUBY
+ruby -ryaml "$WORK/scope.rb" "$DIR/.github/workflows/release-script-controls.yml" > "$WORK/scope.out" 2>&1
+check_zero "a pin bump runs the seed control on PRs and in the merge queue" $?
+sed 's/^/    /' "$WORK/scope.out"
+
+echo "$PASS passed, $FAIL failed"
+[ "$FAIL" = 0 ]

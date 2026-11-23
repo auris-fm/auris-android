@@ -25,15 +25,21 @@ jobs:
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
       # Robolectric resolves android-all into ~/.m2/repository (its MavenDependencyResolver's
-      # default), so caching that directory is enough: on a hit the class loader finds the jar
-      # locally and nothing touches the network. On a miss it downloads as it does on main.
-      # Keyed on the inputs that decide WHICH jar is needed, so a Robolectric or SDK bump cannot
-      # leave a stale key re-downloading every run.
-      - name: Cache Robolectric android-all jars
-        uses: actions/cache@v4
+      # default), so that is the directory to cache. Keyed on the inputs that decide WHICH jar is
+      # needed, so a Robolectric or SDK bump cannot leave a stale key re-fetching every run.
+      # restore/save rather than actions/cache: the combined action saves only when the job
+      # succeeds, which is exactly when the jar is least likely to have been downloaded.
+      - name: Restore the Robolectric android-all jar
+        uses: actions/cache/restore@v4
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
+      # Seed explicitly rather than relying on the suite to download it. When Gradle serves the test
+      # task from its build cache Robolectric never runs, so nothing lands in ~/.m2 and the save step
+      # would report success while storing nothing. Seeding must not depend on the tests running.
+      - name: Seed the Robolectric android-all jar
+        id: robolectric-seed
+        run: bash .github/scripts/robolectric-seed.sh
       - name: Run voice module Robolectric unit tests (self-contained)
         shell: bash
         run: set -o pipefail; ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log
@@ -56,6 +62,19 @@ jobs:
             modules/services/voice/build/reports/tests/testDebugUnitTest/
             modules/services/voice/build/test-results/testDebugUnitTest/
             voice-test-output.log
+
+      # Save whatever the seed produced, even when the tests fail: a Maven outage that reds the suite
+      # must still leave the jar cached for the next run. Gated on the file being present so a failed
+      # seed cannot store an empty directory under the good key.
+      - name: Save the Robolectric android-all jar
+        # The seed step reports whether a complete, verified jar is in place. hashFiles cannot be
+        # used here: it only sees files under GITHUB_WORKSPACE, so a ~/.m2 pattern is always empty
+        # and the save would silently never run.
+        if: always() && steps.robolectric-seed.outputs.jar-present == 'yes'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
 
   cloud-transport-tests:
     name: "repositories:cloud transport tests"

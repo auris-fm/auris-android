@@ -90,6 +90,88 @@ for f in "$WF"/*.yml; do
   check "$base listens to merge_group" "yes" "$(listens_to_queue "$f" && echo yes || echo no)"
 done
 
+echo "== a queue trigger names no activity type: a merge group reports only checks_requested"
+for f in "$WF"/*.yml; do
+  base="$(basename "$f")"
+  # A `merge_group:` block may not carry any other type. `types:` listing events that a
+  # merge group never reports is worse than no trigger at all: the check looks wired up
+  # and never arrives.
+  types="$(trigger_block "$f" | awk '/^[[:space:]]+merge_group:[[:space:]]*$/ { g = 1; next } g && /^[[:space:]]+types:/ { print; exit }')"
+  check "$base names no activity type on merge_group" "" "$types"
+done
+
+echo "== a required check is never filtered by path in the queue"
+for f in "$WF"/*.yml; do
+  base="$(basename "$f")"
+  if [ "$base" = "$RELEASE_WORKFLOW" ]; then continue; fi
+  case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
+  # A path filter on a required check means a queued change touching none of those
+  # paths gets no run and no status, and the queue waits forever. The filter belongs
+  # inside the job.
+  filter="$(trigger_block "$f" | awk '/^[[:space:]]+merge_group:[[:space:]]*$/ { g = 1; next } g && /^[[:space:]]+[a-z_-]+:/ && !/^[[:space:]]+(paths|paths-ignore):/ { g = 0 } g && /^[[:space:]]+(paths|paths-ignore):/ { print "path filter"; exit }')"
+  check "$base is not path-filtered in the queue" "" "$filter"
+done
+
+echo "== a required check has a step that runs on a queue build"
+# A step with a false condition does not run. A job where every step is conditional
+# reports success with nothing run behind it, which is how a required check becomes
+# decorative. So each of these workflows must have one step whose `run:` or `uses:` line
+# carries no `if:` of its own.
+unconditional_step() { # file -> 0 when some step cannot be skipped
+  python3 - "$1" <<'PYTHON'
+import sys
+
+lines = open(sys.argv[1]).read().split("\n")
+in_steps = False
+step = None
+
+def flush():
+    # A step is unconditional when neither side of the pair carries a condition.
+    if step and not step[1] and step[2]:
+        return True
+    return False
+
+found = False
+for line in lines:
+    if line.startswith("    steps:"):
+        in_steps = True
+        continue
+    if in_steps and line[:3] not in ("   ",) and line:
+        if flush():
+            found = True
+        in_steps = False
+        step = None
+    if not in_steps:
+        continue
+    stripped = line.lstrip()
+    if stripped.startswith("- "):
+        if flush():
+            found = True
+        # The step's first line may itself carry the condition or the action.
+        step = [stripped, stripped.startswith("- if:"), False]
+        if stripped.startswith(("- run:", "- uses:")):
+            step[2] = True
+        continue
+    if step is None:
+        continue
+    if stripped.startswith("if:"):
+        step[1] = True
+    elif stripped.startswith(("run:", "uses:")):
+        step[2] = True
+if flush():
+    found = True
+sys.exit(0 if found else 1)
+PYTHON
+}
+
+for f in "$WF"/*.yml; do
+  base="$(basename "$f")"
+  if [ "$base" = "$RELEASE_WORKFLOW" ]; then continue; fi
+  case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
+  check "$base runs a step on a queue build" "yes" \
+    "$(unconditional_step "$f" && echo yes || echo no)"
+done
+
 echo "== the release workflow never runs for a queue build"
 check "release workflow is excluded from merge_group" "no" \
   "$(listens_to_queue "$WF/$RELEASE_WORKFLOW" && echo yes || echo no)"

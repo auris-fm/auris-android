@@ -3,14 +3,14 @@ name: ☢️ Trigger Danger On Buildkite
 on:
   pull_request:
     types: [labeled, unlabeled, milestoned, demilestoned, ready_for_review, edited]
-  # A queue build is a new head about to land. Danger's checks are the same ones a
-  # pull request gets, so the queue run uses the same event types.
+  # A merge group reports only `checks_requested`, and the event carries no pull request,
+  # so there is nothing for Danger to lint. The job below reports success instead of
+  # running, which keeps this check required without changing any branch rule.
   merge_group:
-    types: [labeled, unlabeled, milestoned, demilestoned, ready_for_review, edited]
 
 jobs:
   dangermattic:
-    if: ${{ (github.event.pull_request.draft == false) }}
+    if: ${{ github.event_name != 'merge_group' && github.event.pull_request.draft == false }}
     uses: Automattic/dangermattic/.github/workflows/reusable-retry-buildkite-step-on-events.yml@v1
     with:
       org-slug: automattic
@@ -19,3 +19,13 @@ jobs:
       build-commit-sha: ${{ github.event.pull_request.head.sha }}
     secrets:
       buildkite-api-token: ${{ secrets.TRIGGER_BK_BUILD_TOKEN }}
+
+  # The queue build reports this job's name, so it must exist and pass. A skipped job
+  # reports nothing a required check can accept, which is why this is a success rather
+  # than an `if:` that skips the job above.
+  queue-passes:
+    if: ${{ github.event_name == 'merge_group' }}
+    name: "dangermattic"
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "A merge group reports checks_requested only; Danger already ran on the pull request."

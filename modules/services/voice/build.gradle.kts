@@ -43,6 +43,15 @@ android {
                     "-DANDROID_STL=c++_shared",
                     "-DANDROID_LD_FLAGS=-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384",
                 )
+                // Pre-populated native dependency trees, when the caller prepared them. Without
+                // these, CMake clones llama.cpp and oboe once per ABI at configure time; with them
+                // every ABI shares one tree per pin and clones nothing. Set by the release step
+                // through .buildkite/scripts/native-deps.sh; absent for a plain local build, which
+                // then fetches as before.
+                System.getenv("AURIS_NATIVE_CMAKE_ARGS")
+                    ?.split(" ")
+                    ?.filter { it.isNotBlank() }
+                    ?.let { arguments += it }
             }
         }
         ndk {

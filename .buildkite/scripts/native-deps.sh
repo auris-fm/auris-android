@@ -74,7 +74,7 @@ prepare() { # prepare <name> <url> <sha>
   # Warm: the tree is present AND at the pinned revision. Presence alone is not enough -- a tree
   # whose git metadata is gone cannot be verified, and an unverifiable tree must be refetched.
   if [ -d "$dest" ] && [ "$(git -C "$dest" rev-parse HEAD 2>/dev/null || true)" = "$sha" ]; then
-    echo "--- native: $name $sha already cached"
+    echo "--- native: $name $sha already cached" >&2
     return 0
   fi
 
@@ -101,7 +101,7 @@ prepare() { # prepare <name> <url> <sha>
     if [ "$rc" -eq 0 ] && [ "$(git -C "$stage/src" rev-parse HEAD 2>/dev/null || true)" = "$sha" ]; then
       mv "$stage/src" "$dest"
       rm -rf "$stage"
-      echo "--- native: $name $sha fetched"
+      echo "--- native: $name $sha fetched" >&2
       return 0
     fi
     echo "--- native: $name attempt $attempt/$ATTEMPTS failed (exit $rc)" >&2
@@ -123,9 +123,11 @@ while IFS=$'\t' read -r name url sha; do
     oboe)  url="${AURIS_NATIVE_OBOE_URL:-$url}";  sha="${AURIS_NATIVE_OBOE_SHA:-$sha}";;
   esac
   prepare "$name" "$url" "$sha"
-  EXPORTS="${EXPORTS}FETCHCONTENT_SOURCE_DIR_${upper}=\"$CACHE/$name/$sha\""$'\n'
+  EXPORTS="${EXPORTS}FETCHCONTENT_SOURCE_DIR_${upper}=$CACHE/$name/$sha"$'\n'
 done < <(declarations)
 
-# The overrides are printed once, as NAME="path" lines. CMake reads them as CACHE variables, so
+# The overrides are printed once, as NAME=path lines with NO quotes: the caller turns each into a
+# -D argument and nothing between Gradle and cmake would strip quote characters from the value.
+# Progress goes to stderr so stdout carries only these lines. CMake reads them as CACHE variables, so
 # the caller turns each into a -D argument; this script does not need to know how the build runs.
 printf '%s' "$EXPORTS"

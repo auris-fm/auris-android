@@ -246,6 +246,46 @@ if [ "$RC" -ne 0 ]; then
   echo "    (configure stopped later, as expected off-Android: $(grep -m1 'CMake Error' "$WORK/realcmake.out" | cut -c1-100))"
 fi
 
+# --- 9c. THE PRODUCER AND CONSUMER AS A PAIR: real helper -> the release step's OWN parse loop ->
+#     the Gradle block's OWN split -> real cmake. Building the -D arguments by hand here would test
+#     a seam that production does not use, and both defects below shipped through exactly that gap.
+PAIR_CACHE="$WORK/pair-cache"
+AURIS_NATIVE_DEPS_CACHE="$PAIR_CACHE" \
+AURIS_NATIVE_LLAMA_URL="$LLAMA_URL" AURIS_NATIVE_LLAMA_SHA="$LLAMA_SHA2" \
+AURIS_NATIVE_OBOE_URL="$OBOE_URL" AURIS_NATIVE_OBOE_SHA="$OBOE_SHA" \
+bash "$SCRIPT" > "$WORK/pair-exports" 2>"$WORK/pair-stderr"
+check "the helper succeeds for the pair case" 0 $?
+
+# Extracted from the release step itself, not retyped: a copy here could drift from what runs.
+sed -n '/^NATIVE_CMAKE_ARGS=()/,/^done < "\$NATIVE_EXPORTS"/p' \
+  "$DIR/.buildkite/commands/auris-release-aab.sh" > "$WORK/parse-loop.sh"
+check "the release step's parse loop was extracted" yes "$([ -s "$WORK/parse-loop.sh" ] && echo yes || echo no)"
+NATIVE_EXPORTS="$WORK/pair-exports"
+# shellcheck disable=SC1090
+. "$WORK/parse-loop.sh"
+check "exactly one argument per dependency" 2 "${#NATIVE_CMAKE_ARGS[@]}"
+for arg in "${NATIVE_CMAKE_ARGS[@]}"; do
+  case "$arg" in
+    -DFETCHCONTENT_SOURCE_DIR_LLAMA="$PAIR_CACHE/llama/$LLAMA_SHA2"|\
+    -DFETCHCONTENT_SOURCE_DIR_OBOE="$PAIR_CACHE/oboe/$OBOE_SHA")
+      ok "argument is exactly a source-dir override: ${arg%%=*}";;
+    *) bad "stray or malformed cmake argument: $arg";;
+  esac
+done
+# No quote characters may survive into the path: nothing between Gradle and cmake strips them.
+check "no literal quotes reach cmake" no "$(printf '%s\n' "${NATIVE_CMAKE_ARGS[@]}" | grep -q '"' && echo yes || echo no)"
+check "progress goes to stderr, not into the overrides" yes "$([ -s "$WORK/pair-stderr" ] && echo yes || echo no)"
+
+# The Gradle block splits the joined string on spaces; reproduce THAT, then run real cmake.
+JOINED="$(printf '%s ' "${NATIVE_CMAKE_ARGS[@]}")"
+rm -rf "$WORK/consumer/pair"
+# shellcheck disable=SC2086
+cmake -S "$WORK/consumer" -B "$WORK/consumer/pair" $JOINED > "$WORK/pair-cmake.out" 2>&1
+check "cmake configures from the producer's own output" 0 $?
+check "cmake resolved the llama tree to a real directory" yes "$(grep -q "LLAMA_SRC=$PAIR_CACHE/llama/$LLAMA_SHA2$" "$WORK/pair-cmake.out" && echo yes || echo no)"
+check "cmake resolved the oboe tree to a real directory" yes "$(grep -q "OBOE_SRC=$PAIR_CACHE/oboe/$OBOE_SHA$" "$WORK/pair-cmake.out" && echo yes || echo no)"
+check "the pair path attempted no clone" no "$(grep -qi 'Cloning into' "$WORK/pair-cmake.out" && echo yes || echo no)"
+
 # --- 10. Both declarations carry a TRANSFER BOUND, and oboe is pinned to a commit. --------------
 ruby - "$CML" <<'RUBY' > "$WORK/shape.out" 2>&1
   src = File.read(ARGV[0])

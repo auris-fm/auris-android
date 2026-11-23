@@ -26,6 +26,9 @@ on:
       # it: otherwise a renamed or removed API is first discovered after merge.
       - "Gemfile"
       - "Gemfile.lock"
+      # The native control reads the pins and the cmake wiring from these two files.
+      - "modules/services/voice/src/main/cpp/CMakeLists.txt"
+      - "modules/services/voice/build.gradle.kts"
   merge_group:
 
 jobs:
@@ -63,7 +66,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^gradle/libs\.versions\.toml$|^modules/services/voice/src/test/resources/robolectric\.properties$|^Gemfile(\.lock)?$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^gradle/libs\.versions\.toml$|^modules/services/voice/src/test/resources/robolectric\.properties$|^Gemfile(\.lock)?$|^modules/services/voice/(src/main/cpp/CMakeLists\.txt|build\.gradle\.kts)$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -98,6 +101,10 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         name: Release gate wiring control
         run: ruby .buildkite/scripts/release-gates.test.rb
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Native dependency control
+        run: bash .buildkite/scripts/native-deps.test.sh
 
       # No Gradle step here on purpose: the seed control exercises the cold-runner path itself, with
       # an empty Gradle home, so it proves the script fetches what it needs rather than assuming a

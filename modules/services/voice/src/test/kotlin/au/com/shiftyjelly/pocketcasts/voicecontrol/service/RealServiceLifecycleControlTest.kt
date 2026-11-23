@@ -1,8 +1,13 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
 import android.content.Intent
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Looper
 import android.provider.Settings
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import dagger.hilt.android.testing.HiltTestApplication
@@ -10,8 +15,10 @@ import javax.inject.Inject
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -162,4 +169,122 @@ class RealServiceLifecycleControlTest {
             service.lifecycle.isStarted,
         )
     }
+
+    /**
+     * A SECOND START COMMAND MUST NOT ADD A SECOND WATCHER OF THE OFFERED SURFACE.
+     *
+     * The controller starts the service again whenever the gate allows while it believes the service
+     * is not running, and Android delivers that as another `onStartCommand` to the SAME live
+     * instance. A watcher launched per start command therefore accumulates one collector per command
+     * for the rest of the service's life, each holding the scope and re-running the same decision.
+     *
+     * HOW THIS IS OBSERVED. The offered surface is a StateFlow, so its subscriber count is the
+     * observable: no test-only accessor and no field the fix introduces is read here. The surface is
+     * driven through the platform's own device callback, and the answer checked is the service's
+     * failed-attempt record — the state the watcher exists to maintain.
+     */
+    @Test
+    fun `repeated start commands leave one watcher of the offered surface`() {
+        hiltRule.inject()
+        val audioManager = RuntimeEnvironment.getApplication()
+            .getSystemService(android.content.Context.AUDIO_SERVICE) as AudioManager
+        // Connected-but-unrouted Bluetooth: A2DP output with an enumerated SCO input and the link
+        // down is the acquirable candidate surface, which is what a failed attempt records against.
+        shadowOf(audioManager).setOutputDevices(
+            listOf(org.robolectric.shadows.AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP).build()),
+        )
+        shadowOf(audioManager).setInputDevices(
+            listOf(org.robolectric.shadows.AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BLUETOOTH_SCO).build()),
+        )
+
+        // The monitor reads the device list when it is constructed, so the platform's answer has to
+        // be in place before the graph builds it. Deliver the event as well: the injected monitor is
+        // the graph singleton, and its published surface is what the service watches.
+        routeMonitor.onDevicesChanged()
+        awaitOfferedSurface(AudioRoute.BluetoothA2dpOnly)
+
+        val controller = build()
+        val service = controller.create().get()
+        assertEquals(
+            "precondition: the candidate surface is what the monitor offers",
+            AudioRoute.BluetoothA2dpOnly,
+            routeMonitor.availability.value,
+        )
+        // The FIRST start command establishes whatever watching this service does. What must not
+        // happen is growth: the controller starts the service again whenever the gate allows while it
+        // believes the service is not running, and each of those arrives here as another command on
+        // the same live instance.
+        service.onStartCommand(Intent(), 0, 1)
+        shadowOf(Looper.getMainLooper()).idle()
+        val afterFirstStart = offeredSurfaceSubscribers()
+        assertTrue(
+            "precondition: the first start watches the offered surface",
+            afterFirstStart > 0,
+        )
+
+        service.onStartCommand(Intent(), 0, 2)
+        service.onStartCommand(Intent(), 0, 3)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(
+            "later start commands must add NO watcher of the offered surface; one launched per " +
+                "command accumulates a collector for every later start of this instance",
+            afterFirstStart,
+            offeredSurfaceSubscribers(),
+        )
+
+        // And the watcher still does its job after the repeated start: a failed attempt's record
+        // names the surface it was tried on, and a different surface being offered is what marks
+        // that record as describing a situation that has passed.
+        setFailedAttemptSurface(service, AudioRoute.BluetoothA2dpOnly)
+        shadowOf(audioManager).setOutputDevices(emptyList())
+        shadowOf(audioManager).setInputDevices(emptyList())
+        routeMonitor.onDevicesChanged()
+        awaitOfferedSurface(AudioRoute.Unknown)
+
+        // The watcher's own continuation is dispatched on Main, so let it run before reading what it
+        // recorded: the surface being published and the service reacting to it are two steps.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && !failedAttemptSurfaceLeft(service)) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        assertTrue(
+            "after a repeated start the watcher must still notice the offered surface leaving the " +
+                "one a failed attempt was recorded against",
+            failedAttemptSurfaceLeft(service),
+        )
+    }
+
+    /**
+     * How many collectors the monitor's offered-surface flow currently has.
+     *
+     * The count lives on the mutable flow behind the published read-only view, so it is read from
+     * the monitor's own state: the public `StateFlow` deliberately does not expose it, and adding
+     * product API to make a test possible would test the accessor rather than the behaviour.
+     */
+    private fun offeredSurfaceSubscribers(): Int {
+        val flow = routeMonitor.javaClass.getDeclaredField("mutableAvailability")
+            .apply { isAccessible = true }.get(routeMonitor) as kotlinx.coroutines.flow.MutableStateFlow<*>
+        return flow.subscriptionCount.value
+    }
+
+    /** Let the monitor's own debounced read publish [expected]; the debounce runs on real threads. */
+    private fun awaitOfferedSurface(expected: AudioRoute) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && routeMonitor.availability.value != expected) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        assertEquals("the offered surface did not settle", expected, routeMonitor.availability.value)
+    }
+
+    private fun setFailedAttemptSurface(service: VoiceControlService, surface: AudioRoute) {
+        service.javaClass.getDeclaredField("failedAttemptAvailability")
+            .apply { isAccessible = true }.set(service, surface)
+    }
+
+    private fun failedAttemptSurfaceLeft(service: VoiceControlService): Boolean =
+        service.javaClass.getDeclaredField("failedAttemptSurfaceLeft")
+            .apply { isAccessible = true }.getBoolean(service)
 }

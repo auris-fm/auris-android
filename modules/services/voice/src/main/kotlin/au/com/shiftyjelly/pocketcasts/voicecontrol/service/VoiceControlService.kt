@@ -139,6 +139,13 @@ class VoiceControlService : Service() {
     private var acquisitionJob: Job? = null
 
     /**
+     * The one watcher of the offered surface, for this instance's whole life. Android delivers every
+     * later start request as another `onStartCommand` to the SAME live instance, so a watcher launched
+     * per command would add a collector each time and keep it until the scope dies.
+     */
+    private var offeredSurfaceJob: Job? = null
+
+    /**
      * The start that has been ACCEPTED but may still be waiting for model readiness. `engineStart`
      * only flips true once capture is really up, so without this a second start would slip into the
      * readiness window (reviewer a85cf8fe). Cleared when the start coroutine finishes, so a failed
@@ -432,7 +439,10 @@ class VoiceControlService : Service() {
      * failed one.
      */
     private fun watchOfferedSurface() {
-        serviceScope.launch(Dispatchers.Main.immediate) {
+        // ONE WATCHER PER INSTANCE: a start command arriving while the watcher is running is the
+        // controller asking again, not a second thing to watch.
+        if (offeredSurfaceJob?.isActive == true) return
+        offeredSurfaceJob = serviceScope.launch(Dispatchers.Main.immediate) {
             audioRouteMonitor.availability.collect { offered ->
                 if (failedAttemptAvailability != null && offered != failedAttemptAvailability) {
                     failedAttemptSurfaceLeft = true

@@ -1634,7 +1634,7 @@ class FingerprintTimingManager @Inject constructor(
                 referenceTime = best.timestampSeconds.toDouble(),
                 score = best.score,
             )
-            cloudCandidatesForTest = cloudCandidatesForTest + candidate
+            cloudCandidateRecorder?.invoke(candidate)
             val committed = consider(candidate, isDebug)
             // Log the first mapping the drift filter actually commits, not a
             // candidate it may reject (spec: the turn's context depends on it).
@@ -1782,17 +1782,30 @@ class FingerprintTimingManager @Inject constructor(
         cloudMatcher = matcher
     }
 
-    /** Test seam: run the cloud matching path over completed windows. Single-threaded tests only. */
+    /**
+     * Test seam: run the cloud matching path over completed windows and return what it offered
+     * the drift filter, before the filter judged it. Single-threaded tests only.
+     *
+     * The recording lives in this call, not in the matching loop: production installs no
+     * recorder, so nothing accumulates per window there.
+     */
     @VisibleForTesting
-    internal fun processCloudWindowsForTest(windows: List<CloudFingerprinter.Window>, startOffset: Double) {
-        cloudCandidatesForTest = emptyList()
-        processCloudMatches(windows, startOffset)
+    internal fun processCloudWindowsForTest(
+        windows: List<CloudFingerprinter.Window>,
+        startOffset: Double,
+    ): List<TimeMappingEntry> {
+        val offered = mutableListOf<TimeMappingEntry>()
+        cloudCandidateRecorder = { offered.add(it) }
+        try {
+            processCloudMatches(windows, startOffset)
+        } finally {
+            cloudCandidateRecorder = null
+        }
+        return offered
     }
 
-    /** What the cloud path offered the drift filter on the last test run, before the filter judged it. */
-    @VisibleForTesting
-    internal var cloudCandidatesForTest: List<TimeMappingEntry> = emptyList()
-        private set
+    /** Observes candidates as the cloud path offers them. Null outside tests; never set in production. */
+    private var cloudCandidateRecorder: ((TimeMappingEntry) -> Unit)? = null
 
     companion object {
         /** Core eager-pass gate (assumes the platform check already passed). */

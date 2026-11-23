@@ -79,8 +79,7 @@ class CloudReferenceAcceptanceTest {
     /** Runs the cloud path over one window and returns what the drift filter was offered. */
     private fun candidatesFrom(matcher: CloudReferenceMatcher, seconds: Int, querySize: Int): List<FingerprintTimingManager.TimeMappingEntry> {
         manager.stubCloudMatcher(matcher)
-        manager.processCloudWindowsForTest(windowAt(seconds, querySize), startOffset = 0.0)
-        return manager.cloudCandidatesForTest
+        return manager.processCloudWindowsForTest(windowAt(seconds, querySize), startOffset = 0.0)
     }
 
     @Test

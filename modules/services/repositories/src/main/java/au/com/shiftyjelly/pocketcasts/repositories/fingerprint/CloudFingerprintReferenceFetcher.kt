@@ -23,7 +23,6 @@ import timber.log.Timber
  * Returns null on any failure (unconfigured, network, decode, no checkpoints)
  * so callers degrade gracefully to the transcript-sync path.
  */
-@Singleton
 /**
  * What the manager needs from the cloud reference source: one reference's bytes, and a matcher built
  * from them. Naming the two operations lets a caller supply the fetch boundary — or a matcher that
@@ -40,6 +39,7 @@ interface CloudReferenceSource {
     fun buildMatcher(data: ByteArray): CheckpointMatcher?
 }
 
+@Singleton
 class CloudFingerprintReferenceFetcher @Inject constructor(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this

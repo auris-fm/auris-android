@@ -210,11 +210,10 @@ class FingerprintDecodeHarness(
     private fun fakeStreamer(): StreamingWindowedFingerprinter {
         val streamer = mock(StreamingWindowedFingerprinter::class.java)
         whenever(streamer.pushSamplesF32(any(), any())).thenReturn(streamedWindows)
-        whenever(streamer.flush()).thenAnswer {
-            // The flush is the last thing the decode loop does, so it marks the decode complete.
-            decoded.set(true)
-            tailWindows
-        }
+        whenever(streamer.flush()).thenReturn(tailWindows)
+        // Close runs after the loop has committed the flushed tail, so waiting on it cannot
+        // observe a map that is still missing its last windows.
+        org.mockito.kotlin.doAnswer { decoded.set(true) }.whenever(streamer).close()
         whenever(streamer.durationMs()).thenReturn(0u)
         return streamer
     }

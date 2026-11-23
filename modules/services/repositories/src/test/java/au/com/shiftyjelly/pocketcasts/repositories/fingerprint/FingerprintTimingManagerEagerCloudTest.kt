@@ -165,6 +165,9 @@ class FingerprintTimingManagerEagerCloudTest {
         )
 
         assertEquals(3, manager.mappingSnapshot.size)
+        // The signal waits for the tail to be committed, so returning at all means the last
+        // windows were scored. The map is complete the moment the harness reports completion.
+        assertEquals(listOf(0.0, 1.0, 2.0), manager.mappingSnapshot.map { it.playbackTime })
     }
 
     @Test

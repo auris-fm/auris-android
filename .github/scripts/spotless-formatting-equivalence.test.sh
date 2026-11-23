@@ -252,6 +252,17 @@ KT
 printf 'val s = %s\n * ab\n%s\n' "$T" "$T" > File.kt
 expect fail "a whitespace edit on a KDoc-looking raw-string line is not formatting"
 
+# An import-looking line inside a raw string: import-ness must come from position too, or the
+# line is dropped from both sides and its content never compared.
+fixture raw-import-line <<KT
+val s = $T
+import a b
+real line
+$T
+KT
+printf 'val s = %s\nreal line\nimport a b\n%s\n' "$T" "$T" > File.kt
+expect fail "moving an import-looking line inside a raw string is not formatting"
+
 fixture raw-blank-line <<KT
 val msg = $T
 line one

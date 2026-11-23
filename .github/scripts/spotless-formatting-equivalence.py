@@ -177,11 +177,21 @@ def tokens(text):
     return render(text, transform)
 
 
+def is_import(line, inside, start):
+    """An import only counts as one outside a literal: a raw string can contain such a line."""
+    if line_is_literal(inside, start, line):
+        return False
+    return line.strip().startswith("import ")
+
+
 def split_imports(text):
-    lines = text.split("\n")
-    imports = sorted(l.strip() for l in lines if l.strip().startswith("import "))
-    rest = "\n".join(l for l in lines if not l.strip().startswith("import "))
-    return imports, rest
+    inside = literal_mask(text)
+    imports, rest = [], []
+    pos = 0
+    for line in text.split("\n"):
+        (imports if is_import(line, inside, pos) else rest).append(line)
+        pos += len(line) + 1
+    return sorted(l.strip() for l in imports), "\n".join(rest)
 
 
 def literal_mask(text):
@@ -243,7 +253,7 @@ def ordered_lines(text):
     pos = 0
     for line in text.split("\n"):
         literal = line_is_literal(inside, pos, line)
-        keep = (line.strip() or literal) and not line.strip().startswith("import ")
+        keep = (line.strip() or literal) and not is_import(line, inside, pos)
         if keep:
             out.append(strip_line(line, inside, pos))
         pos += len(line) + 1

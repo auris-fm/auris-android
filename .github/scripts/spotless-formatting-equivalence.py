@@ -37,6 +37,20 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, text=True, check=True).stdout
 
 
+def _is_char_literal(text, i):
+    """True when the quote at i opens a Kotlin character literal rather than something else.
+
+    Kotlin has no single-quoted strings, so a stray apostrophe (in a comment, say) must not open
+    a span: it would swallow the code after it. Accept only '\\x' and 'x' shapes.
+    """
+    if text.startswith("'\\", i):
+        j = i + 2
+        while j < len(text) and text[j] != "'" and text[j] != "\n":
+            j += 1
+        return j < len(text) and text[j] == "'"
+    return i + 2 < len(text) and text[i + 2] == "'" and text[i + 1] != "\n"
+
+
 TRIPLE = chr(34) * 3
 
 
@@ -67,7 +81,7 @@ def split_spans(text):
             spans.append(("lit", text[i:end]))
             i = end
             continue
-        if ch in '"`':
+        if ch in '"`' or (ch == "'" and _is_char_literal(text, i)):
             flush_code()
             j = i + 1
             while j < n:
@@ -152,7 +166,10 @@ def ordered_lines(text):
     out = []
     pos = 0
     for line in text.split("\n"):
-        if line.strip() and not line.strip().startswith("import "):
+        blank_inside_literal = not line.strip() and any(
+            inside[pos : pos + len(line) + 1]
+        )
+        if (line.strip() or blank_inside_literal) and not line.strip().startswith("import "):
             kept = []
             quote = None
             for offset, ch in enumerate(line):

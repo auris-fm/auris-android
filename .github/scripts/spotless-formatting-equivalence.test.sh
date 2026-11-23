@@ -173,6 +173,52 @@ KT
 printf 'fun f() {\n    g()\n    h()\n}\n' > File.kt
 expect fail "adding a statement is not formatting"
 
+fixture char-literal <<'KT'
+fun f() {
+    val q = '"'
+    g()
+}
+KT
+printf 'fun f() {\n        val q = %s\n        g()\n}\n' "'\"'" > File.kt
+expect pass "re-indenting a line with a char literal is formatting"
+
+fixture after-char-literal <<'KT'
+fun f() {
+    val q = '"'
+    val a = 1
+}
+KT
+printf 'fun f() {\n    val q = %s\n    val a = 2\n}\n' "'\"'" > File.kt
+expect fail "an edit after a char literal is still seen"
+
+# A double-quote CHAR literal followed by a real string on the same line: without char-literal
+# awareness the scanner pairs the wrong quotes and treats the real string as code, so editing
+# its contents compares equal. This is the case that separates the two implementations.
+fixture char-then-string <<'KT'
+sb.append('"').append("a b")
+KT
+printf 'sb.append(%s).append(%sab%s)\n' "'\"'" "$Q" "$Q" > File.kt
+expect fail "a string edit after a quote char literal is still seen"
+
+fixture raw-blank-line <<KT
+val msg = $T
+line one
+
+line two
+$T
+KT
+printf 'val msg = %s\nline one\nline two\n%s\n' "$T" "$T" > File.kt
+expect fail "deleting a blank line inside a raw string is not formatting"
+
+fixture raw-blank-added <<KT
+val msg = $T
+line one
+line two
+$T
+KT
+printf 'val msg = %s\nline one\n\nline two\n%s\n' "$T" "$T" > File.kt
+expect fail "adding a blank line inside a raw string is not formatting"
+
 # --- root .kts is in scope ------------------------------------------------------------------
 R="$WORK/kts"; mkdir -p "$R"; cd "$R" || exit 1
 git init -q -b main .

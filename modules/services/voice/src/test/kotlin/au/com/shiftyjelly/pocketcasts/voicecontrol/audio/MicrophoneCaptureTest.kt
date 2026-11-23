@@ -3,6 +3,13 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 import android.content.Context
 import android.content.res.AssetManager
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -44,12 +51,19 @@ class MicrophoneCaptureTest {
         override fun startInputStream(): Boolean = true
 
         override fun closeInputCapture() {
+            closeCount++
             capturing = false
         }
 
+        var closeCount = 0
+
         override fun isCapturing(): Boolean = capturing
 
-        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int = -1
+        override fun waitForVadEvent(timeoutMs: Int, generationOut: LongArray): Int {
+            // A starved stream reports nothing and consumes nothing: only a timeout comes back.
+            Thread.sleep(timeoutMs.toLong())
+            return 0
+        }
 
         override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = 0
         override fun getSpeechPcm(buffer: ShortArray): Int = 0
@@ -67,6 +81,11 @@ class MicrophoneCaptureTest {
 
         override fun getSpeechEndSample(): Int = 0
         override fun getSpeechEndStreamPosition(): Long = 0L
+        override fun getFramesConsumed(): Long = consumedFrames
+
+        /** Frames the native VAD has consumed; a starved stream leaves this still. */
+        @Volatile
+        var consumedFrames: Long = 0L
 
         companion object {
             const val DEVICE_ID = 42
@@ -171,6 +190,83 @@ class MicrophoneCaptureTest {
 
         assertEquals(1, hardware.stopCount)
         assertFalse(hardware.capturing)
+    }
+
+    @Test
+    fun `a stream that delivers no frames ends the capture instead of waiting forever`() = runBlocking {
+        val hardware = FakeCaptureHardware()
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
+
+        capture.openStreamForAcquisition()
+        assertTrue(capture.attachCapture())
+
+        // The consumed counter never moves: the stream is running but delivering nothing.
+        val engine = capture.currentEngineForTest()!!
+        val ended = withTimeoutOrNull<Unit>(OboeConfig.STARVED_AFTER_MS + OboeConfig.LIVENESS_POLL_MS * 4 + 2_000) {
+            engine.captureEvents().collect { /* no events expected while starved */ }
+        }
+        assertTrue("a starved stream must end the capture rather than block on it forever", ended === Unit)
+        assertTrue(
+            "the dead stream is torn down, so the owner can restart through the existing path",
+            hardware.stopCount >= 1,
+        )
+    }
+
+    @Test
+    fun `a stream that keeps delivering frames is not treated as starved`() = runBlocking {
+        val hardware = FakeCaptureHardware()
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
+
+        capture.openStreamForAcquisition()
+        assertTrue(capture.attachCapture())
+        val engine = capture.currentEngineForTest()!!
+
+        // Frames keep reaching the VAD — silence still does — so the capture must stay alive for
+        // several starvation windows' worth of polling.
+        val collector = launch(Dispatchers.Default) {
+            runCatching { engine.captureEvents().collect { } }
+        }
+        val deadline = System.currentTimeMillis() + OboeConfig.STARVED_AFTER_MS * 3
+        while (System.currentTimeMillis() < deadline) {
+            hardware.consumedFrames += OboeConfig.FRAMES_PER_POLL
+            delay(40)
+        }
+        assertTrue("a delivering stream must not be ended by the liveness check", collector.isActive)
+        collector.cancelAndJoin()
+    }
+
+    /**
+     * A release can ask to close the acquisition stream after the engine has taken it: the gate
+     * can block between hand-off and the next check, and a stop releases routing after the engine's
+     * own teardown. Native close deletes whatever capture exists — including the replacement a
+     * restart has already opened — so the owner must refuse a close for a stream it no longer owns,
+     * exactly as it refuses a stale engine's stop.
+     */
+    @Test
+    fun `a close for a stream the engine has taken leaves the live capture alone`() {
+        val hardware = FakeCaptureHardware()
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
+
+        capture.openStreamForAcquisition()
+        assertTrue(capture.attachCapture())
+        val owning = capture.currentEngineForTest()!!
+
+        // The engine took this stream (hand-off), and a restart has since opened its replacement.
+        capture.openStreamForAcquisition()
+        assertTrue(capture.attachCapture())
+        val replacement = capture.currentEngineForTest()!!
+        assertTrue("the replacement is a different engine", replacement !== owning)
+        val closesBefore = hardware.closeCount
+
+        // The late release for the FIRST stream arrives now. It must not close the replacement.
+        capture.closeAcquiredStream(generation = owning.generation)
+
+        assertEquals(
+            "a close for a stream that is no longer current must not delete the live capture",
+            closesBefore,
+            hardware.closeCount,
+        )
+        assertTrue("the replacement stays attached", capture.currentEngineForTest() === replacement)
     }
 
     @Test

@@ -3,6 +3,14 @@
 # body on failure (curl -f alone hides it -- the first main trigger failed
 # with a bare 422 and no reason). Env: BUILDKITE_API_TOKEN, BUILDKITE_ORG,
 # BUILDKITE_PIPELINE, GITHUB_SHA. Optional BUILDKITE_API_BASE for tests.
+#
+# ignore_pipeline_branch_filters is REQUIRED here, not an optimisation. This
+# pipeline deliberately keeps "Build branches" off so the GitHub job is the
+# only automatic entry and unmerged code never reaches the signing secrets.
+# That switch also refuses API-created branch builds: without this flag every
+# main push got `422 Branches have been disabled for this pipeline` and no
+# release ever ran. The flag declares a deliberate API-initiated build; the
+# pipeline setting stays off.
 set -euo pipefail
 
 API_BASE="${BUILDKITE_API_BASE:-https://api.buildkite.com/v2}"
@@ -13,7 +21,7 @@ HTTP_CODE=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' -X POST \
   "${API_BASE}/organizations/${BUILDKITE_ORG}/pipelines/${BUILDKITE_PIPELINE}/builds" \
   -H "Authorization: Bearer ${BUILDKITE_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d "{\"commit\": \"${GITHUB_SHA}\", \"branch\": \"main\", \"message\": \"Release build for ${GITHUB_SHA}\"}")
+  -d "{\"commit\": \"${GITHUB_SHA}\", \"branch\": \"main\", \"message\": \"Release build for ${GITHUB_SHA}\", \"ignore_pipeline_branch_filters\": true}")
 
 # Never log the raw API response: a build object can echo pipeline env
 # (including secrets). Success prints allowlisted metadata only; failure

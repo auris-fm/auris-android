@@ -1,20 +1,22 @@
-task copyGitHooks(type: Copy) {
-    description 'Copies the git hooks from scripts/git-hooks to the .git folder.'
-    from("${rootDir}/scripts/git-hooks/") {
-        include '**/*.sh'
-        rename '(.*).sh', '$1'
-    }
-    into "${rootDir}/.git/hooks"
-}
-
+// Run the hook from the repository, not from a copy of it.
+//
+// Installing used to copy scripts/git-hooks/*.sh into $rootDir/.git/hooks. That has two failure
+// modes. A copy goes stale the moment the tracked hook changes, and "installed once, never
+// refreshed" is the normal state of a developer machine -- which is how a whole-repository
+// format check kept running long after the tracked hook had been scoped to staged files. And in
+// a git worktree $rootDir/.git is a FILE pointing at the real git directory, so the copy lands
+// nowhere useful.
+//
+// core.hooksPath points git at this directory instead, so what runs IS the tracked file, in the
+// main checkout and in every worktree, and updating it is a git operation rather than an install.
 task installGitHooks(type: Exec) {
-    description 'Installs the pre-commit git hooks from scripts/git-hooks.'
+    description 'Installs the pre-commit git hook from scripts/git-hooks via core.hooksPath.'
     group 'git hooks'
     workingDir rootDir
-    commandLine 'chmod'
-    args '-R', '+x', '.git/hooks/'
-    dependsOn copyGitHooks
+    // core.hooksPath resolves a relative path against the working directory, so it must be
+    // root-relative: this keeps working when the same repository is checked out elsewhere.
+    commandLine 'sh', '-c', 'chmod +x scripts/git-hooks/pre-commit && git config core.hooksPath scripts/git-hooks'
     doLast {
-        logger.info('Git hook installed successfully.')
+        logger.info('Git hooks installed: git will run scripts/git-hooks/pre-commit.')
     }
 }

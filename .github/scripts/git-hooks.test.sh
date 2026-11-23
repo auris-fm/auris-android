@@ -14,7 +14,7 @@
 # network: the question is what the hook asks for and what it does with the answer.
 set -u
 DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-HOOK="$DIR/scripts/git-hooks/pre-commit.sh"
+HOOK="$DIR/scripts/git-hooks/pre-commit"
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "ok: $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }

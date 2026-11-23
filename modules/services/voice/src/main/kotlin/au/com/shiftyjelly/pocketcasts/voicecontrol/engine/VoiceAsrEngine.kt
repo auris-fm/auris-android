@@ -116,6 +116,15 @@ class VoiceAsrEngine @Inject constructor(
      * the verdict then only exists at the endpoint, as before.
      */
     private val inProgressUtterance: InProgressUtteranceReader? = null,
+    /**
+     * The jobs this engine is still waiting on at teardown. A control substitutes a list that
+     * forces the completion interleaving; production gets a fresh one per engine from
+     * VoiceControlModule.provideUnfinishedProcessingJobList -- Dagger supplies every constructor
+     * parameter and never applies Kotlin defaults, so a shared or scoped binding would mix two
+     * engines' jobs.
+     */
+    private val unfinished: java.util.concurrent.CopyOnWriteArrayList<Job> =
+        java.util.concurrent.CopyOnWriteArrayList(),
 ) {
 
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -189,10 +198,6 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal val ownedJobs: Set<Job> get() = ownedProcessingJobs.keys.toSet()
 
-    // A `var` of the CONCRETE copy-on-write type, like `scope` above: production always uses the
-    // real list, and a control can substitute a subclass that forces the completion interleaving
-    // deterministically. Widening this to List would lose removeAll's predicate overload.
-    internal var unfinished = java.util.concurrent.CopyOnWriteArrayList<Job>()
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null

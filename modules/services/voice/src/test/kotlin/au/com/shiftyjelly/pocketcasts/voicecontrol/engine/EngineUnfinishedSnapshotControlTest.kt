@@ -58,7 +58,10 @@ class EngineUnfinishedSnapshotControlTest {
         }
     }
 
-    private fun engine(scope: CoroutineScope): VoiceAsrEngine {
+    private fun engine(
+        scope: CoroutineScope,
+        unfinished: CopyOnWriteArrayList<Job> = CopyOnWriteArrayList(),
+    ): VoiceAsrEngine {
         val processor = mock(VoiceAudioProcessor::class.java)
         val issued = IssuedAuthority("a@b.c", "epoch-1", "disclosure-1")
         val authority: () -> AuthorityDecision = {
@@ -87,6 +90,7 @@ class EngineUnfinishedSnapshotControlTest {
             retentionSink = ContributionRetentionSink(),
             segmentObserver = observer,
             context = mock(android.content.Context::class.java),
+            unfinished = unfinished,
         ).also { it.scope = scope }
     }
 
@@ -94,10 +98,9 @@ class EngineUnfinishedSnapshotControlTest {
     fun `a job finishing during the snapshot does not throw`() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
-            val engine = engine(scope)
             val jobs = RacingList<Job>()
             jobs.add(scope.launch { })
-            engine.unfinished = jobs
+            val engine = engine(scope, jobs)
 
             // Before the fix this throws ArrayIndexOutOfBoundsException out of the getter.
             val snapshot = engine.unfinishedProcessingJobs
@@ -112,11 +115,10 @@ class EngineUnfinishedSnapshotControlTest {
     fun `the snapshot still reports a job that has not finished`() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
-            val engine = engine(scope)
             val held = scope.launch { kotlinx.coroutines.awaitCancellation() }
             val jobs = RacingList<Job>()
             jobs.add(held)
-            engine.unfinished = jobs
+            val engine = engine(scope, jobs)
 
             // The atomic snapshot must not become "always empty": that would report quiescence
             // while work is still running, which is the opposite failure and worse than a throw.
@@ -130,12 +132,11 @@ class EngineUnfinishedSnapshotControlTest {
     fun `a stop whose snapshot races a completion still settles`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
-            val engine = engine(scope)
             val finished = scope.launch { }
             finished.join()
             val jobs = RacingList<Job>()
             jobs.add(finished)
-            engine.unfinished = jobs
+            val engine = engine(scope, jobs)
 
             // The consequence, not just the absence of a throw: quiescence takes its snapshot
             // through this getter, and a throw here becomes StopFailed/a held session rather than

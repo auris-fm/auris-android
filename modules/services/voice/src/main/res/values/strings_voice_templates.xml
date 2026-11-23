@@ -58,8 +58,4 @@
     <!-- Prior admissions cannot be established, so a fresh conversation is required. A voice user
          has no separate "start a new conversation" action: asking again IS what starts one. -->
     <string name="voice_cloud_error_corrupt_record" translatable="true">Sorry, I\'ve lost track of our conversation. Please ask again to start a new one.</string>
-    <!-- Not in the approved seven: wording unchanged, moved out of the array so it can be
-         localized like the rest. -->
-    <string name="voice_cloud_error_unauthorized" translatable="true">Service is unavailable at the moment.</string>
-    <string name="voice_cloud_error_provider_error" translatable="true">The assistant couldn\'t finish that request.</string>
 </resources>

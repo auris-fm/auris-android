@@ -125,6 +125,11 @@ class SpokenTemplateResolver(
          * wording, and two codes deliberately SHARE one string (speech_unavailable/internal_error),
          * so a mechanical `voice_cloud_error_<code>` lookup would need a resource per synonym and
          * would hide that sharing. Listing them keeps the pairing visible.
+         *
+         * Only codes the contract classifies as Required appear here. A Generic code -- among them
+         * unauthorized and provider_error -- owes the listener the localized generic line, so it is
+         * deliberately absent and falls through to it. Giving one its own English-only string would
+         * be a regression: it would speak English to every non-English speaker.
          */
         private val CLOUD_ERROR_LINES: List<Pair<String, Int>> = listOf(
             KEY_NO_ANSWER to R.string.voice_cloud_error_no_answer,
@@ -134,8 +139,6 @@ class SpokenTemplateResolver(
             KEY_QUEUE_OVERFLOW to R.string.voice_cloud_error_queue_overflow,
             KEY_TURN_CONFLICT to R.string.voice_cloud_error_turn_conflict,
             KEY_CORRUPT_RECORD to R.string.voice_cloud_error_corrupt_record,
-            KEY_UNAUTHORIZED to R.string.voice_cloud_error_unauthorized,
-            KEY_PROVIDER_ERROR to R.string.voice_cloud_error_provider_error,
         )
 
         /** Mirrors the sink's `cloud_error_<code>` construction for the overlaid keys. */
@@ -146,8 +149,6 @@ class SpokenTemplateResolver(
         private const val KEY_QUEUE_OVERFLOW = "cloud_error_queue_overflow"
         private const val KEY_TURN_CONFLICT = "cloud_error_turn_conflict"
         private const val KEY_CORRUPT_RECORD = "cloud_error_corrupt_record"
-        private const val KEY_UNAUTHORIZED = "cloud_error_unauthorized"
-        private const val KEY_PROVIDER_ERROR = "cloud_error_provider_error"
         private const val KEY_DAILY_LIMIT = "cloud_error_limit_exceeded"
         private const val KEY_CONVERSATION_EXPIRED = "cloud_error_conversation_expired"
         private const val KEY_SPEECH_UNAVAILABLE = "cloud_error_speech_unavailable"

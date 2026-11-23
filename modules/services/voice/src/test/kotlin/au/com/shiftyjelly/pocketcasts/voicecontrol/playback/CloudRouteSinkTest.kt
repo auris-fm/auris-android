@@ -2541,9 +2541,9 @@ class CloudRouteSinkTest {
             "the executed seek is the MAPPED sink position (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:545"),
         )
-        // Deliberately changed: the client speaks its own words for the code, never the
-        // server's message (which here was the same sentence by coincidence).
-        assertEquals(VoiceResponse.Spoken("The assistant couldn't finish that request."), response)
+        // The client speaks its own words, never the server's message. provider_error is a
+        // Generic code in the contract, so its own words ARE the generic line.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
         // Auto-pause is restored exactly once.
         assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
@@ -2554,8 +2554,8 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = { _ ->
                 if (token == null) {
-                    // Client-minted code, no prose: the sink localises it, and
-                    // `unauthorized` has no template by design, so it earcons.
+                    // Client-minted code, no prose: the sink localises it. unauthorized is a
+                    // Generic code, so it resolves to the generic line.
                     flowOf(CloudRouteEvent.Error("unauthorized", ""))
                 } else {
                     flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(1, 1))
@@ -2575,9 +2575,9 @@ class CloudRouteSinkTest {
         token = null
         val second = sink.routeToCloud("second", playbackContext, admitted = testWireId).feedback
 
-        // Deliberately changed: a rejected credential is the service being unavailable, which the
-        // owner asked to hear as words rather than a tone.
-        assertEquals(VoiceResponse.Spoken("Service is unavailable at the moment."), second)
+        // A rejected credential still speaks rather than earcons: unauthorized is Generic, so it
+        // gets the same localized catch-all as any other code with no line of its own.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), second)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
     }
 
@@ -4257,6 +4257,34 @@ class CloudRouteSinkTest {
         assertEquals("the voice must match the text", language, result.feedbackLanguage)
     }
 
+    /**
+     * A Generic code reaches the listener as the LOCALIZED generic line, driven through the real
+     * dispatch with the real resource resolver on an ENGLISH UI context.
+     *
+     * unauthorized and provider_error are Generic in the contract's error table, so they have no
+     * dedicated string: the sink substitutes cloud_error_generic in the UTTERANCE's language. Giving
+     * either an English-only line of its own would make a German listener hear English, which is the
+     * defect this whole change removes -- so the assertion is on the German sentence, not on "some
+     * text was spoken".
+     */
+    @Test
+    fun `a german unauthorized hears the german generic line`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.UNAUTHORIZED,
+            "de",
+            "Entschuldigung, ich konnte diese Anfrage nicht abschließen.",
+        )
+    }
+
+    @Test
+    fun `a german provider error hears the german generic line`() = kotlinx.coroutines.runBlocking {
+        assertSpokenInLanguage(
+            CloudRouteErrorCodes.PROVIDER_ERROR,
+            "de",
+            "Entschuldigung, ich konnte diese Anfrage nicht abschließen.",
+        )
+    }
+
     @Test
     fun `a german no-answer refusal is spoken in german`() = kotlinx.coroutines.runBlocking {
         assertSpokenInLanguage(
@@ -5059,7 +5087,6 @@ class CloudRouteSinkTest {
             userId = "", // No token.
             templateResolver = SpokenTemplateResolver(
                 mapOf(
-                    "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
                     "general.cloud_coming_soon" to "Cloud processing is coming soon",
                     "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
                     "cloud_error_generic" to "Sorry, I couldn't complete that request.",
@@ -5079,10 +5106,11 @@ class CloudRouteSinkTest {
         // Transport exchange never reached — missing token stops before socket.
         assertFalse("exchange should not be called when token is missing", exchangeCalled)
 
-        // Localized unauthorized feedback, not silence.
+        // Localized feedback, not silence. unauthorized is Generic, so the generic line is what
+        // this listener hears -- asserted against the resolver's own generic text, not a literal.
         val feedback = result.feedback
         assertTrue("expected localized Spoken refusal, got $feedback", feedback is VoiceResponse.Spoken)
-        assertEquals("Service is unavailable at the moment.", (feedback as VoiceResponse.Spoken).text)
+        assertEquals("Sorry, I couldn't complete that request.", (feedback as VoiceResponse.Spoken).text)
     }
 
     @Test

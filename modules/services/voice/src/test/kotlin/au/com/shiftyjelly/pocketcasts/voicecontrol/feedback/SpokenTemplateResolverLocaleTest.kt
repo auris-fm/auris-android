@@ -171,8 +171,6 @@ class SpokenTemplateResolverLocaleTest {
             "cloud_error_queue_overflow",
             "cloud_error_turn_conflict",
             "cloud_error_corrupt_record",
-            "cloud_error_unauthorized",
-            "cloud_error_provider_error",
         )
         val duplicated = array.map { it.substringBefore('|') }.filter { it in overlaid }
         assertEquals(
@@ -258,6 +256,28 @@ class SpokenTemplateResolverLocaleTest {
             resolver.resolve("cloud_error_budget_exceeded"),
         )
     }
+
+    /**
+     * A Generic code has NO line of its own: the resolver returns blank and the SINK substitutes the
+     * localized generic line. Asserting the blank here is what pins the classification -- a resolver
+     * that grew an English-only string for one of these would return text, and a German listener
+     * would hear English. The spoken outcome is asserted at the sink, where the substitution lives.
+     */
+    private fun assertNoLineOfItsOwn(code: String) {
+        Locale.setDefault(Locale.ENGLISH)
+        val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
+        assertEquals(
+            "$code is Generic in the contract and must have no dedicated line",
+            "",
+            resolver.resolve("cloud_error_$code"),
+        )
+    }
+
+    @Test
+    fun `unauthorized has no line of its own`() = assertNoLineOfItsOwn("unauthorized")
+
+    @Test
+    fun `provider error has no line of its own`() = assertNoLineOfItsOwn("provider_error")
 
     /**
      * Every Required cloud error line, in every locale this module ships, resolved from the REAL

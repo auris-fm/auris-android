@@ -5176,7 +5176,8 @@ class CloudRouteSinkTest {
         assertFalse("exchange should not be called when token is missing", exchangeCalled)
 
         // Localized feedback, not silence. unauthorized is Generic, so the generic line is what
-        // this listener hears -- asserted against the resolver's own generic text, not a literal.
+        // this listener hears. The expected sentence is written out rather than read back from the
+        // resolver: comparing the resolver to itself would pass whatever it returned.
         val feedback = result.feedback
         assertTrue("expected localized Spoken refusal, got $feedback", feedback is VoiceResponse.Spoken)
         assertEquals("Sorry, I couldn't complete that request.", (feedback as VoiceResponse.Spoken).text)

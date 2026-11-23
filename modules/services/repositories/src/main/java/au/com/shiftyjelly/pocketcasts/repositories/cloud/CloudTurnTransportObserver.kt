@@ -32,8 +32,10 @@ interface CloudTurnTransportObserver {
     fun onTerminalReceived(requestId: String, origin: TerminalOrigin, errorCode: String?)
 
     /**
-     * WebSocket onFailure fired — connection lost or upgrade refused. May occur after partial
-     * response.
+     * The socket ended without giving the turn its answer: WebSocket onFailure (connection lost or
+     * upgrade refused), or a clean onClosed that arrives mid-turn with no terminal. May occur after
+     * a partial response. A normal close is NOT exempt -- an ended stream is the same outage as a
+     * failed one, so implementers must not assume this only fires on failure callbacks.
      *
      * [stillNeeded] says whether the failure was news about a turn that was still waiting for it.
      * A socket that dies after the turn's terminal arrived, or after the exchange was cancelled,

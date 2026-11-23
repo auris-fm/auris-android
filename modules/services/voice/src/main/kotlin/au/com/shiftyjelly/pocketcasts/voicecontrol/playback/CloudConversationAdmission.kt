@@ -27,6 +27,17 @@ class CloudConversationAdmission @Inject constructor() {
     private var handle: String? = null
 
     /**
+     * The id most recently MINTED by this client that the worker has not yet acknowledged with
+     * `connected`, or null once it has been.
+     *
+     * The handle is client-generated, so a create that dies before the handshake leaves a conversation
+     * the worker never made. Resuming it would ask to continue something that does not exist. While this
+     * is set the conversation is NOT resumable, and a follow-up creates a fresh id instead -- the rule in
+     * the shared contract. Cleared by [acknowledge], which the sink calls on `connected`.
+     */
+    private var pending: String? = null
+
+    /**
      * The pair for a turn being prepared under [origin], or null when this origin has been superseded
      * and must not be admitted at all.
      *
@@ -62,13 +73,24 @@ class CloudConversationAdmission @Inject constructor() {
         // A WAKE ORIGIN ALWAYS STARTS A CONVERSATION: a request captured under a wake is a new user
         // act, so it creates even when an earlier handle exists. Only a wake-FREE request inside
         // the same live window may resume.
-        if (!isWakeOriginated && isLiveGraceTurn && existing != null) {
+        // RESUMABLE ONLY WHEN ACKNOWLEDGED. `pending` holds an id the worker has not answered with
+        // `connected`, so resuming it would continue a conversation that does not exist server-side.
+        if (!isWakeOriginated && isLiveGraceTurn && existing != null && pending == null) {
             Prepared(existing, CloudConversationMode.Resume)
         } else {
             // A new conversation: the handle is minted HERE and remembered, so every later turn in it
-            // resumes the same one.
+            // resumes the same one -- but only once the worker has ACKNOWLEDGED it. `pending` records
+            // that this id is not yet resumable; `handle` keeps its existing meaning so nothing else
+            // about admission changes.
             val created = UUID.randomUUID().toString()
-            handle = created
+            // A CONTINUATION prepared while its predecessor is still unacknowledged does not take over the
+            // handle. Overwriting it would lose the predecessor's identity, so its `connected` could never
+            // promote anything and the continuation would be stuck creating a second conversation. The
+            // predecessor keeps the slot; this turn carries its own id and re-decides at dispatch.
+            if (!isLiveGraceTurn || isWakeOriginated || pending == null) {
+                handle = created
+                pending = created
+            }
             Prepared(created, CloudConversationMode.Create)
         }
     }
@@ -85,8 +107,21 @@ class CloudConversationAdmission @Inject constructor() {
      */
     fun validateForRetry(origin: Long): Prepared? = synchronized(lock) {
         if (origin != currentOrigin) return null
-        val existing = handle ?: return null
-        Prepared(existing, CloudConversationMode.Resume)
+        // A LIVE WINDOW IS ENOUGH. With a conversation to resume, return it; with none, mint a fresh one
+        // and record it as pending, so the turn is admitted and carries a real id.
+        //
+        // Refusing here instead dropped the user's follow-up outright after the worker forgot its
+        // conversation: the dispatch-time conversion to a fresh CREATE never got the chance to run, and
+        // the user's question was silently lost.
+        // MIRRORS `prepare`'s gate: an UNACKNOWLEDGED handle is not resumable, so a turn admitted here
+        // must not be handed a Resume of it. Returning Resume was masked only because routeTurn discards
+        // this value for a prepared turn -- a latent disagreement waiting for the next caller.
+        val existing = handle?.takeIf { pending == null }
+        if (existing != null) return Prepared(existing, CloudConversationMode.Resume)
+        val fresh = UUID.randomUUID().toString()
+        handle = fresh
+        pending = fresh
+        Prepared(fresh, CloudConversationMode.Create)
     }
 
     /**
@@ -106,9 +141,46 @@ class CloudConversationAdmission @Inject constructor() {
         superseded
     }
 
+    /**
+     * This turn is going on the wire NOW, so its conversation pair is the live one.
+     *
+     * A CREATE establishes a conversation, so its id becomes the handle -- pending until `connected`.
+     * Recording it here rather than at prepare matters for the RECOVERY path: a replacement minted after
+     * a failed create was previously never stored, so its own `connected` could not promote it and every
+     * later follow-up in the window kept opening fresh conversations, losing the user's context.
+     *
+     * Called for every dispatched turn on both entry paths (`routeToCloud` prepares and sends in one go;
+     * `dispatchPrepared` sends a turn prepared earlier).
+     */
+    fun noteSending(turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) {
+        synchronized(lock) {
+            if (turn.conversationMode == CloudConversationMode.Create) {
+                handle = turn.conversationId
+                pending = turn.conversationId
+            }
+        }
+    }
+
+    /**
+     * The worker acknowledged [conversationId] with `connected`, so it is now RESUMABLE.
+     *
+     * Keyed by the id, because the handshake for an older exchange can arrive after a newer turn has
+     * already minted its own conversation; clearing blindly would make the WRONG one resumable. A late
+     * acknowledgement for a superseded id is therefore ignored.
+     */
+    fun acknowledge(conversationId: String) {
+        synchronized(lock) {
+            if (pending == conversationId) {
+                pending = null
+                handle = conversationId
+            }
+        }
+    }
+
     /** Forgets the conversation, so the next turn creates a new one. */
     fun reset() = synchronized(lock) {
         handle = null
+        pending = null
     }
 
     /**
@@ -120,6 +192,8 @@ class CloudConversationAdmission @Inject constructor() {
     fun forgetConversation(conversationId: String) {
         synchronized(lock) {
             if (handle == conversationId) handle = null
+            // An unacknowledged create can lose the conversation too, and it must not stay pending.
+            if (pending == conversationId) pending = null
         }
     }
 
@@ -128,7 +202,15 @@ class CloudConversationAdmission @Inject constructor() {
     /** One in-memory owner of preparation and dispatch for each retained request. */
     private class RetainedRequest(
         val logicalId: String?,
-        val turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+        var turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+        /**
+         * Whether this turn CONTINUES a live grace window, and whether a wake began it.
+         *
+         * Kept beside the turn rather than on the wire model: these are admission facts, not protocol
+         * fields, and only the dispatch-time decision needs them.
+         */
+        val continuesGraceWindow: Boolean = false,
+        val wakeOriginated: Boolean = false,
         var completion: CompletableDeferred<Unit>? = null,
     )
 
@@ -158,13 +240,16 @@ class CloudConversationAdmission @Inject constructor() {
     internal fun retainOrPrepare(
         logicalRequestId: String?,
         isRetry: Boolean,
+        continuesGraceWindow: Boolean = false,
+        wakeOriginated: Boolean = false,
         create: () -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(lock) {
         val key = logicalRequestId?.let { "logical:$it" }
         key?.let { prepared[it]?.let { existing -> return@synchronized existing.turn } }
         if (isRetry) return@synchronized null
         val turn = create() ?: return@synchronized null
-        prepared[key ?: "wire:${turn.requestId}"] = RetainedRequest(logicalRequestId, turn)
+        prepared[key ?: "wire:${turn.requestId}"] =
+            RetainedRequest(logicalRequestId, turn, continuesGraceWindow, wakeOriginated)
         turn
     }
 
@@ -177,6 +262,20 @@ class CloudConversationAdmission @Inject constructor() {
     /** Duplicates join the existing completion. Only an explicit retry can start another attempt. */
     internal fun claimDispatch(turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn, isRetry: Boolean): Dispatch? = synchronized(lock) {
         val retained = prepared.values.firstOrNull { it.turn.requestId == turn.requestId } ?: return@synchronized null
+        // THE MODE IS DECIDED HERE, AT DISPATCH, not at prepare. A follow-up can be prepared while its
+        // predecessor is still on the wire -- the executor prepares and dispatches in separate calls, and
+        // the predecessor is only cancelled inside the dispatch -- so the handshake may arrive in between.
+        // Fixing the mode at prepare would ignore that acknowledgement and create a second conversation
+        // for what is one continuation.
+        //
+        // A RETRY IS EXEMPT: it must resend the SAME logical request, so its id and mode stay exactly as
+        // prepared. Only a first dispatch re-decides.
+        if (!isRetry) {
+            val resolved = resolveForDispatch(retained)
+            if (resolved !== retained.turn) {
+                retained.turn = resolved
+            }
+        }
         val previous = retained.completion
         if (previous != null && (!isRetry || !previous.isCompleted)) return@synchronized Dispatch(retained.turn, previous, false)
         val completion = CompletableDeferred<Unit>()
@@ -194,6 +293,39 @@ class CloudConversationAdmission @Inject constructor() {
      */
     fun forgetRetained(logicalRequestId: String) {
         synchronized(lock) { prepared.remove("logical:$logicalRequestId") }
+    }
+
+    /**
+     * The conversation pair this turn should carry NOW, given what has been acknowledged since it was
+     * prepared. Returns the same instance when nothing changed.
+     *
+     * Three cases, all decided against what is true NOW rather than at prepare:
+     *  - a turn prepared as CREATE keeps its own minted id: it establishes the conversation;
+     *  - a continuation whose handle became acknowledged since prepare adopts it and RESUMES;
+     *  - a turn prepared as RESUME whose conversation has since been forgotten or superseded becomes a
+     *    CREATE with a fresh id, because resuming it would fail on a conversation the worker no longer has.
+     *
+     * A wake-originated turn always begins a conversation, so it is never converted to a resume.
+     */
+    private fun resolveForDispatch(
+        intent: RetainedRequest,
+    ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn {
+        val turn = intent.turn
+        val acknowledged = handle?.takeIf { pending == null }
+        if (acknowledged == null) {
+            // Nothing is resumable. A prepared RESUME would ask to continue a conversation that is gone
+            // (expired, forgotten, or superseded), so it becomes a fresh CREATE instead.
+            if (turn.conversationMode == CloudConversationMode.Resume) {
+                val fresh = UUID.randomUUID().toString()
+                return turn.copy(conversationId = fresh, conversationMode = CloudConversationMode.Create)
+            }
+            return turn
+        }
+        // Only a CONTINUATION may adopt the acknowledged conversation. A wake-originated turn begins a new
+        // one by contract, and that decision does not depend on acknowledgement.
+        if (!intent.continuesGraceWindow || intent.wakeOriginated) return turn
+        if (turn.conversationMode == CloudConversationMode.Resume && turn.conversationId == acknowledged) return turn
+        return turn.copy(conversationId = acknowledged, conversationMode = CloudConversationMode.Resume)
     }
 
     /** The origin currently declared live. Exposed so a caller with no captured window can use it. */

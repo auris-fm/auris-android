@@ -3,11 +3,18 @@
 #
 #   1. The key changes when either input that decides WHICH jar is needed changes.
 #   2. The cached directory is the one Robolectric actually reads.
+#   3. EVERY workflow job that runs the voice suite carries that cache -- the release
+#      workflow has its own copy of the job and gates the release trigger, so a job
+#      without the cache holds releases back while the other workflow stays green.
 #
 # Nothing else is asserted, because nothing else is done: there is no prefetch step.
 set -u
 DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WF="$DIR/.github/workflows/voice-unit-tests.yml"
+# Every workflow with a job that runs the voice suite, found from disk: naming one file here
+# is how the release workflow's copy went uncached in the first place.
+WFS="$(grep -rl ':modules:services:voice:testDebugUnitTest' "$DIR/.github/workflows" | sort)"
+[ -n "$WFS" ] || { echo "FAIL: no workflow runs the voice suite"; exit 1; }
 PASS=0; FAIL=0
 check() {
   if [ "$2" = "$3" ]; then PASS=$((PASS+1)); echo "ok: $1";
@@ -40,9 +47,11 @@ cat > /tmp/rc-key.rb <<'RUBY'
   end
   puts "key responds to each of #{files.size} inputs"
 RUBY
-ruby -ryaml -rdigest /tmp/rc-key.rb "$WF" "$DIR" > /tmp/rc-key.out 2>&1
-check "the cache key changes when either input changes" 0 $?
-sed 's/^/    /' /tmp/rc-key.out
+for wf in $WFS; do
+  ruby -ryaml -rdigest /tmp/rc-key.rb "$wf" "$DIR" > /tmp/rc-key.out 2>&1
+  check "the cache key changes when either input changes ($(basename "$wf"))" 0 $?
+  sed 's/^/    /' /tmp/rc-key.out
+done
 
 # 2. THE CACHED PATH IS THE ONE ROBOLECTRIC READS.
 #    Robolectric's MavenDependencyResolver defaults to $user.home/.m2/repository (overridable by
@@ -62,9 +71,11 @@ cat > /tmp/rc-path.rb <<'RUBY'
   end
   puts "cached path: #{path}"
 RUBY
-ruby -ryaml /tmp/rc-path.rb "$WF" > /tmp/rc-path.out 2>&1
-check "the cached path is Robolectric's Maven local repository" 0 $?
-sed 's/^/    /' /tmp/rc-path.out
+for wf in $WFS; do
+  ruby -ryaml /tmp/rc-path.rb "$wf" > /tmp/rc-path.out 2>&1
+  check "the cached path is Robolectric's Maven local repository ($(basename "$wf"))" 0 $?
+  sed 's/^/    /' /tmp/rc-path.out
+done
 
 # The repo must not set maven.repo.local anywhere either, or the assertion above is incomplete.
 if grep -rn "maven.repo.local" "$DIR/gradle.properties" "$DIR/modules/services/voice/build.gradle.kts" 2>/dev/null | grep -q .; then
@@ -89,13 +100,40 @@ cat > /tmp/rc-noprefetch.rb <<'RUBY'
     end
   end
   # And the plain-JUnit job carries no cache at all: it never loads an android-all jar.
-  plain = wf["jobs"]["cloud-transport-tests"]["steps"]
-  bad = plain.select { |s| (s["uses"] || "").include?("actions/cache") }
-  abort "cloud-transport-tests carries a Robolectric cache it never uses" unless bad.empty?
+  plain = wf["jobs"]["cloud-transport-tests"]
+  if plain
+    bad = (plain["steps"] || []).select { |s| (s["uses"] || "").include?("actions/cache") }
+    abort "cloud-transport-tests carries a Robolectric cache it never uses" unless bad.empty?
+  end
 RUBY
-ruby -ryaml /tmp/rc-noprefetch.rb "$WF" > /tmp/rc-noprefetch.out 2>&1
-check "no job downloads android-all, and the plain-JUnit job has no cache" 0 $?
-sed 's/^/    /' /tmp/rc-noprefetch.out
+for wf in $WFS; do
+  ruby -ryaml /tmp/rc-noprefetch.rb "$wf" > /tmp/rc-noprefetch.out 2>&1
+  check "no job downloads android-all, and the plain-JUnit job has no cache ($(basename "$wf"))" 0 $?
+  sed 's/^/    /' /tmp/rc-noprefetch.out
+done
+
+# 4. THE CACHE IS ON EVERY JOB THAT RUNS THE SUITE, and the keys agree. Two copies of a job
+#    with different keys would restore the outage on whichever copy lost the cache.
+cat > /tmp/rc-coverage.rb <<'RUBY'
+  keys = {}
+  ARGV.each do |path|
+    wf = YAML.load_file(path)
+    wf["jobs"].each do |name, job|
+      steps = job["steps"] || []
+      runs_suite = steps.any? { |s| s["run"].to_s.include?(":modules:services:voice:testDebugUnitTest") }
+      next unless runs_suite
+      cache = steps.find { |s| (s["uses"] || "").include?("actions/cache") }
+      abort "#{File.basename(path)}:#{name} runs the voice suite with NO android-all cache" unless cache
+      keys["#{File.basename(path)}:#{name}"] = cache["with"]["key"].to_s
+    end
+  end
+  abort "no job found running the voice suite" if keys.empty?
+  abort "cache keys disagree across jobs: #{keys.inspect}" if keys.values.uniq.size != 1
+  puts "#{keys.size} job(s) run the suite, all cached with the same key"
+RUBY
+ruby -ryaml /tmp/rc-coverage.rb $WFS > /tmp/rc-coverage.out 2>&1
+check "every job that runs the voice suite caches android-all, with one key" 0 $?
+sed 's/^/    /' /tmp/rc-coverage.out
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

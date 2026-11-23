@@ -301,7 +301,10 @@ cat > "$WORK/wf.rb" <<'RUBY'
       abort "#{File.basename(path)}:#{name} gate reads '#{m[1]}' but the seed step is '#{seed_step["id"]}'" unless m[1] == seed_step["id"]
       abort "#{File.basename(path)}:#{name} gate reads '#{m[2]}', not jar-present" unless m[2] == "jar-present"
       abort "#{File.basename(path)}:#{name} gate does not require 'yes'" unless gate.include?("'yes'") || gate.include?('"yes"')
-      restore = steps.find { |s| (s["uses"] || "").to_s.strip == "actions/cache/restore@v4" }
+      # The reference is a commit pin with the version as a trailing comment (an action run by a
+      # tag follows whatever that tag points at next), so it is matched on the repository and a
+      # path, never on a version string.
+      restore = steps.find { |s| (s["uses"] || "").to_s.strip.match?(%r{\Aactions/cache/restore@[0-9a-f]{40}\z}) }
       abort "#{File.basename(path)}:#{name} must restore without saving (use cache/restore)" unless restore
       abort "#{File.basename(path)}:#{name} restores after seeding" unless steps.index(restore) < si
       keys["#{File.basename(path)}:#{name}"] = [restore["with"]["key"], save["with"]["key"]]

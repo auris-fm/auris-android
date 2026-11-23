@@ -60,7 +60,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release)\.yml$|^Gemfile(\.lock)?$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^Gemfile(\.lock)?$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -79,6 +79,10 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         name: Keystore-decode control
         run: bash .buildkite/scripts/keystore-decode.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Robolectric cache control
+        run: bash .github/scripts/robolectric-cache.test.sh
 
       - if: steps.scope.outputs.run == 'true'
         name: R2 publish control

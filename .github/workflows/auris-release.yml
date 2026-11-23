@@ -69,6 +69,15 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
+      # This job runs the same suite as voice-unit-tests.yml and needs the same jar. It gates
+      # the release trigger, so a Maven outage here holds releases back even when the other
+      # workflow is green -- which is what happened before this step existed. Keep the two
+      # cache steps identical; robolectric-cache.test.sh asserts both carry one.
+      - name: Cache Robolectric android-all jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
       - run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
 
   cloud-transport-tests:

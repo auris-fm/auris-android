@@ -1312,7 +1312,8 @@ class CloudRouteSinkTest {
     @Test
     fun `a wake-free request in the same live window resumes, and a stale origin is refused`() = runTest {
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            // The handshake first: only an ACKNOWLEDGED conversation may be resumed.
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(1, 0)) },
         )
         val sink = deps.sink()
         deps.conversationAdmission.beginOrigin(7)
@@ -1363,9 +1364,10 @@ class CloudRouteSinkTest {
     @Test
     fun `the first turn CREATES a client-minted conversation and a later grace turn RESUMES it`() = runTest {
         // admission contract: the client generates the handle, create carries it, and a later
-        // turn inside the live grace window resumes the SAME conversation.
+        // turn inside the live grace window resumes the SAME conversation -- once the worker has
+        // ACKNOWLEDGED it with `connected`. Without that frame there is no conversation to resume.
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(1, 0)) },
         )
         val sink = deps.sink()
 
@@ -2792,10 +2794,11 @@ class CloudRouteSinkTest {
         // resumed the same dead id and failed the same way until a wake began a new conversation.
         val deps = TestDeps(
             routeInvoker = { turn ->
+                // The handshake precedes the outcome: it is what makes the conversation resumable at all.
                 if (turn.conversationMode == CloudConversationMode.Resume) {
-                    flowOf(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                    flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Error(code = "conversation_expired", message = ""))
                 } else {
-                    flowOf(CloudRouteEvent.Done(0, 0))
+                    flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(0, 0))
                 }
             },
         )
@@ -2829,6 +2832,9 @@ class CloudRouteSinkTest {
         admission.beginOrigin(1)
         val old = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = false)!!
         val replacement = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = true)!!
+        // The replacement was ACKNOWLEDGED, which is what makes it resumable at all; without this the
+        // case would pass for the wrong reason, since an unacknowledged handle is never resumed.
+        admission.acknowledge(replacement.conversationId)
 
         admission.forgetConversation(old.conversationId)
 

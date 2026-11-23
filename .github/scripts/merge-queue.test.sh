@@ -14,6 +14,9 @@ set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 WF="$(cd "$DIR/../workflows" && pwd)"
 PASS=0; FAIL=0
+note() { # text -> a decision this control cannot make, said out loud
+  echo "NOTE: $1"
+}
 check() { # name expected actual
   if [ "$2" = "$3" ]; then
     PASS=$((PASS+1)); echo "ok: $1"
@@ -170,6 +173,94 @@ for f in "$WF"/*.yml; do
   case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
   check "$base runs a step on a queue build" "yes" \
     "$(unconditional_step "$f" && echo yes || echo no)"
+done
+
+echo "== a check reports the same name on a queue build as on a pull request"
+# A required check is matched by its name. A workflow that reports one name for a pull
+# request and another for a queue build leaves the rule satisfied on one path and waiting
+# forever on the other, so the queue path must report exactly what the pull-request path
+# reports, with no places to drift.
+#
+# A job that calls a reusable workflow reports `<calling job> / <reusable job>`. The
+# reusable side is remote, so this check refuses to certify a guarded workflow that uses
+# one: a person has to compare the two names by hand and say so here. That refusal is the
+# point — a guess would certify the mistake it was added to catch.
+queue_check_name() { # file -> the name one queue job reports, empty when there is none
+  python3 - "$1" <<'PYTHON'
+import re, sys
+
+lines = open(sys.argv[1]).read().split("\n")
+jobs, current, order = {}, None, []
+for line in lines:
+    m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+    if m:
+        current = m.group(1)
+        jobs[current] = []
+        order.append(current)
+        continue
+    if current:
+        jobs[current].append(line)
+
+names = []
+for name in order:
+    text = "\n".join(jobs[name])
+    if not re.search(r"^    if:.*merge_group", text, re.M):
+        continue
+    if re.search(r"^    uses:", text, re.M):
+        print("REUSABLE", end="")
+        sys.exit(0)
+    m = re.search(r'^    name:\s*"?(.+?)"?\s*$', text, re.M)
+    names.append(m.group(1) if m else name)
+print(",".join(names))
+PYTHON
+}
+
+pr_check_name() { # file -> the name the pull-request path reports
+  python3 - "$1" <<'PYTHON'
+import re, sys
+
+lines = open(sys.argv[1]).read().split("\n")
+jobs, current, order = {}, None, []
+for line in lines:
+    m = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+    if m:
+        current = m.group(1)
+        jobs[current] = []
+        order.append(current)
+        continue
+    if current:
+        jobs[current].append(line)
+
+for name in order:
+    text = "\n".join(jobs[name])
+    if re.search(r"^    if:.*merge_group", text, re.M):
+        continue
+    if re.search(r"^    uses:", text, re.M):
+        print("REUSABLE", end="")
+        sys.exit(0)
+    m = re.search(r'^    name:\s*"?(.+?)"?\s*$', text, re.M)
+    print(m.group(1) if m else name, end="")
+    sys.exit(0)
+sys.exit(1)
+PYTHON
+}
+
+for f in "$WF"/*.yml; do
+  base="$(basename "$f")"
+  if [ "$base" = "$RELEASE_WORKFLOW" ]; then continue; fi
+  case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
+  queue_name="$(queue_check_name "$f")"
+  [ -n "$queue_name" ] || continue
+  pr_name="$(pr_check_name "$f")"
+  if [ "$queue_name" = "REUSABLE" ] || [ "$pr_name" = "REUSABLE" ]; then
+    # The half of the check name that lives in another repository cannot be read here,
+    # so this says so and asks for the comparison rather than guessing it.
+    note "$base: one side calls a reusable workflow, so its check name cannot be compared here."
+    note "  the queue job must report exactly what the pull request's checks report;"
+    note "  a person compares them, and the name is written out beside the job."
+    continue
+  fi
+  check "$base reports one check name on both paths" "$pr_name" "$queue_name"
 done
 
 echo "== the release workflow never runs for a queue build"

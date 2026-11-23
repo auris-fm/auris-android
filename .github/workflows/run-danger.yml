@@ -20,12 +20,19 @@ jobs:
     secrets:
       buildkite-api-token: ${{ secrets.TRIGGER_BK_BUILD_TOKEN }}
 
-  # The queue build reports this job's name, so it must exist and pass. A skipped job
-  # reports nothing a required check can accept, which is why this is a success rather
-  # than an `if:` that skips the job above.
+  # A merge group has nothing for Danger to lint, but the check still has to report, so
+  # this job reports it and passes.
+  #
+  # The name below is the check name the pull request path reports: a job that calls a
+  # reusable workflow reports `<calling job> / <reusable job>`, and the pinned workflow
+  # defines the job `retry-buildkite-job`. One required check then covers both paths;
+  # any other name leaves the rule satisfied on one path and waiting forever on the
+  # other. The reusable half lives in another repository, so this name cannot be read
+  # from a file here: the control says so and asks for the comparison instead of
+  # guessing the half it cannot see.
   queue-passes:
     if: ${{ github.event_name == 'merge_group' }}
-    name: "dangermattic"
+    name: "dangermattic / retry-buildkite-job"
     runs-on: ubuntu-latest
     steps:
       - run: echo "A merge group reports checks_requested only; Danger already ran on the pull request."

@@ -2,18 +2,28 @@ name: "Release script controls"
 
 # The trigger and keystore-decode controls must gate PRs too: a PR that breaks
 # them should fail before merge, not only on the next main push.
+#
+# On a pull request the workflow only runs when a file it guards has changed. A merge
+# group cannot be filtered that way: a required check that does not run reports no
+# status, and the queue waits for it forever. So the queue runs this job on every
+# `merge_group` and decides inside the job which controls have anything to check,
+# reporting success when none do.
 
 on:
   pull_request:
     paths:
       - ".buildkite/scripts/**"
       - ".buildkite/commands/**"
-      - ".github/workflows/release-script-controls.yml"
-      - ".github/workflows/auris-release.yml"
+      # The queue's trigger rule reads every workflow and lives beside them, so a change to
+      # either has to run this job: until the queue is switched on, this is the only place
+      # that control runs at all.
+      - ".github/scripts/**"
+      - ".github/workflows/**"
       # The Play-API control reads its pin from the lock, so a gem bump must run
       # it: otherwise a renamed or removed API is first discovered after merge.
       - "Gemfile"
       - "Gemfile.lock"
+  merge_group:
 
 jobs:
   controls:
@@ -21,15 +31,66 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: bash .buildkite/scripts/trigger-release.test.sh
-      - uses: actions/setup-java@v4
+        with:
+          # The queue needs the merge base to see which files the queued change touches.
+          fetch-depth: 0
+
+      # The queue's trigger rule is checked here, with the other repo-level controls: it
+      # reads every workflow's triggers. It is cheap, needs no setup, and its answer is
+      # the same whoever asked, so it always runs — including in the queue, where a
+      # workflow change arriving through the queue must still be checked.
+      - name: Check the queue's trigger rule
+        run: bash .github/scripts/merge-queue.test.sh
+
+      - name: Decide which controls this change needs
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "merge_group" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Not a queue build; the path filter decided this run already."
+            exit 0
+          fi
+          changed="$(git diff --name-only "$MERGE_GROUP_BASE" HEAD)"
+          echo "Files the queued change touches:"
+          printf '%s\n' "$changed" | sed '/^$/d'
+          if printf '%s\n' "$changed" | grep -qE \
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release)\.yml$|^Gemfile(\.lock)?$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "None of these paths is guarded by the controls; the queue passes."
+          fi
+
+      - if: steps.scope.outputs.run == 'true'
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      - run: bash .buildkite/scripts/keystore-decode.test.sh
-      - run: bash .buildkite/scripts/r2-publish.test.sh
-      - run: bash .buildkite/scripts/verify-play-apk.test.sh
-      - run: ruby .buildkite/scripts/release-gates.test.rb
+      - if: steps.scope.outputs.run == 'true'
+        name: Trigger control
+        run: bash .buildkite/scripts/trigger-release.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Keystore-decode control
+        run: bash .buildkite/scripts/keystore-decode.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: R2 publish control
+        run: bash .buildkite/scripts/r2-publish.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Play APK verification control
+        run: bash .buildkite/scripts/verify-play-apk.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
+        name: Release gate wiring control
+        run: ruby .buildkite/scripts/release-gates.test.rb
 
   play-api-surface:
     name: "Play API surface (real gem)"
@@ -54,3 +115,4 @@ jobs:
           echo "Installing pinned version $PIN"
           gem install google-apis-androidpublisher_v3 -v "$PIN" --no-document
       - run: ruby .buildkite/scripts/fetch-play-apk-api.test.rb
+

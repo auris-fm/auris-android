@@ -37,7 +37,9 @@ class RouteAcquisitionOverlapTest {
         }
 
         override fun startInputStream() = true
-        override fun closeInputStream() = Unit
+                override fun openStreamGeneration(): Long? = null
+
+override fun closeInputStream(generation: Long?) = Unit
     }
 
     @Test

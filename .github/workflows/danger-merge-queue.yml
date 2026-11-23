@@ -1,0 +1,27 @@
+name: ☢️ Danger check on the merge queue
+
+# A merge group has nothing for Danger to lint, and the event carries no pull request, but
+# a required check still has to report on the queue's combined commit or the queue waits
+# forever. This workflow reports it and passes.
+#
+# It is a separate file on purpose. A job placed in `run-danger.yml` would also appear on
+# every pull request as a skipped check, and two checks with one name mean the rule can be
+# satisfied by the skipped copy after the real Danger run failed. Here each path reports
+# exactly one check: `run-danger.yml` calls Danger on a pull request, and this reports the
+# same name on a merge group. That name — `<calling job> / <reusable job>`, so
+# `dangermattic / retry-buildkite-job` — is what the pull request's checks report.
+#
+# Keep the two in step: if the reusable workflow's job id or the calling job's key in
+# `run-danger.yml` changes, the name here changes with it.
+
+on:
+  merge_group:
+
+permissions: {}
+
+jobs:
+  queue-passes:
+    name: "dangermattic / retry-buildkite-job"
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "A merge group reports checks_requested only; Danger already ran on the pull request."

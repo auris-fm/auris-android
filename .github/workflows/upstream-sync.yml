@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -61,7 +61,7 @@ jobs:
       - name: Resolve merge conflicts with Pi
         id: pi
         if: steps.preflight.outputs.proceed == 'true' && steps.prepare.outputs.merge_conflicts == 'true'
-        uses: shaftoe/pi-coding-agent-action@v2
+        uses: shaftoe/pi-coding-agent-action@7624af592b830d2cdf2872c18d353989cc7b1efb # v2.9.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           provider: ${{ secrets.PI_PROVIDER || vars.PI_PROVIDER }}
@@ -136,7 +136,7 @@ jobs:
 
       - name: Upload deferred workflow patch
         if: steps.preflight.outputs.proceed == 'true' && steps.finalize.outputs.workflows_deferred == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upstream-sync-workflows-patch
           path: ${{ runner.temp }}/upstream-sync/github-workflows.patch
@@ -144,7 +144,7 @@ jobs:
 
       - name: Upload Pi session JSONL
         if: steps.preflight.outputs.proceed == 'true' && steps.prepare.outputs.merge_conflicts == 'true' && steps.pi.outputs.session_jsonl_path != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: upstream-sync-pi-session
           path: ${{ steps.pi.outputs.session_jsonl_path }}

@@ -15,8 +15,11 @@
 #                          dir). `unscanned.tsv` there lists what semgrep did not finish, as
 #                          `path<TAB>rule`, with `*` for a file no rule finished.
 #   AUDIT_SCANNERS         which of "secrets deps code workflows" to run (default: all four)
-#   AUDIT_ENFORCE          "true" makes high-severity findings from deps, code and workflows
-#                          fail a `pr` run. A leaked secret fails a `pr` run regardless.
+#   AUDIT_ENFORCE          "true" makes high-severity findings from EVERY scanner block the pull
+#                          request. A scanner name ("workflows") or a comma-separated list
+#                          ("secrets,workflows") enforces only those, which is how one scanner can
+#                          be made blocking before the others are trusted. A leaked secret fails a
+#                          `pr` run regardless.
 #   AUDIT_QUIET            "true" prints the count per scanner and not the findings, for a run
 #                          whose log is public. The full report is still written to AUDIT_OUT.
 #   AUDIT_HISTORY_SINCE    `full` only: scan history after this commit instead of all of it
@@ -81,6 +84,24 @@ for name in $scanners; do
     *) die "AUDIT_SCANNERS: unknown scanner '$name'" ;;
   esac
 done
+
+# A misspelt scanner name here would silently enforce nothing, and a gate that enforces nothing
+# looks exactly like a gate that passes. Split on commas -- deleting them would join the names
+# into one word -- and accept the two values `enforces()` reads as "nothing": false and empty.
+if [ -n "${AUDIT_ENFORCE:-}" ]; then
+  IFS=',' read -r -a enforced_names <<< "$AUDIT_ENFORCE"
+  for name in "${enforced_names[@]}"; do
+    case "$name" in
+      secrets | deps | code | workflows) ;;
+      # `true` and `false` mean every scanner and none, so they are whole settings, not members
+      # of a list: `true,code` would otherwise pass here and then enforce only `code`.
+      true | false)
+        [ "${#enforced_names[@]}" -eq 1 ] ||
+          die "AUDIT_ENFORCE: '$name' cannot be combined with other scanners" ;;
+      *) die "AUDIT_ENFORCE: unknown scanner '$name' (use true, false, or a comma-separated scanner list)" ;;
+    esac
+  done
+fi
 
 # Read by earlier versions of this script, as a list of the findings that were open. A caller
 # that still passes it expects them to be kept, and they would not be.
@@ -569,6 +590,18 @@ blocking=0
 : > "$out/sections.md"
 : > "$out/counts.md"
 
+# Whether a scanner's findings may block the pull request. `false` and "" enforce nothing;
+# "true" enforces every scanner; any other value is a comma-separated list of scanner names.
+enforces() {
+  local scanner=$1 setting="${AUDIT_ENFORCE:-false}"
+  [ -n "$setting" ] || return 1
+  [ "$setting" = true ] && return 0
+  case ",$setting," in
+    *",$scanner,"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Appends one scanner's section and adds its counts to the totals.
 report() {
   local name=$1 title=$2 rows="$out/$1.tsv" count high
@@ -577,7 +610,8 @@ report() {
   count=$(wc -l < "$out/$name.lines" | tr -d ' ')
   high=$(grep -c "^high$tab" "$out/$name.lines" || true)
   total=$((total + count))
-  if [ "$name" = secrets ] || [ "${AUDIT_ENFORCE:-false}" = true ]; then
+  # A leaked secret always blocks: it is exposed the moment the pull request is pushed.
+  if [ "$name" = secrets ] || enforces "$name"; then
     blocking=$((blocking + high))
   fi
   echo "- $title: $count" >> "$out/counts.md"

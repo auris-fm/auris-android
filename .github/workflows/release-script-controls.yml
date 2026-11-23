@@ -36,10 +36,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # The fetcher's Play API names were only ever read statically: the gem was
-      # not installed where the review ran. Install JUST that gem at the locked
-      # version -- a full `bundle install` pulls fastlane and takes minutes, and
-      # this control needs one gem, not the release toolchain.
+      # Checks the fetcher's Play API names against the real gem classes, so a
+      # renamed method or changed property fails here rather than at the first
+      # upload. Install JUST that gem at the locked version -- a full
+      # `bundle install` pulls fastlane and takes minutes, and this control needs
+      # one gem, not the release toolchain.
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"

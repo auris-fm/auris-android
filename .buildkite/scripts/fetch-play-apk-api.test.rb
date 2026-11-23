@@ -1,10 +1,10 @@
 # Controls for the Play API surface fetch-play-apk.rb depends on.
 #
-# The automated review could only read this statically: the gem was not
-# vendored where it ran, so `list_generatedapks`, `download_generatedapk` and
-# `generated_universal_apk.download_id` were unverified names. They are checked
-# here against the REAL gem classes from Gemfile.lock -- no hand-made double, so
-# a renamed method or a changed JSON property fails instead of being mirrored.
+# `list_generatedapks`, `download_generatedapk` and
+# `generated_universal_apk.download_id` are checked against the REAL gem classes
+# from Gemfile.lock -- no hand-made double, so a renamed method or a changed JSON
+# property fails instead of being mirrored. Reading the names alone would certify
+# whatever the fetcher happens to call.
 #
 # What this does NOT prove: that Play populates download_id for a given build.
 # That is a server behaviour, decidable only by a real upload.

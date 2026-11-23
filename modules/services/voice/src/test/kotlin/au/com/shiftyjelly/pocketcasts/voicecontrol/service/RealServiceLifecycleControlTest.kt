@@ -321,15 +321,22 @@ class RealServiceLifecycleControlTest {
         val deadline = System.currentTimeMillis() + 30_000
         var last = watcherCount(service)
         var stableReads = 0
+        val readings = mutableListOf(last)
         while (System.currentTimeMillis() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
             val now = watcherCount(service)
             stableReads = if (now == last) stableReads + 1 else 0
             last = now
+            readings += now
             if (stableReads >= 3) return now
             Thread.sleep(10)
         }
-        return last
+        // Running out of the bound is NOT an answer. Returning the last reading here would let a
+        // count that never settled pass on whatever it happened to read at the deadline, which is
+        // the failure this control exists to remove.
+        throw AssertionError(
+            "the watcher count never settled; readings=${readings.takeLast(20)}",
+        )
     }
 
     /**

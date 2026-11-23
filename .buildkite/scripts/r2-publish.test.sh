@@ -270,6 +270,15 @@ printf 'aab' > "$MOCK_ARTIFACTS/app/build/outputs/bundle/release/app-release.aab
 # script into the same artifact store the consumer downloads from.
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" "$WORK/repo/.buildkite/commands/"
 chmod +x "$WORK/repo/.buildkite/commands/"*.sh
+# The release step prepares native dependency trees before building; this control targets the
+# artifact hand-off, so stub that preparation with two already-present trees. No clone, no network.
+mkdir -p "$WORK/repo/.buildkite/scripts" "$WORK/repo/native-trees/llama" "$WORK/repo/native-trees/oboe"
+cat > "$WORK/repo/.buildkite/scripts/native-deps.sh" <<'NATIVESTUB'
+#!/bin/bash
+printf 'FETCHCONTENT_SOURCE_DIR_LLAMA="%s/native-trees/llama"\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_OBOE="%s/native-trees/oboe"\n' "$PWD"
+NATIVESTUB
+chmod +x "$WORK/repo/.buildkite/scripts/native-deps.sh"
 (
   cd "$WORK/repo"
   # Producer fixture: the signing gate needs a real keystore; Gradle and the

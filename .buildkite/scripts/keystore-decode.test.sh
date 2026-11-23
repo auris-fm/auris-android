@@ -20,8 +20,19 @@ cd "$WORK"
 keytool -genkeypair -keystore good.keystore -alias upload -storepass testpass \
   -keypass testpass -dname "CN=Control" -keyalg RSA -keysize 2048 -validity 1 >/dev/null 2>&1
 
-mkdir -p app .buildkite/commands
+mkdir -p app .buildkite/commands .buildkite/scripts
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" .buildkite/commands/
+# The release step prepares the native dependency trees before building. This control targets the
+# DECODE gate, so give it the helper and a stub that reports two already-present trees: no clone,
+# no network, and the step's own ordering still exercised.
+cp "$DIR/.buildkite/scripts/native-deps.sh" .buildkite/scripts/
+mkdir -p native-trees/llama native-trees/oboe
+cat > .buildkite/scripts/native-deps.sh <<'NATIVESTUB'
+#!/bin/bash
+printf 'FETCHCONTENT_SOURCE_DIR_LLAMA="%s/native-trees/llama"\n' "$PWD"
+printf 'FETCHCONTENT_SOURCE_DIR_OBOE="%s/native-trees/oboe"\n' "$PWD"
+NATIVESTUB
+chmod +x .buildkite/scripts/native-deps.sh
 # Buildkite runs the step as an executable, so its `#!/bin/bash -eu` applies.
 chmod +x .buildkite/commands/auris-release-aab.sh
 printf 'versionName=7.90\nversionCode=9452\n' > version.properties

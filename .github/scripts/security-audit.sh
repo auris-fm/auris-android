@@ -92,7 +92,12 @@ if [ -n "${AUDIT_ENFORCE:-}" ]; then
   IFS=',' read -r -a enforced_names <<< "$AUDIT_ENFORCE"
   for name in "${enforced_names[@]}"; do
     case "$name" in
-      true | false | secrets | deps | code | workflows) ;;
+      secrets | deps | code | workflows) ;;
+      # `true` and `false` mean every scanner and none, so they are whole settings, not members
+      # of a list: `true,code` would otherwise pass here and then enforce only `code`.
+      true | false)
+        [ "${#enforced_names[@]}" -eq 1 ] ||
+          die "AUDIT_ENFORCE: '$name' cannot be combined with other scanners" ;;
       *) die "AUDIT_ENFORCE: unknown scanner '$name' (use true, false, or a comma-separated scanner list)" ;;
     esac
   done

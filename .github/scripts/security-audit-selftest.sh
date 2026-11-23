@@ -123,13 +123,14 @@ expect "a high-severity finding blocks once enforced" 1 "" \
 # The first workflow of a repository is audited at all (the base has no workflow), and pinning
 # a scanner ON without touching what counts as high must not fail on an unenforced rule.
 #
-# The expectation is measured, not guessed: zizmor 1.32.0 reports FOUR high-severity findings for
-# this one file -- dangerous-triggers, artipacked and excessive-permissions alongside
-# unpinned-uses -- so enabling the scanner blocks with four, and an assertion of one would be
-# asserting a zizmor version rather than the gate.
+# The gate fixture is the PINNED workflow below with its commit swapped back for a tag, so
+# `unpinned-uses` is its ONLY high-severity finding. `$unsafe_workflow` carries three others
+# (dangerous-triggers, artipacked, excessive-permissions), which would let this case pass on a
+# zizmor that had demoted unpinned-uses below high -- the gate would be off and the test green.
 new_repo pinned-gate-off
 mkdir -p .github/workflows
-printf '%s' "$unsafe_workflow" > .github/workflows/unsafe.yml
+printf 'name: unpinned\non: pull_request\npermissions: {}\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n' \
+  > .github/workflows/unpinned.yml
 commit_all "add a version-tagged workflow"
 expect "an unpinned workflow is reported but does not block when the scanner is not enforced" 0 \
   "zizmor/unpinned-uses" \
@@ -137,13 +138,13 @@ expect "an unpinned workflow is reported but does not block when the scanner is 
 
 # THE GATE: the same finding, with zizmor enforced and nothing else enforced, fails the check.
 expect "enforcing the workflow scanner alone blocks an unpinned workflow" 1 \
-  "::error::Security audit:" \
+  "::error::Security audit: 1 blocking finding(s)" \
   AUDIT_SCANNERS=workflows AUDIT_ENFORCE="workflows" bash "$audit" pr 'HEAD^1'
 
 # A list must be SPLIT, not joined: deleting the commas would read "secrets,workflows" as one
 # unknown name. Accepted AND enforcing -- the same unpinned workflow still blocks under a list.
 expect "a comma-separated enforcement list is accepted and enforces both named scanners" 1 \
-  "::error::Security audit:" \
+  "::error::Security audit: 1 blocking finding(s)" \
   AUDIT_SCANNERS=workflows AUDIT_ENFORCE="secrets,workflows" bash "$audit" pr 'HEAD^1'
 # `false` is the value main's workflow used and what enforces() reads as nothing.
 expect "an explicit false enforcement is accepted and blocks nothing" 0 \
@@ -179,6 +180,10 @@ expect "a misspelt enforcement name is refused" 2 "" \
 # runs in `full` mode where no base is needed.
 expect "a misspelt name inside an enforcement list is refused" 2 "" \
   AUDIT_SCANNERS=workflows AUDIT_ENFORCE="secrets,workflow" bash "$audit" full
+# `true` means every scanner, so it cannot be a member of a list: enforces() reads the whole
+# setting, and "true,code" would silently enforce only code.
+expect "true combined with a scanner name is refused" 2 "" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="true,code" bash "$audit" full
 expect "an unknown history bound is refused" 2 "" \
   AUDIT_SCANNERS=secrets AUDIT_HISTORY_SINCE=no-such-tag bash "$audit" full
 expect "an unknown base commit is refused" 2 "" \

@@ -587,4 +587,251 @@ class CloudConversationAcknowledgementTest {
             dispatched[2].conversationId,
         )
     }
+
+    /**
+     * A Create RESENT after its own `connected` must not demote the conversation it established.
+     *
+     * The resend goes through the same sending step as the first attempt. Marking the acknowledged id
+     * pending again would make every later follow-up create a fresh conversation, losing the user's
+     * context for the rest of the exchange. Nothing in production raises the retry flag today, so this
+     * path is driven by tests; the guard exists so retry wiring cannot inherit the demotion.
+     */
+    @Test
+    fun `resending a create after its handshake keeps the conversation resumable`() = runTest {
+        // A LONG window: this case is about admission, and a 100 ms one would close under it.
+        val signal = GracePeriodSignal(timeoutMs = 60_000L)
+        signal.onWakeWordDetected()
+        // A window that has a cloud turn in flight is NOT closed by a non-terminal end: the hold is
+        // preserved, which is what keeps a follow-up's window open here.
+        val windowHold = requireNotNull(signal.holdCloudTurn())
+        val origin = signal.currentGeneration
+        val admission = CloudConversationAdmission().apply { beginOrigin(origin) }
+        val dispatched = mutableListOf<Dispatched>()
+        var call = 0
+        val sink = sink(signal, origin, admission) { turn ->
+            dispatched += Dispatched(turn.conversationId, turn.conversationMode)
+            call += 1
+            if (call == 2) {
+                // THE RESEND GETS NO SECOND HANDSHAKE. The worker already admitted this request, so it
+                // answers `duplicate_request` rather than sending `connected` again -- which is exactly why
+                // a demotion caused by the resend would never be repaired.
+                flow { emit(CloudRouteEvent.Error(code = "duplicate_request", message = "")) }
+            } else {
+                flow {
+                    emit(CloudRouteEvent.Connected("pcm@16k"))
+                    emit(CloudRouteEvent.Done(0, 0))
+                }
+            }
+        }
+
+        // Prepare the wake's own turn, dispatch it, and let its handshake acknowledge the conversation.
+        val prepared = requireNotNull(
+            sink.prepareTurn(
+                request = "first",
+                context = PlaybackContext(),
+                isLiveGraceTurn = false,
+                capturedOrigin = origin,
+                isWakeOriginated = true,
+                hint = null,
+                logicalRequestId = createWireId,
+                isRetry = false,
+                sourceLanguage = null,
+            ),
+        )
+        sink.dispatchPrepared(prepared)
+        val established = requireNotNull(dispatched.single().conversationId)
+
+        // PREPARE the follow-up while the conversation is acknowledged, so it is a RESUME. This is the
+        // ordering that matters: the demotion happens AFTER this prepare, and the follow-up is sent after
+        // it. Preparing it later would let admission mint a Create for its own reason and the case would
+        // pass without exercising the guard at all.
+        signal.notePreparedRequest(origin)
+        assertTrue("the window is still live", signal.isCurrent(origin) && signal.isActive.value)
+        val followUp = requireNotNull(
+            sink.prepareTurn(
+                request = "follow up",
+                context = PlaybackContext(),
+                isLiveGraceTurn = signal.isCurrent(origin) && signal.isActive.value,
+                capturedOrigin = origin,
+                isWakeOriginated = signal.isWakeOriginated(origin, isFirstRequestOfWindow = !signal.hasPreparedRequest(origin)),
+                hint = null,
+                logicalRequestId = followUpWireId,
+                isRetry = false,
+                sourceLanguage = null,
+            ),
+        )
+        assertEquals("prepared as a RESUME of the acknowledged conversation", CloudConversationMode.Resume, followUp.conversationMode)
+
+        // RESEND the create after its handshake arrived. The follow-up is already prepared and waiting, so
+        // nothing re-decides it afterwards: what admission holds when it is sent is what it sends.
+        sink.dispatchPrepared(prepared, isRetry = true)
+        assertEquals("the resend must actually reach the wire", 2, dispatched.size)
+        assertEquals("the resend keeps its own identity", established, dispatched[1].conversationId)
+        assertEquals(CloudConversationMode.Create, dispatched[1].mode)
+
+        // Send the follow-up as the executor does. Its pair was fixed while the conversation was
+        // acknowledged; what must survive the resend is that the CONVERSATION IT NAMES is still resumable.
+        sink.dispatchPrepared(followUp)
+        signal.onAppBackgrounded()
+        signal.finishCloudTurn(windowHold)
+
+        // And a LATER CONTINUATION, in its OWN live window, must still resume the same conversation. This
+        // is where a demotion costs the user their thread: admission would mint a fresh conversation for
+        // every remaining turn of the exchange. It is prepared under the wake's own window, which has
+        // already had its turn, so it is a continuation rather than another wake. The follow-up of a real
+        // exchange shares this window; a second wake would be a new act and would create by contract.
+        val followUpOrigin = origin
+        val later = requireNotNull(
+            sink.prepareTurn(
+                request = "later",
+                context = PlaybackContext(),
+                isLiveGraceTurn = signal.isCurrent(followUpOrigin) && signal.isActive.value,
+                capturedOrigin = followUpOrigin,
+                isWakeOriginated = signal.isWakeOriginated(followUpOrigin, isFirstRequestOfWindow = !signal.hasPreparedRequest(followUpOrigin)),
+                hint = null,
+                logicalRequestId = "9a0364b9-e9f8-4d2c-b1a7-3c5e7f901234",
+                isRetry = false,
+                sourceLanguage = null,
+            ),
+        )
+        // Not assumed: a control that states its own flags can cover a path production never takes.
+        assertTrue("the later turn is inside a live window", signal.isCurrent(followUpOrigin) && signal.isActive.value)
+        assertFalse(
+            "and it is a continuation, not a wake",
+            signal.isWakeOriginated(followUpOrigin, isFirstRequestOfWindow = !signal.hasPreparedRequest(followUpOrigin)),
+        )
+        assertEquals(
+            "a continuation prepared AFTER the resend still resumes the acknowledged conversation",
+            CloudConversationMode.Resume,
+            later.conversationMode,
+        )
+        assertEquals(established, later.conversationId)
+
+        assertEquals(3, dispatched.size)
+        assertEquals(
+            "the resend must not demote the acknowledged conversation",
+            CloudConversationMode.Resume,
+            dispatched[2].mode,
+        )
+        assertEquals(established, dispatched[2].conversationId)
+    }
+
+    /**
+     * The Create to Resume conversion AT DISPATCH, on the recovery path.
+     *
+     * A create dies unacknowledged, so the continuation is prepared as a CREATE of a replacement. The
+     * replacement's handshake then lands before the continuation is sent, and it must adopt that now-real
+     * conversation rather than opening a third one. Without the conversion the continuation stays a Create
+     * and the user's thread splits.
+     */
+    @Test
+    fun `a continuation prepared as a create adopts the replacement once it is acknowledged`() = runTest {
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+        signal.onWakeWordDetected()
+        val origin = signal.currentGeneration
+        val admission = CloudConversationAdmission().apply { beginOrigin(origin) }
+        val dispatched = mutableListOf<Dispatched>()
+        val firstEnds = CompletableDeferred<Unit>()
+        val replacementOnWire = CompletableDeferred<Unit>()
+        val handshake = CompletableDeferred<Unit>()
+        val handshakeSeen = CompletableDeferred<Unit>()
+        val letReplacementFinish = CompletableDeferred<Unit>()
+        var call = 0
+        val sink = sink(signal, origin, admission) { turn ->
+            dispatched += Dispatched(turn.conversationId, turn.conversationMode)
+            call += 1
+            when (call) {
+                1 -> flow {
+                    // The first create dies BEFORE any handshake.
+                    firstEnds.await()
+                    throw java.io.IOException("socket closed before the handshake")
+                }
+
+                2 -> flow {
+                    replacementOnWire.complete(Unit)
+                    handshake.await()
+                    emit(CloudRouteEvent.Connected("pcm@16k"))
+                    handshakeSeen.complete(Unit)
+                    letReplacementFinish.await()
+                    emit(CloudRouteEvent.Done(0, 0))
+                }
+
+                else -> flow {
+                    emit(CloudRouteEvent.Connected("pcm@16k"))
+                    emit(CloudRouteEvent.Done(0, 0))
+                }
+            }
+        }
+
+        val first = async {
+            runCatching {
+                sink.routeToCloud(
+                    request = "first",
+                    context = PlaybackContext(),
+                    isLiveGraceTurn = false,
+                    capturedOrigin = origin,
+                    isWakeOriginated = true,
+                    admitted = createWireId,
+                )
+            }
+        }
+        runCurrent()
+        firstEnds.complete(Unit)
+        assertTrue("the first create must actually have failed", first.await().isFailure)
+        signal.notePreparedRequest(origin)
+
+        // The replacement create goes on the wire and stays there.
+        val replacement = async {
+            sink.routeToCloud(
+                request = "replacement",
+                context = PlaybackContext(),
+                isLiveGraceTurn = signal.isCurrent(origin) && signal.isActive.value,
+                capturedOrigin = origin,
+                isWakeOriginated = signal.isWakeOriginated(origin, isFirstRequestOfWindow = !signal.hasPreparedRequest(origin)),
+                admitted = followUpWireId,
+            )
+        }
+        replacementOnWire.await()
+
+        // Prepare the continuation NOW: the replacement is unacknowledged, so this is a CREATE.
+        val prepared = requireNotNull(
+            sink.prepareTurn(
+                request = "continuation",
+                context = PlaybackContext(),
+                isLiveGraceTurn = signal.isCurrent(origin) && signal.isActive.value,
+                capturedOrigin = origin,
+                isWakeOriginated = signal.isWakeOriginated(origin, isFirstRequestOfWindow = !signal.hasPreparedRequest(origin)),
+                hint = null,
+                logicalRequestId = "9a0364b9-e9f8-4d2c-b1a7-3c5e7f901234",
+                isRetry = false,
+                sourceLanguage = null,
+            ),
+        )
+        assertEquals(
+            "prepared as a CREATE, because the replacement has not been acknowledged yet",
+            CloudConversationMode.Create,
+            prepared.conversationMode,
+        )
+
+        // The replacement's handshake lands BETWEEN that prepare and the continuation's dispatch.
+        handshake.complete(Unit)
+        handshakeSeen.await()
+        letReplacementFinish.complete(Unit)
+        replacement.await()
+
+        sink.dispatchPrepared(prepared)
+        signal.onAppBackgrounded()
+
+        assertEquals(3, dispatched.size)
+        assertEquals(
+            "the continuation adopts the acknowledged replacement instead of opening a third conversation",
+            CloudConversationMode.Resume,
+            dispatched[2].mode,
+        )
+        assertEquals(
+            "and it continues the REPLACEMENT's conversation",
+            dispatched[1].conversationId,
+            dispatched[2].conversationId,
+        )
+    }
 }

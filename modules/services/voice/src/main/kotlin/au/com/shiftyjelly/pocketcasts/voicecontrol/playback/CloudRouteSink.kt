@@ -259,10 +259,13 @@ class CloudRouteSink internal constructor(
     /**
      * Prepares a turn ONCE, for a controller that may dispatch it more than once.
      *
-     * The returned turn is immutable and already carries its identity: request ID, conversation handle
-     * and mode were fixed when it was prepared. A RETRY reuses it unchanged -- it must not re-prepare,
-     * because re-preparing would mint a second conversation and consume the wake selection a second
-     * time, so a retried request would look like a new user act.
+     * The returned turn carries its REQUEST IDENTITY fixed: a RETRY reuses it unchanged -- it must not
+     * re-prepare, because re-preparing would mint a second conversation and consume the wake selection a
+     * second time, so a retried request would look like a new user act.
+     *
+     * The CONVERSATION PAIR is provisional until the turn is sent. A first dispatch re-decides it against
+     * what the worker has acknowledged by then, since the predecessor's handshake can arrive between this
+     * prepare and that dispatch. A retry keeps the pair it was prepared with.
      *
      * Returns null when the origin has been superseded: nothing is sent, so no conversation is created
      * on behalf of a turn that has already been replaced.
@@ -1115,8 +1118,7 @@ class CloudRouteSink internal constructor(
      * cannot support. Null rather than an empty or invented tag when the locale has none: absence is
      * a fact the server handles (it falls through to English), while a made-up tag is a wrong claim.
      */
-    private fun uiLanguageForWire(): String? =
-        currentLocale().language.lowercase().takeIf { it.isNotBlank() }
+    private fun uiLanguageForWire(): String? = currentLocale().language.lowercase().takeIf { it.isNotBlank() }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         // The saved positions are requested FOR THIS EPISODE: a position recorded while another
@@ -1536,8 +1538,7 @@ class CloudRouteSink internal constructor(
          */
         private val PERSISTABLE_TERMINAL_MARKERS: Set<String> = setOf("done", "interrupted")
 
-        private fun isPersistableErrorCode(code: String): Boolean =
-            CloudRouteErrorCodes.isRecognised(code) || code in PERSISTABLE_TERMINAL_MARKERS
+        private fun isPersistableErrorCode(code: String): Boolean = CloudRouteErrorCodes.isRecognised(code) || code in PERSISTABLE_TERMINAL_MARKERS
 
         private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"

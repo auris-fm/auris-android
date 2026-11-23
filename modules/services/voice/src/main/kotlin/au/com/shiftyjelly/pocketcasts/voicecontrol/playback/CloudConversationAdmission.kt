@@ -14,10 +14,14 @@ import kotlinx.coroutines.CompletableDeferred
  * so CREATE carries the UUID this client made -- there is no server-minted handle to wait for, and no
  * round trip before the first turn can be sent.
  *
- * PREPARED HERE, SERIALIZED BY THE SINK. The sink must not resolve "the current conversation" when it
- * finally sends, because a retry or a superseded origin would then borrow whichever handle happened to
- * be current at send time. The pair is therefore fixed at the moment the turn is prepared and travels
- * with the turn.
+ * ADMITTED HERE, SERIALIZED BY THE SINK. Admission decides whether the turn may act at all, and mints
+ * the conversation when it begins one. A RETRY keeps the pair it was prepared with, so a resend cannot
+ * borrow whichever handle happens to be current.
+ *
+ * A FIRST DISPATCH RE-DECIDES THE PAIR against what the worker has acknowledged by then, because a
+ * follow-up can be prepared while its predecessor is still on the wire and the handshake may land in
+ * between. Only a conversation the worker confirmed with `connected` is resumable; an unacknowledged one
+ * is created fresh instead. See [acknowledge] and [noteSending].
  */
 @Singleton
 class CloudConversationAdmission @Inject constructor() {
@@ -154,10 +158,15 @@ class CloudConversationAdmission @Inject constructor() {
      */
     fun noteSending(turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) {
         synchronized(lock) {
-            if (turn.conversationMode == CloudConversationMode.Create) {
-                handle = turn.conversationId
-                pending = turn.conversationId
-            }
+            if (turn.conversationMode != CloudConversationMode.Create) return
+            // ALREADY ACKNOWLEDGED IS ALREADY RESUMABLE. Re-marking it pending would demote a live
+            // conversation, so every later follow-up would create a fresh one and the user would lose
+            // context. Reached when a Create is RESENT after its own handshake -- today only tests drive
+            // that path, since nothing in production raises the retry flag yet; the guard is here so
+            // whoever wires retries does not inherit the demotion.
+            if (handle == turn.conversationId && pending == null) return
+            handle = turn.conversationId
+            pending = turn.conversationId
         }
     }
 

@@ -56,6 +56,11 @@ PLAY_NORM="$(norm "$PLAY_SHA256")"
 CLASSICAL_NORM="$(norm "${AURIS_PLAY_HYBRID_CLASSICAL_SHA256:-}")"
 PQC_NORM="$(norm "${AURIS_PLAY_HYBRID_PQC_SHA256:-}")"
 
+# Highest SDK any shipping device runs today. A signer whose maxSdkVersion is below this cannot
+# be the key that governs installs. Deliberately a floor well above every released API level, so
+# only a genuinely superseded range is skipped -- never the current one.
+CURRENT_DEVICE_SDK="${AURIS_CURRENT_DEVICE_SDK:-36}"
+
 APP_FOUND=0
 echo "APK signing certificates by label:"
 while IFS= read -r line; do
@@ -64,7 +69,7 @@ while IFS= read -r line; do
   digest="$(printf '%s' "$line" | awk '{print $NF}')"
   printf '  %s-> %s\n' "$label" "$digest"
   case "$label" in
-    "Source Stamp Signer"*|"Source Stamp Signer: "*)
+    "Source Stamp Signer"*)
       continue ;;                             # provenance stamp, not a signing key
     "V3.2 Hybrid Classical Signer"*)
       [ -n "$CLASSICAL_NORM" ] || { echo "FAIL: hybrid classical signer present but no pin configured" >&2; exit 1; }
@@ -81,6 +86,16 @@ while IFS= read -r line; do
         echo "  actual:   $digest" >&2; exit 1; }
       continue ;;
     "Signer #"*|"Signer ("*|"V3.0 Signer"*|"V2 Signer"*|"V3.1 Signer"*)
+      # An app-signing signer. Which one GOVERNS INSTALLS depends on its SDK range: after a real
+      # rotation the lineage keeps the old certificate for older devices, so requiring every
+      # signer to equal one pin would make the check permanently unpublishable -- no pin value
+      # could satisfy both ends of the lineage. The signer covering current devices must equal
+      # the pin; an older-range signer is reported, not compared against it.
+      maxsdk="$(printf '%s' "$label" | sed -n 's/.*maxSdkVersion=\([0-9]*\).*/\1/p')"
+      if [ -n "$maxsdk" ] && [ "$maxsdk" -lt "$CURRENT_DEVICE_SDK" ]; then
+        echo "  (older-range signer, superseded above SDK $maxsdk: not the install-governing key)"
+        continue
+      fi
       APP_FOUND=1
       [ "$(norm "$digest")" = "$PLAY_NORM" ] || {
         echo "FAIL: app-signing signer is NOT the pinned Play app-signing key" >&2

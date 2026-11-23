@@ -22,6 +22,8 @@ keytool -genkeypair -keystore good.keystore -alias upload -storepass testpass \
 
 mkdir -p app .buildkite/commands
 cp "$DIR/.buildkite/commands/auris-release-aab.sh" .buildkite/commands/
+# Buildkite runs the step as an executable, so its `#!/bin/bash -eu` applies.
+chmod +x .buildkite/commands/auris-release-aab.sh
 printf 'versionName=7.90\nversionCode=9452\n' > version.properties
 printf 'org.gradle.jvmargs=-Xmx1g\n' > gradle.properties
 printf 'rootProject.name="x"\n' > settings.gradle.kts
@@ -32,10 +34,17 @@ echo reached > gradlew-reached
 exit 0
 STUB
 chmod +x gradlew
-# Stub buildkite-agent (artifact upload at the end).
+# Stub buildkite-agent: RECORDS what it was asked to upload. A stub that just
+# exits 0 lets the release step stop publishing its artifacts entirely and every
+# control here stays green -- the assertion has to be on the outbound action.
 mkdir -p bin
-cat > bin/buildkite-agent <<'STUB'
+cat > bin/buildkite-agent <<STUB
 #!/bin/bash
+if [ "\$1 \$2" = "artifact upload" ]; then
+  printf '%s\n' "\$3" >> "$WORK/artifact-uploads"
+  [ -f "\$3" ] || { echo "FAIL: upload of missing file \$3" >&2; exit 1; }
+  [ -z "\${MOCK_UPLOAD_FAILS:-}" ] || { echo "mock: artifact upload failed" >&2; exit 1; }
+fi
 exit 0
 STUB
 chmod +x bin/buildkite-agent
@@ -71,13 +80,33 @@ FIXTURE_JAVA_HOME="$(dirname "$(dirname "$SAVED_REAL_KEYTOOL_EARLY")")"
 run() { # b64-value expected_exit name
   rm -f gradlew-reached
   JAVA_HOME="$FIXTURE_JAVA_HOME" ANDROID_UPLOAD_KEYSTORE_B64="$1" BUILDKITE_BUILD_NUMBER=9452 \
-    bash -eu .buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
+    ./.buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
   check "$3" "$2" "$?"
 }
 
 GOOD_B64="$(openssl base64 -A < good.keystore)"
+rm -f "$WORK/artifact-uploads"
 run "$GOOD_B64" 0 "valid base64 keystore passes the gate"
+# The step must PUBLISH both artifacts the later steps download. Asserting the
+# pair (producer's upload call + the consumer's download path) is what catches a
+# declared-but-unproduced artifact; asserting either side alone does not.
+grep -qx 'app/build/outputs/bundle/release/app-release.aab' "$WORK/artifact-uploads" 2>/dev/null \
+  && { PASS=$((PASS+1)); echo "ok: release step uploads the AAB the Play step downloads"; } \
+  || { FAIL=$((FAIL+1)); echo "FAIL: release step did not upload the AAB"; }
+grep -qx 'built-version-code.txt' "$WORK/artifact-uploads" 2>/dev/null \
+  && { PASS=$((PASS+1)); echo "ok: release step uploads the built version the Play step reads"; } \
+  || { FAIL=$((FAIL+1)); echo "FAIL: release step did not upload built-version-code.txt"; }
 [ -f gradlew-reached ] && { PASS=$((PASS+1)); echo "ok: gradle reached on valid input"; } || { FAIL=$((FAIL+1)); echo "FAIL: gradle not reached on valid input"; }
+
+# A failed artifact upload must FAIL the build step. Otherwise the release goes
+# green with no AAB or no carried version published, and the Play step fails
+# later with nothing to download -- the same stranding as a dropped meta-data
+# write, one step earlier. Run as an EXECUTABLE so the script's own `-eu` applies,
+# exactly as Buildkite invokes it.
+rm -f "$WORK/artifact-uploads" gradlew-reached
+JAVA_HOME="$FIXTURE_JAVA_HOME" ANDROID_UPLOAD_KEYSTORE_B64="$GOOD_B64" BUILDKITE_BUILD_NUMBER=9452 \
+  MOCK_UPLOAD_FAILS=1 ./.buildkite/commands/auris-release-aab.sh >/dev/null 2>&1
+check "failed artifact upload fails the release step" 1 "$?"
 
 # Wrapped base64 (GNU base64 wraps at 76 cols): must decode identically.
 WRAPPED_B64="$(openssl base64 < good.keystore)"

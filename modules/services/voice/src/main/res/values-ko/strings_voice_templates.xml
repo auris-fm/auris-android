@@ -7,4 +7,13 @@
     <string name="voice_cloud_error_conversation_expired">그 대화는 종료되었습니다.</string>
     <string name="voice_cloud_error_answer_unavailable">죄송합니다. 지금은 답변드리지 못했습니다. 다시 시도해 주세요.</string>
     <string name="voice_cloud_error_generic">죄송합니다. 그 요청을 완료하지 못했습니다.</string>
+    <!-- Cloud error lines, taken verbatim from the iOS copy so both apps say the same thing.
+         Dedicated strings, not array entries: an array entry cannot be overridden per locale. -->
+    <string name="voice_cloud_error_no_answer">죄송합니다. 그에 대한 답을 찾지 못했습니다. 다른 방식으로 물어봐 주세요.</string>
+    <string name="voice_cloud_error_retrieval_unavailable">죄송합니다. 지금은 확인하지 못했습니다. 다시 시도해 주세요.</string>
+    <string name="voice_cloud_error_queue_overflow">죄송합니다. 답변을 끝까지 드리지 못했습니다. 다시 시도해 주세요.</string>
+    <string name="voice_cloud_error_budget_exceeded">죄송합니다. 답변하는 데 시간이 너무 오래 걸렸습니다. 다시 시도해 주세요.</string>
+    <string name="voice_cloud_error_turn_conflict">이전 질문에 아직 답변하고 있습니다. 잠시 후에 다시 시도해 주세요.</string>
+    <string name="voice_cloud_error_corrupt_record">죄송합니다. 대화의 흐름을 놓쳤습니다. 다시 말씀해 주시면 새 대화를 시작합니다.</string>
+    <string name="voice_cloud_error_connection_lost">연결이 끊어졌습니다. 다시 시도해 주세요.</string>
 </resources>

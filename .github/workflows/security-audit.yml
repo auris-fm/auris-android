@@ -81,6 +81,11 @@ jobs:
       - name: Check the audit script against known cases
         run: .github/scripts/security-audit-selftest.sh
 
+      # The base-commit choice, on both event shapes. Needs no scanners: it drives the real step
+      # against throwaway repositories with a stand-in audit that records the base it was handed.
+      - name: Check the base-commit choice for both events
+        run: bash .github/scripts/security-audit-base.test.sh
+
       - name: Audit what the pull request adds
         env:
           # Read-only in this job, and handed to zizmor alone, which looks up the actions
@@ -100,14 +105,11 @@ jobs:
           # leaked secret already does. Off while the first weeks of results show which rules
           # are noise here; review on 2026-12-04.
           AUDIT_ENFORCE: "false"
-        run: |
-          # On any other commit `HEAD^1` is just the previous commit, and the audit would
-          # cover the last commit of the pull request instead of all of it.
-          if ! git rev-parse --verify --quiet 'HEAD^2' > /dev/null; then
-            echo "::error::Expected the pull request's merge commit to be checked out."
-            exit 2
-          fi
-          .github/scripts/security-audit.sh pr 'HEAD^1'
+          # A merge group's ref is a LINEAR commit: the base tip with the queued changes on
+          # top, so it has no second parent and `HEAD^1` is not the base. GitHub names the
+          # base explicitly for that event.
+          MERGE_GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+        run: bash .github/scripts/security-audit-base.sh
 
   # The weekly run is two jobs so that nothing which scans can also publish. The scanners,
   # and whatever they download, run under a read-only token; the job that can write to the

@@ -7,4 +7,13 @@
     <string name="voice_cloud_error_conversation_expired">その会話は終了しました。</string>
     <string name="voice_cloud_error_answer_unavailable">申し訳ありません。今はお答えできませんでした。もう一度お試しください。</string>
     <string name="voice_cloud_error_generic">申し訳ありません。そのリクエストを完了できませんでした。</string>
+    <!-- Cloud error lines, taken verbatim from the iOS copy so both apps say the same thing.
+         Dedicated strings, not array entries: an array entry cannot be overridden per locale. -->
+    <string name="voice_cloud_error_no_answer">申し訳ありません。それに対する答えが見つかりませんでした。別の聞き方でお試しください。</string>
+    <string name="voice_cloud_error_retrieval_unavailable">申し訳ありません。今は調べられませんでした。もう一度お試しください。</string>
+    <string name="voice_cloud_error_queue_overflow">申し訳ありません。最後までお答えできませんでした。もう一度お試しください。</string>
+    <string name="voice_cloud_error_budget_exceeded">申し訳ありません。お答えするのに時間がかかりすぎました。もう一度お試しください。</string>
+    <string name="voice_cloud_error_turn_conflict">前の質問にまだお答えしています。少し待ってからもう一度お試しください。</string>
+    <string name="voice_cloud_error_corrupt_record">申し訳ありません。会話の流れがわからなくなってしまいました。もう一度話しかけていただくと、新しい会話が始まります。</string>
+    <string name="voice_cloud_error_connection_lost">接続が切れました。もう一度お試しください。</string>
 </resources>

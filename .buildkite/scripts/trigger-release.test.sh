@@ -17,11 +17,24 @@ trap 'rm -rf "$MOCK_DIR"; [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null
 cat > "$MOCK_DIR/mock.py" <<'PY'
 import http.server, sys, json
 MODE = sys.argv[1]
+# The posted payload is recorded so controls can assert what we SEND, not
+# only how we handle what comes back. A trigger that posts the wrong body
+# fails at the API with a 422 and never runs a build.
+PAYLOAD_FILE = sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
-        self.rfile.read(length)
-        if MODE == 'ok':
+        raw = self.rfile.read(length)
+        with open(PAYLOAD_FILE, 'wb') as f:
+            f.write(raw)
+        if MODE == 'branches-disabled':
+            # What auris-android actually returns: "Build branches" is off, so
+            # an API branch build is refused WHOLESALE unless the request sets
+            # ignore_pipeline_branch_filters. Bare message, no errors array --
+            # a per-branch filter rejection would name the field instead.
+            body = json.dumps({"message": "Branches have been disabled for this pipeline"}).encode()
+            self.send_response(422)
+        elif MODE == 'ok':
             # The response echoes pipeline env with a dummy secret: the
             # trigger must NEVER print it (allowlisted metadata only).
             body = json.dumps({"number": 70, "web_url": "https://buildkite.com/x/y/builds/70",
@@ -67,8 +80,9 @@ PY
 
 run_case() { # mode
   PORT_FILE="$MOCK_DIR/port"
-  rm -f "$PORT_FILE"
-  python3 "$MOCK_DIR/mock.py" "$1" > "$PORT_FILE" & MOCK_PID=$!
+  PAYLOAD="$MOCK_DIR/payload.json"
+  rm -f "$PORT_FILE" "$PAYLOAD"
+  python3 "$MOCK_DIR/mock.py" "$1" "$PAYLOAD" > "$PORT_FILE" & MOCK_PID=$!
   # Poll until the mock prints its port and accepts connections (no fixed
   # ports, no blind sleep).
   PORT=
@@ -138,6 +152,37 @@ if printf '%s' "$OUT" | grep -q "canary-do-not-log"; then
 else
   PASS=$((PASS+1)); echo "ok: structured error prints status only"
 fi
+
+# --- The posted payload -------------------------------------------------
+# Every control above exercises the RESPONSE path. None of them looked at
+# what we send, which is how a body missing ignore_pipeline_branch_filters
+# shipped: the mock accepted anything, so the suite stayed green while every
+# real main push got a 422 and no release ever ran.
+run_case ok
+payload_check() { # name python-expression-on-b
+  if python3 -c "
+import json,sys
+b = json.load(open(sys.argv[1]))
+sys.exit(0 if ($2) else 1)
+" "$PAYLOAD" 2>/dev/null; then
+    PASS=$((PASS+1)); echo "ok: $1"
+  else
+    FAIL=$((FAIL+1)); echo "FAIL: $1"
+  fi
+}
+payload_check "posts the commit being released" "b.get('commit') == 'abc123'"
+payload_check "posts branch main" "b.get('branch') == 'main'"
+# The flag must be the JSON boolean true, not the string \"true\": Buildkite
+# treats a non-boolean as absent and still refuses the branch build.
+payload_check "posts ignore_pipeline_branch_filters as boolean true" \
+  "b.get('ignore_pipeline_branch_filters') is True"
+
+# The real failure this fixes, reproduced: a pipeline with \"Build branches\"
+# off answers 422 with a bare message. Our diagnostic must name the cause
+# without echoing response values.
+run_case branches-disabled
+check "branches-disabled 422 fails" 1 "$CODE" "422" "$OUT"
+check "branches-disabled prints the branch diagnostic" 1 "$CODE" "branch rejected by the pipeline" "$OUT"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

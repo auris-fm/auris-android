@@ -24,9 +24,13 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Date
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -112,6 +116,8 @@ class FingerprintTimingManagerTranscriptFormatTest {
             cloudReferenceStore = mock(CloudReferenceStore::class.java),
             decodePolicy = decodePolicy,
         )
+        // The preparation runs on this scope; the teardown cancels it, so nothing outlives the test.
+        manager.scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
 
     /** A compact reference in [format] with three one-second checkpoints carrying real values. */
@@ -185,6 +191,13 @@ class FingerprintTimingManagerTranscriptFormatTest {
         }
         throw AssertionError("preparation published neither a refusal nor a library attempt: ${manager.state}")
     }
+
+    /**
+     * The preparation runs on the manager's own scope; leaving it alive lets its failure — on the
+     * JVM, the native library's — surface in whichever test class runs next.
+     */
+    @After
+    fun tearDown() = runBlocking { manager.shutdownForTest() }
 
     @Test
     fun `a transcript-format reference is still accepted`() {

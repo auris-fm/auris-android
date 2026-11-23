@@ -44,6 +44,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.DurationUnit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -75,8 +76,8 @@ class FingerprintTimingManager @Inject constructor(
     private val settings: Settings,
     private val dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>,
     private val pcmTap: FingerprintPcmTap,
-    private val cloudConfig: SharedPreferencesCloudConfig,
-    private val cloudFetcher: CloudFingerprintReferenceFetcher,
+    private val cloudConfig: CloudConfig,
+    private val cloudFetcher: CloudReferenceSource,
     private val cloudReferenceStore: CloudReferenceStore,
     private val decodePolicy: FingerprintDecodePolicy,
 ) {
@@ -87,6 +88,34 @@ class FingerprintTimingManager @Inject constructor(
         TRANSCRIPT_VIEW,
         BOOKMARK,
     }
+
+    /**
+     * One usable Auris reference: the bytes to match against, and the identity of those bytes so a
+     * saved mapping can record which reference produced its entries.
+     */
+    internal data class ResolvedCloudReference(
+        val payload: ByteArray,
+        val format: String?,
+        val payloadHash: String,
+    )
+
+    internal suspend fun resolveCloudMatcher(
+        cloudBaseUrl: String,
+        episodeUuid: String,
+        podcastUuid: String,
+    ): CheckpointMatcher? =
+        resolveCloudReference(cloudBaseUrl, episodeUuid, podcastUuid)
+            ?.let { cloudFetcher.buildMatcher(it.payload) }
+
+    /**
+     * The same resolution, stopping at the payload. Building the matcher needs the native library,
+     * so which reference survives a revalidation is decided — and observable — one step earlier.
+     */
+    internal suspend fun resolveCloudReferencePayload(
+        cloudBaseUrl: String,
+        episodeUuid: String,
+        podcastUuid: String,
+    ): ByteArray? = resolveCloudReference(cloudBaseUrl, episodeUuid, podcastUuid)?.payload
 
     /**
      * Resolves the cloud reference for one preparation (delta: fingerprint revalidation).
@@ -100,47 +129,35 @@ class FingerprintTimingManager @Inject constructor(
      *   200 can replace the stale entry. Unavailable does NOT refetch -- offline, a 404 or a
      *   persistent 401 stays a single request, not a second full attempt.
      */
-    internal suspend fun resolveCloudMatcher(
+    internal suspend fun resolveCloudReference(
         cloudBaseUrl: String,
         episodeUuid: String,
         podcastUuid: String,
-    ): CheckpointMatcher? =
-        resolveCloudReferencePayload(cloudBaseUrl, episodeUuid, podcastUuid)
-            ?.let { cloudFetcher.buildMatcher(it) }
-
-    /**
-     * The same resolution, stopping at the payload. Building the matcher needs the native library,
-     * so which reference survives a revalidation is decided — and observable — one step earlier.
-     */
-    internal suspend fun resolveCloudReferencePayload(
-        cloudBaseUrl: String,
-        episodeUuid: String,
-        podcastUuid: String,
-    ): ByteArray? {
+    ): ResolvedCloudReference? {
         val stored = cloudReferenceStore.load(episodeUuid)
         when (val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, stored?.etag)) {
             is CloudFingerprintReferenceFetcher.Fetch.Fresh -> {
                 cloudReferenceStore.save(episodeUuid, fetched.payload, fetched.etag)
                 Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.payload.size} bytes) for $episodeUuid")
-                return fetched.payload
+                return resolved(fetched.payload)
             }
             is CloudFingerprintReferenceFetcher.Fetch.NotModified -> {
                 if (stored != null && ReferenceFingerprint.decode(stored.payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true) {
                     Timber.d("FingerprintTimingManager: cloud reference revalidated (304) for $episodeUuid")
-                    return stored.payload
+                    return resolved(stored.payload)
                 }
                 // 304 but the stored payload is missing or corrupt: one unconditional refetch.
                 val refetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid, podcastUuid, null)
                 if (refetched is CloudFingerprintReferenceFetcher.Fetch.Fresh) {
                     cloudReferenceStore.save(episodeUuid, refetched.payload, refetched.etag)
                     Timber.d("FingerprintTimingManager: cloud reference refetched (${refetched.payload.size} bytes) for $episodeUuid")
-                    return refetched.payload
+                    return resolved(refetched.payload)
                 }
             }
             CloudFingerprintReferenceFetcher.Fetch.Unavailable -> {
                 if (stored != null && ReferenceFingerprint.decode(stored.payload, ReferenceFingerprint.AURIS_FORMAT)?.libraryCheckpoints()?.isNotEmpty() == true) {
                     Timber.d("FingerprintTimingManager: revalidation failed; keeping stored cloud reference for $episodeUuid")
-                    return stored.payload
+                    return resolved(stored.payload)
                 }
                 // No refetch here: with nothing stored, offline / 404 / persistent 401 ends now.
             }
@@ -148,6 +165,13 @@ class FingerprintTimingManager @Inject constructor(
         Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
         return null
     }
+
+    private fun resolved(payload: ByteArray): ResolvedCloudReference =
+        ResolvedCloudReference(
+            payload = payload,
+            format = ReferenceFingerprint.decode(payload, ReferenceFingerprint.AURIS_FORMAT)?.format,
+            payloadHash = ReferenceFingerprint.sha256(payload),
+        )
 
     sealed interface State {
         data object Idle : State
@@ -187,7 +211,12 @@ class FingerprintTimingManager @Inject constructor(
     var activeEpisodeUuid: String? = null
         private set
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Test seam: replace the scope work is launched on, so a test can guarantee nothing outlives it.
+     * Production work runs on [Dispatchers.Default].
+     */
+    @VisibleForTesting
+    internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val decodeDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val mutex = Mutex()
     private val activeResolves = AtomicInteger(0)
@@ -243,6 +272,7 @@ class FingerprintTimingManager @Inject constructor(
     // (/api/v1/episodes/{id}/fingerprints), scored by the same inherited library's matcher as the
     // transcript path above. The two references are independent; the fingerprinter is shared.
     private var cloudMatcher: CheckpointMatcher? = null
+    private var cloudReferenceInUse: ResolvedCloudReference? = null
     private var cloudFirstMappingLogged = false
     private var hasReachedActive = false
     private var hasTrackedFailure = false
@@ -876,9 +906,12 @@ class FingerprintTimingManager @Inject constructor(
         // Cloud-alignment reference data (Auris cloud fingerprints), fetched
         // independently of the transcript-sync reference below.
         cloudMatcher = null
+        cloudReferenceInUse = null
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
-            cloudMatcher = resolveCloudMatcher(cloudBaseUrl, episodeUuid, podcastUuid)
+            val resolved = resolveCloudReference(cloudBaseUrl, episodeUuid, podcastUuid)
+            cloudReferenceInUse = resolved
+            cloudMatcher = resolved?.let { cloudFetcher.buildMatcher(it.payload) }
         } else {
             Timber.d("FingerprintTimingManager: cloud alignment off — no gateway URL (cutover inactive) for $episodeUuid")
         }
@@ -978,7 +1011,16 @@ class FingerprintTimingManager @Inject constructor(
         // Try loading mapping cache (only for local files)
         val refPath = FingerprintReferenceRetriever.referencePath(audioFilePath)
         val isLocalFile = !audioFilePath.startsWith("http://") && !audioFilePath.startsWith("https://")
-        val cached = if (isLocalFile) FingerprintMappingCache.load(audioFilePath, refPath, referenceData) else null
+        val cached = if (isLocalFile) {
+            FingerprintMappingCache.load(
+                audioFilePath = audioFilePath,
+                referenceFilePath = refPath,
+                referenceData = referenceData,
+                aurisIdentity = cloudReferenceInUse?.let { AurisReferenceIdentity(it.format, it.payloadHash) },
+            )
+        } else {
+            null
+        }
 
         mutex.withLock {
             if (gen != generation) {
@@ -1379,7 +1421,7 @@ class FingerprintTimingManager @Inject constructor(
     private suspend fun streamFingerprint(
         gen: Long,
         audioFilePath: String,
-        matcher: CheckpointMatcher,
+        matcher: CheckpointMatcher?,
         episodeUuid: String,
         startingAt: Double,
         openStream: suspend () -> AudioStream = {
@@ -1424,7 +1466,7 @@ class FingerprintTimingManager @Inject constructor(
                 ) { windows ->
                     mutex.withLock {
                         if (gen != generation) throw CancellationException("Fingerprint stream superseded")
-                        processMatches(windows, matcher, stream.startSec)
+                        if (matcher != null) processMatches(windows, matcher, stream.startSec)
                         processCloudMatches(windows, stream.startSec)
                     }
                 }
@@ -1434,7 +1476,7 @@ class FingerprintTimingManager @Inject constructor(
                 if (tail.isNotEmpty()) {
                     mutex.withLock {
                         if (gen != generation) throw CancellationException("Fingerprint stream superseded")
-                        processMatches(tail, matcher, stream.startSec)
+                        if (matcher != null) processMatches(tail, matcher, stream.startSec)
                         processCloudMatches(tail, stream.startSec)
                     }
                 }
@@ -1704,7 +1746,14 @@ class FingerprintTimingManager @Inject constructor(
         val refDuration = currentReference?.totalDuration ?: return
 
         val entries = snapshotPlaybackToReference
-        FingerprintMappingCache.save(entries, audioPath, refPath, refData, refDuration)
+        FingerprintMappingCache.save(
+            entries = entries,
+            audioFilePath = audioPath,
+            referenceFilePath = refPath,
+            referenceData = refData,
+            referenceDuration = refDuration,
+            aurisIdentity = cloudReferenceInUse?.let { AurisReferenceIdentity(it.format, it.payloadHash) },
+        )
     }
 
     internal fun consider(
@@ -1737,45 +1786,71 @@ class FingerprintTimingManager @Inject constructor(
         _mappingVersion.value++
     }
 
-    /** Test seams for the Auris-reference path: install a matcher and feed it windows directly. */
-    @VisibleForTesting
-    internal fun installCloudMatcherForTest(matcher: CheckpointMatcher) {
-        cloudMatcher = matcher
-    }
-
-    @VisibleForTesting
-    internal fun processCloudMatchesForTest(windows: List<WindowedFingerprint>, startOffset: Double) {
-        processCloudMatches(windows, startOffset)
-    }
-
     /**
-     * Test seam: run the eager full-file decode against a supplied decoder and fingerprinter, so
-     * the production path can be driven without a device. Everything after the decoded samples —
-     * both references, the acceptance rule, the drift filter — is the real code.
+     * Test seam: prepare for one episode against a supplied audio stream and fingerprinter, the way
+     * a download or a transcript request does. Everything after the audio boundary — both
+     * references, the acceptance rule, the mapping cache, the drift filter — is the real code, and
+     * the Auris reference arrives through the real fetch path rather than a matcher handed in.
      */
     @VisibleForTesting
-    internal fun runEagerDecodeForTest(
+    internal suspend fun prepareForTest(
+        episodeUuid: String,
         audioFilePath: String,
-        transcriptMatcher: CheckpointMatcher,
         extractor: MediaExtractor,
         codec: MediaCodec,
-        streamer: StreamingWindowedFingerprinter,
         format: MediaFormat,
         sampleRate: Int,
         channelCount: Int,
+        streamer: StreamingWindowedFingerprinter,
     ) {
-        currentAudioFilePath = audioFilePath
-        kotlinx.coroutines.runBlocking {
+        generation++
+        val gen = generation
+        // The Auris reference arrives the way it does in production: resolved from the endpoint,
+        // stored, and only then turned into a matcher.
+        val cloudBaseUrl = cloudConfig.baseUrl()
+        if (cloudBaseUrl.isNotBlank()) {
+            val resolved = resolveCloudReference(cloudBaseUrl, episodeUuid, "podcast")
+            cloudReferenceInUse = resolved
+            cloudMatcher = resolved?.let { cloudFetcher.buildMatcher(it.payload) }
+        }
+        withContext(decodeDispatcher) {
             streamFingerprint(
-                gen = generation,
+                gen = gen,
                 audioFilePath = audioFilePath,
-                matcher = transcriptMatcher,
-                episodeUuid = "test-episode",
+                matcher = null,
+                episodeUuid = episodeUuid,
                 startingAt = 0.0,
                 openStream = { AudioStream(extractor, codec, format, sampleRate, channelCount, startSec = 0.0) },
                 newStreamer = { streamer },
             )
         }
+    }
+
+    /**
+     * Test seam: abandon all work and stop the scope, waiting for it to finish. A test that leaves a
+     * decode running lets its failure surface in the NEXT test class, where it reads as an unrelated
+     * uncaught exception.
+     */
+    @VisibleForTesting
+    internal suspend fun shutdownForTest() {
+        generation++
+        generationJob?.cancel()
+        downloadObserverJob?.cancel()
+        catchUpJob?.cancel()
+        scope.cancel()
+        scope.coroutineContext.job.join()
+    }
+
+    /** Test seam: drive the cloud match pass over supplied windows. Single-threaded tests only. */
+    @VisibleForTesting
+    internal fun processCloudWindowsForTest(windows: List<WindowedFingerprint>, startOffset: Double) {
+        processCloudMatches(windows, startOffset)
+    }
+
+    /** Test seam: set the Auris matcher the resolution would have produced. Single-threaded tests only. */
+    @VisibleForTesting
+    internal fun installCloudMatcher(matcher: CheckpointMatcher) {
+        cloudMatcher = matcher
     }
 
     /** Test seam: insert a mapping directly. Must only be called from single-threaded tests. */

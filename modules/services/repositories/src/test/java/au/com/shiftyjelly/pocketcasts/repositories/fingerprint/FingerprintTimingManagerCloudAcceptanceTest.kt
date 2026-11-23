@@ -10,8 +10,13 @@ import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintDecodePolicy
 import com.automattic.eventhorizon.EventHorizon
 import dagger.Lazy
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -20,27 +25,27 @@ import org.mockito.kotlin.eq
 import org.mockito.kotlin.whenever
 import uniffi.fingerprint_uniffi.CheckpointMatcher
 import uniffi.fingerprint_uniffi.MatchResult
+import uniffi.fingerprint_uniffi.StreamingWindowedFingerprinter
 import uniffi.fingerprint_uniffi.WindowedFingerprint
 
 /**
  * The Auris-reference match path applies the same acceptance rule as the pure-function cases:
  * a distant rival must lead by the gap, and with no distant candidate the window is refused.
  *
- * The matcher is a fake over the library's own type (its test constructor takes no native
- * pointer), so these cases run without the native library while still exercising the real
- * production path from window to committed mapping.
+ * The windows are fed through the real decode loop with the real acceptance rule; the matcher is a
+ * fake over the library's own type (its test constructor takes no native pointer), so these run
+ * without the native library.
  */
 class FingerprintTimingManagerCloudAcceptanceTest {
 
     private lateinit var manager: FingerprintTimingManager
     private lateinit var matcher: CheckpointMatcher
+    private lateinit var streamer: StreamingWindowedFingerprinter
 
-    @Before
-    fun setUp() {
+    private fun newManager(): FingerprintTimingManager {
         val playbackManager = mock(PlaybackManager::class.java)
         whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
-        matcher = mock(CheckpointMatcher::class.java)
-        manager = FingerprintTimingManager(
+        return FingerprintTimingManager(
             playbackManager = playbackManager,
             referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
             eventHorizon = mock(EventHorizon::class.java),
@@ -49,13 +54,25 @@ class FingerprintTimingManagerCloudAcceptanceTest {
             settings = mock(Settings::class.java),
             dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
             pcmTap = FingerprintPcmTap(),
-            cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
+            cloudConfig = mock(CloudConfig::class.java),
             cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
             cloudReferenceStore = mock(CloudReferenceStore::class.java),
+          
             decodePolicy = mock(FingerprintDecodePolicy::class.java),
         )
+        // Nothing this manager launches may outlive the test.
+        manager.scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    }
+
+    @Before
+    fun setUp() {
+        val playbackManager = mock(PlaybackManager::class.java)
+        whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
+        matcher = mock(CheckpointMatcher::class.java)
+        streamer = mock(StreamingWindowedFingerprinter::class.java)
+        manager = newManager()
         manager.debugTrackingEnabled = true
-        manager.installCloudMatcherForTest(matcher)
+        manager.installCloudMatcher(matcher)
     }
 
     /** One window per second of playback, each scored by [ranked]. */
@@ -68,8 +85,14 @@ class FingerprintTimingManagerCloudAcceptanceTest {
                 hashes = listOf(7u, 9u, 11u),
             )
         }
-        manager.processCloudMatchesForTest(windows, startOffset = 0.0)
+        manager.processCloudWindowsForTest(windows, startOffset = 0.0)
     }
+
+    @After
+    fun tearDown() = runBlocking { manager.shutdownForTest() }
+
+    /** Off Default: a preparation that outlives the test must not surface in the next class. */
+    private fun CoroutineScope.separate() = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
 
     @Test
     fun `a near neighbour does not veto an otherwise confident match`() {

@@ -34,6 +34,8 @@ import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSyncImpl
 import au.com.shiftyjelly.pocketcasts.repositories.external.ExternalDataManager
 import au.com.shiftyjelly.pocketcasts.repositories.external.ExternalDataManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudFingerprintReferenceFetcher
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudReferenceSource
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudReferenceStore
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FileCloudReferenceStore
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.SharedPreferencesCloudConfig
@@ -126,6 +128,10 @@ abstract class RepositoryModule {
     @Binds
     @Singleton
     abstract fun bindsCloudReferenceStore(impl: FileCloudReferenceStore): CloudReferenceStore
+
+    @Binds
+    @Singleton
+    abstract fun bindsCloudReferenceSource(fetcher: CloudFingerprintReferenceFetcher): CloudReferenceSource
 
     @Binds
     @Singleton

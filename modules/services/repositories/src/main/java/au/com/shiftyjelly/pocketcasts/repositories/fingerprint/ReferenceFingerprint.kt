@@ -5,6 +5,7 @@ import com.squareup.moshi.JsonClass
 import com.squareup.moshi.Moshi
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.security.MessageDigest
 import kotlin.io.encoding.Base64
 import timber.log.Timber
 
@@ -101,6 +102,15 @@ data class ReferenceFingerprint(
                 return null
             }
             return fingerprint
+        }
+
+        /**
+         * Identifies reference bytes by content, so a saved mapping can name the exact reference it
+         * was built from — a reference regenerated in place keeps its format and size.
+         */
+        fun sha256(data: ByteArray): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            return digest.digest(data).joinToString("") { "%02x".format(it) }
         }
     }
 }

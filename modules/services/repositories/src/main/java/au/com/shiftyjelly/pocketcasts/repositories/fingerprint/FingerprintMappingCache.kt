@@ -8,11 +8,27 @@ import java.io.FileInputStream
 import java.security.MessageDigest
 import timber.log.Timber
 
+/** Which Auris reference contributed entries to a saved mapping, as recorded by the writer. */
+data class AurisReferenceIdentity(
+    val format: String?,
+    val payloadHash: String,
+)
+
 object FingerprintMappingCache {
 
     data class LoadResult(
         val entries: List<FingerprintTimingManager.TimeMappingEntry>,
         val referenceDuration: Double,
+    )
+
+    /**
+     * The Auris reference a mapping's entries were built against. Absent when no Auris reference was
+     * in use, which is a mapping that can never carry Auris-derived anchors.
+     */
+    @JsonClass(generateAdapter = true)
+    internal data class CachedAurisIdentity(
+        val format: String?,
+        val payloadHash: String,
     )
 
     @JsonClass(generateAdapter = true)
@@ -30,6 +46,12 @@ object FingerprintMappingCache {
          * recorded, which is unknown provenance rather than a supported one.
          */
         val referenceFormat: String? = null,
+        /**
+         * The Auris reference in use when this mapping was saved, if any. Its format and content
+         * hash, because the Auris reference has no other on-disk identity to compare against: the
+         * byte guards above describe the TRANSCRIPT reference only.
+         */
+        val auris: CachedAurisIdentity? = null,
         val entries: List<CachedEntry>,
     )
 
@@ -43,10 +65,16 @@ object FingerprintMappingCache {
     private val moshi = Moshi.Builder().build()
     private val adapter = moshi.adapter(CachedMapping::class.java)
 
+    /**
+     * [aurisIdentity] is the Auris reference the caller holds now, or null when none is in use. It
+     * is the only record of the Auris reference anywhere on disk, so a mapping that recorded one
+     * must match it exactly — format and content.
+     */
     fun load(
         audioFilePath: String,
         referenceFilePath: String,
         referenceData: ByteArray,
+        aurisIdentity: AurisReferenceIdentity? = null,
     ): LoadResult? {
         val path = mappingPath(audioFilePath)
         val file = File(path)
@@ -72,6 +100,18 @@ object FingerprintMappingCache {
         val expectedFormat = ReferenceFingerprint.decode(referenceData)?.format
         if (expectedFormat == null || cached.referenceFormat != expectedFormat) {
             Timber.d("FingerprintMappingCache: reference format '${cached.referenceFormat}' at $path — discarding")
+            return null
+        }
+
+        // The Auris reference has no file of its own, so its format and hash are the only identity a
+        // mapping can be checked against. A reference regenerated in place keeps its format and its
+        // size, and would otherwise resume alignment on a timeline this build cannot reproduce.
+        if (cached.auris != null && cached.auris.format != aurisIdentity?.format) {
+            Timber.d("FingerprintMappingCache: Auris reference format changed at $path — discarding")
+            return null
+        }
+        if (cached.auris != null && cached.auris.payloadHash != aurisIdentity?.payloadHash) {
+            Timber.d("FingerprintMappingCache: Auris reference content changed at $path — discarding")
             return null
         }
 
@@ -122,6 +162,7 @@ object FingerprintMappingCache {
         referenceFilePath: String,
         referenceData: ByteArray,
         referenceDuration: Double,
+        aurisIdentity: AurisReferenceIdentity? = null,
     ) {
         val lastEntry = entries.lastOrNull() ?: return
         if (referenceDuration <= 0 || lastEntry.referenceTime / referenceDuration < FingerprintConstants.FULL_COVERAGE_THRESHOLD) {
@@ -156,6 +197,7 @@ object FingerprintMappingCache {
             audioContentHash = audioContentHash,
             referenceDuration = referenceDuration,
             referenceFormat = ReferenceFingerprint.decode(referenceData)?.format,
+            auris = aurisIdentity?.let { CachedAurisIdentity(it.format, it.payloadHash) },
             entries = entries.map { CachedEntry(it.playbackTime, it.referenceTime, it.score) },
         )
 

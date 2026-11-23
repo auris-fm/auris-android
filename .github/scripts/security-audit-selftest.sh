@@ -140,6 +140,16 @@ expect "enforcing the workflow scanner alone blocks an unpinned workflow" 1 \
   "::error::Security audit:" \
   AUDIT_SCANNERS=workflows AUDIT_ENFORCE="workflows" bash "$audit" pr 'HEAD^1'
 
+# A list must be SPLIT, not joined: deleting the commas would read "secrets,workflows" as one
+# unknown name. Accepted AND enforcing -- the same unpinned workflow still blocks under a list.
+expect "a comma-separated enforcement list is accepted and enforces both named scanners" 1 \
+  "::error::Security audit:" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="secrets,workflows" bash "$audit" pr 'HEAD^1'
+# `false` is the value main's workflow used and what enforces() reads as nothing.
+expect "an explicit false enforcement is accepted and blocks nothing" 0 \
+  "zizmor/unpinned-uses" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="false" bash "$audit" pr 'HEAD^1'
+
 # And the control for that control: an already-pinned workflow must pass the same gate, so the
 # previous case is not merely "enforcing fails".
 new_repo pinned-gate-on
@@ -165,6 +175,10 @@ expect "a misspelt scanner name is refused" 2 "" \
 # enforces nothing exits 0 looking exactly like one that passed.
 expect "a misspelt enforcement name is refused" 2 "" \
   AUDIT_SCANNERS=workflows AUDIT_ENFORCE="workflow" bash "$audit" full
+# A misspelt name inside a list must still be refused. This repository has one commit, so it
+# runs in `full` mode where no base is needed.
+expect "a misspelt name inside an enforcement list is refused" 2 "" \
+  AUDIT_SCANNERS=workflows AUDIT_ENFORCE="secrets,workflow" bash "$audit" full
 expect "an unknown history bound is refused" 2 "" \
   AUDIT_SCANNERS=secrets AUDIT_HISTORY_SINCE=no-such-tag bash "$audit" full
 expect "an unknown base commit is refused" 2 "" \

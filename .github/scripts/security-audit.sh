@@ -86,13 +86,17 @@ for name in $scanners; do
 done
 
 # A misspelt scanner name here would silently enforce nothing, and a gate that enforces nothing
-# looks exactly like a gate that passes. Only "true" (every scanner) and scanner names are read.
-for name in ${AUDIT_ENFORCE:+"${AUDIT_ENFORCE//,/}"}; do
-  case "$name" in
-    true | secrets | deps | code | workflows) ;;
-    *) die "AUDIT_ENFORCE: unknown scanner '$name' (use true or a comma-separated scanner list)" ;;
-  esac
-done
+# looks exactly like a gate that passes. Split on commas -- deleting them would join the names
+# into one word -- and accept the two values `enforces()` reads as "nothing": false and empty.
+if [ -n "${AUDIT_ENFORCE:-}" ]; then
+  IFS=',' read -r -a enforced_names <<< "$AUDIT_ENFORCE"
+  for name in "${enforced_names[@]}"; do
+    case "$name" in
+      true | false | secrets | deps | code | workflows) ;;
+      *) die "AUDIT_ENFORCE: unknown scanner '$name' (use true, false, or a comma-separated scanner list)" ;;
+    esac
+  done
+fi
 
 # Read by earlier versions of this script, as a list of the findings that were open. A caller
 # that still passes it expects them to be kept, and they would not be.

@@ -224,13 +224,16 @@ class RealServiceLifecycleControlTest {
 
         service.onStartCommand(Intent(), 0, 2)
         service.onStartCommand(Intent(), 0, 3)
-        shadowOf(Looper.getMainLooper()).idle()
 
+        // A collector registers and deregisters asynchronously, so the count is read once it has
+        // stopped moving rather than at an arbitrary instant. Waiting for it to SETTLE cannot hide
+        // the defect: an extra watcher per command raises the count and keeps it raised.
+        val settled = settleSubscriberCount(afterFirstStart)
         assertEquals(
             "later start commands must add NO watcher of the offered surface; one launched per " +
                 "command accumulates a collector for every later start of this instance",
             afterFirstStart,
-            offeredSurfaceSubscribers(),
+            settled,
         )
 
         // And the watcher still does its job after the repeated start: a failed attempt's record
@@ -267,6 +270,28 @@ class RealServiceLifecycleControlTest {
         val flow = routeMonitor.javaClass.getDeclaredField("mutableAvailability")
             .apply { isAccessible = true }.get(routeMonitor) as kotlinx.coroutines.flow.MutableStateFlow<*>
         return flow.subscriptionCount.value
+    }
+
+    /**
+     * The subscriber count once it has stopped changing, or the last reading if it never settles.
+     * Returns early when [expected] is reached and holds, so a correct tree does not pay the budget.
+     */
+    private fun settleSubscriberCount(expected: Int): Int {
+        val deadline = System.currentTimeMillis() + 5_000
+        var last = offeredSurfaceSubscribers()
+        var stableSince = System.currentTimeMillis()
+        while (System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            val now = offeredSurfaceSubscribers()
+            if (now != last) {
+                last = now
+                stableSince = System.currentTimeMillis()
+            } else if (now == expected && System.currentTimeMillis() - stableSince >= 200) {
+                return now
+            }
+        }
+        return last
     }
 
     /** Let the monitor's own debounced read publish [expected]; the debounce runs on real threads. */

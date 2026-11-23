@@ -14,8 +14,11 @@ on:
     paths:
       - ".buildkite/scripts/**"
       - ".buildkite/commands/**"
-      - ".github/workflows/release-script-controls.yml"
-      - ".github/workflows/auris-release.yml"
+      # The queue's trigger rule reads every workflow and lives beside them, so a change to
+      # either has to run this job: until the queue is switched on, this is the only place
+      # that control runs at all.
+      - ".github/scripts/**"
+      - ".github/workflows/**"
   merge_group:
 
 jobs:

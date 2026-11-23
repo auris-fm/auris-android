@@ -63,19 +63,6 @@ listens_to_queue() { # file -> 0 when merge_group is one of its triggers
   trigger_block "$1" | grep -qE '^on:[[:space:]]*\[[^]]*merge_group|^[[:space:]]+merge_group:'
 }
 
-# The triggers of a workflow, one per line, for assertions about shape.
-triggers_of() { # file -> sorted trigger names
-  trigger_block "$1" | awk '
-    /^on:[[:space:]]*\[/ {
-      line = $0; gsub(/^on:[[:space:]]*\[|\][[:space:]]*$/, "", line)
-      n = split(line, parts, ",")
-      for (i = 1; i <= n; i++) { gsub(/[[:space:]]/, "", parts[i]); print parts[i] }
-      next
-    }
-    /^[[:space:]]+[a-z_]+:[[:space:]]*$/ { match($0, /[a-z_]+:/); print substr($0, RSTART, RLENGTH-1) }
-  ' | sort -u | tr '\n' ' '
-}
-
 # The triggers of a workflow, as one sorted line, for assertions about shape.
 triggers_of() { # file -> sorted trigger names
   awk '
@@ -239,6 +226,24 @@ for pair in $SPLIT_QUEUE_CHECKS; do
   expected="$caller / $REUSABLE_JOB_ID"
   actual="$(python3 "$DIR/merge-queue-helper.py" job-check-name "$WF/$queue_file")"
   check "$queue_file reports the name $pr_file's call produces" "$expected" "$actual"
+done
+
+echo "== the job reporting a required name runs for a queue build"
+# A job-level condition that cannot hold for a merge group leaves the check unreported, and
+# the trigger above it still looks right. So the job behind each required name is read and
+# its own condition checked, not just the workflow's triggers.
+for f in "$WF"/*.yml; do
+  base="$(basename "$f")"
+  if [ "$base" = "$RELEASE_WORKFLOW" ]; then continue; fi
+  case " $NOT_REQUIRED " in *" $base "*) continue ;; esac
+  # The pull-request half of a split pair reports nothing in the queue by design, so only
+  # the queue-only half is read here. Which half is which is decided from the file's own
+  # triggers, not from the pairing, so a queue job gated to pull requests is still caught.
+  if partner="$(split_queue_partner "$base")"; then
+    if ! python3 "$DIR/merge-queue-helper.py" merge-group-only "$f"; then continue; fi
+  fi
+  excluded="$(python3 "$DIR/merge-queue-helper.py" queue-reporting-jobs-excluded "$f")"
+  check "$base has no queue-reporting job ruled out by its own condition" "" "$excluded"
 done
 
 echo "== a check is reported once on each path, never twice on one"

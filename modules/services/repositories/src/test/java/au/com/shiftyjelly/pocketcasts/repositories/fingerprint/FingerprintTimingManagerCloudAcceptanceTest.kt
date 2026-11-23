@@ -1,23 +1,20 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
-import android.content.Context
-import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.repositories.playback.ExoPlayerDataSourceFactory
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
-import au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager
-import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintDecodePolicy
-import com.automattic.eventhorizon.EventHorizon
-import dagger.Lazy
-import kotlinx.coroutines.flow.MutableStateFlow
+import java.io.File
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
 import org.mockito.kotlin.any
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.whenever
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import uniffi.fingerprint_uniffi.CheckpointMatcher
 import uniffi.fingerprint_uniffi.MatchResult
 import uniffi.fingerprint_uniffi.WindowedFingerprint
@@ -26,49 +23,51 @@ import uniffi.fingerprint_uniffi.WindowedFingerprint
  * The Auris-reference match path applies the same acceptance rule as the pure-function cases:
  * a distant rival must lead by the gap, and with no distant candidate the window is refused.
  *
- * The matcher is a fake over the library's own type (its test constructor takes no native
- * pointer), so these cases run without the native library while still exercising the real
- * production path from window to committed mapping.
+ * The windows reach the rule through the real preparation and decode loop. Only the boundaries
+ * needing a device are replaced, so these run without the native library.
  */
+@Config(manifest = Config.NONE)
+@RunWith(RobolectricTestRunner::class)
 class FingerprintTimingManagerCloudAcceptanceTest {
 
-    private lateinit var manager: FingerprintTimingManager
+    @get:Rule
+    val temp = TemporaryFolder()
+
     private lateinit var matcher: CheckpointMatcher
+    private lateinit var harness: FingerprintDecodeHarness
 
     @Before
     fun setUp() {
-        val playbackManager = mock(PlaybackManager::class.java)
-        whenever(playbackManager.playbackStateFlow).thenReturn(MutableStateFlow(PlaybackState()))
         matcher = mock(CheckpointMatcher::class.java)
-        manager = FingerprintTimingManager(
-            playbackManager = playbackManager,
-            referenceRetriever = mock(FingerprintReferenceRetriever::class.java),
-            eventHorizon = mock(EventHorizon::class.java),
-            context = mock(Context::class.java),
-            chapterManager = Lazy { mock(ChapterManager::class.java) },
-            settings = mock(Settings::class.java),
-            dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
-            pcmTap = FingerprintPcmTap(),
-            cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
-            cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
-            cloudReferenceStore = mock(CloudReferenceStore::class.java),
-            decodePolicy = mock(FingerprintDecodePolicy::class.java),
+        val audioFile = temp.newFile("episode.mp3").apply { writeBytes(ByteArray(4096)) }
+        harness = FingerprintDecodeHarness(
+            audioFile = audioFile,
+            cloudReferenceSource = FingerprintDecodeHarness.source(
+                data = FingerprintDecodeHarness.payload(ReferenceFingerprint.AURIS_FORMAT),
+                matcher = matcher,
+            ),
+            cloudBaseUrl = "https://auris.invalid",
+            transcriptMatcher = mock(CheckpointMatcher::class.java),
         )
-        manager.debugTrackingEnabled = true
-        manager.installCloudMatcherForTest(matcher)
     }
 
-    /** One window per second of playback, each scored by [ranked]. */
+    @After
+    fun tearDown() = harness.close()
+
+    private val manager get() = harness.manager
+
+    /** One window per second of playback, each scored by [ranked], through the real decode loop. */
     private fun feed(seconds: Int, ranked: List<MatchResult>) {
         whenever(matcher.findTopMatches(any(), any())).thenReturn(ranked)
-        val windows = (0 until seconds).map { second ->
+        harness.streamedWindows = (0 until seconds).map { second ->
             WindowedFingerprint(
                 timestampMs = (second * 1000).toUInt(),
                 durationMs = FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
                 hashes = listOf(7u, 9u, 11u),
             )
         }
-        manager.processCloudMatchesForTest(windows, startOffset = 0.0)
+        harness.tailWindows = emptyList()
+        harness.prepareAndAwaitDecode()
     }
 
     @Test

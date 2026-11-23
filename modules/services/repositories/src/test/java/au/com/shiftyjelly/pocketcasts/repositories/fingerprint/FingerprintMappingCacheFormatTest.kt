@@ -50,8 +50,12 @@ class FingerprintMappingCacheFormatTest {
         FingerprintTimingManager.TimeMappingEntry(playbackTime = 99.0, referenceTime = 99.0, score = 0.9f),
     )
 
-    private fun saveAndLoad(f: Fixture) = FingerprintMappingCache.load(
-        f.audio.absolutePath, f.reference.absolutePath, f.data,
+    private fun saveAndLoad(f: Fixture, auris: AurisReferenceIdentity? = null) =
+        FingerprintMappingCache.load(f.audio.absolutePath, f.reference.absolutePath, f.data, auris)
+
+    /** A saved mapping that also recorded which Auris reference contributed to it. */
+    private fun saveWithAuris(f: Fixture, auris: AurisReferenceIdentity?) = FingerprintMappingCache.save(
+        fullEntries(), f.audio.absolutePath, f.reference.absolutePath, f.data, 100.0, auris,
     )
 
     @Test
@@ -130,5 +134,46 @@ class FingerprintMappingCacheFormatTest {
         val unreadable = "not json".toByteArray()
 
         assertNull(saveAndLoad(Fixture(f.audio, f.reference, unreadable)))
+    }
+
+    private val aurisRef = AurisReferenceIdentity(ReferenceFingerprint.AURIS_FORMAT, "hash-of-the-auris-reference")
+
+    @Test
+    fun `a mapping recorded against the Auris reference in hand stays reusable`() {
+        val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
+        saveWithAuris(f, aurisRef)
+
+        assertNotNull("the same Auris reference must not invalidate the mapping", saveAndLoad(f, aurisRef))
+    }
+
+    @Test
+    fun `a mapping recorded against a different Auris reference is discarded`() {
+        // The Auris reference was regenerated in place: same format, different values. The byte
+        // guards describe the transcript file, which has not changed, so only the recorded hash
+        // can catch this.
+        val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
+        saveWithAuris(f, aurisRef)
+
+        assertNull(
+            "a mapping built from another Auris reference cannot be reused",
+            saveAndLoad(f, aurisRef.copy(payloadHash = "a-regenerated-reference")),
+        )
+    }
+
+    @Test
+    fun `a mapping recorded against an Auris reference is discarded when none is in use now`() {
+        val f = fixture(ReferenceFingerprint.AURIS_FORMAT)
+        saveWithAuris(f, aurisRef)
+
+        assertNull("no Auris reference now cannot reuse mapping entries that came from one", saveAndLoad(f, null))
+    }
+
+    @Test
+    fun `a mapping saved with no Auris reference in use stays reusable`() {
+        // Transcript-only alignment: nothing was recorded, so nothing can have gone stale.
+        val f = fixture(ReferenceFingerprint.TRANSCRIPT_FORMAT)
+        saveWithAuris(f, null)
+
+        assertNotNull("a mapping with no Auris entries is unaffected by the Auris reference", saveAndLoad(f, null))
     }
 }

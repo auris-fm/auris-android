@@ -24,9 +24,14 @@ import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.Date
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -63,6 +68,7 @@ class FingerprintTimingManagerTranscriptFormatTest {
     private lateinit var audioFile: File
     private lateinit var episode: PodcastEpisode
     private val eventHorizon = mock(EventHorizon::class.java)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Before
     fun setUp() {
@@ -111,6 +117,7 @@ class FingerprintTimingManagerTranscriptFormatTest {
             cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
             cloudReferenceStore = mock(CloudReferenceStore::class.java),
             decodePolicy = decodePolicy,
+            scope = scope,
         )
     }
 
@@ -185,6 +192,13 @@ class FingerprintTimingManagerTranscriptFormatTest {
         }
         throw AssertionError("preparation published neither a refusal nor a library attempt: ${manager.state}")
     }
+
+    /**
+     * The caller owns the scope the preparation runs on; leaving it alive lets its failure — on the
+     * JVM, the native library's — surface in whichever test class runs next.
+     */
+    @After
+    fun tearDown() = scope.cancel()
 
     @Test
     fun `a transcript-format reference is still accepted`() {

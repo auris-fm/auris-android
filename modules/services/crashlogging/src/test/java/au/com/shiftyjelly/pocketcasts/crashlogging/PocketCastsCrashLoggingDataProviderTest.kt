@@ -6,16 +6,21 @@ import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeBuildDataProvider
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeCrashReportPermissionCheck
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeEncryptedLogging
 import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.FakeObserveUser
+import au.com.shiftyjelly.pocketcasts.crashlogging.fakes.asLogQueueing
 import com.automattic.android.tracks.crashlogging.CrashLoggingUser
 import com.automattic.android.tracks.crashlogging.ErrorSampling
+import com.automattic.android.tracks.crashlogging.EventLevel
 import java.io.File
 import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
+@org.robolectric.annotation.Config(manifest = org.robolectric.annotation.Config.NONE)
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
 class PocketCastsCrashLoggingDataProviderTest {
 
     private lateinit var sut: PocketCastsCrashLoggingDataProvider
@@ -28,7 +33,7 @@ class PocketCastsCrashLoggingDataProviderTest {
             fakeObserveUser,
             FakeCrashReportPermissionCheck(),
             fakeBuildDataProvider,
-            FakeEncryptedLogging(),
+            FakeEncryptedLogging().asLogQueueing(),
             File.createTempFile("test", "test"),
             localeProvider = { null },
             connectionStatusProvider = { true },
@@ -82,5 +87,65 @@ class PocketCastsCrashLoggingDataProviderTest {
         sut.user.test {
             assertEquals(null, expectMostRecentItem())
         }
+    }
+
+    @Test
+    fun `should not attach a log uuid when logs cannot be queued`() {
+        val fake = FakeEncryptedLogging()
+        val provider = PocketCastsCrashLoggingDataProvider(
+            fakeObserveUser,
+            FakeCrashReportPermissionCheck(),
+            fakeBuildDataProvider,
+            KeyGuardedEncryptedLogging(fake, ""),
+            File.createTempFile("test", "test"),
+            localeProvider = { null },
+            connectionStatusProvider = { true },
+        )
+
+        val extras = provider.provideExtrasForEvent(emptyMap(), EventLevel.FATAL)
+
+        assertTrue(extras.isEmpty())
+        assertTrue(fake.toUpload.isEmpty())
+    }
+
+    @Test
+    fun `should attach a log uuid when logs can be queued`() {
+        val fake = FakeEncryptedLogging()
+        val key = android.util.Base64.encodeToString(ByteArray(32), android.util.Base64.NO_WRAP)
+        val provider = PocketCastsCrashLoggingDataProvider(
+            fakeObserveUser,
+            FakeCrashReportPermissionCheck(),
+            fakeBuildDataProvider,
+            KeyGuardedEncryptedLogging(fake, key),
+            File.createTempFile("test", "test"),
+            localeProvider = { null },
+            connectionStatusProvider = { true },
+        )
+
+        val extras = provider.provideExtrasForEvent(emptyMap(), EventLevel.FATAL)
+
+        assertEquals(setOf(PocketCastsCrashLoggingDataProvider.EXTRA_UUID), extras.keys)
+        assertEquals(1, fake.toUpload.size)
+    }
+
+    @Test
+    fun `should not attach a log uuid when any other implementation refuses the log`() {
+        // The provider must depend on the CAPABILITY, not on recognising the key
+        // guard's concrete type: a future wrapper that refuses logs has to suppress
+        // the uuid too, or triage points at a log that never exists. This case is
+        // deliberately not a KeyGuardedEncryptedLogging.
+        val provider = PocketCastsCrashLoggingDataProvider(
+            fakeObserveUser,
+            FakeCrashReportPermissionCheck(),
+            fakeBuildDataProvider,
+            LogQueueing { _, _, _ -> false },
+            File.createTempFile("test", "test"),
+            localeProvider = { null },
+            connectionStatusProvider = { true },
+        )
+
+        val extras = provider.provideExtrasForEvent(emptyMap(), EventLevel.FATAL)
+
+        assertTrue(extras.isEmpty())
     }
 }

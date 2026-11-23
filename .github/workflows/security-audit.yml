@@ -36,6 +36,10 @@ name: Security audit
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # The queue's combined commit is a new head arriving without a pull request event. A
+  # merge group reports only `checks_requested`, so no other type is named: a secret or
+  # unsafe pattern the queue introduces must fail there, not after the merge.
+  merge_group:
   schedule:
     - cron: "0 1 * * 1" # Mondays 01:00 UTC (09:00 UTC+8)
   workflow_dispatch:
@@ -51,7 +55,10 @@ jobs:
   pull-request:
     # A draft is skipped: the audit runs when the pull request is marked ready and on every
     # push after that, so nothing merges unaudited and work in progress does not spend minutes.
-    if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+    # A merge group has no draft and no pull request event, so it is audited too.
+    if: >-
+      (github.event_name == 'pull_request' && !github.event.pull_request.draft) ||
+      github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -82,9 +89,11 @@ jobs:
           # An upstream release merge brings in upstream's commits and code, which are not
           # Auris's to answer for, but any workflow it changes will run here with this
           # repository's secrets. The narrowing applies only to a branch in this
-          # repository: a fork can name a branch anything.
+          # repository: a fork can name a branch anything. A merge group is always this
+          # repository's own branch, and never an upstream-sync one, so it is not narrowed.
           AUDIT_SCANNERS: >-
-            ${{ (github.event.pull_request.head.repo.full_name == github.repository &&
+            ${{ (github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
             startsWith(github.head_ref, 'upstream-sync/')) && 'workflows' ||
             'secrets code workflows' }}
           # "true" makes a new high-severity code or workflow finding fail the check as a

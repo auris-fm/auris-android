@@ -209,13 +209,25 @@ class MicrophoneCapture @Inject constructor(
     /** Starts the stream opened by [openStreamForAcquisition]. */
     fun startAcquiredStream(): Boolean = synchronized(lock) { hardware.startInputStream() }
 
-    /** Closes any stream opened by [openStreamForAcquisition]. Idempotent. */
-    fun closeAcquiredStream() = synchronized(lock) {
+    /**
+     * Closes the stream opened by [openStreamForAcquisition]. Idempotent.
+     *
+     * When [generation] names the stream the caller means to close, the close happens only while
+     * that generation is still the current one: native close deletes whatever capture exists, so a
+     * late close for a stream that was replaced would delete the replacement's live capture. This is
+     * the same ownership rule [onEngineFinished] applies to a stale engine's stop.
+     */
+    fun closeAcquiredStream(generation: Long? = null) = synchronized(lock) {
+        if (generation != null && currentGeneration != generation) return@synchronized
         hardware.closeInputCapture()
         currentGeneration = null
         activeEngine = null
         episodeReferenceEligibility.setCaptureActive(false)
     }
+
+    /** The generation of the currently open stream, or null when none is. Names a stream for close. */
+    val openStreamGeneration: Long?
+        get() = synchronized(lock) { currentGeneration }
 
     /**
      * Stop audio capture and release resources.

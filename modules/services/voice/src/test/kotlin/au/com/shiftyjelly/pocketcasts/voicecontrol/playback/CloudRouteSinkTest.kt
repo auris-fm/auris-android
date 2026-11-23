@@ -1312,7 +1312,8 @@ class CloudRouteSinkTest {
     @Test
     fun `a wake-free request in the same live window resumes, and a stale origin is refused`() = runTest {
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            // The handshake first: only an ACKNOWLEDGED conversation may be resumed.
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(1, 0)) },
         )
         val sink = deps.sink()
         deps.conversationAdmission.beginOrigin(7)
@@ -1363,9 +1364,10 @@ class CloudRouteSinkTest {
     @Test
     fun `the first turn CREATES a client-minted conversation and a later grace turn RESUMES it`() = runTest {
         // admission contract: the client generates the handle, create carries it, and a later
-        // turn inside the live grace window resumes the SAME conversation.
+        // turn inside the live grace window resumes the SAME conversation -- once the worker has
+        // ACKNOWLEDGED it with `connected`. Without that frame there is no conversation to resume.
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(1, 0)) },
         )
         val sink = deps.sink()
 
@@ -2844,10 +2846,11 @@ class CloudRouteSinkTest {
         // resumed the same dead id and failed the same way until a wake began a new conversation.
         val deps = TestDeps(
             routeInvoker = { turn ->
+                // The handshake precedes the outcome: it is what makes the conversation resumable at all.
                 if (turn.conversationMode == CloudConversationMode.Resume) {
-                    flowOf(CloudRouteEvent.Error(code = "conversation_expired", message = ""))
+                    flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Error(code = "conversation_expired", message = ""))
                 } else {
-                    flowOf(CloudRouteEvent.Done(0, 0))
+                    flowOf(CloudRouteEvent.Connected("pcm@16k"), CloudRouteEvent.Done(0, 0))
                 }
             },
         )
@@ -2881,6 +2884,9 @@ class CloudRouteSinkTest {
         admission.beginOrigin(1)
         val old = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = false)!!
         val replacement = admission.prepare(origin = 1, isLiveGraceTurn = false, isWakeOriginated = true)!!
+        // The replacement was ACKNOWLEDGED, which is what makes it resumable at all; without this the
+        // case would pass for the wrong reason, since an unacknowledged handle is never resumed.
+        admission.acknowledge(replacement.conversationId)
 
         admission.forgetConversation(old.conversationId)
 
@@ -4552,6 +4558,69 @@ class CloudRouteSinkTest {
         } finally {
             capture.close()
         }
+    }
+
+    /**
+     * The user-visible half of the no-terminal defect, through the REAL sink and REAL transport.
+     *
+     * The sink assigns its outcome only in the Done and Error branches, so a stream that simply
+     * ENDS leaves it null and returns Silent: the user asked something and hears nothing at all.
+     * A socket FAILURE already spoke a line; a clean CLOSE mid-turn did not. This drives the real
+     * transport's own listener with a close after the handshake and no terminal, and asserts what
+     * the caller receives -- not what the transport emitted, which the transport suite pins.
+     */
+    @Test
+    fun `a stream that ends with no terminal speaks the connection-lost line instead of silence`() = kotlinx.coroutines.runBlocking {
+        val wireClient = CapturingWebSocketClient()
+        val deps = TestDeps(
+            // Real resources: the line must be the shipped one, not a map this test invented.
+            templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+            transportFactory = { _, _, observer ->
+                au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                    "https://example.invalid",
+                    wireClient,
+                    observer,
+                )
+            },
+        )
+        val driver = Thread {
+            try {
+                val deadline = System.currentTimeMillis() + 5_000
+                while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                // The turn is ACCEPTED -- this is not a failed dial -- and then the socket closes
+                // with neither done nor error.
+                wireClient.listener!!.onMessage(
+                    wireClient.socket,
+                    """{"type":"connected","codec":"pcm_s16le@24k","reservation_id":"r-1"}""",
+                )
+                wireClient.listener!!.onClosed(wireClient.socket, 1000, "")
+            } catch (t: Throwable) {
+                t.printStackTrace()
+            }
+        }
+        val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+        var result: CloudTurnResult? = null
+        val turn = turnScope.launch {
+            result = kotlinx.coroutines.withTimeout(8_000) {
+                deps.sink().routeToCloud("question", playbackContext, admitted = testWireId)
+            }
+        }
+        driver.start()
+        turn.join()
+        turnScope.cancel()
+        driver.join()
+
+        assertNotNull("the turn must end rather than hang", result)
+        val ended = requireNotNull(result) { "the turn must end rather than hang" }
+        assertEquals(
+            "an ended stream must speak the connection-lost line, not return silence",
+            VoiceResponse.Spoken("Connection lost. Please try again."),
+            ended.feedback,
+        )
+        assertFalse("a turn that never answered must not earn recognition", ended.succeeded)
     }
 
     @Test

@@ -63,10 +63,15 @@ PQC_NORM="$(norm "${AURIS_PLAY_HYBRID_PQC_SHA256:-}")"
 # rotation lineage above -- the older certificate is signed over by the key that must equal
 # Google's pin. The lineage, not an SDK assumption, is what makes the exemption sound.
 #
-# The threshold must NOT rise above the top of the app signer's range: on real Play output the
-# V3.0 app signer covers up to SDK 36 and the V3.2 hybrids take 37+. Raising it to 37 (or a rule
-# like "skip any bounded range") would skip the V3.0 signer and never check the app pin at all.
-# Lowering it is the safe direction -- it compares more signers, not fewer.
+# This only affects signers that STATE a range. On real Play output the V3.0 app-signing line
+# carries no SDK label at all, so it is always compared regardless of this value -- the threshold
+# is machinery for a future rotation, not something protecting today's APK. Only the v3.2 hybrids
+# state a range, and they are handled by their own labels above.
+#
+# For a labelled signer the dangerous direction is RAISING the threshold past its range, which
+# would skip a signer that should be compared; lowering it compares more, not fewer. A rotation
+# splitting at SDK 37 leaves the old key at maxSdkVersion=36, which is not below 36, so it fails
+# closed until deliberately re-pinned -- correct behaviour.
 CURRENT_DEVICE_SDK="${AURIS_CURRENT_DEVICE_SDK:-36}"
 
 APP_FOUND=0

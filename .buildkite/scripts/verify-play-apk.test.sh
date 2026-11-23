@@ -206,11 +206,10 @@ CODE=$?
 AURIS_PLAY_HYBRID_PQC_SHA256="$AURIS_PLAY_HYBRID_PQC_SHA256_SAVE"
 check "a PQC signer with no pin configured fails closed too" 1 "$CODE"
 
-# The threshold must not RISE above the top of the app signer's range. On real Play output the
-# V3.0 app signer covers up to SDK 36; raising the floor to 37 would skip it and never check the
-# app pin. Lowering it is the safe direction -- it compares more signers, not fewer.
-# This case pins that: with the floor at 36 the bounded current signer IS compared, so an off-pin
-# value fails. A "skip any bounded range" rule would pass here and prove nothing.
+# For a LABELLED signer the dangerous direction is RAISING the threshold past its range, which
+# skips a signer that should be compared; lowering it compares more, not fewer. These cases use
+# explicitly labelled signers to pin that. A "skip any bounded range" rule would pass here and
+# prove nothing. (The real V3.0 line is UNLABELLED and always compared -- see the case below.)
 cat > "$WORK/shape-bounded-current" <<'SHAPE'
 Signer (minSdkVersion=24, maxSdkVersion=36) certificate SHA-256 digest: 11:22:33
 SHAPE
@@ -227,6 +226,15 @@ check "a bounded signer at the top of the current range is still compared" 1 "$C
 
 run good 9522 9522 bounded-offpin
 check "an off-pin bounded signer is caught even beside a valid unbounded one" 1 "$CODE"
+
+# The real Play output's app-signing line carries NO SDK label, so the threshold must never
+# affect it. Run with the threshold raised far past any range: an unlabelled off-pin signer must
+# still fail. Without this, "skip anything without a range" would look plausible and stay green.
+OUT="$(cd "$WORK/repo" && MODE=good VC=9522 SHAPE_FILE="$WORK/shape-hybrid-wrongapp" \
+  AURIS_CURRENT_DEVICE_SDK=999 \
+  bash .buildkite/scripts/verify-play-apk.sh "$WORK/app.apk" 9522 "$PIN" 2>&1)"
+CODE=$?
+check "an UNLABELLED app signer is compared whatever the threshold" 1 "$CODE"
 
 # Diagnostic still printed on a FAILING run -- the run we need to read is a failing one.
 run good 9522 9522 hybrid-wrongapp

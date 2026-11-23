@@ -206,8 +206,9 @@ CODE=$?
 AURIS_PLAY_HYBRID_PQC_SHA256="$AURIS_PLAY_HYBRID_PQC_SHA256_SAVE"
 check "a PQC signer with no pin configured fails closed too" 1 "$CODE"
 
-# The threshold must not drop below the top of the app signer's range. On real Play output the
-# V3.0 app signer covers up to SDK 36; a lower floor would skip it and never check the app pin.
+# The threshold must not RISE above the top of the app signer's range. On real Play output the
+# V3.0 app signer covers up to SDK 36; raising the floor to 37 would skip it and never check the
+# app pin. Lowering it is the safe direction -- it compares more signers, not fewer.
 # This case pins that: with the floor at 36 the bounded current signer IS compared, so an off-pin
 # value fails. A "skip any bounded range" rule would pass here and prove nothing.
 cat > "$WORK/shape-bounded-current" <<'SHAPE'

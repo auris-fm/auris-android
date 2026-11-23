@@ -171,7 +171,13 @@ class VoiceAsrEngine @Inject constructor(
     private val ownedProcessingJobs = java.util.concurrent.ConcurrentHashMap<Job, Unit>()
 
     internal val unfinishedProcessingJobs: List<Job>
-        get() = unfinished.toList()
+        // ONE atomic snapshot. `toList()` on a copy-on-write list reads size and then indexes, and a
+        // completion callback removes the job from this list the moment it finishes, so the element
+        // can vanish between those two reads and the index read throws. This getter is the
+        // quiescence snapshot inside stopVoiceControl, where a throw is a FAILED STOP and the
+        // surrounding contract is fail-closed -- a job finishing at the wrong microsecond would hold
+        // a session that stopped cleanly. toArray() captures the array under the list's own lock.
+        get() = unfinished.toArray().map { it as Job }
 
     /**
      * EVERY processing job this engine ever created, running or finished.
@@ -183,7 +189,10 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal val ownedJobs: Set<Job> get() = ownedProcessingJobs.keys.toSet()
 
-    private val unfinished = java.util.concurrent.CopyOnWriteArrayList<Job>()
+    // A `var` of the CONCRETE copy-on-write type, like `scope` above: production always uses the
+    // real list, and a control can substitute a subclass that forces the completion interleaving
+    // deterministically. Widening this to List would lose removeAll's predicate overload.
+    internal var unfinished = java.util.concurrent.CopyOnWriteArrayList<Job>()
     private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null

@@ -43,14 +43,36 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       # This job runs the same suite as voice-unit-tests.yml and needs the same jar. It gates
       # the release trigger, so a Maven outage here holds releases back even when the other
-      # workflow is green -- which is what happened before this step existed. Keep the two
-      # cache steps identical; robolectric-cache.test.sh asserts both carry one.
-      - name: Cache Robolectric android-all jars
-        uses: actions/cache@v4
+      # workflow is green -- which is what happened before these steps existed. Keep the two
+      # jobs' restore/seed/save identical; the controls assert both carry all three.
+      - name: Restore the Robolectric android-all jar
+        uses: actions/cache/restore@v4
         with:
           path: ~/.m2/repository/org/robolectric
           key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
+      # Seed explicitly rather than relying on the suite to download it. When Gradle serves the test
+      # task from its build cache Robolectric never runs, so nothing lands in ~/.m2 and the save step
+      # would report success while storing nothing. Seeding must not depend on the tests running.
+      - name: Seed the Robolectric android-all jar
+        run: bash .github/scripts/robolectric-seed.sh
       - run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
+      # Same evidence the standalone workflow prints: which jar is on disk and where it came from.
+      # Without it this job's failures name no artifact, which is what made the outage hard to read.
+      - name: Report the resolved android-all path
+        if: always()
+        shell: bash
+        run: |
+          echo "--- android-all files present under the cached directory ---"
+          find "$HOME/.m2/repository/org/robolectric" -name 'android-all*.jar' 2>/dev/null || true
+      # Save whatever the seed produced, even when the tests fail: a Maven outage that reds the suite
+      # must still leave the jar cached for the next run. Gated on the file being present so a failed
+      # seed cannot store an empty directory under the good key.
+      - name: Save the Robolectric android-all jar
+        if: always() && hashFiles('~/.m2/repository/org/robolectric/**/*.jar') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-android-all-${{ hashFiles('gradle/libs.versions.toml', 'modules/services/voice/src/test/resources/robolectric.properties') }}
 
   cloud-transport-tests:
     name: "repositories:cloud transport tests"

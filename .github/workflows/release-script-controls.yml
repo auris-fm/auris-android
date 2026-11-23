@@ -19,6 +19,9 @@ on:
       # that control runs at all.
       - ".github/scripts/**"
       - ".github/workflows/**"
+      # The seed control derives its coordinate from these two pins, so a bump has to run it.
+      - "gradle/libs.versions.toml"
+      - "modules/services/voice/src/test/resources/robolectric.properties"
   merge_group:
 
 jobs:
@@ -56,7 +59,7 @@ jobs:
           echo "Files the queued change touches:"
           printf '%s\n' "$changed" | sed '/^$/d'
           if printf '%s\n' "$changed" | grep -qE \
-              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$'; then
+              '^\.buildkite/(scripts|commands)/|^\.github/scripts/|^\.github/workflows/(release-script-controls|auris-release|voice-unit-tests)\.yml$|^gradle/libs\.versions\.toml$|^modules/services/voice/src/test/resources/robolectric\.properties$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -79,4 +82,16 @@ jobs:
       - if: steps.scope.outputs.run == 'true'
         name: Robolectric cache control
         run: bash .github/scripts/robolectric-cache.test.sh
+
+      # The seed control derives the android-all coordinate from the Robolectric jar Gradle resolved,
+      # so it needs that jar on disk. Resolving the test runtime classpath fetches it without running
+      # any test, and uses the same pins the workflow jobs do.
+      - if: steps.scope.outputs.run == 'true'
+        uses: gradle/actions/setup-gradle@v4
+      - if: steps.scope.outputs.run == 'true'
+        name: Resolve Robolectric so the seed control can read its SDK table
+        run: ./gradlew :modules:services:voice:dependencies --configuration debugUnitTestRuntimeClasspath --no-daemon -q > /dev/null
+      - if: steps.scope.outputs.run == 'true'
+        name: Robolectric seed control
+        run: bash .github/scripts/robolectric-seed.test.sh
 

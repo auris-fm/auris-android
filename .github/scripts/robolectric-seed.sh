@@ -19,19 +19,57 @@ ATTEMPTS="${ROBOLECTRIC_SEED_ATTEMPTS:-4}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# Fetch one Maven artifact and its published SHA-512 into a staging directory, verifying the digest
+# before returning. Retries then fails closed: a partial file must never be mistaken for a complete
+# artifact, whether it is the android-all jar or the Robolectric jar the coordinate is read from.
+#   fetch <relative-path-without-extension> <file-stem> <dest-dir> [extension]
+fetch() {
+  local rel="$1" stem="$2" dest="$3" ext="${4:-jar}" attempt=1
+  mkdir -p "$dest" || return 1
+  while [ "$attempt" -le "$ATTEMPTS" ]; do
+    if curl -fsS --retry 2 --connect-timeout 20 --max-time 900 \
+         -o "$dest/$stem.$ext" "$REPO/$rel.$ext" \
+       && curl -fsS --retry 2 --connect-timeout 20 --max-time 120 \
+         -o "$dest/$stem.$ext.sha512" "$REPO/$rel.$ext.sha512"; then
+      local want got
+      want="$(tr -d ' \t\r\n' < "$dest/$stem.$ext.sha512")"
+      got="$(shasum -a 512 "$dest/$stem.$ext" | awk '{print $1}')"
+      if [ "$want" = "$got" ]; then
+        return 0
+      fi
+      echo "--- SHA-512 mismatch for $stem.$ext on attempt $attempt" >&2
+    fi
+    echo "--- attempt $attempt/$ATTEMPTS for $stem.$ext failed; retrying" >&2
+    rm -f "$dest/$stem.$ext" "$dest/$stem.$ext.sha512"
+    attempt=$((attempt + 1))
+    sleep $((attempt * 3))
+  done
+  return 1
+}
+
 RV="$(sed -n 's/^robolectric = "org\.robolectric:robolectric:\([0-9.]*\)".*/\1/p' "$DIR/gradle/libs.versions.toml")"
 [ -n "$RV" ] || fail "no org.robolectric:robolectric pin in gradle/libs.versions.toml"
 SDK="$(sed -n 's/^sdk=\([0-9][0-9]*\).*/\1/p' "$DIR/modules/services/voice/src/test/resources/robolectric.properties")"
 [ -n "$SDK" ] || fail "no sdk pin in modules/services/voice/src/test/resources/robolectric.properties"
 
-# The jar Gradle resolved for that exact version. Searching by version keeps this honest: a stale
-# jar from another version cannot supply the coordinate.
-RJAR="$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.robolectric/robolectric/$RV" \
-  -name "robolectric-$RV.jar" 2>/dev/null | head -1)"
-[ -n "$RJAR" ] || fail "Robolectric $RV is not in the Gradle cache; run the build's dependency resolution first"
-
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+
+# The jar Gradle resolved for that exact version. Searching by version keeps this honest: a stale
+# jar from another version cannot supply the coordinate. On a cold runner Gradle has not fetched it
+# yet, so fetch it here with the same retries and checksum discipline as the android-all jar --
+# otherwise the seed would depend on a prior build having run, which is the dependency this change
+# exists to remove.
+GRADLE_FILES="${GRADLE_USER_HOME:-$HOME/.gradle}/caches/modules-2/files-2.1"
+RJAR="$(find "$GRADLE_FILES/org.robolectric/robolectric/$RV" -name "robolectric-$RV.jar" 2>/dev/null | head -1)"
+if [ -z "$RJAR" ]; then
+  echo "--- Robolectric $RV is not in the Gradle cache; fetching it to read its SDK table"
+  RREL="org/robolectric/robolectric/$RV/robolectric-$RV"
+  mkdir -p "$TMP/robolectric"
+  fetch "$RREL" "robolectric-$RV" "$TMP/robolectric" \
+    || fail "could not fetch robolectric-$RV.jar to derive the android-all coordinate"
+  RJAR="$TMP/robolectric/robolectric-$RV.jar"
+fi
 (cd "$TMP" && unzip -o -q "$RJAR" 'org/robolectric/plugins/DefaultSdkProvider*.class') \
   || fail "could not read DefaultSdkProvider from $RJAR"
 javap -p -c "$TMP/org/robolectric/plugins/DefaultSdkProvider.class" > "$TMP/prov.txt" 2>&1 \
@@ -57,38 +95,24 @@ DEST="$M2/$(dirname "$REL")"
 echo "--- seeding $ARTIFACT $VERSION into $DEST"
 
 mkdir -p "$DEST" || fail "cannot create $DEST"
+# Fetch to a staging directory and move only after the checksum matches, so an interrupted download
+# can never leave a truncated jar that Robolectric would treat as cached.
+STAGE="$TMP/stage"
+mkdir -p "$STAGE"
 if [ -s "$DEST/$ARTIFACT-$VERSION.jar" ]; then
   echo "--- already present, nothing to fetch"
   exit 0
 fi
 
-# Fetch to a staging directory and move only after the checksum matches, so an interrupted download
-# can never leave a truncated jar that Robolectric would treat as cached.
-STAGE="$TMP/stage"
-mkdir -p "$STAGE"
-fetch() {
-  local name="$1" attempt=1
-  while [ "$attempt" -le "$ATTEMPTS" ]; do
-    if curl -fsS --retry 2 --connect-timeout 20 --max-time 900 \
-         -o "$STAGE/$name" "$REPO/$REL.$name"; then
-      return 0
-    fi
-    echo "--- attempt $attempt/$ATTEMPTS for $name failed; retrying" >&2
-    attempt=$((attempt + 1))
-    sleep $((attempt * 3))
-  done
-  return 1
-}
+# The jar (verified inside fetch), then the POM and its digest. Robolectric reads all four files
+# from this directory, so all four are installed -- but only after every one of them is complete.
+fetch "$REL" "$ARTIFACT-$VERSION" "$STAGE" jar \
+  || fail "could not fetch $ARTIFACT-$VERSION.jar after $ATTEMPTS attempts"
+fetch "$REL" "$ARTIFACT-$VERSION" "$STAGE" pom \
+  || fail "could not fetch $ARTIFACT-$VERSION.pom after $ATTEMPTS attempts"
 
-for ext in pom pom.sha512 jar.sha512 jar; do
-  fetch "$ext" || fail "could not fetch $ARTIFACT-$VERSION.$ext after $ATTEMPTS attempts"
-done
-
-expected="$(tr -d ' \t\r\n' < "$STAGE/jar.sha512")"
-actual="$(shasum -a 512 "$STAGE/jar" | awk '{print $1}')"
-[ "$expected" = "$actual" ] || fail "SHA-512 mismatch for $ARTIFACT-$VERSION.jar"
-
-for ext in pom pom.sha512 jar.sha512 jar; do
-  mv "$STAGE/$ext" "$DEST/$ARTIFACT-$VERSION.$ext" || fail "cannot install $ext"
+for ext in jar jar.sha512 pom pom.sha512; do
+  [ -s "$STAGE/$ARTIFACT-$VERSION.$ext" ] || fail "missing $ARTIFACT-$VERSION.$ext after a successful fetch"
+  mv "$STAGE/$ARTIFACT-$VERSION.$ext" "$DEST/$ARTIFACT-$VERSION.$ext" || fail "cannot install $ext"
 done
 echo "--- seeded $ARTIFACT-$VERSION.jar ($(wc -c < "$DEST/$ARTIFACT-$VERSION.jar") bytes)"

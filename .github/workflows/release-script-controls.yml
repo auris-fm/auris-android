@@ -83,14 +83,9 @@ jobs:
         name: Robolectric cache control
         run: bash .github/scripts/robolectric-cache.test.sh
 
-      # The seed control derives the android-all coordinate from the Robolectric jar Gradle resolved,
-      # so it needs that jar on disk. Resolving the test runtime classpath fetches it without running
-      # any test, and uses the same pins the workflow jobs do.
-      - if: steps.scope.outputs.run == 'true'
-        uses: gradle/actions/setup-gradle@v4
-      - if: steps.scope.outputs.run == 'true'
-        name: Resolve Robolectric so the seed control can read its SDK table
-        run: ./gradlew :modules:services:voice:dependencies --configuration debugUnitTestRuntimeClasspath --no-daemon -q > /dev/null
+      # No Gradle step here on purpose: the seed control exercises the cold-runner path itself, with
+      # an empty Gradle home, so it proves the script fetches what it needs rather than assuming a
+      # prior build supplied it.
       - if: steps.scope.outputs.run == 'true'
         name: Robolectric seed control
         run: bash .github/scripts/robolectric-seed.test.sh

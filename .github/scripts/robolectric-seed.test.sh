@@ -92,6 +92,36 @@ else
   fi
 fi
 
+# 2b. THE REAL CI START STATE: an EMPTY Gradle home AND an empty ~/.m2. Gradle has not fetched the
+#     Robolectric jar yet, so the script must fetch that too -- with the same retries and checksum
+#     discipline -- rather than depending on a prior build. This is the case that broke an earlier
+#     version of the cache change, so it is asserted, not assumed.
+COLD="$WORK/cold-gradle"
+mkdir -p "$COLD"
+# The fake repository must also serve the Robolectric jar for this to be a true cold start.
+RREL="org/robolectric/robolectric/$RV/robolectric-$RV"
+mkdir -p "$REPO/$(dirname "$RREL")"
+cp "$RJAR" "$REPO/$RREL.jar"
+( cd "$REPO/$(dirname "$RREL")" && shasum -a 512 "robolectric-$RV.jar" | awk '{print $1}' > "robolectric-$RV.jar.sha512" )
+M2="$WORK/m2-coldgradle"
+GRADLE_USER_HOME="$COLD" ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$REPO" \
+  bash "$SEED" > "$WORK/coldgradle.out" 2>&1
+check_zero "an empty Gradle home and empty ~/.m2 still seed" $?
+if [ -s "$M2/$REL.jar" ]; then ok "the jar lands even with no prior Gradle build"; else bad "cold Gradle home produced no jar"; fi
+grep -q "not in the Gradle cache; fetching it" "$WORK/coldgradle.out" \
+  && ok "the Robolectric jar is fetched when Gradle has not resolved it" \
+  || bad "the script did not fetch the Robolectric jar itself"
+
+# 2c. That fetch FAILS CLOSED too: an unreachable repository with a cold Gradle home must not
+#     silently fall back to a guessed coordinate.
+GRADLE_USER_HOME="$COLD" ROBOLECTRIC_M2_DIR="$WORK/m2-coldfail" \
+  ROBOLECTRIC_MAVEN_REPO="file://$WORK/no-such-repo" ROBOLECTRIC_SEED_ATTEMPTS=2 \
+  bash "$SEED" > "$WORK/coldfail.out" 2>&1
+check_nonzero "a cold Gradle home with an unreachable repository fails closed" $?
+grep -q "robolectric-$RV.jar" "$WORK/coldfail.out" \
+  && ok "the failure names the Robolectric jar it could not fetch" \
+  || bad "failure does not name the Robolectric jar"
+
 # 3. CORRUPT PAYLOAD: the checksum disagrees, so nothing may be installed.
 BADREPO="$WORK/repo-bad"
 mkdir -p "$BADREPO/$(dirname "$REL")"
@@ -122,7 +152,7 @@ M2="$WORK/m2-unreachable"
 ROBOLECTRIC_M2_DIR="$M2" ROBOLECTRIC_MAVEN_REPO="file://$WORK/no-such-repo" ROBOLECTRIC_SEED_ATTEMPTS=3 \
   bash "$SEED" > "$WORK/retry.out" 2>&1
 check_nonzero "an unreachable repository fails closed" $?
-tries="$(grep -c 'attempt .* for pom failed' "$WORK/retry.out" || true)"
+tries="$(grep -c 'attempt .* for android-all-instrumented-.*\.jar failed' "$WORK/retry.out" || true)"
 if [ "$tries" -ge 2 ]; then ok "the fetch is retried ($tries attempts logged)"; else bad "no retries logged ($tries)"; fi
 grep -q "$ART-$VERSION" "$WORK/retry.out" && ok "the failure names the artifact it could not fetch" || bad "failure does not name the artifact"
 

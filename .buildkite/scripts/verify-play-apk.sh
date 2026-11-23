@@ -29,6 +29,15 @@ fi
 # `|| true` on the pipeline: under `set -euo pipefail` a grep MISS aborts the
 # whole script here, so the empty-check below never runs and the step reds with
 # no diagnostic at all. The check IS the failure path; let it be reached.
+# Diagnostic FIRST, comparison unchanged below. A real run failed this pin with the pinned key
+# present but not last in the chain, and `--print-certs` alone does not say which signature scheme
+# (v2/v3/v3.1) or SDK range each certificate belongs to -- so it cannot tell a rotation from a
+# wrong-field read. Print the verbose form and the byte count BEFORE comparing, so a FAILING run
+# still carries the evidence; printing only on success would be useless on the run we need to read.
+echo "APK size: $(wc -c < "$APK" | tr -d ' ') bytes"
+echo "--- apksigner verify --print-certs -v (schemes and SDK ranges)"
+"$APKSIGNER" verify --print-certs -v "$APK" || echo "(verbose verify reported failure; see above)"
+
 CERT_DIGESTS="$("$APKSIGNER" verify --print-certs "$APK" | grep 'certificate SHA-256 digest' | awk '{print $NF}' || true)"
 [ -n "$CERT_DIGESTS" ] || { echo "FAIL: no signer certificate found" >&2; exit 1; }
 echo "APK signer SHA-256 chain (oldest to newest):"

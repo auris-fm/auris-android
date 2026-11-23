@@ -29,8 +29,23 @@ case "${MODE:-good}" in
     [ "$2" = "--print-certs" ] && { echo "Signer #1 name: CN=x"; exit 0; }
     exit 0 ;;
 esac
+VERBOSE=0
+for a in "$@"; do [ "$a" = "-v" ] || [ "$a" = "--verbose" ] && VERBOSE=1; done
 if [ "$2" = "--print-certs" ]; then
-  echo "Signer #1 certificate SHA-256 digest: aa:bb:cc"
+  if [ "${CHAIN:-single}" = rotated ]; then
+    echo "Signer #1 certificate DN: CN=pinned"
+    echo "Signer #1 certificate SHA-256 digest: aa:bb:cc"
+    echo "Signer #2 certificate DN: CN=added"
+    echo "Signer #2 certificate SHA-256 digest: 11:22:33"
+  else
+    echo "Signer #1 certificate SHA-256 digest: aa:bb:cc"
+  fi
+  if [ "$VERBOSE" = 1 ]; then
+    echo "Verified using v2 scheme (APK Signature Scheme v2): true"
+    echo "Verified using v3 scheme (APK Signature Scheme v3): true"
+    echo "Number of signers: 1"
+    echo "Signer #1 min SDK: 24, max SDK: 33"
+  fi
 fi
 exit 0
 STUB
@@ -42,7 +57,7 @@ STUB
 chmod +x "$WORK/sdk/build-tools/35.0.0/aapt2"
 
 run() { # mode apk-version expected-version -> sets OUT/CODE
-  OUT="$(cd "$WORK/repo" && MODE="$1" VC="$2" \
+  OUT="$(cd "$WORK/repo" && MODE="$1" VC="$2" CHAIN="${4:-single}" \
     bash .buildkite/scripts/verify-play-apk.sh "$WORK/app.apk" "$3" "$PIN" 2>&1)"
   CODE=$?
 }
@@ -68,6 +83,26 @@ run good 9522 9999
 check "versionCode mismatch fails" 1 "$CODE"
 printf '%s' "$OUT" | grep -q "versionCode" && r=ok || r=missing
 check "versionCode mismatch names both values" ok "$r"
+
+# --- Diagnostic output: the schemes/SDK ranges and the byte count must be printed BEFORE the
+# comparison, so a FAILING run still explains which scheme carries which key. A guard that only
+# prints on success tells us nothing on the run we actually need to read.
+run good 9522 9522
+printf '%s' "$OUT" | grep -q "Verified using v2 scheme" && r=ok || r=missing
+check "verbose scheme detail is printed" ok "$r"
+printf '%s' "$OUT" | grep -qE "APK size: [0-9]+ bytes" && r=ok || r=missing
+check "APK byte count is printed" ok "$r"
+
+# The case that matters: a chain whose LAST digest is not the pin fails, and the diagnostic must
+# still be there. Without this, moving the print below the comparison would stay green.
+run good 9522 9522 rotated
+check "a chain ending off the pin still fails" 1 "$CODE"
+printf '%s' "$OUT" | grep -q "Verified using v2 scheme" && r=ok || r=missing
+check "scheme detail survives a FAILED pin comparison" ok "$r"
+printf '%s' "$OUT" | grep -qE "APK size: [0-9]+ bytes" && r=ok || r=missing
+check "byte count survives a FAILED pin comparison" ok "$r"
+printf '%s' "$OUT" | grep -q "11:22:33" && r=ok || r=missing
+check "every certificate in the chain is printed, not just the compared one" ok "$r"
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

@@ -56,9 +56,17 @@ PLAY_NORM="$(norm "$PLAY_SHA256")"
 CLASSICAL_NORM="$(norm "${AURIS_PLAY_HYBRID_CLASSICAL_SHA256:-}")"
 PQC_NORM="$(norm "${AURIS_PLAY_HYBRID_PQC_SHA256:-}")"
 
-# Highest SDK any shipping device runs today. A signer whose maxSdkVersion is below this cannot
-# be the key that governs installs. Deliberately a floor well above every released API level, so
-# only a genuinely superseded range is skipped -- never the current one.
+# Which signer counts as CURRENT. Not a claim that lower ranges are unused: a device on API 35
+# really does install under a maxSdkVersion=35 signer.
+#
+# Skipping the older-range signer is safe because `apksigner verify` has ALREADY validated the
+# rotation lineage above -- the older certificate is signed over by the key that must equal
+# Google's pin. The lineage, not an SDK assumption, is what makes the exemption sound.
+#
+# The threshold must NOT rise above the top of the app signer's range: on real Play output the
+# V3.0 app signer covers up to SDK 36 and the V3.2 hybrids take 37+. Raising it to 37 (or a rule
+# like "skip any bounded range") would skip the V3.0 signer and never check the app pin at all.
+# Lowering it is the safe direction -- it compares more signers, not fewer.
 CURRENT_DEVICE_SDK="${AURIS_CURRENT_DEVICE_SDK:-36}"
 
 APP_FOUND=0
@@ -86,11 +94,11 @@ while IFS= read -r line; do
         echo "  actual:   $digest" >&2; exit 1; }
       continue ;;
     "Signer #"*|"Signer ("*|"V3.0 Signer"*|"V2 Signer"*|"V3.1 Signer"*)
-      # An app-signing signer. Which one GOVERNS INSTALLS depends on its SDK range: after a real
-      # rotation the lineage keeps the old certificate for older devices, so requiring every
-      # signer to equal one pin would make the check permanently unpublishable -- no pin value
-      # could satisfy both ends of the lineage. The signer covering current devices must equal
-      # the pin; an older-range signer is reported, not compared against it.
+      # An app-signing signer. After a real rotation the lineage keeps the old certificate for
+      # older devices, so requiring EVERY signer to equal one pin would make the check
+      # permanently unpublishable -- no pin value satisfies both ends of the lineage. The
+      # current-range signer must equal the pin; an older-range one is reported, not compared,
+      # because `apksigner verify` has already validated the lineage tying it to that pin.
       maxsdk="$(printf '%s' "$label" | sed -n 's/.*maxSdkVersion=\([0-9]*\).*/\1/p')"
       if [ -n "$maxsdk" ] && [ "$maxsdk" -lt "$CURRENT_DEVICE_SDK" ]; then
         echo "  (older-range signer, superseded above SDK $maxsdk: not the install-governing key)"

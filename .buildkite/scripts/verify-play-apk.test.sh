@@ -206,6 +206,27 @@ CODE=$?
 AURIS_PLAY_HYBRID_PQC_SHA256="$AURIS_PLAY_HYBRID_PQC_SHA256_SAVE"
 check "a PQC signer with no pin configured fails closed too" 1 "$CODE"
 
+# The threshold must not drop below the top of the app signer's range. On real Play output the
+# V3.0 app signer covers up to SDK 36; a lower floor would skip it and never check the app pin.
+# This case pins that: with the floor at 36 the bounded current signer IS compared, so an off-pin
+# value fails. A "skip any bounded range" rule would pass here and prove nothing.
+cat > "$WORK/shape-bounded-current" <<'SHAPE'
+Signer (minSdkVersion=24, maxSdkVersion=36) certificate SHA-256 digest: 11:22:33
+SHAPE
+# A bounded current-range signer that is OFF the pin, alongside a valid unbounded one. RAISING
+# the floor to 37 would skip the bounded signer and pass on the strength of the other -- the
+# off-pin key would go unchecked. This is what pins the threshold itself. (Lowering it is the
+# safe direction: it compares more, so a lowered-floor mutant is not a defect.)
+cat > "$WORK/shape-bounded-offpin" <<'SHAPE'
+Signer (minSdkVersion=37, maxSdkVersion=2147483647) certificate SHA-256 digest: aa:bb:cc
+Signer (minSdkVersion=24, maxSdkVersion=36) certificate SHA-256 digest: 11:22:33
+SHAPE
+run good 9522 9522 bounded-current
+check "a bounded signer at the top of the current range is still compared" 1 "$CODE"
+
+run good 9522 9522 bounded-offpin
+check "an off-pin bounded signer is caught even beside a valid unbounded one" 1 "$CODE"
+
 # Diagnostic still printed on a FAILING run -- the run we need to read is a failing one.
 run good 9522 9522 hybrid-wrongapp
 printf '%s' "$OUT" | grep -qE "APK size: [0-9]+ bytes" && r=ok || r=missing

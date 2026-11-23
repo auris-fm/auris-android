@@ -1068,13 +1068,26 @@ class FingerprintTimingManager @Inject constructor(
 
         // Cloud-alignment reference data (Auris cloud fingerprints), fetched
         // independently of the transcript-sync reference below.
-        cloudMatcher = null
-        cloudReferenceInUse = null
+        mutex.withLock {
+            if (gen != generation) return
+            cloudMatcher = null
+            cloudReferenceInUse = null
+        }
         val cloudBaseUrl = cloudConfig.baseUrl()
         if (cloudBaseUrl.isNotBlank()) {
             val resolved = resolveCloudReference(cloudBaseUrl, episodeUuid, podcastUuid)
-            cloudReferenceInUse = resolved
-            cloudMatcher = resolved?.let { cloudFetcher.buildMatcher(it.payload) }
+            val matcher = resolved?.let { cloudFetcher.buildMatcher(it.payload) }
+            // The fetch suspended: a newer preparation may own the manager now. Installing this
+            // reference then would tag the new episode's mapping with another episode's identity
+            // and score its windows against the wrong reference.
+            mutex.withLock {
+                if (gen != generation) {
+                    matcher?.close()
+                    return
+                }
+                cloudReferenceInUse = resolved
+                cloudMatcher = matcher
+            }
         } else {
             Timber.d("FingerprintTimingManager: cloud alignment off — no gateway URL (cutover inactive) for $episodeUuid")
         }

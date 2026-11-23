@@ -20,7 +20,6 @@ import uniffi.fingerprint_uniffi.CheckpointMatcher
  * from them. Naming the two operations lets a caller supply the fetch boundary — or a matcher that
  * cannot be built on the JVM — without the manager reaching into a concrete transport.
  */
-@Singleton
 interface CloudReferenceSource {
     suspend fun fetchReference(
         baseUrl: String,
@@ -40,6 +39,7 @@ interface CloudReferenceSource {
  * Returns null on any failure (unconfigured, network, decode, no checkpoints)
  * so callers degrade gracefully to the transcript-sync path.
  */
+@Singleton
 class CloudFingerprintReferenceFetcher @Inject constructor(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this

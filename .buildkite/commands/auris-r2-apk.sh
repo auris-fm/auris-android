@@ -18,9 +18,19 @@ cd "$(dirname "$0")/../.."
 
 # Play app-signing certificate pin (public; from Play Console's App signing
 # page for fm.auris). Env override only for deliberate key rotation. If a real
-# run fails on this pin, nothing is published -- correct the pin from the
-# actual APK's certificate, never loosen the check.
+# run fails on this pin, nothing is published -- re-pin from Play Console's
+# own certificate download, never from the APK and never by loosening the check.
 AURIS_PLAY_APP_SIGNING_SHA256="${AURIS_PLAY_APP_SIGNING_SHA256:-8C:9F:5B:68:3E:BC:0B:F6:87:B6:5A:B7:EA:70:D6:F0:3D:DC:E1:6F:91:7C:49:66:F7:AC:D6:60:B0:0F:BD:E9}"
+
+# Play's quantum-ready (v3.2) hybrid pair, applied at SDK 37+. These are DIFFERENT keys by design,
+# so they cannot be compared against the app-signing pin above. Read from Play Console's
+# "Download certificates" bundle (hybrid_classical_cert.der / hybrid_pqc_cert.der) and fingerprinted
+# with `openssl x509 -inform DER -noout -fingerprint -sha256` -- Google's own certificates, never
+# taken from a build's output. A rotation by Google fails this closed, which is correct: re-pin
+# from the same download, not from an APK.
+AURIS_PLAY_HYBRID_CLASSICAL_SHA256="${AURIS_PLAY_HYBRID_CLASSICAL_SHA256:-DD:DC:9D:F1:60:3B:E2:11:18:F3:13:3D:35:97:F6:75:47:A8:E4:BE:BA:FE:7D:C8:1F:29:F5:86:CF:9E:CC:A2}"
+AURIS_PLAY_HYBRID_PQC_SHA256="${AURIS_PLAY_HYBRID_PQC_SHA256:-28:A1:74:6C:33:AA:1B:DE:14:0C:27:E6:1C:B1:B7:DF:37:97:6A:C7:A4:89:2F:FF:D5:CB:81:42:51:81:CE:AD}"
+export AURIS_PLAY_HYBRID_CLASSICAL_SHA256 AURIS_PLAY_HYBRID_PQC_SHA256
 
 R2_ENDPOINT="https://f8823ef2e78cfe210b4554177000e4da.r2.cloudflarestorage.com"
 R2_BUCKET="auris-download"

@@ -234,6 +234,24 @@ sys.exit(0 if lits == [want] else 1)
 PYSPANS
 [ $? -eq 0 ] && ok "an escaped apostrophe is one literal span" || bad "the escaped char literal was split"
 
+# A raw string whose interior line LOOKS like a comment: comment-ness must come from position,
+# not from the line's own characters, or its whitespace gets normalised away.
+fixture raw-comment-line <<KT
+val s = $T
+// a b
+$T
+KT
+printf 'val s = %s\n// ab\n%s\n' "$T" "$T" > File.kt
+expect fail "a whitespace edit on a comment-looking raw-string line is not formatting"
+
+fixture raw-star-line <<KT
+val s = $T
+ * a b
+$T
+KT
+printf 'val s = %s\n * ab\n%s\n' "$T" "$T" > File.kt
+expect fail "a whitespace edit on a KDoc-looking raw-string line is not formatting"
+
 fixture raw-blank-line <<KT
 val msg = $T
 line one

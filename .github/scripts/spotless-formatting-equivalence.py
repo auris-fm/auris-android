@@ -184,13 +184,8 @@ def split_imports(text):
     return imports, rest
 
 
-def ordered_lines(text):
-    """Non-blank lines in order, layout whitespace removed -- except inside a multi-line literal.
-
-    A raw string's interior lines ARE content: squeezing them there would make an edited message
-    compare equal. Walk the spans so each line knows which parts of it are literal.
-    """
-    # Mark every character position that belongs to a literal.
+def literal_mask(text):
+    """Per-character flags: True where the character belongs to a string/char/backtick literal."""
     inside = [False] * len(text)
     pos = 0
     for kind, chunk in split_spans(text):
@@ -198,45 +193,89 @@ def ordered_lines(text):
             for k in range(pos, pos + len(chunk)):
                 inside[k] = True
         pos += len(chunk)
+    return inside
+
+
+def line_is_literal(inside, start, line):
+    """True when any non-whitespace character of this line sits inside a literal.
+
+    Comment-ness and blank-line-ness must be decided from POSITION, not from the line's own
+    characters: a raw string can contain a line that starts with `//`, and treating it as a
+    comment would normalise its whitespace away.
+    """
+    # A blank line has no characters to test, so ask about its POSITION: a newline that falls
+    # inside a literal span is part of that string's content.
+    if not line.strip():
+        return start < len(inside) and inside[start]
+    for offset, ch in enumerate(line):
+        if not ch.isspace() and inside[start + offset]:
+            return True
+    return False
+
+
+def strip_line(line, inside, start):
+    kept = []
+    quote = None
+    for offset, ch in enumerate(line):
+        if inside[start + offset]:
+            kept.append(ch)
+            continue
+        if quote:
+            kept.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in '"`':
+            quote = ch
+            kept.append(ch)
+        elif not ch.isspace():
+            kept.append(ch)
+    return "".join(kept)
+
+
+def ordered_lines(text):
+    """Non-blank lines in order, layout whitespace removed -- except inside a multi-line literal.
+
+    A raw string's interior lines ARE content: squeezing them there would make an edited message
+    compare equal. A blank line inside a literal is content too.
+    """
+    inside = literal_mask(text)
     out = []
     pos = 0
     for line in text.split("\n"):
-        blank_inside_literal = not line.strip() and any(
-            inside[pos : pos + len(line) + 1]
-        )
-        if (line.strip() or blank_inside_literal) and not line.strip().startswith("import "):
-            kept = []
-            quote = None
-            for offset, ch in enumerate(line):
-                index = pos + offset
-                if inside[index]:
-                    kept.append(ch)
-                    continue
-                if quote:
-                    kept.append(ch)
-                    if ch == quote:
-                        quote = None
-                elif ch in '"`':
-                    quote = ch
-                    kept.append(ch)
-                elif not ch.isspace():
-                    kept.append(ch)
-            out.append("".join(kept))
+        literal = line_is_literal(inside, pos, line)
+        keep = (line.strip() or literal) and not line.strip().startswith("import ")
+        if keep:
+            out.append(strip_line(line, inside, pos))
         pos += len(line) + 1
     return out
 
 
-def is_comment(line):
+def is_comment(line, inside, start):
+    if line_is_literal(inside, start, line):
+        return False        # a `//` inside a raw string is text, not a comment
     stripped = line.strip()
     return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*")
 
 
+def partition_comments(text):
+    inside = literal_mask(text)
+    code, comments = [], []
+    pos = 0
+    for line in text.split("\n"):
+        if is_comment(line, inside, pos):
+            comments.append(strip_line(line, inside, pos))
+        else:
+            code.append(line)
+        pos += len(line) + 1
+    return "\n".join(code), collections.Counter(comments)
+
+
 def code_tokens(text):
-    return tokens("\n".join(l for l in text.split("\n") if not is_comment(l)))
+    return tokens(partition_comments(text)[0])
 
 
 def comment_multiset(text):
-    return collections.Counter(strip_layout(l) for l in text.split("\n") if is_comment(l))
+    return partition_comments(text)[1]
 
 
 def equivalent(before, after):

@@ -197,8 +197,9 @@ class FingerprintTimingManagerTranscriptFormatTest {
     }
 
     /**
-     * The caller owns the scope the preparation runs on; leaving it alive lets its failure — on the
-     * JVM, the native library's — surface in whichever test class runs next.
+     * The manager keeps collectors running on this scope for as long as it lives, so the test that
+     * owns it has to stop them. This is not what stops the library failure reaching another class —
+     * the scope's handler does that, at the point the coroutine fails.
      */
     @After
     fun tearDown() = scope.cancel()

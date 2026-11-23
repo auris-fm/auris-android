@@ -35,15 +35,13 @@ auris_require_interpreter() {
   fi
 
   # Ruby raises on non-ASCII output under a non-UTF-8 locale, and the release prints
-  # translated text. Override BY VALUE: an inherited UTF-8 locale is a deliberate choice
-  # (it may carry a region) and is left alone; anything else is replaced.
-  case "${LC_ALL:-${LANG:-}}" in
+  # translated text. The effective character type is LC_ALL, then LC_CTYPE, then LANG --
+  # checking only the first and last leaves a host with LC_CTYPE=C in the C locale whatever
+  # LANG says. Override BY VALUE: an effective UTF-8 locale is a deliberate choice (it may
+  # carry a region) and everything is left alone; otherwise LC_ALL settles it, since LC_ALL
+  # outranks both of the others.
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
     *UTF-8|*utf-8|*UTF8|*utf8) ;;
-    *) export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 ;;
-  esac
-  # An inherited LC_ALL that is not UTF-8 would still win over LANG, so clear the mismatch.
-  case "${LC_ALL:-}" in
-    ""|*UTF-8|*utf-8|*UTF8|*utf8) ;;
     *) export LC_ALL=en_US.UTF-8 ;;
   esac
 

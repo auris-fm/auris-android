@@ -19,7 +19,7 @@ check_zero() {
 }
 
 RUBY_PIN="$(cat "$DIR/.ruby-version")"
-BUNDLER_PIN="$(sed -n 's/^BUNDLED WITH$//p' "$DIR/Gemfile.lock" >/dev/null; awk '/^BUNDLED WITH/{getline; gsub(/ /,""); print}' "$DIR/Gemfile.lock")"
+BUNDLER_PIN="$(awk '/^BUNDLED WITH/{getline; gsub(/[ \t]/,""); print}' "$DIR/Gemfile.lock")"
 [ -n "$RUBY_PIN" ] || { echo "FAIL: no .ruby-version"; exit 1; }
 [ -n "$BUNDLER_PIN" ] || { echo "FAIL: no BUNDLED WITH in Gemfile.lock"; exit 1; }
 echo "pins from the repo: ruby $RUBY_PIN, bundler $BUNDLER_PIN"
@@ -162,7 +162,7 @@ if [ "\$1" = "-v" ] || [ "\$1" = "--version" ]; then
   exit 0
 fi
 if [ "\$1" = "-rbase64" ]; then
-  printf '%s|%s\n' "\${LANG:-unset}" "\${LC_ALL:-unset}" >> "$WORK/locale-seen"
+  printf '%s|%s|%s\n' "\${LANG:-unset}" "\${LC_ALL:-unset}" "\${LC_CTYPE:-unset}" >> "$WORK/locale-seen"
 fi
 exec "$REAL_RUBY" "\$@"
 STUB
@@ -170,14 +170,30 @@ chmod +x "$WORK/ruby-good/ruby"
 rm -f "$WORK/locale-seen"
 LANG=C LC_ALL=C aab "$WORK/ruby-good:$WORK/bundle-good" out-locale-c
 check_zero "a C locale does not fail the step" $?
-grep -qx "en_US.UTF-8|en_US.UTF-8" "$WORK/locale-seen" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: an inherited C locale is overridden by value"; } || { FAIL=$((FAIL+1)); echo "FAIL: the interpreter still saw a non-UTF-8 locale ($(cat "$WORK/locale-seen" 2>/dev/null))"; }
+grep -qx "C|en_US.UTF-8|unset" "$WORK/locale-seen" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: an inherited C locale is outranked by a UTF-8 LC_ALL"; } || { FAIL=$((FAIL+1)); echo "FAIL: the interpreter still saw a non-UTF-8 locale ($(cat "$WORK/locale-seen" 2>/dev/null))"; }
 
 # 8. An inherited UTF-8 locale is LEFT ALONE -- overriding it would discard a deliberate
 #    choice (and a region), which is why the rule is by value and not unconditional.
 rm -f "$WORK/locale-seen"
 LANG=ja_JP.UTF-8 LC_ALL=ja_JP.UTF-8 aab "$WORK/ruby-good:$WORK/bundle-good" out-locale-utf8
 check_zero "an inherited UTF-8 locale does not fail the step" $?
-grep -qx "ja_JP.UTF-8|ja_JP.UTF-8" "$WORK/locale-seen" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: an inherited UTF-8 locale is preserved"; } || { FAIL=$((FAIL+1)); echo "FAIL: a UTF-8 locale was overwritten ($(cat "$WORK/locale-seen" 2>/dev/null))"; }
+grep -qx "ja_JP.UTF-8|ja_JP.UTF-8|unset" "$WORK/locale-seen" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: an inherited UTF-8 locale is preserved"; } || { FAIL=$((FAIL+1)); echo "FAIL: a UTF-8 locale was overwritten ($(cat "$WORK/locale-seen" 2>/dev/null))"; }
+
+# 9. LC_CTYPE TAKES PRECEDENCE OVER LANG. A host with LC_CTYPE=C and no LC_ALL is in the C
+#    locale whatever LANG says -- checking only LC_ALL/LANG leaves exactly the failure this
+#    gate exists to prevent.
+rm -f "$WORK/locale-seen"
+env -u LC_ALL LC_CTYPE=C LANG=de_DE.UTF-8 PATH="$WORK/ruby-good:$WORK/bundle-good:$WORK/bin:$PATH" \
+  ./.buildkite/commands/auris-release-aab.sh > out-locale-ctype 2>&1
+check_zero "LC_CTYPE=C does not fail the step" $?
+grep -qx "de_DE.UTF-8|en_US.UTF-8|C" "$WORK/locale-seen" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: LC_CTYPE=C is outranked by a UTF-8 LC_ALL"; } || { FAIL=$((FAIL+1)); echo "FAIL: LC_CTYPE=C left the interpreter in the C locale ($(cat "$WORK/locale-seen" 2>/dev/null))"; }
+
+# 10. A regional UTF-8 LANG with LC_ALL unset is a deliberate choice and survives untouched.
+rm -f "$WORK/locale-seen"
+env -u LC_ALL -u LC_CTYPE LANG=de_DE.UTF-8 PATH="$WORK/ruby-good:$WORK/bundle-good:$WORK/bin:$PATH" \
+  ./.buildkite/commands/auris-release-aab.sh > out-locale-lang 2>&1
+check_zero "a regional UTF-8 LANG does not fail the step" $?
+grep -qx "de_DE.UTF-8|unset|unset" "$WORK/locale-seen" 2>/dev/null && { PASS=$((PASS+1)); echo "ok: a regional UTF-8 LANG is preserved with LC_ALL left unset"; } || { FAIL=$((FAIL+1)); echo "FAIL: a regional UTF-8 LANG was overwritten ($(cat "$WORK/locale-seen" 2>/dev/null))"; }
 
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]

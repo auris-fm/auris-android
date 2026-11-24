@@ -575,10 +575,6 @@ class AndroidPlatformTtsEngineTest {
      * driven here is the production one -- the same lambda the real TextToSpeech invokes -- rather
      * than a test-only "initialized" flag.
      */
-    private fun managerStateOf(engine: AndroidPlatformTtsEngine): String = try {
-        engine.javaClass.methods.firstOrNull { it.name == "getState" }?.invoke(engine)?.toString() ?: "n/a"
-    } catch (t: Throwable) { "err:$t" }
-
     private fun engineWithFakeSynthesizer(
         onSynthesize: (utteranceId: String) -> Unit = {},
     ): Triple<AndroidPlatformTtsEngine, FakeSynthesizer, PlaybackBufferRecorder> {

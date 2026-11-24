@@ -265,6 +265,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
                             Timber.w("TTS synthesizeToFile failed with $queued")
                             // ONE-SHOT: the refusal is this utterance's first completion; the flag makes any
                             // late platform callback for the same id a no-op instead of a double resume.
+                            // A refusal RESUMES this continuation, so the cancellation handler below it
+                            // never runs on this path -- correct, because a refused queue left nothing
+                            // to stop; the old post-call liveness check used to stop here over an
+                            // empty queue (a resumed continuation looks inactive), which was the defect.
                             completeOnce(false)
                         }
                         // A cancellation landing while the platform call is in flight is handled by the

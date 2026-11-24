@@ -12,6 +12,7 @@ import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import dagger.hilt.android.testing.HiltTestApplication
 import javax.inject.Inject
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -63,6 +64,12 @@ class RealServiceLifecycleControlTest {
 
     @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 
+    // The monitor's debounced-read scope, test-lifetime: cancelled in teardown so a pending read
+    // cannot fire detached after this class ends.
+    @Inject
+    @au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteMonitorScope
+    lateinit var routeMonitorScope: kotlinx.coroutines.CoroutineScope
+
     /**
      * Supply the device id the PLATFORM would provide.
      *
@@ -89,7 +96,7 @@ class RealServiceLifecycleControlTest {
         // Cancel it BEFORE destroy so the read cannot fire detached after this class ends and land
         // in the next runTest's UncaughtExceptionsBeforeTest (the VoiceControlServiceAcquisitionTest
         // flake). The injected monitor is the graph singleton the service uses.
-        routeMonitor.cancelDebouncedRouteReadForTest()
+        routeMonitorScope.cancel()
         controllers.forEach { controller ->
             // destroy() STARTS teardown; AWAIT IT (reviewer 57bf1be9): an asynchronous teardown
             // left running from this test could land in the next test's assertions. The bound is

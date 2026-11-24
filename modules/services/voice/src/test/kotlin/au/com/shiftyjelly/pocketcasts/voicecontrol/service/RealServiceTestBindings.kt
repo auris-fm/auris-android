@@ -195,6 +195,26 @@ object RecognizerReleaseProbe {
     }
 }
 
+/**
+ * The route monitor's debounced-read scope, TEST-LIFETIME. Replaces ONLY [RouteMonitorScopeModule]:
+ * production binds the application-lifetime scope there, and a test class can end while a 500ms
+ * debounced read is pending -- a read firing detached after the class ends lands in the next
+ * runTest's UncaughtExceptionsBeforeTest (the VoiceControlServiceAcquisitionTest flake). The test
+ * cancels THIS scope in teardown; the monitor's own lifetime reasoning is unchanged.
+ */
+@Module
+@TestInstallIn(
+    components = [SingletonComponent::class],
+    replaces = [au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteMonitorScopeModule::class],
+)
+object TestRouteMonitorScopeModule {
+    @Provides
+    @Singleton
+    @au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteMonitorScope
+    fun provideTestRouteMonitorScope(): kotlinx.coroutines.CoroutineScope =
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+}
+
 /** Types with no existing provider on this module's classpath. */
 @Module
 @InstallIn(SingletonComponent::class)

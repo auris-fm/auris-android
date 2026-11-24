@@ -45,6 +45,13 @@ class AndroidAudioRouteMonitor @Inject constructor(
      * A provider, because the answer belongs to whichever stream is live.
      */
     private val captureRoutedDeviceId: (() -> Int?)? = null,
+    /**
+     * The scope the debounced route read runs on. Production injects the application-lifetime scope
+     * (the monitor is a process-lifetime singleton); a test passes a scope it cancels in teardown,
+     * so a pending read cannot fire detached after the test class ends. The lifetime is owned by
+     * whoever supplies the scope, not by a test-only method on production code.
+     */
+    @RouteMonitorScope private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
 ) : AudioRouteMonitor {
 
     /**
@@ -70,12 +77,10 @@ class AndroidAudioRouteMonitor @Inject constructor(
     // PROCESS LIFETIME, DELIBERATELY WITHOUT A TEARDOWN OWNER. This monitor is a process-lifetime
     // singleton: it never unregisters registerAudioDeviceCallback, addOnCommunicationDeviceChangedListener
     // or its receiver, because it observes the route for the app's whole life, across sessions. The
-    // debounced read below therefore has an owner -- the process -- and wiring a cancel into service
-    // teardown would CREATE a defect: a service stop would freeze the route the next session reads.
-    // cancelDebouncedRouteReadForTest exists for a different lifetime: a test CLASS can end while a
-    // debounce job is pending, which is a test-lifetime problem, so a test-lifetime cancel is the
-    // right tool. Retire that seam only if the flake it addresses is gone without it.
-    private val scope = CoroutineScope(Dispatchers.Default)
+    // debounced read below therefore has an owner -- the process, via the injected application scope --
+    // and wiring a cancel into service teardown would CREATE a defect: a service stop would freeze the
+    // route the next session reads. A test's different lifetime is handled where it belongs: the test
+    // supplies its own scope and cancels it in teardown.
     private var debounceJob: Job? = null
 
     // Bluetooth devices are enumerated incrementally — output first, then input.
@@ -136,15 +141,6 @@ class AndroidAudioRouteMonitor @Inject constructor(
         return devices.outputs.joinToString(",") + "|" +
             devices.inputs.joinToString(",") + "|" +
             devices.inputIds.joinToString(",")
-    }
-
-    /**
-     * TEST SEAM (same convention as the queue's ForTest seams): cancel a pending debounced route
-     * read so it cannot fire detached after a test class has ended. Production never calls this;
-     * a device event still schedules a fresh read afterwards.
-     */
-    fun cancelDebouncedRouteReadForTest() {
-        debounceJob?.cancel()
     }
 
     private fun scheduleRouteUpdate() {

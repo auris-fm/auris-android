@@ -7,6 +7,7 @@ import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import dagger.hilt.android.testing.HiltTestApplication
 import javax.inject.Inject
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -60,6 +61,12 @@ class RealServiceSessionAdmissionControlTest {
 
     @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 
+    // The monitor's debounced-read scope, test-lifetime: cancelled in teardown so a pending read
+    // cannot fire detached after this class ends (replaces the former ForTest seam on the monitor).
+    @Inject
+    @au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteMonitorScope
+    lateinit var routeMonitorScope: kotlinx.coroutines.CoroutineScope
+
     private val controllers = mutableListOf<ServiceController<VoiceControlService>>()
 
     @Before
@@ -81,7 +88,7 @@ class RealServiceSessionAdmissionControlTest {
 
     @After
     fun dispose() {
-        routeMonitor.cancelDebouncedRouteReadForTest()
+        routeMonitorScope.cancel()
         controllers.forEach { controller ->
             runCatching { controller.destroy() }
             val deadline = System.currentTimeMillis() + 5_000

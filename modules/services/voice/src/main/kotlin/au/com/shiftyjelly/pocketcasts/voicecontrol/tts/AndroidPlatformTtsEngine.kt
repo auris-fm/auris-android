@@ -299,13 +299,13 @@ class AndroidPlatformTtsEngine @Inject constructor(
                                 }
                             }
                         }
-                        // A cancellation landing while the platform call is in flight is handled by the
-                        // [continuation.invokeOnCancellation] handler above: it runs at cancellation
-                        // with the same in-lock generation check, whether the cancellation arrives
-                        // during the call or later. There is deliberately NO post-call liveness check
-                        // here: !isActive is also true when the continuation has already RESUMED, so
-                        // a synthesis completing during this block would walk into a stop that has
-                        // nothing to clean up (the observed stop-after-onDone defect).
+                        // Cancellation during the call is handled by the invokeOnCancellation handler
+                        // above, and the post-call stop below covers the case its stop cannot reach:
+                        // a cancellation whose stop lands while the platform call is still parked,
+                        // so the synthesis enqueues after it. That stop is gated on cancellationLanded,
+                        // NEVER on continuation liveness: both !isActive and isCancelled are also true
+                        // after a successful resume, which stopped completed utterances (the observed
+                        // stop-after-onDone defect).
                     }
                 }
             } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {

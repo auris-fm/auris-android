@@ -34,8 +34,10 @@ import timber.log.Timber
  *
  * `TextToSpeech.speak` renders internally and exposes no PCM, which is why this uses
  * `synthesizeToFile` and plays the result itself. Everything the previous implementation guaranteed
- * is preserved: language selection with the same fallback, one utterance at a time
- * (QUEUE_FLUSH), completion on done or error, and cancellation that stops playback immediately.
+ * is preserved: language selection with the same fallback, one utterance at a time (the generation
+ * guard plus the cancellation handler supersede an older synthesis -- file synthesis is QUEUE_ADD,
+ * so the platform queue never flushes one), completion on done or error, and cancellation that
+ * stops playback immediately.
  */
 class AndroidPlatformTtsEngine @Inject constructor(
     @ApplicationContext context: Context,
@@ -250,31 +252,45 @@ class AndroidPlatformTtsEngine @Inject constructor(
                         // ownership claim.
                         ownershipToken = synthesisLock.withLock { ++synthesisGeneration }
                         val mine = ownershipToken
+                        // Cancellation stops the queued synthesis here, under the generation guard.
+                        // One case this stop cannot reach: cancellation arriving while the platform
+                        // call is still parked -- the stop precedes the enqueue, so the synthesis
+                        // lands after it and stays queued. The post-call stop below covers that case,
+                        // gated on cancellationLanded (set here), NEVER on continuation liveness:
+                        // both !isActive and isCancelled are also true after a successful resume
+                        // (kotlinx's bookkeeping for a dispatched but untaken resume reports
+                        // cancelled), which stopped completed utterances -- the stop-after-onDone defect.
+                        val cancellationLanded = java.util.concurrent.atomic.AtomicBoolean(false)
                         continuation.invokeOnCancellation {
+                            cancellationLanded.set(true)
                             synthesisLock.withLock {
                                 if (synthesisGeneration == mine) {
                                     engine.stop()
                                 }
                             }
                         }
-                        // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
-                        // must not keep talking.
+                        // Supersession is OUR machinery, not the platform queue: file synthesis is
+                        // always QUEUE_ADD (synthesizeToFile takes no queue mode), so a superseded
+                        // reply is never flushed by a newer one. What actually stops a superseded
+                        // reply is the generation guard plus this utterance's own cancellation
+                        // handler, and the successor does the talking from our own AudioTrack playback.
+                        // If the successor claims the generation before this utterance's handler runs,
+                        // the old synthesis stays queued (never played -- its coroutine is cancelled --
+                        // but it can delay the successor's synthesis).
                         val queued = synthesizeToFile?.invoke(engine, text, wav, utteranceId)
                             ?: engine.synthesizeToFile(text, null, wav, utteranceId)
                         if (queued != TextToSpeech.SUCCESS) {
                             Timber.w("TTS synthesizeToFile failed with $queued")
                             // ONE-SHOT: the refusal is this utterance's first completion; the flag makes any
                             // late platform callback for the same id a no-op instead of a double resume.
+                            // A refusal resumes rather than cancels, so the cancellation handler does
+                            // not run here, and nothing needs stopping: the platform enqueues nothing
+                            // when synthesizeToFile returns non-SUCCESS.
                             completeOnce(false)
                         }
-                        if (!continuation.isActive) {
-                            // A cancellation landed while the platform call was in flight (a slow
-                            // synthesizeToFile outliving the synthesis deadline): the queued synthesis
-                            // must be stopped rather than left orphaned -- but ONLY while this
-                            // utterance still owns the engine. A successor may have claimed the
-                            // generation while the call was parked, and an unguarded stop here would
-                            // silence the successor's synthesis or playback (same boundary as the
-                            // cancellation handler above).
+                        // The late-enqueue case described at the handler: re-stop under the same
+                        // boundary, only on actual cancellation -- never on a completed utterance.
+                        if (cancellationLanded.get()) {
                             synthesisLock.withLock {
                                 if (synthesisGeneration == mine) {
                                     engine.stop()

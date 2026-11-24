@@ -168,6 +168,27 @@ class FingerprintTimingManagerEagerCloudTest {
     }
 
     @Test
+    fun `an Auris-only downloaded episode is decoded eagerly before any playback`() {
+        // No transcript reference exists, so the only reference is the Auris one fetched from the
+        // cloud endpoint. The episode is downloaded and the eager gate passes; the map must be
+        // built ahead of playback, not wait for the PCM tap.
+        harness.transcriptPayload = null
+        whenever(cloudMatcher.findTopMatches(any(), any())).thenReturn(accepted)
+
+        runEagerDecode(
+            streamedWindows = listOf(window(0), window(1), window(2)),
+            tailWindows = emptyList(),
+        )
+
+        assertEquals(
+            "the Auris-only episode built no map before playback",
+            listOf(0.0, 1.0, 2.0),
+            manager.mappingSnapshot.map { it.playbackTime },
+        )
+        assertEquals(listOf(40.0, 40.0, 40.0), manager.mappingSnapshot.map { it.referenceTime })
+    }
+
+    @Test
     fun `the eager decode refuses what the acceptance rule refuses`() {
         // No candidate more than two seconds away: fail closed, even above the floor.
         whenever(cloudMatcher.findTopMatches(any(), any())).thenReturn(

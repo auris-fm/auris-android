@@ -173,7 +173,15 @@ class FingerprintTimingManagerEagerCloudTest {
         // cloud endpoint. The episode is downloaded and the eager gate passes; the map must be
         // built ahead of playback, not wait for the PCM tap.
         harness.transcriptPayload = null
-        whenever(cloudMatcher.findTopMatches(any(), any())).thenReturn(accepted)
+        // The runner-up is close enough that BOTH the transcript rule and the Auris acceptance rule
+        // accept these windows, so double-scoring a window would duplicate its anchor and fail here.
+        whenever(cloudMatcher.findTopMatches(any(), any())).thenReturn(
+            listOf(
+                MatchResult(timestamp = 40f, score = 0.90f),
+                MatchResult(timestamp = 41f, score = 0.80f),
+                MatchResult(timestamp = 90f, score = 0.40f),
+            ),
+        )
 
         runEagerDecode(
             streamedWindows = listOf(window(0), window(1), window(2)),

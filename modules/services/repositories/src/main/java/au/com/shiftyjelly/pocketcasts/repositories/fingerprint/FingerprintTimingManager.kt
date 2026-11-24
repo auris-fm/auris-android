@@ -1252,15 +1252,17 @@ class FingerprintTimingManager @Inject constructor(
             _stateFlow.value = State.Preparing
             val aurisMatcher = cloudMatcher
             if (currentEager && !currentIsStreaming && aurisMatcher != null) {
-                startEagerLocalDecode(gen, audioFilePath, aurisMatcher, episodeUuid)
+                // Null matcher: the decode loop scores the Auris matcher itself; handing it here
+                // as well would score every window twice and duplicate anchors.
+                startEagerLocalDecode(gen, audioFilePath, null, episodeUuid)
             } else {
                 startTapCollection(gen, null)
             }
         }
     }
 
-    /** Must be called under [mutex]. */
-    private fun startEagerLocalDecode(gen: Long, audioFilePath: String, matcher: CheckpointMatcher, episodeUuid: String) {
+    /** Must be called under [mutex]. A null [matcher] scores only the Auris reference. */
+    private fun startEagerLocalDecode(gen: Long, audioFilePath: String, matcher: CheckpointMatcher?, episodeUuid: String) {
         generationJob?.cancel()
         generationJob = scope.launch(decodeDispatcher) {
             try {

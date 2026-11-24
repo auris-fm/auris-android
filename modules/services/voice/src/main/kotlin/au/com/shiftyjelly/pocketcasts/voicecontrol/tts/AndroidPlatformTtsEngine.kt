@@ -34,8 +34,10 @@ import timber.log.Timber
  *
  * `TextToSpeech.speak` renders internally and exposes no PCM, which is why this uses
  * `synthesizeToFile` and plays the result itself. Everything the previous implementation guaranteed
- * is preserved: language selection with the same fallback, one utterance at a time
- * (QUEUE_FLUSH), completion on done or error, and cancellation that stops playback immediately.
+ * is preserved: language selection with the same fallback, one utterance at a time (the generation
+ * guard plus the cancellation handler supersede an older synthesis -- file synthesis is QUEUE_ADD,
+ * so the platform queue never flushes one), completion on done or error, and cancellation that
+ * stops playback immediately.
  */
 class AndroidPlatformTtsEngine @Inject constructor(
     @ApplicationContext context: Context,
@@ -257,8 +259,14 @@ class AndroidPlatformTtsEngine @Inject constructor(
                                 }
                             }
                         }
-                        // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
-                        // must not keep talking.
+                        // Supersession is OUR machinery, not the platform queue: file synthesis is
+                        // always QUEUE_ADD (synthesizeToFile takes no queue mode), so a superseded
+                        // reply is never flushed by a newer one. What actually stops a superseded
+                        // reply is the generation guard plus this utterance's own cancellation
+                        // handler, and the successor does the talking from our own AudioTrack playback.
+                        // If the successor claims the generation before this utterance's handler runs,
+                        // the old synthesis stays queued (never played -- its coroutine is cancelled --
+                        // but it can delay the successor's synthesis).
                         val queued = synthesizeToFile?.invoke(engine, text, wav, utteranceId)
                             ?: engine.synthesizeToFile(text, null, wav, utteranceId)
                         if (queued != TextToSpeech.SUCCESS) {

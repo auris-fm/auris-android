@@ -332,21 +332,16 @@ class AndroidPlatformTtsEngineTest {
         val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         wired.synthesisWaitMs = 200
-        val park = java.util.concurrent.CountDownLatch(1)
-        val go = java.util.concurrent.CountDownLatch(1)
-        fake.parkUntil = park
-        // Release the platform call only after the deadline has fired.
-        Thread {
-            try { Thread.sleep(500) } catch (_: InterruptedException) {}
-            park.countDown()
-            go.countDown()
-        }.start()
+        // The call parks until the FIRST stop() releases it. The deadline's cancellation handler
+        // therefore stops while the call is still parked -- before the enqueue completes -- by
+        // construction, with no wall-clock race between a sleep and the deadline.
+        fake.parkUntil = java.util.concurrent.CountDownLatch(1)
 
         val scope = CoroutineScope(Dispatchers.Default)
         val spoke = scope.launch { wired.speak("hello", "en") }
         // speak() touches the platform engine through withContext(Dispatchers.Main): idle the looper
-        // until the call reaches its parked synthesizeToFile, then let the deadline fire and the
-        // release thread un-park it.
+        // until the call reaches its parked synthesizeToFile; the deadline then fires and the
+        // handler's stop un-parks it.
         val queued = (0 until 100).any {
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
             Thread.sleep(20)
@@ -356,13 +351,16 @@ class AndroidPlatformTtsEngineTest {
         runBlocking {
             kotlinx.coroutines.withTimeoutOrNull(5_000) { spoke.join() }
         }
-        go.await()
-        // speak returned false (the deadline fired) and the engine was stopped twice: once by the
-        // handler (which raced ahead of the enqueue) and once after the call completed the enqueue.
         assertEquals(
             "a cancelled utterance whose synthesis enqueued late must leave the engine stopped",
             2,
             fake.stopCalls,
+        )
+        // Two stops alone could both precede the enqueue. What makes this the late-enqueue case is
+        // that a stop happened AFTER the platform call returned: the post-call stop did real work.
+        assertTrue(
+            "a stop must land after the platform call returned (stops=${fake.stopTimes}, returned=${fake.callReturnedAt})",
+            fake.stopTimes.any { it >= fake.callReturnedAt },
         )
         scope.cancel()
     }
@@ -723,14 +721,27 @@ class AndroidPlatformTtsEngineTest {
             synthesizeQueued = true
             parkUntil?.await()
             onSynthesize(utteranceId ?: "")
+            callReturnedAt = System.currentTimeMillis()
             // Deterministic: the completion is delivered BEFORE the call returns, so it races the
             // engine's own setup block exactly the way a fast platform can.
             if (completeDuringCall) listener?.onDone(utteranceId)
             return android.speech.tts.TextToSpeech.SUCCESS
         }
 
+        /** Wall-clock of each stop(), in order: lets a test assert a stop happened AFTER the
+         * platform call returned, not merely that stops were counted. */
+        val stopTimes = java.util.concurrent.CopyOnWriteArrayList<Long>()
+
+        /** Wall-clock when the last synthesizeToFile call RETURNED (after any park). */
+        @Volatile
+        var callReturnedAt = 0L
+
         override fun stop(): Int {
             stopCalls += 1
+            stopTimes.add(System.currentTimeMillis())
+            // The first stop un-parks a parked call: the handler's stop is then BY CONSTRUCTION
+            // before the enqueue completes, so the late-enqueue case is forced by order, not timing.
+            parkUntil?.countDown()
             return android.speech.tts.TextToSpeech.SUCCESS
         }
     }

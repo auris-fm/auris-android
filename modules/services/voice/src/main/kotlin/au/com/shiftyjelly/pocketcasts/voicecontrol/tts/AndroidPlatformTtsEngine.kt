@@ -252,13 +252,14 @@ class AndroidPlatformTtsEngine @Inject constructor(
                         // ownership claim.
                         ownershipToken = synthesisLock.withLock { ++synthesisGeneration }
                         val mine = ownershipToken
-                        // Set by the cancellation handler, read after the platform call: the handler's
-                        // stop can land BEFORE synthesizeToFile finishes enqueueing (the call is still
-                        // parked when cancellation arrives), so the post-call stop below must know
-                        // cancellation happened even though this continuation was never resumed after.
-                        // Continuation liveness cannot be the gate: !isActive and isCancelled are both
-                        // also true after a successful resume (kotlinx's bookkeeping for a dispatched
-                        // but untaken resume reports cancelled), which stopped completed utterances.
+                        // Cancellation stops the queued synthesis here, under the generation guard.
+                        // One case this stop cannot reach: cancellation arriving while the platform
+                        // call is still parked -- the stop precedes the enqueue, so the synthesis
+                        // lands after it and stays queued. The post-call stop below covers that case,
+                        // gated on cancellationLanded (set here), NEVER on continuation liveness:
+                        // both !isActive and isCancelled are also true after a successful resume
+                        // (kotlinx's bookkeeping for a dispatched but untaken resume reports
+                        // cancelled), which stopped completed utterances -- the stop-after-onDone defect.
                         val cancellationLanded = java.util.concurrent.atomic.AtomicBoolean(false)
                         continuation.invokeOnCancellation {
                             cancellationLanded.set(true)
@@ -287,11 +288,8 @@ class AndroidPlatformTtsEngine @Inject constructor(
                             // when synthesizeToFile returns non-SUCCESS.
                             completeOnce(false)
                         }
-                        // A cancellation whose handler-stop raced ahead of the enqueue: the call still
-                        // parked when cancellation arrived, so the handler stopped nothing (or stopped
-                        // before the platform registered the queue entry) and the synthesis lands
-                        // AFTER that stop. Re-stop under the same boundary, but ONLY on actual
-                        // cancellation -- never on a completed utterance.
+                        // The late-enqueue case described at the handler: re-stop under the same
+                        // boundary, only on actual cancellation -- never on a completed utterance.
                         if (cancellationLanded.get()) {
                             synthesisLock.withLock {
                                 if (synthesisGeneration == mine) {
@@ -299,13 +297,6 @@ class AndroidPlatformTtsEngine @Inject constructor(
                                 }
                             }
                         }
-                        // Cancellation during the call is handled by the invokeOnCancellation handler
-                        // above, and the post-call stop below covers the case its stop cannot reach:
-                        // a cancellation whose stop lands while the platform call is still parked,
-                        // so the synthesis enqueues after it. That stop is gated on cancellationLanded,
-                        // NEVER on continuation liveness: both !isActive and isCancelled are also true
-                        // after a successful resume, which stopped completed utterances (the observed
-                        // stop-after-onDone defect).
                     }
                 }
             } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {

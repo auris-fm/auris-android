@@ -358,9 +358,11 @@ class AndroidPlatformTtsEngineTest {
         )
         // Two stops alone could both precede the enqueue. What makes this the late-enqueue case is
         // that a stop happened AFTER the platform call returned: the post-call stop did real work.
+        // Compared by stop COUNT at return, not wall-clock: the handler's stop and the return can
+        // share a millisecond, so a timestamp comparison would pass without a post-return stop.
         assertTrue(
-            "a stop must land after the platform call returned (stops=${fake.stopTimes}, returned=${fake.callReturnedAt})",
-            fake.stopTimes.any { it >= fake.callReturnedAt },
+            "a stop must land after the platform call returned (stops=${fake.stopCalls}, atReturn=${fake.stopsAtReturn})",
+            fake.stopCalls > fake.stopsAtReturn,
         )
         scope.cancel()
     }
@@ -721,24 +723,21 @@ class AndroidPlatformTtsEngineTest {
             synthesizeQueued = true
             parkUntil?.await()
             onSynthesize(utteranceId ?: "")
-            callReturnedAt = System.currentTimeMillis()
+            stopsAtReturn = stopCalls
             // Deterministic: the completion is delivered BEFORE the call returns, so it races the
             // engine's own setup block exactly the way a fast platform can.
             if (completeDuringCall) listener?.onDone(utteranceId)
             return android.speech.tts.TextToSpeech.SUCCESS
         }
 
-        /** Wall-clock of each stop(), in order: lets a test assert a stop happened AFTER the
-         * platform call returned, not merely that stops were counted. */
-        val stopTimes = java.util.concurrent.CopyOnWriteArrayList<Long>()
-
-        /** Wall-clock when the last synthesizeToFile call RETURNED (after any park). */
+        /** Stop count at the moment the last synthesizeToFile call RETURNED (after any park):
+         * lets a test assert a stop happened AFTER the return by ORDER, not wall-clock -- the
+         * handler's stop and the return can share a millisecond. */
         @Volatile
-        var callReturnedAt = 0L
+        var stopsAtReturn = 0
 
         override fun stop(): Int {
             stopCalls += 1
-            stopTimes.add(System.currentTimeMillis())
             // The first stop un-parks a parked call: the handler's stop is then BY CONSTRUCTION
             // before the enqueue completes, so the late-enqueue case is forced by order, not timing.
             parkUntil?.countDown()

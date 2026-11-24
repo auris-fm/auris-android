@@ -67,6 +67,14 @@ class AndroidAudioRouteMonitor @Inject constructor(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mutableRoute = MutableStateFlow(readRoute())
     private val mutableAvailability = MutableStateFlow(readAvailability())
+    // PROCESS LIFETIME, DELIBERATELY WITHOUT A TEARDOWN OWNER. This monitor is a process-lifetime
+    // singleton: it never unregisters registerAudioDeviceCallback, addOnCommunicationDeviceChangedListener
+    // or its receiver, because it observes the route for the app's whole life, across sessions. The
+    // debounced read below therefore has an owner -- the process -- and wiring a cancel into service
+    // teardown would CREATE a defect: a service stop would freeze the route the next session reads.
+    // cancelDebouncedRouteReadForTest exists for a different lifetime: a test CLASS can end while a
+    // debounce job is pending, which is a test-lifetime problem, so a test-lifetime cancel is the
+    // right tool. Retire that seam only if the flake it addresses is gone without it.
     private val scope = CoroutineScope(Dispatchers.Default)
     private var debounceJob: Job? = null
 

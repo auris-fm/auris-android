@@ -195,9 +195,11 @@ internal object OboeConfig {
     /**
      * How long capture may run without the native VAD consuming a single frame before the stream is
      * treated as dead: five polling windows, so the check fires on the fifth consecutive read that
-     * saw no progress. The VAD consumes [FRAMES_PER_POLL] frames per window whatever the input, so a
-     * stream that delivers nothing for this long is not merely quiet, it is not delivering at all —
-     * silence still reaches the VAD, only a dead or disconnected stream does not.
+     * saw no progress. The VAD consumes audio in [FRAMES_PER_POLL]-frame chunks (one 64 ms chunk at
+     * 16 kHz), so a single polling window holds about eight of them, not one; the liveness read
+     * samples the consumed-frame counter once per window whatever the chunk cadence. A stream that
+     * delivers nothing for this long is not merely quiet, it is not delivering at all — silence
+     * still reaches the VAD, only a dead or disconnected stream does not.
      */
     const val STARVED_AFTER_MS = LIVENESS_POLL_MS * 5
 }

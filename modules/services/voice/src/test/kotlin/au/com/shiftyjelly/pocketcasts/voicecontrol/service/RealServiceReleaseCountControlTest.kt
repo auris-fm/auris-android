@@ -60,8 +60,6 @@ class RealServiceReleaseCountControlTest {
     // Proves the component really is Hilt-built: this arrives through generated injection.
     @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
 
-    @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
-
     // The monitor's debounced-read scope, test-lifetime: cancelled in teardown so a pending read
     // cannot fire detached after this class ends.
     @Inject

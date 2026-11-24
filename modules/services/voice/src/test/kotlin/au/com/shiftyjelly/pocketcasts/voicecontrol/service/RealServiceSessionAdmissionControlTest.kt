@@ -59,8 +59,6 @@ class RealServiceSessionAdmissionControlTest {
     /** Arrives through generated injection, so it is the same instance the services receive. */
     @Inject lateinit var sessionGate: VoiceSessionGate
 
-    @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
-
     // The monitor's debounced-read scope, test-lifetime: cancelled in teardown so a pending read
     // cannot fire detached after this class ends.
     @Inject

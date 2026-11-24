@@ -18,6 +18,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -178,10 +179,12 @@ class RealServiceLifecycleControlTest {
      * instance. A watcher launched per start command therefore accumulates one collector per command
      * for the rest of the service's life, each holding the scope and re-running the same decision.
      *
-     * HOW THIS IS OBSERVED. The offered surface is a StateFlow, so its subscriber count is the
-     * observable: no test-only accessor and no field the fix introduces is read here. The surface is
-     * driven through the platform's own device callback, and the answer checked is the service's
-     * failed-attempt record — the state the watcher exists to maintain.
+     * HOW THIS IS OBSERVED. The watcher job the service records (`offeredSurfaceJob`) is the
+     * observable: the SAME job must still be recorded after the later commands, because a guard
+     * that lets a command launch a watcher REPLACES the record. Identity is exactly the defect;
+     * nothing else the service runs can move it. The surface is driven through the platform's own
+     * device callback, and the answer checked is the service's failed-attempt record — the state
+     * the watcher exists to maintain.
      */
     @Test
     fun `repeated start commands leave one watcher of the offered surface`() {
@@ -226,25 +229,25 @@ class RealServiceLifecycleControlTest {
             "precondition: the first start watches the offered surface",
             offeredSurfaceSubscribers() > 0,
         )
+        val firstWatcher = watcherJob(service)
+        assertNotNull("precondition: the first start recorded its watcher job", firstWatcher)
 
         service.onStartCommand(Intent(), 0, 2)
         service.onStartCommand(Intent(), 0, 3)
+        // Let the later commands' work run: a watcher they launched would exist by then. The wait
+        // ends when the main queue has drained with the commands delivered, never on a duration.
+        drainMainQueue()
 
-        // THE OBSERVABLE IS THIS INSTANCE'S OWN WATCHERS, not the flow's subscriber total. The
-        // monitor is a graph singleton: another instance's watcher may still be subscribed while
-        // its teardown finishes, and a StateFlow counts a collector twice while it registers. Both
-        // move the total for reasons that have nothing to do with these commands, which is what
-        // made a total-based reading depend on the machine's speed. Counting the watcher jobs this
-        // service launched does not: a guard that lets each command launch one shows up as three.
-        //
-        // The wait ends when the main queue has drained with the commands delivered, so any watcher
-        // they launched exists by then. It waits on that state, never on a duration.
-        val watchers = awaitWatchersSettled(service)
-        assertEquals(
-            "later start commands must launch NO watcher of the offered surface; one launched per " +
-                "command accumulates a collector for every later start of this instance",
-            1,
-            watchers,
+        // IDENTITY, NOT A COUNT. A guard that lets a later command launch a watcher REPLACES the
+        // recorded job, so the same instance still being recorded is exactly the one-watcher fact.
+        // Counting active scope children inferred that from position in the job tree and broke for
+        // reasons unrelated to the guard (any other direct-scope launch moves the count); the
+        // record cannot be moved by anything else the service runs.
+        assertSame(
+            "later start commands must leave the FIRST watcher recorded; a replacement means a " +
+                "command launched another watcher of the offered surface",
+            firstWatcher,
+            watcherJob(service),
         )
 
         // And the watcher still does its job after the repeated start: a failed attempt's record
@@ -256,18 +259,11 @@ class RealServiceLifecycleControlTest {
         routeMonitor.onDevicesChanged()
         awaitOfferedSurface(AudioRoute.Unknown)
 
-        // The watcher's own continuation is dispatched on Main, so let it run before reading what it
-        // recorded: the surface being published and the service reacting to it are two steps.
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline && !failedAttemptSurfaceLeft(service)) {
-            shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-        }
-        assertTrue(
-            "after a repeated start the watcher must still notice the offered surface leaving the " +
-                "one a failed attempt was recorded against",
-            failedAttemptSurfaceLeft(service),
-        )
+        // The surface change above was published only AFTER awaitWatcherRegistered confirmed the
+        // subscription, so the watcher receives it as a transition, not as its initial value. Its
+        // continuation is dispatched on Main: idle the queue while waiting on the RECORD, with a
+        // bound that THROWS rather than reporting a stale reading as the answer.
+        awaitFailedAttemptSurfaceLeft(service)
     }
 
     /**
@@ -308,57 +304,43 @@ class RealServiceLifecycleControlTest {
         )
     }
 
+    /** The watcher job this service recorded, read from its own state. */
+    private fun watcherJob(service: VoiceControlService): kotlinx.coroutines.Job? =
+        service.javaClass.getDeclaredField("offeredSurfaceJob")
+            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.Job?
+
     /**
-     * How many of THIS service's coroutines are watching the offered surface, once the later start
-     * commands' work has been drained.
-     *
-     * Read from the service's own job tree rather than the flow's subscriber total, so another
-     * instance's watcher leaving cannot change the answer. The wait ends on a stable reading with
-     * the main queue idle — a count of consecutive identical READINGS, not of milliseconds — so a
-     * slow machine changes how long this takes and never what it concludes.
+     * Drain the main queue until it stays empty across consecutive idles, so work the later start
+     * commands posted has run. Ends on the queue's state, never on a duration; the bound throws.
      */
-    private fun awaitWatchersSettled(service: VoiceControlService): Int {
+    private fun drainMainQueue() {
         val deadline = System.currentTimeMillis() + 30_000
-        var last = watcherCount(service)
-        var stableReads = 0
-        val readings = mutableListOf(last)
+        var emptyReads = 0
         while (System.currentTimeMillis() < deadline) {
             shadowOf(Looper.getMainLooper()).idle()
-            val now = watcherCount(service)
-            stableReads = if (now == last) stableReads + 1 else 0
-            last = now
-            readings += now
-            if (stableReads >= 3) return now
+            emptyReads = if (shadowOf(Looper.getMainLooper()).isIdle) emptyReads + 1 else 0
+            if (emptyReads >= 3) return
             Thread.sleep(10)
         }
-        // Running out of the bound is NOT an answer. Returning the last reading here would let a
-        // count that never settled pass on whatever it happened to read at the deadline, which is
-        // the failure this control exists to remove.
-        throw AssertionError(
-            "the watcher count never settled; readings=${readings.takeLast(20)}",
-        )
+        throw AssertionError("the main queue never drained after the later start commands")
     }
 
     /**
-     * How many watchers this service has launched directly on its own scope.
-     *
-     * `watchOfferedSurface` launches straight onto the service scope, while everything else a start
-     * command runs is nested inside that command's start job. So the watcher count is the number of
-     * ACTIVE DIRECT children of the scope other than the start and stop jobs — identified by
-     * structure, not by name, and independent of how many collectors the shared flow happens to
-     * have at that moment.
+     * Wait for the watcher's record that the offered surface left the failed attempt's, idling the
+     * main queue so the watcher's Main-dispatched continuation runs. The bound THROWS: reaching it
+     * is a failure, not a stale reading reported as the answer.
      */
-    private fun watcherCount(service: VoiceControlService): Int {
-        val scope = service.javaClass.getDeclaredField("serviceScope")
-            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.CoroutineScope
-        val root = scope.coroutineContext[kotlinx.coroutines.Job] ?: return 0
-        val startJob = service.javaClass.getDeclaredField("startInFlightJob")
-            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.Job?
-        val stopJob = service.javaClass.getDeclaredField("stopInFlightJob")
-            .apply { isAccessible = true }.get(service) as kotlinx.coroutines.Job?
-        return root.children.count { child ->
-            child.isActive && child !== startJob && child !== stopJob
+    private fun awaitFailedAttemptSurfaceLeft(service: VoiceControlService) {
+        val deadline = System.currentTimeMillis() + 30_000
+        while (System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (failedAttemptSurfaceLeft(service)) return
+            Thread.sleep(10)
         }
+        throw AssertionError(
+            "after a repeated start the watcher never noticed the offered surface leaving the " +
+                "one a failed attempt was recorded against",
+        )
     }
 
     /** Whether the service's one watcher job is running, read from its own state. */

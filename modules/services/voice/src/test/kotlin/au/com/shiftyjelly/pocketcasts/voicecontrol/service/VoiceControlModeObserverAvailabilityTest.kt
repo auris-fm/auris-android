@@ -61,6 +61,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -1848,6 +1849,68 @@ class VoiceControlModeObserverAvailabilityTest {
         }
     }
 
+    /**
+     * The teardown-verdict diagnostic, extracted so its two branches have committed controls:
+     * an unfinished teardown and a HELD one are different facts and each message must name its own.
+     * Returns the error message for the fact, or null when the teardown released (or none ran).
+     */
+    private fun teardownVerdictError(joined: TeardownResult?, budgetMs: Long): String? = when {
+        joined == null ->
+            "the teardown had not finished ${budgetMs}ms after onDestroy; " +
+                "it is still joining its own work, so the session is legitimately held"
+
+        joined is TeardownResult.Held ->
+            "the teardown HELD the shared resources, so the session cannot come back: " +
+                "${joined.failure.reason}. The engine was not proven settled; this is " +
+                "not a slow host."
+
+        else -> null
+    }
+
+    @Test
+    fun `the teardown diagnostic names a HELD teardown as held, with its verdict`() {
+        // A planted Held result: no production mutation needed to reach this branch.
+        val held = TeardownResult.Held(
+            TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 2)),
+        )
+        val message = teardownVerdictError(held, TEARDOWN_JOIN_BUDGET_MS)
+        assertNotNull("a Held teardown must produce a diagnostic", message)
+        assertTrue(
+            "the message must name the HOLD, not a timeout: $message",
+            message!!.contains("HELD the shared resources"),
+        )
+        assertTrue(
+            "the message must carry the verdict's own reason: $message",
+            message.contains(held.failure.reason),
+        )
+        assertFalse(
+            "a Held teardown is not an unfinished join: $message",
+            message.contains("had not finished"),
+        )
+    }
+
+    @Test
+    fun `the teardown diagnostic names an unfinished teardown as still joining`() {
+        // A never-completing Deferred: the join budget expires, which is the null branch.
+        val neverCompletes = kotlinx.coroutines.CompletableDeferred<TeardownResult>()
+        val joined = runBlocking { withTimeoutOrNull(50) { neverCompletes.await() } }
+        assertEquals("fixture: the join must expire", null, joined)
+        val message = teardownVerdictError(joined, 50)
+        assertNotNull("an expired join must produce a diagnostic", message)
+        assertTrue(
+            "the message must name the UNFINISHED join and its budget: $message",
+            message!!.contains("had not finished 50ms"),
+        )
+        assertTrue(
+            "the message must say the session is legitimately held while joining: $message",
+            message.contains("still joining its own work"),
+        )
+        assertFalse(
+            "an unfinished join is not a Held verdict: $message",
+            message.contains("HELD the shared resources"),
+        )
+    }
+
     private suspend fun Harness.stop() {
         runCatching {
             VoiceControlService::class.java.getDeclaredMethod("onDestroy")
@@ -1873,18 +1936,7 @@ class VoiceControlModeObserverAvailabilityTest {
             val joined = runBlocking {
                 withTimeoutOrNull(TEARDOWN_JOIN_BUDGET_MS) { teardown.await() }
             }
-            when {
-                joined == null -> error(
-                    "the teardown had not finished ${TEARDOWN_JOIN_BUDGET_MS}ms after onDestroy; " +
-                        "it is still joining its own work, so the session is legitimately held",
-                )
-
-                joined is TeardownResult.Held -> error(
-                    "the teardown HELD the shared resources, so the session cannot come back: " +
-                        "${joined.failure.reason}. The engine was not proven settled; this is " +
-                        "not a slow host.",
-                )
-            }
+            teardownVerdictError(joined, TEARDOWN_JOIN_BUDGET_MS)?.let { error(it) }
         }
         val gate = getField(service, "voiceSessionGate") as VoiceSessionGate
         // The bound has to cover the teardown's OWN worst case, not a guess: it joins the engine's

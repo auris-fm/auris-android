@@ -252,7 +252,16 @@ class AndroidPlatformTtsEngine @Inject constructor(
                         // ownership claim.
                         ownershipToken = synthesisLock.withLock { ++synthesisGeneration }
                         val mine = ownershipToken
+                        // Set by the cancellation handler, read after the platform call: the handler's
+                        // stop can land BEFORE synthesizeToFile finishes enqueueing (the call is still
+                        // parked when cancellation arrives), so the post-call stop below must know
+                        // cancellation happened even though this continuation was never resumed after.
+                        // Continuation liveness cannot be the gate: !isActive and isCancelled are both
+                        // also true after a successful resume (kotlinx's bookkeeping for a dispatched
+                        // but untaken resume reports cancelled), which stopped completed utterances.
+                        val cancellationLanded = java.util.concurrent.atomic.AtomicBoolean(false)
                         continuation.invokeOnCancellation {
+                            cancellationLanded.set(true)
                             synthesisLock.withLock {
                                 if (synthesisGeneration == mine) {
                                     engine.stop()
@@ -277,6 +286,18 @@ class AndroidPlatformTtsEngine @Inject constructor(
                             // not run here, and nothing needs stopping: the platform enqueues nothing
                             // when synthesizeToFile returns non-SUCCESS.
                             completeOnce(false)
+                        }
+                        // A cancellation whose handler-stop raced ahead of the enqueue: the call still
+                        // parked when cancellation arrived, so the handler stopped nothing (or stopped
+                        // before the platform registered the queue entry) and the synthesis lands
+                        // AFTER that stop. Re-stop under the same boundary, but ONLY on actual
+                        // cancellation -- never on a completed utterance.
+                        if (cancellationLanded.get()) {
+                            synthesisLock.withLock {
+                                if (synthesisGeneration == mine) {
+                                    engine.stop()
+                                }
+                            }
                         }
                         // A cancellation landing while the platform call is in flight is handled by the
                         // [continuation.invokeOnCancellation] handler above: it runs at cancellation

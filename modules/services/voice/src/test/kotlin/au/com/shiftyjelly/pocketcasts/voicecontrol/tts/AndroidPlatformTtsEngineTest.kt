@@ -324,6 +324,50 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `a cancellation during the platform call still stops the synthesis it queued`() {
+        // The handler's stop can land while synthesizeToFile is STILL PARKED: the stop precedes the
+        // enqueue, so the synthesis registers in the platform queue after being "stopped" and stays
+        // there, delaying the next reply's synthesis. The post-call stop, gated on the cancellation
+        // flag (not on continuation liveness), re-stops after the call returns.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        wired.synthesisWaitMs = 200
+        val park = java.util.concurrent.CountDownLatch(1)
+        val go = java.util.concurrent.CountDownLatch(1)
+        fake.parkUntil = park
+        // Release the platform call only after the deadline has fired.
+        Thread {
+            try { Thread.sleep(500) } catch (_: InterruptedException) {}
+            park.countDown()
+            go.countDown()
+        }.start()
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val spoke = scope.launch { wired.speak("hello", "en") }
+        // speak() touches the platform engine through withContext(Dispatchers.Main): idle the looper
+        // until the call reaches its parked synthesizeToFile, then let the deadline fire and the
+        // release thread un-park it.
+        val queued = (0 until 100).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeQueued
+        }
+        assertTrue("precondition: the synthesis must reach the parked platform call", queued)
+        runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { spoke.join() }
+        }
+        go.await()
+        // speak returned false (the deadline fired) and the engine was stopped twice: once by the
+        // handler (which raced ahead of the enqueue) and once after the call completed the enqueue.
+        assertEquals(
+            "a cancelled utterance whose synthesis enqueued late must leave the engine stopped",
+            2,
+            fake.stopCalls,
+        )
+        scope.cancel()
+    }
+
+    @Test
     fun `a cancellation whose cleanup runs after a successor starts does not stop the successor`() {
         // The distinguishing case two completed utterances cannot reach. The cancellation handlers
         // stop the SHARED engine, and they run asynchronously: if the first utterance's handler runs
@@ -621,6 +665,11 @@ class AndroidPlatformTtsEngineTest {
         @Volatile
         var completeDuringCall = false
 
+        /** When non-null, synthesizeToFile parks until it is counted down, then completes the
+         * enqueue: the engine's cancellation fires while the platform call is still parked. */
+        @Volatile
+        var parkUntil: java.util.concurrent.CountDownLatch? = null
+
         /** When set, the synthesis writes GARBAGE bytes instead of a WAV: decode must fail. */
         @Volatile
         var corruptNext = false
@@ -669,8 +718,11 @@ class AndroidPlatformTtsEngineTest {
                     writeMinimalWav(it, samples = 512, sampleRateHz = 22050, sampleValue = level)
                 }
             }
-            onSynthesize(utteranceId ?: "")
+            // Marks ENTERING the platform call (before any park): the cancellation-during-call test
+            // needs to know the call is parked while the deadline fires, not that it has returned.
             synthesizeQueued = true
+            parkUntil?.await()
+            onSynthesize(utteranceId ?: "")
             // Deterministic: the completion is delivered BEFORE the call returns, so it races the
             // engine's own setup block exactly the way a fast platform can.
             if (completeDuringCall) listener?.onDone(utteranceId)

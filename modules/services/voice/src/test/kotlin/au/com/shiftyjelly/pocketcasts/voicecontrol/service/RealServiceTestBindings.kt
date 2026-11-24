@@ -200,8 +200,7 @@ object RecognizerReleaseProbe {
  * production binds the application-lifetime scope there, and a test class can end while a 500ms
  * debounced read is pending -- a read firing detached after the class ends lands in the next
  * runTest's UncaughtExceptionsBeforeTest (the VoiceControlServiceAcquisitionTest flake). The test
- * cancels THIS scope in teardown instead of calling a test-only method on the monitor; the
- * monitor's own lifetime reasoning is unchanged.
+ * cancels THIS scope in teardown; the monitor's own lifetime reasoning is unchanged.
  */
 @Module
 @TestInstallIn(

@@ -49,7 +49,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
      * The scope the debounced route read runs on. Production injects the application-lifetime scope
      * (the monitor is a process-lifetime singleton); a test passes a scope it cancels in teardown,
      * so a pending read cannot fire detached after the test class ends. The lifetime is owned by
-     * whoever supplies the scope, not by a test-only method on production code.
+     * whoever supplies the scope.
      */
     @RouteMonitorScope private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
 ) : AudioRouteMonitor {

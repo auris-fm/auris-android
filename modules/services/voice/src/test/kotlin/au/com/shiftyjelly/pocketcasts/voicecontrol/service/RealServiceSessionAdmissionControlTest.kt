@@ -62,7 +62,7 @@ class RealServiceSessionAdmissionControlTest {
     @Inject lateinit var routeMonitor: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 
     // The monitor's debounced-read scope, test-lifetime: cancelled in teardown so a pending read
-    // cannot fire detached after this class ends (replaces the former ForTest seam on the monitor).
+    // cannot fire detached after this class ends.
     @Inject
     @au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteMonitorScope
     lateinit var routeMonitorScope: kotlinx.coroutines.CoroutineScope

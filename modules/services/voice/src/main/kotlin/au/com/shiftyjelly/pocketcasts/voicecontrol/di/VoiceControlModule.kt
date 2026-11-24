@@ -337,7 +337,6 @@ abstract class VoiceControlModule {
         @Provides
         fun provideEnumeratedDeviceTypes(): (() -> AndroidAudioRouteMonitor.EnumeratedDevices)? = null
 
-
         /**
          * The live capture route, read from the capture stream's own device id. Provided rather than
          * defaulted because this is the observation PR124 requires: without it the monitor can only

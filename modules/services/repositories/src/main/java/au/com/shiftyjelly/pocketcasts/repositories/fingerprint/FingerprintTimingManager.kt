@@ -1232,7 +1232,10 @@ class FingerprintTimingManager @Inject constructor(
 
     /**
      * Starts mapping when only the cloud reference is available (no usable
-     * transcript reference). Uses the PCM tap path; the Rust matcher stays null.
+     * transcript reference). A downloaded episode that passed the eager gate is decoded
+     * ahead of playback instead of waiting for the PCM tap; streaming (and any episode
+     * that failed the gate) keeps the tap path. The Rust matcher stays null either way:
+     * the Auris matcher is what the decode scores.
      */
     private suspend fun startCloudOnly(
         gen: Long,
@@ -1247,12 +1250,19 @@ class FingerprintTimingManager @Inject constructor(
             currentReference = reference
             currentMatcher = null
             _stateFlow.value = State.Preparing
-            startTapCollection(gen, null)
+            val aurisMatcher = cloudMatcher
+            if (currentEager && !currentIsStreaming && aurisMatcher != null) {
+                // Null matcher: the decode loop scores the Auris matcher itself; handing it here
+                // as well would score every window twice and duplicate anchors.
+                startEagerLocalDecode(gen, audioFilePath, null, episodeUuid)
+            } else {
+                startTapCollection(gen, null)
+            }
         }
     }
 
-    /** Must be called under [mutex]. */
-    private fun startEagerLocalDecode(gen: Long, audioFilePath: String, matcher: CheckpointMatcher, episodeUuid: String) {
+    /** Must be called under [mutex]. A null [matcher] scores only the Auris reference. */
+    private fun startEagerLocalDecode(gen: Long, audioFilePath: String, matcher: CheckpointMatcher?, episodeUuid: String) {
         generationJob?.cancel()
         generationJob = scope.launch(decodeDispatcher) {
             try {

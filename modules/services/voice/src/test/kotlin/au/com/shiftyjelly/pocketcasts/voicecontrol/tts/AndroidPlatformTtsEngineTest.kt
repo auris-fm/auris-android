@@ -282,6 +282,48 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `a synthesis completing during the platform call does not stop the engine`() {
+        // The flake this task filed, made deterministic: "a completed synthesis is not disturbed"
+        // saw 1 stop call although onDone completed the utterance. The engine's in-flight check
+        // after synthesizeToFile tests !continuation.isActive -- which is ALSO true when the
+        // continuation has already RESUMED, not only when it was cancelled. A completion delivered
+        // while the setup block is still executing (the platform binder thread can outpace it with
+        // a fast fake; production synthesis takes seconds, so only tests hit it) then walks into
+        // the stop branch with the generation still its own.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.completeDuringCall = true
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var failure: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("hello", "en")
+            } catch (t: Throwable) {
+                failure = t
+            }
+        }
+        // The engine steps onto Dispatchers.Main (setLanguage), so the Robolectric looper has to
+        // run for the utterance to make progress; idling also lets the in-call completion land
+        // while the engine's synthesis setup block is still executing.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (job.isActive && System.currentTimeMillis() < deadline) {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        assertTrue("the utterance must finish within the bound", !job.isActive)
+        runBlocking { job.join() }
+        // The completion must still be a completion: playback fails truthfully as everywhere else.
+        assertTrue(
+            "the onDone-completed utterance must still fail truthfully in playback " +
+                "(failure=${failure?.javaClass?.simpleName})",
+            failure is TtsPlaybackIncompleteException,
+        )
+        assertEquals("a completed synthesis must not stop the engine", 0, fake.stopCalls)
+        scope.cancel()
+    }
+
+    @Test
     fun `a cancellation whose cleanup runs after a successor starts does not stop the successor`() {
         // The distinguishing case two completed utterances cannot reach. The cancellation handlers
         // stop the SHARED engine, and they run asynchronously: if the first utterance's handler runs
@@ -533,6 +575,10 @@ class AndroidPlatformTtsEngineTest {
      * driven here is the production one -- the same lambda the real TextToSpeech invokes -- rather
      * than a test-only "initialized" flag.
      */
+    private fun managerStateOf(engine: AndroidPlatformTtsEngine): String = try {
+        engine.javaClass.methods.firstOrNull { it.name == "getState" }?.invoke(engine)?.toString() ?: "n/a"
+    } catch (t: Throwable) { "err:$t" }
+
     private fun engineWithFakeSynthesizer(
         onSynthesize: (utteranceId: String) -> Unit = {},
     ): Triple<AndroidPlatformTtsEngine, FakeSynthesizer, PlaybackBufferRecorder> {
@@ -573,6 +619,11 @@ class AndroidPlatformTtsEngineTest {
         @Volatile
         var refuseNext = false
         var emitRealWav = false
+
+        /** When set, synthesizeToFile delivers onDone BEFORE returning: the synthesis completes
+         * while the engine's own setup block is still executing. */
+        @Volatile
+        var completeDuringCall = false
 
         /** When set, the synthesis writes GARBAGE bytes instead of a WAV: decode must fail. */
         @Volatile
@@ -624,6 +675,9 @@ class AndroidPlatformTtsEngineTest {
             }
             onSynthesize(utteranceId ?: "")
             synthesizeQueued = true
+            // Deterministic: the completion is delivered BEFORE the call returns, so it races the
+            // engine's own setup block exactly the way a fast platform can.
+            if (completeDuringCall) listener?.onDone(utteranceId)
             return android.speech.tts.TextToSpeech.SUCCESS
         }
 

@@ -267,20 +267,13 @@ class AndroidPlatformTtsEngine @Inject constructor(
                             // late platform callback for the same id a no-op instead of a double resume.
                             completeOnce(false)
                         }
-                        if (!continuation.isActive) {
-                            // A cancellation landed while the platform call was in flight (a slow
-                            // synthesizeToFile outliving the synthesis deadline): the queued synthesis
-                            // must be stopped rather than left orphaned -- but ONLY while this
-                            // utterance still owns the engine. A successor may have claimed the
-                            // generation while the call was parked, and an unguarded stop here would
-                            // silence the successor's synthesis or playback (same boundary as the
-                            // cancellation handler above).
-                            synthesisLock.withLock {
-                                if (synthesisGeneration == mine) {
-                                    engine.stop()
-                                }
-                            }
-                        }
+                        // A cancellation landing while the platform call is in flight is handled by the
+                        // [continuation.invokeOnCancellation] handler above: it runs at cancellation
+                        // with the same in-lock generation check, whether the cancellation arrives
+                        // during the call or later. There is deliberately NO post-call liveness check
+                        // here: !isActive is also true when the continuation has already RESUMED, so
+                        // a synthesis completing during this block would walk into a stop that has
+                        // nothing to clean up (the observed stop-after-onDone defect).
                     }
                 }
             } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {

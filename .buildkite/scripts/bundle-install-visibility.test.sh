@@ -167,7 +167,11 @@ env -u SSL_CERT_FILE ./.buildkite/commands/auris-r2-apk.sh > "$WORK/r2-noca.log"
 RC=$?
 if [ "$RC" != 0 ]; then PASS=$((PASS+1)); echo "ok: unset SSL_CERT_FILE fails the step";
 else FAIL=$((FAIL+1)); echo "FAIL: unset SSL_CERT_FILE did not fail the step"; fi
-check_has "the failure names SSL_CERT_FILE" "$WORK/r2-noca.log" "SSL_CERT_FILE"
+# Assert OUR diagnostic, not merely the variable's name: with the fail-closed block deleted,
+# bash's own "unbound variable" abort also exits non-zero and also prints SSL_CERT_FILE, so a
+# name-only assertion would pass while the guard was gone. (The rclone-ran assertion catches it
+# too; this one makes the message itself load-bearing.)
+check_has "the unset case prints our own diagnostic" "$WORK/r2-noca.log" "unset or unreadable"
 if [ -f "$WORK/rclone-ca-seen" ]; then
   FAIL=$((FAIL+1)); echo "FAIL: rclone ran despite the missing bundle"
 else PASS=$((PASS+1)); echo "ok: no rclone call before the bundle check"; fi
@@ -177,7 +181,7 @@ SSL_CERT_FILE="$WORK/absent.pem" ./.buildkite/commands/auris-r2-apk.sh > "$WORK/
 RC=$?
 if [ "$RC" != 0 ]; then PASS=$((PASS+1)); echo "ok: an unreadable bundle path fails the step";
 else FAIL=$((FAIL+1)); echo "FAIL: an unreadable bundle path did not fail the step"; fi
-check_has "the unreadable-path failure names SSL_CERT_FILE" "$WORK/r2-badca.log" "SSL_CERT_FILE"
+check_has "the unreadable case prints our own diagnostic" "$WORK/r2-badca.log" "unset or unreadable"
 if [ -f "$WORK/rclone-ca-seen" ]; then
   FAIL=$((FAIL+1)); echo "FAIL: rclone ran despite the unreadable bundle"
 else PASS=$((PASS+1)); echo "ok: no rclone call with an unreadable bundle"; fi

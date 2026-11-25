@@ -304,6 +304,30 @@ chmod +x pin-bin/* bin/*
 check "a play step without BUILDKITE_* env still succeeds (download fallback)" 0 "$?"
 has "it says it is downloading" "$WORK/play-noenv.log" "No local AAB copy"
 
+# 7c. A FAILING `rm` after the upload must not fail the step: the bundle is
+# already on Play, and a cleanup failure must cost disk, never the release.
+# A fresh, MATCHING copy: case 6 left tampered bytes, and this case is about
+# the cleanup, not the checksum gate.
+mkdir -p "$HANDOFF_DIR"
+printf 'fixture-aab-bytes' > "$HANDOFF_DIR/app-release.aab"
+printf '18904\n' > "$HANDOFF_DIR/built-version-code.txt"
+mkdir -p "$WORK/play-noenv/.buildkite/commands"
+cd "$WORK/play-noenv"
+cat > bin/rm <<'STUB'
+#!/bin/bash
+for a in "$@"; do case "$a" in *aab-handoff*) echo "mock: rm failed" >&2; exit 1;; esac; done
+exec /bin/rm "$@"
+STUB
+chmod +x bin/rm
+cp "$WORK/artifact-store/built-version-code.txt" . 2>/dev/null
+(PATH="$PWD/pin-bin:$PWD/bin:$PATH" \
+   PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{"type":"service_account"}' \
+   BUILDKITE_BUILD_PATH="$HANDOFF_ROOT" BUILDKITE_BUILD_ID="$BUILD_ID" \
+   ./.buildkite/commands/auris-play-upload.sh > "$WORK/play-rmfails.log" 2>&1)
+check "a failing cleanup rm does not fail the step" 0 "$?"
+has "the failure name says it was the upload succeeding" "$WORK/play-rmfails.log" "recorded for the R2 step"
+rm -f bin/rm
+
 # 7. A FAILED play step keeps the copy, so a manual retry can still use it.
 cd "$WORK/play"
 printf 'fixture-aab-bytes' > "$HANDOFF_DIR/app-release.aab"

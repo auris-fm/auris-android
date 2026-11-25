@@ -35,7 +35,7 @@ echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
 # download, so a foreign agent still works. A copy that DISAGREES with the
 # artifact refuses the step: bytes that mismatch the uploaded artifact mean
 # something is wrong on this machine, and a download would mask it.
-HANDOFF_DIR="${BUILDKITE_BUILD_PATH:+${BUILDKITE_BUILD_PATH%/}/aab-handoff-${BUILDKITE_BUILD_ID:-}}"
+HANDOFF_DIR="${BUILDKITE_BUILD_PATH:+${BUILDKITE_BUILD_ID:+${BUILDKITE_BUILD_PATH%/}/aab-handoff-${BUILDKITE_BUILD_ID}}}"
 AAB_REL="app/build/outputs/bundle/release/app-release.aab"
 if [ -n "$HANDOFF_DIR" ] && [ -f "$HANDOFF_DIR/app-release.aab" ]; then
   LOCAL_SHA="$(shasum -a 1 "$HANDOFF_DIR/app-release.aab" | awk '{print $1}')"
@@ -99,5 +99,7 @@ echo "--- Uploaded versionCode $UPLOADED_VC recorded for the R2 step"
 
 # The handoff copy has served its purpose once the upload succeeded; delete it
 # so the agent's disk does not accumulate ~130 MB per build. A step that failed
-# earlier leaves it in place, so a manual retry finds it.
-rm -rf "$HANDOFF_DIR"
+# earlier leaves it in place, so a manual retry finds it. Post-upload cleanup
+# must not fail the step: the bundle is already on Play, and a failed step here
+# would strand it on the duplicate versionCode.
+[ -z "$HANDOFF_DIR" ] || rm -rf "$HANDOFF_DIR" || true

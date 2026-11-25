@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -468,6 +469,91 @@ class PlaybackManagerPlaybackSinkTest {
         )
         // It returns an outcome rather than throwing: a fault is not something a caller can act on.
         assertNull("and it reports no position, since nothing was performed", outcome.positionMs)
+    }
+
+    @Test
+    @Suppress("DEPRECATION") // Unsafe.objectFieldOffset(Field): the final field has no other setter.
+    fun `a REAL voice seek still lands on the user-seek stream`() = runTest {
+        // The seek-correction loop suppresses emissions from ITS OWN corrective seek; everything else
+        // about the stream is unchanged. This is the consumer-side control: `TranscriptViewModel`
+        // cancels a pending transcript tap-resolve when this stream fires, so a voice seek must keep
+        // landing on it. (The tap-resolve's own reaction is covered in `TranscriptViewModelTest`.)
+        val manager = org.mockito.Mockito.mock(
+            PlaybackManager::class.java,
+            org.mockito.Mockito.CALLS_REAL_METHODS,
+        )
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val enforcesEpisodeBoundSeek: Boolean get() = true
+            override val episodeUuid: String? get() = "episode-A"
+            override suspend fun seekToTimeMsIfEpisode(
+                positionMs: Int,
+                expectedEpisodeUuid: String,
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome =
+                au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.accepted(0L)
+        }
+        val fields = PlaybackManager::class.java
+        fields.getDeclaredField("_playerFlow").apply { isAccessible = true }.set(
+            manager,
+            kotlinx.coroutines.flow.MutableStateFlow<au.com.shiftyjelly.pocketcasts.repositories.playback.Player?>(target),
+        )
+        val episode = au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+            uuid = "episode-A",
+            podcastUuid = "podcast-1",
+            publishedDate = java.util.Date(),
+        )
+        val queue = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextQueue>()
+        org.mockito.kotlin.whenever(queue.currentEpisode).thenReturn(episode)
+        fields.getDeclaredField("upNextQueue").apply { isAccessible = true }.set(manager, queue)
+        fields.getDeclaredField("playbackStateRelay\$delegate").apply { isAccessible = true }.set(
+            manager,
+            kotlin.lazyOf(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState())),
+        )
+        fields.getDeclaredField("selectedPlayerLock").apply { isAccessible = true }.set(manager, Any())
+        // The field is FINAL and modern JDKs hide `Field.modifiers`, so the write goes through Unsafe.
+        // The seek stream is what this control is about; the seeker only has to no-op its cancel.
+        val seekerField = fields.getDeclaredField("generatedChapterSeeker").apply { isAccessible = true }
+        val unsafeField = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe")
+        unsafeField.isAccessible = true
+        val unsafe = unsafeField.get(null) as sun.misc.Unsafe
+        val seeker = dagger.Lazy {
+            org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.fingerprint.GeneratedChapterSeeker>()
+        }
+        unsafe.putObject(manager, unsafe.objectFieldOffset(seekerField), seeker)
+        // `userSeeks` is a val WITH an initializer, so it is its own final backing field -- setting
+        // `_userSeeks` would not change what the getter hands out.
+        val seeksField = fields.getDeclaredField("userSeeks").apply { isAccessible = true }
+        val seeksFlow = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        unsafe.putObject(manager, unsafe.objectFieldOffset(seeksField), seeksFlow)
+        // `_userSeeks` is what the emission writes; both final fields are needed.
+        val backField = fields.getDeclaredField("_userSeeks").apply { isAccessible = true }
+        unsafe.putObject(manager, unsafe.objectFieldOffset(backField), seeksFlow)
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            val emissions = kotlinx.coroutines.channels.Channel<Unit>(capacity = 4)
+            val watcher = launch { manager.userSeeks.collect { emissions.trySend(Unit) } }
+            runCurrent()
+
+            val result = sink(manager).seekTo(
+                positionSeconds = 100,
+                episodeDurationSeconds = 1800,
+                expectedEpisodeId = "episode-A",
+            )
+            runCurrent()
+
+            assertTrue(
+                "the seek must be accepted (result=$result)",
+                result is EpisodeOperationResult.Accepted,
+            )
+            assertTrue(
+                "a voice seek must still surface on the user-seek stream the transcript consumes",
+                emissions.tryReceive().isSuccess,
+            )
+            watcher.cancel()
+            runCurrent()
+        } finally {
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
     }
 
     @Test

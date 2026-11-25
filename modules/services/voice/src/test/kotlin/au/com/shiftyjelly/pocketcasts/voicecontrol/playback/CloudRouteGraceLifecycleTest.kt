@@ -139,6 +139,7 @@ class CloudRouteGraceLifecycleTest {
         val config = mock<au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig>()
         org.mockito.kotlin.whenever(config.baseUrl()).thenReturn("https://cloud.example.com")
         val monitor = mock<PlaybackContextMonitor>()
+    org.mockito.kotlin.whenever(monitor.userSeeks).thenReturn(kotlinx.coroutines.flow.emptyFlow())
         org.mockito.kotlin.whenever(monitor.isHostAudioActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
         // Exercise the actual injected constructor and CloudTurnRoute. A missing token prevents any
         // network call; the hold must nevertheless cover the real, suspended token-provider boundary.

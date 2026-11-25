@@ -62,6 +62,9 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     /** The current episode's duration in seconds, for resolving a negative absolute position. */
     fun episodeDurationSeconds(): Int = playbackManager.getCurrentEpisode()?.duration?.toInt() ?: 0
 
+    /** Emits on every user-initiated seek or skip, so pending corrections can stand down. */
+    val userSeeks: kotlinx.coroutines.flow.Flow<Unit> get() = playbackManager.userSeeks
+
     /**
      * True when a privacy event closed the window. Read by the cloud turn so it does not restore a
      * pause over playback the user's own privacy action ended; a privacy closure does not reach the

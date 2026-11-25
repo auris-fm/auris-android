@@ -24,13 +24,22 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.math.abs
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -90,6 +99,18 @@ class CloudRouteSink internal constructor(
      * dials for itself.
      */
     private val earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
+    /**
+     * Emits on every user-initiated seek or skip outside the voice path, so a pending seek
+     * correction stands down instead of yanking playback out of the user's hand.
+     */
+    private val userSeeks: Flow<Unit> = emptyFlow(),
+    /**
+     * Where pending seek corrections run. The correction outlives the turn that requested it —
+     * matching may converge seconds later — so it cannot run as a child of the turn. Injected so a
+     * caller owns that lifetime; production gets the application-lifetime scope.
+     */
+    @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
+    private val seekCorrectionScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : VoiceCloudRouteSink {
 
     init {
@@ -128,6 +149,8 @@ class CloudRouteSink internal constructor(
         playbackContextMonitor: PlaybackContextMonitor,
         audioPlayer: CloudAudioPlayer?,
         gracePeriodSignal: GracePeriodSignal,
+        @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
+        seekCorrectionScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
@@ -150,6 +173,8 @@ class CloudRouteSink internal constructor(
         // turn's own pause when the answer completes, unless playback actually stopped or a user
         // command superseded it.
         privacyClosureCount = playbackContextMonitor::playbackStopClosureCount,
+        userSeeks = playbackContextMonitor.userSeeks,
+        seekCorrectionScope = seekCorrectionScope,
         earlyConnectionOpener = earlyConnectionOpener,
     )
 
@@ -162,7 +187,13 @@ class CloudRouteSink internal constructor(
      * turn then resumes the shared player under the newer turn.
      */
     private val turnMutex = Mutex()
+    // Volatile so a pending correction's watcher, running on its own scope, reads the CURRENT turn
+    // rather than a stale value from another thread's write.
+    @Volatile
     private var activeTurnId: Long = 0
+
+    /** The correction loop of the last uncovered reference seek; superseded by a newer seek. */
+    private val pendingSeekCorrection = AtomicReference<Job?>(null)
 
     /**
      * The request id whose timing table the FIRST AUDIBLE mark belongs to, set while this sink is
@@ -1297,7 +1328,7 @@ class CloudRouteSink internal constructor(
                     // A reference target with no usable mapping, or no episode to be a position IN, is
                     // refused rather than approximated -- and history is committed ONLY when the seek
                     // was ACCEPTED, against the episode it was bound to.
-                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock ActionOutcome.None
+                    val outcome = seekToReference(referenceMs, turnEpisodeId, myId) ?: return@withLock ActionOutcome.None
                     // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
                     // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
                     // never a live re-read, and only an OBSERVED outcome records the target.
@@ -1501,16 +1532,130 @@ class CloudRouteSink internal constructor(
     private suspend fun seekToReference(
         referenceMs: Long,
         expectedEpisodeId: String?,
+        turnId: Long,
     ): EpisodeOperationResult? {
         if (expectedEpisodeId == null) return null
         val referenceSeconds = referenceMs / 1000.0
-        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return null
+        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds)
+        if (playbackMs == null) {
+            // The mapping does not cover the target. The request still acts: seek to the target plus
+            // the already-observed offset, and let the correction loop refine it once matching
+            // converges (`seekAndCorrect`).
+            return seekAndCorrect(referenceMs, expectedEpisodeId, turnId)
+        }
         return playbackSink.seekTo(
             (playbackMs / 1000).coerceAtLeast(0),
             episodeDurationSeconds(),
             expectedEpisodeId,
         )
     }
+
+    /**
+     * Seeks an uncovered reference target and schedules its refinement (`timeline-alignment` §
+     * Action position conversion).
+     *
+     * The ESTIMATE comes from the nearest covered point BEFORE the target: the mapping's observed
+     * offset there is the one already-known fact about how the two timelines differ. With no mapping
+     * at all, the target is used as-is, on the timeline the client has.
+     *
+     * Matching keeps running after the seek; [launchSeekCorrection] carries the refinement, and this
+     * function reports the outcome of the estimate seek itself — the action the turn performed and
+     * the one whose provenance is recorded.
+     */
+    private suspend fun seekAndCorrect(
+        referenceMs: Long,
+        expectedEpisodeId: String?,
+        turnId: Long,
+    ): EpisodeOperationResult {
+        val targetSeconds = referenceMs / 1000.0
+        val estimateMs = fingerprintTimingManager.mappingSnapshot
+            .filter { it.referenceTime <= targetSeconds }
+            .maxByOrNull { it.referenceTime }
+            ?.let { nearest -> (targetSeconds - (nearest.referenceTime - nearest.playbackTime)) * 1000 }
+            ?.toInt()
+            ?.coerceAtLeast(0)
+            ?: referenceMs.toInt().coerceAtLeast(0)
+        val result = playbackSink.seekTo(
+            estimateMs / 1000,
+            episodeDurationSeconds(),
+            expectedEpisodeId,
+        )
+        if (result !is EpisodeOperationResult.Accepted) return result
+        // ONE PENDING CORRECTION AT A TIME: a newer uncovered seek supersedes the previous loop, so
+        // two corrections cannot fight over the same player.
+        //
+        // THE BASELINE VERSION IS CAPTURED HERE, NOT IN THE LOOP. The loop runs on its own scope and
+        // may start long after this seek; a version read there would already include the convergence
+        // this correction exists to observe.
+        val versionAtEstimate = fingerprintTimingManager.mappingVersion.value
+        pendingSeekCorrection.getAndSet(
+            launchSeekCorrection(referenceMs, estimateMs, expectedEpisodeId, turnId, versionAtEstimate),
+        )?.cancel()
+        return result
+    }
+
+    /**
+     * Watches the mapping until it converges again, then re-seeks by the difference between the
+     * matched reference and the target — at most [SEEK_MAX_CORRECTIONS] times, and only while the
+     * difference stays above [SEEK_CORRECTION_THRESHOLD_SECONDS].
+     *
+     * ANY LATER PLAYBACK CHANGE STANDS THE CORRECTION DOWN: a playback command from outside the
+     * voice path, a user seek ([userSeeks]), or a newer cloud turn — the player now belongs to
+     * someone else, and re-seeking by a difference computed before their change would move a player
+     * this request no longer owns. The checks are point-in-time observations on this loop's own
+     * schedule; the corrective seek itself remains episode-bound in the sink, so a change that lands
+     * inside its final step is refused by the owner rather than applied cross-episode.
+     *
+     * Convergence is read from [FingerprintTimingManager.mappingVersion]: matching has produced new
+     * anchors, and the anchor nearest the current playback estimate is the observation the difference
+     * comes from. The loop ends when the map puts the anchor on the target, when the cap is reached,
+     * or when the window closes without convergence — a map that never covers the seek point never
+     * produces a correction from a far-away anchor's offset.
+     */
+    private fun launchSeekCorrection(
+        targetReferenceMs: Long,
+        estimateMs: Int,
+        expectedEpisodeId: String?,
+        turnId: Long,
+        versionAtEstimate: Long,
+    ): Job = seekCorrectionScope.launch {
+        val startRevision = playbackCommandRevision()
+        val userSeeked = AtomicReference(false)
+        val watchUserSeek = launch { userSeeks.first(); userSeeked.set(true) }
+        try {
+            var positionMs = estimateMs
+            var corrections = 0
+            var waitedMs = 0L
+            var lastVersion = versionAtEstimate
+            while (corrections < SEEK_MAX_CORRECTIONS) {
+                if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
+                if (waitedMs >= SEEK_CORRECTION_WINDOW_MS) return@launch
+                delay(SEEK_CORRECTION_POLL_MS)
+                waitedMs += SEEK_CORRECTION_POLL_MS
+                val version = fingerprintTimingManager.mappingVersion.value
+                if (version == lastVersion) continue
+                lastVersion = version
+                val anchor = fingerprintTimingManager.mappingSnapshot
+                    .minByOrNull { abs(it.playbackTime - positionMs / 1000.0) }
+                    ?: continue
+                val differenceSeconds = targetReferenceMs / 1000.0 - anchor.referenceTime
+                if (abs(differenceSeconds) <= SEEK_CORRECTION_THRESHOLD_SECONDS) return@launch
+                positionMs = (positionMs + differenceSeconds * 1000).toInt().coerceAtLeast(0)
+                corrections += 1
+                if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
+                playbackSink.seekTo(
+                    positionMs / 1000,
+                    episodeDurationSeconds(),
+                    expectedEpisodeId,
+                )
+            }
+        } finally {
+            watchUserSeek.cancel()
+        }
+    }
+
+    private fun correctionSuperseded(startRevision: Long, turnId: Long, userSeeked: AtomicReference<Boolean>): Boolean =
+        playbackCommandRevision() != startRevision || userSeeked.get() || (activeTurnId != 0L && activeTurnId != turnId)
 
     private fun Map<String, Any?>.positionSeconds(): Int? {
         val value = this["position_seconds"] ?: return null
@@ -1544,6 +1689,21 @@ class CloudRouteSink internal constructor(
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
         private const val KEY_CLOUD_ERROR_GENERIC = "cloud_error_generic"
         private const val KEY_CLOUD_INCOMPLETE_TURN = "general.cloud_incomplete_turn"
+
+        /**
+         * Reference-time difference under which a converged mapping counts as ON the target, so no
+         * corrective seek fires (timeline-alignment: re-seek by the difference if greater than 3 s).
+         */
+        internal const val SEEK_CORRECTION_THRESHOLD_SECONDS = 3.0
+
+        /** Corrections a single uncovered reference seek may make. */
+        internal const val SEEK_MAX_CORRECTIONS = 2
+
+        /** How long a correction waits for the mapping to converge before giving up. */
+        private const val SEEK_CORRECTION_WINDOW_MS = 60_000L
+
+        /** How often the correction loop re-reads its cancellation and convergence signals. */
+        private const val SEEK_CORRECTION_POLL_MS = 250L
 
         /** What the turn's playback action achieved, as far as the client could OBSERVE. */
         internal enum class ActionOutcome {

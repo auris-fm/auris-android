@@ -68,6 +68,7 @@ class VoiceLifecycleWiringTest {
                 val config = mock<CloudConfig>()
                 whenever(config.baseUrl()).thenReturn("https://example.invalid")
                 val monitor = mock<PlaybackContextMonitor>()
+                org.mockito.kotlin.whenever(monitor.userSeeks).thenReturn(kotlinx.coroutines.flow.emptyFlow())
                 whenever(monitor.isHostAudioActive).thenReturn(MutableStateFlow(false))
                 val sink = CloudRouteSink(
                     cloudConfig = config,
@@ -211,6 +212,7 @@ class VoiceLifecycleWiringTest {
                 )
                 val playbackManager = mock<au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager>()
                 whenever(playbackManager.playbackStateFlow).thenReturn(playbackState)
+                whenever(playbackManager.userSeeks).thenReturn(kotlinx.coroutines.flow.MutableSharedFlow())
                 val playbackMonitor = PlaybackContextMonitor(playbackManager, signal, backgroundScope)
                 val settings = mock<au.com.shiftyjelly.pocketcasts.preferences.Settings>()
                 val disabled = mock<au.com.shiftyjelly.pocketcasts.preferences.UserSetting<Boolean>>()
@@ -440,6 +442,7 @@ class VoiceLifecycleWiringTest {
                 )
                 val playbackManager = mock<au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager>()
                 whenever(playbackManager.playbackStateFlow).thenReturn(playbackState)
+                whenever(playbackManager.userSeeks).thenReturn(kotlinx.coroutines.flow.MutableSharedFlow())
                 val playbackMonitor = PlaybackContextMonitor(playbackManager, signal, backgroundScope)
                 val settings = mock<au.com.shiftyjelly.pocketcasts.preferences.Settings>()
                 val disabled = mock<au.com.shiftyjelly.pocketcasts.preferences.UserSetting<Boolean>>()

@@ -2355,10 +2355,11 @@ class CloudRouteSinkTest {
     @Test
     fun `a mapping that never converges gives up at sixty seconds and corrects nothing after`() = runTest {
         // `timeline-alignment` step 3: a correction that has not converged 60 s after the action's
-        // seek gives up -- no correction, and the loop ENDS. "No correction" alone cannot guard the
-        // bound: an unconverged mapping makes no correction with or without it. What fails when the
-        // bound is removed is the late-convergence assertion: a loop still polling past the window
-        // would act on a convergence arriving after it. Virtual time over the poll count.
+        // seek gives up -- no further correction, and the loop ENDS. Three assertions pin the bound
+        // from both sides: a convergence just INSIDE the window still corrects (a shortened window
+        // fails there); an unconverged stretch adds nothing; and a convergence arriving AFTER the
+        // window makes no seek (a removed bound fails there, the loop still polling). Virtual time
+        // over the poll count.
         val fingerprint = mock<FingerprintTimingManager>()
         val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
         whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
@@ -2391,29 +2392,46 @@ class CloudRouteSinkTest {
             "the estimate seek must have run (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:1170"),
         )
+        // JUST INSIDE THE WINDOW a convergence must still correct: this pins the bound's LENGTH,
+        // not merely its existence -- a shortened window would fail here.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        // Advance to just short of the bound with the mapping STILL UNCOVERED, then publish the
+        // convergence: a window shortened to 30 s has already closed by now, so its loop is gone
+        // and the assertion below fails. A convergence published before the advance would be seen
+        // by the shortened loop's first poll and could not distinguish the two windows.
+        advanceTimeBy(58_750)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+        assertTrue(
+            "a convergence inside the window must still correct (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1115"),
+        )
 
-        // The whole window passes with NO convergence: the mapping never covers the target.
-        advanceTimeBy(60_000)
+        // Back to uncovered, and the rest of the window passes with NO further convergence.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        advanceTimeBy(2_000)
         runCurrent()
 
         assertEquals(
-            "an unconverged mapping must produce no corrective seek (calls=${deps.playback.calls})",
-            listOf("seekTo:1170"),
+            "the estimate plus the one in-window correction, nothing more (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1115"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
 
-        // A convergence arriving AFTER the window must not resurrect it. This is also what proves
-        // the loop ENDED rather than merely stayed quiet: without the bound the loop is still
-        // polling at 61 s, so this late convergence would map the target 55 s from the estimate and
-        // seek -- the assertion below fails.
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
-        mappingVersion.value = 1L
+        // A NEW convergence arriving AFTER the window must not resurrect the loop. This is what
+        // proves the loop ENDED rather than merely stayed quiet: without the bound it is still
+        // polling past 60 s, so this maps the target to 1090 s -- 25 s from the corrected position,
+        // over threshold -- and seeks. The assertion below fails.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
+        mappingVersion.value = 2L
         advanceTimeBy(1_000)
         runCurrent()
 
         assertEquals(
             "a late convergence must make no seek (calls=${deps.playback.calls})",
-            listOf("seekTo:1170"),
+            listOf("seekTo:1170", "seekTo:1115"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
     }

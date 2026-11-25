@@ -13,8 +13,10 @@ import timber.log.Timber
  * The audio-mode listener needs no permission.
  *
  * Note the interplay with [au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition]:
- * route acquisition never writes the audio mode; that SCO establishment leaves it out of the
- * call modes is verified on device.
+ * no code path in the app writes the audio mode, so our own routing cannot make the gate read a
+ * call. Whether the platform itself sets a call mode while a headset mic is live without a call
+ * is platform behaviour this repo cannot prove; it has not been checked on a device. If it did,
+ * listening would stop and reacquire in a loop during headset-mic use.
  */
 class AudioModeCallWatcher(
     private val audioManager: AudioManager,

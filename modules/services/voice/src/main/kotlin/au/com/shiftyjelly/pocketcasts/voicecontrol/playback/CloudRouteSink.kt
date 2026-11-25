@@ -1601,12 +1601,11 @@ class CloudRouteSink internal constructor(
      * ANY LATER PLAYBACK CHANGE STANDS THE CORRECTION DOWN: a playback command from outside the
      * voice path, a user seek ([userSeeks]), or a newer cloud turn — the player now belongs to
      * someone else, and re-seeking a position computed before their change would move a player this
-     * request no longer owns. Emissions that arrive while a corrective seek is in flight are NOT a
-     * user's hand — the seek itself can surface on the seek stream — so they are ignored, and the
-     * voice seek does not emit at all (see `PlaybackManagerPlaybackSink`). The checks are
-     * point-in-time observations on this loop's own schedule; the corrective seek remains
-     * episode-bound in the sink, so a change landing inside its final step is refused by the owner
-     * rather than applied cross-episode.
+     * request no longer owns. A seek surfaces on the seek stream — the voice path's own corrective
+     * seek included — so emissions that arrive while a corrective seek is in flight are NOT a user's
+     * hand and are ignored. The checks are point-in-time observations on this loop's own schedule;
+     * the corrective seek remains episode-bound in the sink, so a change landing inside its final
+     * step is refused by the owner rather than applied cross-episode.
      *
      * CONVERGENCE IS READ OFF THE MAPPING, NOT OFF AN ANCHOR. Matching runs in wall-clock time, so
      * new anchors sit past the seek point and the nearest one may predate it; anchor arithmetic

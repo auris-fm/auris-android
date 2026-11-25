@@ -1405,10 +1405,9 @@ open class PlaybackManager @Inject constructor(
     suspend fun seekIfPlayingCapturing(
         episodeUuid: String,
         positionMs: Int,
-        emitUserSeek: Boolean = true,
     ): ScopedMutation? {
         if (getCurrentEpisode()?.uuid != episodeUuid) return null
-        cancelPendingChapterSeek(emitUserSeek)
+        cancelPendingChapterSeek()
         // THE PRE-ACTION POSITION IS THE PLAYER'S, READ AT THE DECISION.
         //
         // `episode.playedUpToMs` is PERSISTED PROGRESS, which the player updates on its own schedule and
@@ -1880,13 +1879,10 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    private fun cancelPendingChapterSeek(emitUserSeek: Boolean = true) {
+    private fun cancelPendingChapterSeek() {
         pendingChapterSeek = null
         generatedChapterSeeker.get().cancelActiveResolve()
-        // PROGRAMMATIC SEEKS ARE NOT USER SEEKS. Every seek path passes through here, so the emission
-        // must be scoped to callers that actually report a user's hand; a caller's own seek surfacing
-        // as "the user moved" made that caller cancel itself (the voice seek-correction loop did).
-        if (emitUserSeek) _userSeeks.tryEmit(Unit)
+        _userSeeks.tryEmit(Unit)
     }
 
     fun clearUpNextAsync() {

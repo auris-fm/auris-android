@@ -3893,8 +3893,8 @@ class CloudRouteSinkTest {
             }
             calls += "seekTo:$resolved"
             // CONTROL HOOK: when set, every seek surfaces on the seek stream, the way the REAL manager
-            // emitted before voice seeks stopped counting as user seeks. The self-cancellation control
-            // wires this so the loop must survive its own corrective seek's emission.
+            // does (a seek lands on `userSeeks`, the voice path's own included). The self-cancellation
+            // control wires this so the loop must survive its own corrective seek's emission.
             userSeekFeedback?.value = Unit
             return EpisodeOperationResult.Accepted(expectedEpisodeId, preActionPositionMsForTest)
         }

@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -74,7 +75,7 @@ class PlaybackManagerPlaybackSinkTest {
         // The OWNER's operation decides, so the mock must answer it: this case is about the adapter
         // consulting the owner, not about the owner's own behaviour.
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenReturn(null)
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
@@ -471,23 +472,88 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
-    fun `the voice sink's seek does not surface as a user seek`() = runTest {
-        // `seekIfPlayingCapturing` emits on the seek stream, and consumers read that as "the user
-        // moved playback by hand". The voice path's own mutation must not carry that meaning: a
-        // consumer reacting to the voice's own action cancels itself (the seek-correction loop did).
-        // The adapter is the caller, so the no-emit flag is asserted HERE.
-        val manager = mock<PlaybackManager>()
-        org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
-        ).thenReturn(PlaybackManager.ScopedMutation("episode-A", preActionPositionMs = 60_000))
-
-        sink(manager).seekTo(positionSeconds = 100, episodeDurationSeconds = 1800, expectedEpisodeId = "episode-A")
-
-        org.mockito.kotlin.verify(manager).seekIfPlayingCapturing(
-            org.mockito.kotlin.eq("episode-A"),
-            org.mockito.kotlin.eq(100_000),
-            org.mockito.kotlin.eq(false),
+    @Suppress("DEPRECATION") // Unsafe.objectFieldOffset(Field): the final field has no other setter.
+    fun `a REAL voice seek still lands on the user-seek stream`() = runTest {
+        // The seek-correction loop suppresses emissions from ITS OWN corrective seek; everything else
+        // about the stream is unchanged. This is the consumer-side control: `TranscriptViewModel`
+        // cancels a pending transcript tap-resolve when this stream fires, so a voice seek must keep
+        // landing on it. (The tap-resolve's own reaction is covered in `TranscriptViewModelTest`.)
+        val manager = org.mockito.Mockito.mock(
+            PlaybackManager::class.java,
+            org.mockito.Mockito.CALLS_REAL_METHODS,
         )
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val enforcesEpisodeBoundSeek: Boolean get() = true
+            override val episodeUuid: String? get() = "episode-A"
+            override suspend fun seekToTimeMsIfEpisode(
+                positionMs: Int,
+                expectedEpisodeUuid: String,
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome =
+                au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.accepted(0L)
+        }
+        val fields = PlaybackManager::class.java
+        fields.getDeclaredField("_playerFlow").apply { isAccessible = true }.set(
+            manager,
+            kotlinx.coroutines.flow.MutableStateFlow<au.com.shiftyjelly.pocketcasts.repositories.playback.Player?>(target),
+        )
+        val episode = au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+            uuid = "episode-A",
+            podcastUuid = "podcast-1",
+            publishedDate = java.util.Date(),
+        )
+        val queue = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextQueue>()
+        org.mockito.kotlin.whenever(queue.currentEpisode).thenReturn(episode)
+        fields.getDeclaredField("upNextQueue").apply { isAccessible = true }.set(manager, queue)
+        fields.getDeclaredField("playbackStateRelay\$delegate").apply { isAccessible = true }.set(
+            manager,
+            kotlin.lazyOf(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState())),
+        )
+        fields.getDeclaredField("selectedPlayerLock").apply { isAccessible = true }.set(manager, Any())
+        // The field is FINAL and modern JDKs hide `Field.modifiers`, so the write goes through Unsafe.
+        // The seek stream is what this control is about; the seeker only has to no-op its cancel.
+        val seekerField = fields.getDeclaredField("generatedChapterSeeker").apply { isAccessible = true }
+        val unsafeField = sun.misc.Unsafe::class.java.getDeclaredField("theUnsafe")
+        unsafeField.isAccessible = true
+        val unsafe = unsafeField.get(null) as sun.misc.Unsafe
+        val seeker = dagger.Lazy {
+            org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.fingerprint.GeneratedChapterSeeker>()
+        }
+        unsafe.putObject(manager, unsafe.objectFieldOffset(seekerField), seeker)
+        // `userSeeks` is a val WITH an initializer, so it is its own final backing field -- setting
+        // `_userSeeks` would not change what the getter hands out.
+        val seeksField = fields.getDeclaredField("userSeeks").apply { isAccessible = true }
+        val seeksFlow = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        unsafe.putObject(manager, unsafe.objectFieldOffset(seeksField), seeksFlow)
+        // `_userSeeks` is what the emission writes; both final fields are needed.
+        val backField = fields.getDeclaredField("_userSeeks").apply { isAccessible = true }
+        unsafe.putObject(manager, unsafe.objectFieldOffset(backField), seeksFlow)
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            val emissions = kotlinx.coroutines.channels.Channel<Unit>(capacity = 4)
+            val watcher = launch { manager.userSeeks.collect { emissions.trySend(Unit) } }
+            runCurrent()
+
+            val result = sink(manager).seekTo(
+                positionSeconds = 100,
+                episodeDurationSeconds = 1800,
+                expectedEpisodeId = "episode-A",
+            )
+            runCurrent()
+
+            assertTrue(
+                "the seek must be accepted (result=$result)",
+                result is EpisodeOperationResult.Accepted,
+            )
+            assertTrue(
+                "a voice seek must still surface on the user-seek stream the transcript consumes",
+                emissions.tryReceive().isSuccess,
+            )
+            watcher.cancel()
+            runCurrent()
+        } finally {
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
     }
 
     @Test
@@ -498,7 +564,7 @@ class PlaybackManagerPlaybackSinkTest {
         // player already performed.
         val manager = mock<PlaybackManager>()
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenReturn(PlaybackManager.ScopedMutation("episode-A", preActionPositionMs = null, unknown = true))
 
         val result = sink(manager).seekTo(
@@ -693,7 +759,7 @@ class PlaybackManagerPlaybackSinkTest {
             )
         }
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenAnswer {
             // THE REPLACEMENT LANDS AT THE OWNER'S DECIDING STEP. The owner is where the decision is
             // made, so it is where the replacement must be observable; the payload it returns is the
@@ -744,7 +810,7 @@ class PlaybackManagerPlaybackSinkTest {
             )
         }
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenAnswer {
             // THE OWNER'S DECIDING STEP: the replacement has landed by now, so it observes B and
             // refuses. Returning A's payload would be the defect itself -- an operation performed on
@@ -778,7 +844,7 @@ class PlaybackManagerPlaybackSinkTest {
         // The owner here answers on a delay, which is exactly the shape that used to be misreported: a
         // launch-and-return would answer false before this completed.
         val manager = mock<PlaybackManager>()
-        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
             .thenAnswer {
                 // A NON-SUSPENDING delay: the point is that the answer arrives AFTER the call returns,
                 // which is what a launch-and-read-a-flag cannot report.
@@ -820,7 +886,7 @@ class PlaybackManagerPlaybackSinkTest {
             ),
         )
 
-        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
             .thenReturn(PlaybackManager.ScopedMutation("episode-A", 100_000))
 
         val result = sink(manager).seekTo(
@@ -837,7 +903,6 @@ class PlaybackManagerPlaybackSinkTest {
         verify(manager).seekIfPlayingCapturing(
             org.mockito.kotlin.eq("episode-A"),
             positionMs.capture(),
-            org.mockito.kotlin.eq(false),
         )
         assertEquals(100_000, positionMs.firstValue)
         assertTrue("accepted, reporting the episode it was bound to", result is EpisodeOperationResult.Accepted)

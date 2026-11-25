@@ -152,6 +152,11 @@ mkdir -p "$MOCK_ARTIFACTS"
 printf 'id' > "$MOCK_SECRETS/R2_APK_ACCESS_KEY_ID"
 printf 'secret' > "$MOCK_SECRETS/R2_APK_SECRET_ACCESS_KEY"
 export PLAY_UPLOAD=1 PLAY_SERVICE_ACCOUNT_JSON='{}'
+# The step passes the job's CA bundle to rclone explicitly (Go ignores SSL_CERT_FILE on macOS)
+# and fails closed without one. These controls are about identity and atomicity, so give the
+# fixture a readable bundle; the CA rule has its own suite.
+printf 'fixture-ca-bundle\n' > "$WORK/ca.pem"
+export SSL_CERT_FILE="$WORK/ca.pem"
 printf '9522' > "$MOCK_META/uploaded-version-code"
 
 run_r2() { (cd "$WORK/repo" && ./.buildkite/commands/auris-r2-apk.sh >/dev/null 2>&1); }

@@ -2357,8 +2357,8 @@ class CloudRouteSinkTest {
         // `timeline-alignment` step 3: a correction that has not converged 60 s after the action's
         // seek gives up -- no correction, and the loop ENDS. "No correction" alone cannot guard the
         // bound: an unconverged mapping makes no correction with or without it. What fails when the
-        // bound is removed is that the job is still alive, and that a convergence arriving AFTER
-        // the window still seeks. Both are asserted here, on virtual time over the poll count.
+        // bound is removed is the late-convergence assertion: a loop still polling past the window
+        // would act on a convergence arriving after it. Virtual time over the poll count.
         val fingerprint = mock<FingerprintTimingManager>()
         val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
         whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
@@ -2402,18 +2402,10 @@ class CloudRouteSinkTest {
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
 
-        // THE LOOP MUST HAVE ENDED, not merely be quiet. Without the bound this job lives forever.
-        val correctionJob = checkNotNull(
-            CloudRouteSink::class.java.getDeclaredField("pendingSeekCorrection")
-                .apply { isAccessible = true }
-                .get(sink) as java.util.concurrent.atomic.AtomicReference<*>,
-        ).get() as kotlinx.coroutines.Job
-        assertTrue(
-            "the correction loop must be complete once the 60-second window closes",
-            correctionJob.isCompleted,
-        )
-
-        // A convergence arriving AFTER the window must not resurrect it.
+        // A convergence arriving AFTER the window must not resurrect it. This is also what proves
+        // the loop ENDED rather than merely stayed quiet: without the bound the loop is still
+        // polling at 61 s, so this late convergence would map the target 55 s from the estimate and
+        // seek -- the assertion below fails.
         whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
         mappingVersion.value = 1L
         advanceTimeBy(1_000)

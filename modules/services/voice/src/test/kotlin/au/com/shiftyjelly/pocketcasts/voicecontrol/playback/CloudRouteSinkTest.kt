@@ -2353,6 +2353,90 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a correction converges inside sixty seconds and nothing after`() = runTest {
+        // `timeline-alignment` step 3: a correction that has not converged 60 s after the action's
+        // seek gives up -- no further correction, and the loop ENDS. Three assertions pin the bound
+        // from both sides: a convergence just INSIDE the window still corrects (a shortened window
+        // fails there); an unconverged stretch adds nothing; and a convergence arriving AFTER the
+        // window makes no seek (a removed bound fails there, the loop still polling). Virtual time
+        // over the poll count.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // JUST INSIDE THE WINDOW a convergence must still correct: this pins the bound's LENGTH,
+        // not merely its existence -- a shortened window would fail here.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        // Advance to just short of the bound with the mapping STILL UNCOVERED, then publish the
+        // convergence: a window shortened to 30 s has already closed by now, so its loop is gone
+        // and the assertion below fails. A convergence published before the advance would be seen
+        // by the shortened loop's first poll and could not distinguish the two windows.
+        advanceTimeBy(58_750)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+        assertTrue(
+            "a convergence inside the window must still correct (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1115"),
+        )
+
+        // Back to uncovered, and the rest of the window passes with NO further convergence.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        advanceTimeBy(2_000)
+        runCurrent()
+
+        assertEquals(
+            "the estimate plus the one in-window correction, nothing more (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1115"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+
+        // A NEW convergence arriving AFTER the window must not resurrect the loop. This is what
+        // proves the loop ENDED rather than merely stayed quiet: without the bound it is still
+        // polling past 60 s, so this maps the target to 1090 s -- 25 s from the corrected position,
+        // over threshold -- and seeks. The assertion below fails.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
+        mappingVersion.value = 2L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "a late convergence must make no seek (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1115"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
     fun `a correction survives its own seek surfacing on the seek stream`() = runTest {
         // The REAL manager used to emit on every seek, including the corrective one -- the loop then
         // cancelled itself after its first correction. The production fix removes the emission at the

@@ -119,6 +119,10 @@ jobs:
         run: bash .buildkite/scripts/bundle-install-visibility.test.sh
 
       - if: steps.scope.outputs.run == 'true'
+        name: AAB handoff control
+        run: bash .buildkite/scripts/aab-handoff.test.sh
+
+      - if: steps.scope.outputs.run == 'true'
         name: Native dependency control
         run: bash .buildkite/scripts/native-deps.test.sh
 

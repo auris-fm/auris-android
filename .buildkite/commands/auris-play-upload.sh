@@ -29,7 +29,28 @@ fi
 # Owner-only permissions for the service-account key.
 umask 077
 echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
-buildkite-agent artifact download "app/build/outputs/bundle/release/app-release.aab" .
+# Use the release step's local copy when this agent has one: it verifies the
+# copy against the uploaded artifact's checksum (a metadata call, no bulk
+# transfer) and copies it into place. A MISSING copy falls back to the artifact
+# download, so a foreign agent still works. A copy that DISAGREES with the
+# artifact refuses the step: bytes that mismatch the uploaded artifact mean
+# something is wrong on this machine, and a download would mask it.
+HANDOFF_DIR="${BUILDKITE_BUILD_PATH:+${BUILDKITE_BUILD_PATH%/}/aab-handoff-${BUILDKITE_BUILD_ID:-}}"
+AAB_REL="app/build/outputs/bundle/release/app-release.aab"
+if [ -n "$HANDOFF_DIR" ] && [ -f "$HANDOFF_DIR/app-release.aab" ]; then
+  LOCAL_SHA="$(shasum -a 1 "$HANDOFF_DIR/app-release.aab" | awk '{print $1}')"
+  ARTIFACT_SHA="$(buildkite-agent artifact shasum "$AAB_REL")"
+  if [ "$LOCAL_SHA" != "$ARTIFACT_SHA" ]; then
+    echo "FAIL: local AAB copy does not match the uploaded artifact (local sha1 $LOCAL_SHA, artifact sha1 $ARTIFACT_SHA); refusing to use or re-download it" >&2
+    exit 1
+  fi
+  echo "--- Using the release step's local AAB copy (checksum verified)"
+  mkdir -p "$(dirname "$AAB_REL")"
+  cp "$HANDOFF_DIR/app-release.aab" "$AAB_REL"
+else
+  echo "--- No local AAB copy on this agent; downloading the artifact"
+  buildkite-agent artifact download "$AAB_REL" .
+fi
 
 # Gate on the ARTIFACT's signature, not on which secrets this step can see:
 # the AAB step already verified it, and the keystore may be scoped to that
@@ -75,3 +96,8 @@ bundle exec fastlane supply \
   --json_key google-upload-credentials.json
 
 echo "--- Uploaded versionCode $UPLOADED_VC recorded for the R2 step"
+
+# The handoff copy has served its purpose once the upload succeeded; delete it
+# so the agent's disk does not accumulate ~130 MB per build. A step that failed
+# earlier leaves it in place, so a manual retry finds it.
+rm -rf "$HANDOFF_DIR"

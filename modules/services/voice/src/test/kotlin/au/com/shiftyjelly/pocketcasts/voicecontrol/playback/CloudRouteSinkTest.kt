@@ -2353,7 +2353,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a mapping that never converges gives up at sixty seconds and corrects nothing after`() = runTest {
+    fun `a correction converges inside sixty seconds and nothing after`() = runTest {
         // `timeline-alignment` step 3: a correction that has not converged 60 s after the action's
         // seek gives up -- no further correction, and the loop ENDS. Three assertions pin the bound
         // from both sides: a convergence just INSIDE the window still corrects (a shortened window

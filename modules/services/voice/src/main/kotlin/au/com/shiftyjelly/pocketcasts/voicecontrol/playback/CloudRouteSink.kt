@@ -38,7 +38,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -1595,22 +1594,29 @@ class CloudRouteSink internal constructor(
     }
 
     /**
-     * Watches the mapping until it converges again, then re-seeks by the difference between the
-     * matched reference and the target — at most [SEEK_MAX_CORRECTIONS] times, and only while the
-     * difference stays above [SEEK_CORRECTION_THRESHOLD_SECONDS].
+     * Watches the mapping until it converges, then re-seeks to the target's mapped position — at
+     * most [SEEK_MAX_CORRECTIONS] times, and only while it differs from the current position by more
+     * than [SEEK_CORRECTION_THRESHOLD_SECONDS].
      *
      * ANY LATER PLAYBACK CHANGE STANDS THE CORRECTION DOWN: a playback command from outside the
      * voice path, a user seek ([userSeeks]), or a newer cloud turn — the player now belongs to
-     * someone else, and re-seeking by a difference computed before their change would move a player
-     * this request no longer owns. The checks are point-in-time observations on this loop's own
-     * schedule; the corrective seek itself remains episode-bound in the sink, so a change that lands
-     * inside its final step is refused by the owner rather than applied cross-episode.
+     * someone else, and re-seeking a position computed before their change would move a player this
+     * request no longer owns. Emissions that arrive while a corrective seek is in flight are NOT a
+     * user's hand — the seek itself can surface on the seek stream — so they are ignored, and the
+     * voice seek does not emit at all (see `PlaybackManagerPlaybackSink`). The checks are
+     * point-in-time observations on this loop's own schedule; the corrective seek remains
+     * episode-bound in the sink, so a change landing inside its final step is refused by the owner
+     * rather than applied cross-episode.
      *
-     * Convergence is read from [FingerprintTimingManager.mappingVersion]: matching has produced new
-     * anchors, and the anchor nearest the current playback estimate is the observation the difference
-     * comes from. The loop ends when the map puts the anchor on the target, when the cap is reached,
-     * or when the window closes without convergence — a map that never covers the seek point never
-     * produces a correction from a far-away anchor's offset.
+     * CONVERGENCE IS READ OFF THE MAPPING, NOT OFF AN ANCHOR. Matching runs in wall-clock time, so
+     * new anchors sit past the seek point and the nearest one may predate it; anchor arithmetic
+     * would move the listener by that gap. Once the mapping covers the target, `playbackTimeMs`
+     * IS the target's place on the sink timeline. The loop ends when the mapped target is within
+     * threshold, when the cap is reached, or when the window closes without coverage.
+     *
+     * THE SUPPRESSION IS HELD ACROSS THE LOOP'S SUSPENSION, not around the seek call alone: the
+     * watcher only runs while this loop is suspended, so an emission queued by the corrective seek
+     * is drained during the next delay — while it can still be recognized as our own.
      */
     private fun launchSeekCorrection(
         targetReferenceMs: Long,
@@ -1621,7 +1627,10 @@ class CloudRouteSink internal constructor(
     ): Job = seekCorrectionScope.launch {
         val startRevision = playbackCommandRevision()
         val userSeeked = AtomicReference(false)
-        val watchUserSeek = launch { userSeeks.first(); userSeeked.set(true) }
+        val ownSeekInFlight = AtomicReference(false)
+        val watchUserSeek = launch {
+            userSeeks.collect { if (!ownSeekInFlight.get()) userSeeked.set(true) }
+        }
         try {
             var positionMs = estimateMs
             var corrections = 0
@@ -1630,19 +1639,23 @@ class CloudRouteSink internal constructor(
             while (corrections < SEEK_MAX_CORRECTIONS) {
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 if (waitedMs >= SEEK_CORRECTION_WINDOW_MS) return@launch
+                // THE DELAY IS WHERE THE WATCHER DRAINS, so the suppression from a corrective seek
+                // must still be set while it suspends: an emission queued by that seek is processed
+                // here, while it can still be recognized as our own. Cleared only after the drain.
                 delay(SEEK_CORRECTION_POLL_MS)
+                ownSeekInFlight.set(false)
                 waitedMs += SEEK_CORRECTION_POLL_MS
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
-                val anchor = fingerprintTimingManager.mappingSnapshot
-                    .minByOrNull { abs(it.playbackTime - positionMs / 1000.0) }
+                val mappedMs = fingerprintTimingManager.playbackTimeMs(targetReferenceMs / 1000.0)
                     ?: continue
-                val differenceSeconds = targetReferenceMs / 1000.0 - anchor.referenceTime
-                if (abs(differenceSeconds) <= SEEK_CORRECTION_THRESHOLD_SECONDS) return@launch
-                positionMs = (positionMs + differenceSeconds * 1000).toInt().coerceAtLeast(0)
+                val differenceMs = mappedMs - positionMs
+                if (abs(differenceMs) <= (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()) return@launch
+                positionMs = mappedMs.coerceAtLeast(0)
                 corrections += 1
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
+                ownSeekInFlight.set(true)
                 playbackSink.seekTo(
                     positionMs / 1000,
                     episodeDurationSeconds(),

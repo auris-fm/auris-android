@@ -74,7 +74,7 @@ class PlaybackManagerPlaybackSinkTest {
         // The OWNER's operation decides, so the mock must answer it: this case is about the adapter
         // consulting the owner, not about the owner's own behaviour.
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenReturn(null)
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
@@ -471,6 +471,26 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
+    fun `the voice sink's seek does not surface as a user seek`() = runTest {
+        // `seekIfPlayingCapturing` emits on the seek stream, and consumers read that as "the user
+        // moved playback by hand". The voice path's own mutation must not carry that meaning: a
+        // consumer reacting to the voice's own action cancels itself (the seek-correction loop did).
+        // The adapter is the caller, so the no-emit flag is asserted HERE.
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+        ).thenReturn(PlaybackManager.ScopedMutation("episode-A", preActionPositionMs = 60_000))
+
+        sink(manager).seekTo(positionSeconds = 100, episodeDurationSeconds = 1800, expectedEpisodeId = "episode-A")
+
+        org.mockito.kotlin.verify(manager).seekIfPlayingCapturing(
+            org.mockito.kotlin.eq("episode-A"),
+            org.mockito.kotlin.eq(100_000),
+            org.mockito.kotlin.eq(false),
+        )
+    }
+
+    @Test
     fun `an UNKNOWN execution survives the sink as Unknown, not as Refused`() = runTest {
         // @reviewer's cloud-consumer failure: a ScopedMutation marked unknown passed through the real sink
         // but reached the caller as Refused. That is the collapse the whole distinction exists to prevent:
@@ -478,7 +498,7 @@ class PlaybackManagerPlaybackSinkTest {
         // player already performed.
         val manager = mock<PlaybackManager>()
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenReturn(PlaybackManager.ScopedMutation("episode-A", preActionPositionMs = null, unknown = true))
 
         val result = sink(manager).seekTo(
@@ -673,7 +693,7 @@ class PlaybackManagerPlaybackSinkTest {
             )
         }
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenAnswer {
             // THE REPLACEMENT LANDS AT THE OWNER'S DECIDING STEP. The owner is where the decision is
             // made, so it is where the replacement must be observable; the payload it returns is the
@@ -724,7 +744,7 @@ class PlaybackManagerPlaybackSinkTest {
             )
         }
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenAnswer {
             // THE OWNER'S DECIDING STEP: the replacement has landed by now, so it observes B and
             // refuses. Returning A's payload would be the defect itself -- an operation performed on
@@ -758,7 +778,7 @@ class PlaybackManagerPlaybackSinkTest {
         // The owner here answers on a delay, which is exactly the shape that used to be misreported: a
         // launch-and-return would answer false before this completed.
         val manager = mock<PlaybackManager>()
-        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
             .thenAnswer {
                 // A NON-SUSPENDING delay: the point is that the answer arrives AFTER the call returns,
                 // which is what a launch-and-read-a-flag cannot report.
@@ -800,7 +820,7 @@ class PlaybackManagerPlaybackSinkTest {
             ),
         )
 
-        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.any()))
             .thenReturn(PlaybackManager.ScopedMutation("episode-A", 100_000))
 
         val result = sink(manager).seekTo(
@@ -817,6 +837,7 @@ class PlaybackManagerPlaybackSinkTest {
         verify(manager).seekIfPlayingCapturing(
             org.mockito.kotlin.eq("episode-A"),
             positionMs.capture(),
+            org.mockito.kotlin.eq(false),
         )
         assertEquals(100_000, positionMs.firstValue)
         assertTrue("accepted, reporting the episode it was bound to", result is EpisodeOperationResult.Accepted)

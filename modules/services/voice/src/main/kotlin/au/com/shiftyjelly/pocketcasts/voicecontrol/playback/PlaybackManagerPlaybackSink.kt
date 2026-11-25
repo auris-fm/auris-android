@@ -218,6 +218,11 @@ class PlaybackManagerPlaybackSink @Inject constructor(
             val scoped = playbackManager.seekIfPlayingCapturing(
                 expectedEpisodeId,
                 resolvedSeconds * 1000,
+                // THE VOICE SEEK IS NOT A USER SEEK. `seekIfPlayingCapturing` emits on the seek stream,
+                // and consumers treat that as "the user moved playback by hand"; the voice path's own
+                // mutation must not carry that meaning, or a consumer acting on the voice's own action
+                // cancels itself (the seek-correction loop did exactly that).
+                emitUserSeek = false,
             )
             return when {
                 // UNKNOWN SURVIVES TO THE CALLER. The owner issued the request and could not learn its

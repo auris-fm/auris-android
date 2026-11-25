@@ -2277,16 +2277,10 @@ class CloudRouteSinkTest {
             deps.playback.calls.contains("seekTo:1170"),
         )
 
-        // CONVERGENCE: matching produced an anchor at the new playhead, and it sits 55 s past the
-        // target on the reference timeline. The correction must move playback back by that difference.
-        whenever(fingerprint.mappingSnapshot).thenReturn(
-            listOf(
-                FingerprintTimingManager.TimeMappingEntry(
-                    playbackTime = 1170.0,
-                    referenceTime = 1185.0,
-                ),
-            ),
-        )
+        // CONVERGENCE: the mapping now covers the target, and it maps 55 s back from the estimate.
+        // The correction must seek to the MAPPED TARGET, not to a target-plus-gap arithmetic on
+        // whichever anchor happens to be nearest.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
         mappingVersion.value = 1L
         advanceTimeBy(1_000)
         runCurrent()
@@ -2335,45 +2329,82 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
 
-        // Each convergence still leaves the anchor 15 s off, so every wake wants a correction.
-        // After the second the cap stops the loop, however many more times the map converges.
-        whenever(fingerprint.mappingSnapshot).thenReturn(
-            listOf(
-                FingerprintTimingManager.TimeMappingEntry(
-                    playbackTime = 1170.0,
-                    referenceTime = 1185.0,
-                ),
-            ),
-        )
+        // Each convergence still leaves the mapped target far from the current position, so every
+        // wake wants a correction. After the second the cap stops the loop, however many more times
+        // the map converges.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
         mappingVersion.value = 1L
         advanceTimeBy(1_000)
         runCurrent()
-        whenever(fingerprint.mappingSnapshot).thenReturn(
-            listOf(
-                FingerprintTimingManager.TimeMappingEntry(
-                    playbackTime = 1155.0,
-                    referenceTime = 1170.0,
-                ),
-            ),
-        )
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
         mappingVersion.value = 2L
         advanceTimeBy(1_000)
         runCurrent()
-        whenever(fingerprint.mappingSnapshot).thenReturn(
-            listOf(
-                FingerprintTimingManager.TimeMappingEntry(
-                    playbackTime = 1140.0,
-                    referenceTime = 1155.0,
-                ),
-            ),
-        )
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_065_000)
         mappingVersion.value = 3L
         advanceTimeBy(1_000)
         runCurrent()
 
         assertEquals(
             "the estimate plus exactly two corrections, then no more (calls=${deps.playback.calls})",
-            listOf("seekTo:1170", "seekTo:1115", "seekTo:1075"),
+            listOf("seekTo:1170", "seekTo:1115", "seekTo:1090"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a correction survives its own seek surfacing on the seek stream`() = runTest {
+        // The REAL manager used to emit on every seek, including the corrective one -- the loop then
+        // cancelled itself after its first correction. The production fix removes the emission at the
+        // source (voice seeks no longer emit); this control keeps the loop honest against ANY emitter
+        // that still surfaces a corrective seek: the correction must not stand itself down.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // Wire the seek stream the way the pre-fix manager behaved: every seek emits.
+        deps.playback.userSeekFeedback = deps.userSeeksFlow
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        // The watcher starts after the turn; drop the estimate seek's replayed emission, which on the
+        // real stream was consumed before the watcher existed.
+        deps.userSeeksFlow.value = null
+
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
+        mappingVersion.value = 2L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "a corrective seek's own emission must not stop the second correction " +
+                "(calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1115", "seekTo:1090"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
     }
@@ -3861,6 +3892,10 @@ class CloudRouteSinkTest {
                 positionSeconds
             }
             calls += "seekTo:$resolved"
+            // CONTROL HOOK: when set, every seek surfaces on the seek stream, the way the REAL manager
+            // emitted before voice seeks stopped counting as user seeks. The self-cancellation control
+            // wires this so the loop must survive its own corrective seek's emission.
+            userSeekFeedback?.value = Unit
             return EpisodeOperationResult.Accepted(expectedEpisodeId, preActionPositionMsForTest)
         }
 
@@ -3872,6 +3907,9 @@ class CloudRouteSinkTest {
 
         /** Overrides the outcome a seek reports, so a case can drive accepted/refused/unknown. */
         var seekOutcomeForTest: EpisodeOperationResult? = null
+
+        /** When set, each seek also emits here, mirroring the real manager's seek stream. */
+        var userSeekFeedback: kotlinx.coroutines.flow.MutableStateFlow<Unit?>? = null
 
         /** Overrides the outcome a SKIP reports, on the same three-way contract. */
         var skipOutcomeForTest: EpisodeOperationResult? = null

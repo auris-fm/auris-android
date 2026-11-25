@@ -2353,6 +2353,80 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a mapping that never converges gives up at sixty seconds and corrects nothing after`() = runTest {
+        // `timeline-alignment` step 3: a correction that has not converged 60 s after the action's
+        // seek gives up -- no correction, and the loop ENDS. "No correction" alone cannot guard the
+        // bound: an unconverged mapping makes no correction with or without it. What fails when the
+        // bound is removed is that the job is still alive, and that a convergence arriving AFTER
+        // the window still seeks. Both are asserted here, on virtual time over the poll count.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+
+        // The whole window passes with NO convergence: the mapping never covers the target.
+        advanceTimeBy(60_000)
+        runCurrent()
+
+        assertEquals(
+            "an unconverged mapping must produce no corrective seek (calls=${deps.playback.calls})",
+            listOf("seekTo:1170"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+
+        // THE LOOP MUST HAVE ENDED, not merely be quiet. Without the bound this job lives forever.
+        val correctionJob = checkNotNull(
+            CloudRouteSink::class.java.getDeclaredField("pendingSeekCorrection")
+                .apply { isAccessible = true }
+                .get(sink) as java.util.concurrent.atomic.AtomicReference<*>,
+        ).get() as kotlinx.coroutines.Job
+        assertTrue(
+            "the correction loop must be complete once the 60-second window closes",
+            correctionJob.isCompleted,
+        )
+
+        // A convergence arriving AFTER the window must not resurrect it.
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "a late convergence must make no seek (calls=${deps.playback.calls})",
+            listOf("seekTo:1170"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
     fun `a correction survives its own seek surfacing on the seek stream`() = runTest {
         // The REAL manager used to emit on every seek, including the corrective one -- the loop then
         // cancelled itself after its first correction. The production fix removes the emission at the

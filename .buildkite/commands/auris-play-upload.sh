@@ -62,7 +62,12 @@ esac
 # can fail must precede the irreversible one.
 buildkite-agent meta-data set uploaded-version-code "$UPLOADED_VC"
 
-bundle install --quiet
+# NOT --quiet: bundler maps it to ui.level "warn", which silences every progress message
+# ("Fetching gem metadata from ...", "Resolving dependencies...", "Fetching/Installing <gem>").
+# A stalled fetch then prints nothing at all, so the log's last line is whatever ran before
+# bundler and the step burns its whole timeout without saying where it stopped. Progress output
+# is what makes a hang diagnosable; the step's own timeout still bounds a true hang.
+bundle install
 bundle exec fastlane supply \
   --package_name fm.auris \
   --track internal \

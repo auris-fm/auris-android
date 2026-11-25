@@ -39,6 +39,7 @@ jobs:
       - run: bash .buildkite/scripts/verify-play-apk.test.sh
       - run: ruby .buildkite/scripts/release-gates.test.rb
       - run: bash .buildkite/scripts/release-interpreter.test.sh
+      - run: bash .buildkite/scripts/bundle-install-visibility.test.sh
       - run: bash .buildkite/scripts/native-deps.test.sh
 
 

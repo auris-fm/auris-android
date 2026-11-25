@@ -67,7 +67,12 @@ echo "$PLAY_SERVICE_ACCOUNT_JSON" > google-upload-credentials.json
 echo "--- :android: Fetching Play's signed universal APK (versionCode $UPLOADED_VERSION_CODE)"
 # This step has its own checkout; Bundler is configured for checkout-local
 # vendor/bundle, so prepare the bundle here exactly as the Play step does.
-bundle install --quiet
+# NOT --quiet: bundler maps it to ui.level "warn", which silences every progress message
+# ("Fetching gem metadata from ...", "Resolving dependencies...", "Fetching/Installing <gem>").
+# A stalled fetch then prints nothing at all, so the log's last line is whatever ran before
+# bundler and the step burns its whole timeout without saying where it stopped. Progress output
+# is what makes a hang diagnosable; the step's own timeout still bounds a true hang.
+bundle install
 bundle exec ruby .buildkite/scripts/fetch-play-apk.rb \
   google-upload-credentials.json "$UPLOADED_VERSION_CODE" play-universal.apk \
   "$AURIS_PLAY_APP_SIGNING_SHA256"
@@ -82,6 +87,25 @@ SHA256="$(shasum -a 256 play-universal.apk | awk '{print $1}')"
 SIZE="$(stat -f%z play-universal.apk 2>/dev/null || stat -c%s play-universal.apk)"
 VERSIONED_KEY="apk/auris-${VERSION_NAME}-${UPLOADED_VERSION_CODE}.apk"
 URL="${PUBLIC_BASE}/${VERSIONED_KEY}"
+
+# rclone is a Go program, and on macOS Go's crypto/x509 does NOT read SSL_CERT_FILE (its
+# root_unix.go excludes darwin); it calls the system trust evaluator instead. That evaluator
+# fails in this job -- the agent runs as a system daemon with no GUI session -- so every rclone
+# call died with `x509: OSStatus -26276` even though the hook exports SSL_CERT_FILE into the job.
+# Passing an explicit bundle makes rclone build its own root pool and skip that evaluator.
+# Measured in-job: rclone with the bundle reaches R2, without it fails; curl succeeds either way,
+# so the direct SigV4 PUT below needs nothing.
+#
+# ONE export, not a flag per call, so a later rclone call cannot miss it. The bundle comes from
+# the job's own SSL_CERT_FILE -- never a hardcoded path, which would mask a runner where the hook
+# did not run. Missing or unreadable => fail closed HERE, before any rclone call, with our own
+# message rather than an x509 error three steps later.
+if [ -z "${SSL_CERT_FILE:-}" ] || [ ! -r "${SSL_CERT_FILE}" ]; then
+  echo "FAIL: SSL_CERT_FILE is unset or unreadable ('${SSL_CERT_FILE:-}'); rclone on macOS needs an" >&2
+  echo "      explicit CA bundle (Go ignores SSL_CERT_FILE there). Nothing published." >&2
+  exit 1
+fi
+export RCLONE_CA_CERT="${SSL_CERT_FILE}"
 
 # rclone reads its config from env; nothing written to disk.
 export RCLONE_CONFIG_R2_TYPE=s3

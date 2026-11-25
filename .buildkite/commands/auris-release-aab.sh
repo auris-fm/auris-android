@@ -164,3 +164,22 @@ BUILT_VC="$(sed -n 's/^versionCode=//p' version.properties | head -1)"
 [ -n "$BUILT_VC" ] || { echo "FAIL: no versionCode after build" >&2; exit 1; }
 printf '%s\n' "$BUILT_VC" > built-version-code.txt
 buildkite-agent artifact upload built-version-code.txt
+
+# Leave a per-build copy of both artifacts on this agent so the Play step never
+# re-downloads the ~130 MB bundle this machine just built. Keyed by
+# BUILDKITE_BUILD_ID, so a manual step retry finds the same build's copy and no
+# other build can collide with it. The Play step verifies the copy against the
+# uploaded artifact's checksum before using it; a missing copy falls back to
+# the download, so a foreign agent is unaffected.
+if [ -n "${BUILDKITE_BUILD_PATH:-}" ] && [ -n "${BUILDKITE_BUILD_ID:-}" ]; then
+  HANDOFF_DIR="${BUILDKITE_BUILD_PATH%/}/aab-handoff-${BUILDKITE_BUILD_ID}"
+  mkdir -p "$HANDOFF_DIR"
+  cp app/build/outputs/bundle/release/app-release.aab "$HANDOFF_DIR/app-release.aab"
+  cp built-version-code.txt "$HANDOFF_DIR/built-version-code.txt"
+
+  # Copies are ~130 MB each. Drop handoffs from builds older than three days so
+  # the agent's disk does not fill. Best effort: losing an old copy costs a
+  # download, never a build.
+  find "${BUILDKITE_BUILD_PATH%/}" -maxdepth 1 -type d -name 'aab-handoff-*' \
+    -mtime +3 -exec rm -rf {} + 2>/dev/null || true
+fi

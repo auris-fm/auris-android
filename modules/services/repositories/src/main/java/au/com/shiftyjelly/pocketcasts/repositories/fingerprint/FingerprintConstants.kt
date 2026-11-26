@@ -79,8 +79,8 @@ object FingerprintConstants {
     /** Timeout for the reference fetch of an on-demand resolve; short because reference files are small. */
     const val ON_DEMAND_FETCH_TIMEOUT_MS = 3_000L
 
-    /** Budget for the cloud reference fingerprint download (cloud-ingestion.md). */
-    const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 10_000L
+    /** Budget for the cloud reference fingerprint download (cloud-ingestion.md: clients give up at 150 s). */
+    const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 150_000L
 
     /** Minimum matcher score for a local window to match an Auris reference. */
     const val REFERENCE_ACCEPTANCE_SCORE = 0.65f

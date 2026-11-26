@@ -40,16 +40,31 @@ interface CloudReferenceSource {
  * so callers degrade gracefully to the transcript-sync path.
  */
 @Singleton
-class CloudFingerprintReferenceFetcher @Inject constructor(
+class CloudFingerprintReferenceFetcher(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
     private val tokenProvider: AurisTokenProvider,
+    // Constructor-injected; Hilt builds the production instance through the @Inject constructor
+    // below with exactly these values. The fingerprint endpoint sends NOTHING until the
+    // fingerprint is ready -- on a first play that is ~95 s of decode plus generation -- so OkHttp's
+    // read timeout (which covers waiting for the response headers) must not sit under the per-call
+    // budget: NO READ LIMIT on the default client. The per-call budget is the one
+    // cloud-ingestion.md governs and the only limit on waiting.
+    private val client: OkHttpClient,
+    private val fetchBudgetMs: Long,
 ) : CloudReferenceSource {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+    // Dagger cannot use Kotlin default values, so production wiring carries the defaults HERE:
+    // the graph needs no OkHttpClient or Long binding.
+    @Inject
+    constructor(tokenProvider: AurisTokenProvider) : this(
+        tokenProvider = tokenProvider,
+        client = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build(),
+        fetchBudgetMs = FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
+    )
 
     /**
      * Conditional fetch (delta: fingerprint revalidation). When [cachedEtag] is non-null it is
@@ -139,7 +154,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         // fire mid-call (and would only discard late successes). call.timeout
         // is the lever that actually cancels the socket.
         val call = client.newCall(request)
-        call.timeout().timeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        call.timeout().timeout(fetchBudgetMs, TimeUnit.MILLISECONDS)
         return try {
             call.execute().use { response ->
                 when {

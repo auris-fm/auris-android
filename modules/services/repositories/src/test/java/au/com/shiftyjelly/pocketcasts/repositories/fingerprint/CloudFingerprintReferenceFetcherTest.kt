@@ -3,9 +3,12 @@ package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -316,5 +319,62 @@ class CloudFingerprintReferenceFetcherTest {
         } finally {
             server.shutdown()
         }
+    }
+
+    @Test
+    fun `the fingerprint fetch budget is the spec's 150 seconds`() {
+        // cloud-ingestion.md: "Clients give up at 150 s, deliberately shorter than that budget" --
+        // the server may spend up to 4 minutes generating a first-play fingerprint, and generation
+        // continues after a client leaves. A shorter client budget throws that away: on a first play
+        // the reference then never arrives for the whole session. The value is asserted here, not
+        // only its plumbing, because the plumbing already carried the wrong number.
+        assertEquals(150_000L, FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS)
+    }
+
+    @Test
+    fun `the per-call budget fires and reports unavailable`() {
+        // The budget is not merely large: it still FIRES. NO_RESPONSE means the server accepts the
+        // connection and never answers, so with no read limit the only limit on waiting is the
+        // per-call budget itself -- injected here at a few hundred milliseconds. RED AT 10 s: the
+        // request would also end Unavailable under the old budget, but with the CONSTANT test
+        // pinning 150 s, a budget silently reverted to 10 s fails there and a budget that never
+        // fires fails here.
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        server.start()
+        val auth = MockWebServer()
+
+        try {
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(
+                providerFor("session", "auris-access-token-1", auth),
+                client = OkHttpClient.Builder().connectTimeout(10, TimeUnit.SECONDS).readTimeout(0, TimeUnit.MILLISECONDS).build(),
+                fetchBudgetMs = 300L,
+            )
+            val outcome = runBlocking {
+                fetcher.fetchReference(server.url("/").toString().trimEnd('/'), "ep_1", "pod_1", cachedEtag = null)
+            }
+
+            assertTrue(
+                "a fetch the budget cancels must report Unavailable, not hang or throw (outcome=$outcome)",
+                outcome is CloudFingerprintReferenceFetcher.Fetch.Unavailable,
+            )
+        } finally {
+            server.shutdown()
+            auth.shutdown()
+        }
+    }
+
+    @Test
+    fun `the default client has no read limit, so only the budget bounds waiting`() {
+        // The fingerprint endpoint sends nothing until the fingerprint is ready (~95 s on a first
+        // play). OkHttp's read timeout covers waiting for the response HEADERS, so a default client
+        // carrying a 60 s read timeout would cut the request before the 150 s budget. RED AT 10 s:
+        // with the old default, the read assertion fails -- connect was already 10 s.
+        val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "auris-access-token-1", null))
+        val clientField = CloudFingerprintReferenceFetcher::class.java.getDeclaredField("client").apply { isAccessible = true }
+        val client = clientField.get(fetcher) as OkHttpClient
+        assertEquals(10_000, client.connectTimeoutMillis)
+        assertEquals(0, client.readTimeoutMillis)
     }
 }

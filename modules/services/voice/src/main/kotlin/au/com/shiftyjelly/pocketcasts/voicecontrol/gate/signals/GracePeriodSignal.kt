@@ -275,11 +275,10 @@ class GracePeriodSignal @Inject constructor() {
         // answer longer than the cap, the session would then give up at the very moment the hold
         // ends. Readers of [answerHoldOpen] and [answerHoldReleasedAtMs] observe the pair under the
         // same lock, so no poll can see the in-between state.
-        val (hold, releaseAt) = synchronized(windowLock) {
+        val hold = synchronized(windowLock) {
             val removed = outputHolds.remove(requestId) ?: return
-            val at = System.currentTimeMillis()
-            answerHoldReleasedAtMs = at
-            removed to at
+            answerHoldReleasedAtMs = System.currentTimeMillis()
+            removed
         }
         finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }

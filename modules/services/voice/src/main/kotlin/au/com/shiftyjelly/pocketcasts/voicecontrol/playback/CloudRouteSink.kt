@@ -1232,7 +1232,6 @@ class CloudRouteSink internal constructor(
      */
     private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && privacyClosureCount() != atPause
 
-    /** Owner-only: resume the player if this turn chain auto-paused it. */
     /**
      * Give the player back: stamp the release, then clear the obligation. EVERY path that ends the
      * sink's pause goes through this -- the turn's normal restore, a server pause action that hands
@@ -1245,6 +1244,7 @@ class CloudRouteSink internal constructor(
         playerAutoPaused = false
     }
 
+    /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
         releaseAutoPause()

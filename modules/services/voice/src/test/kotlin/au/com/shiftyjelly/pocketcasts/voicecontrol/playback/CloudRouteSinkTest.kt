@@ -2733,6 +2733,82 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a server resume ending a long pause still leaves the correction alive`() = runTest {
+        // THE OTHER RELEASE PATH. A turn does not only hand the player back when it ends: a server
+        // `resume` action clears the pause in the middle of the turn. That clear has to stamp the
+        // release too -- otherwise a correction pending when the resume ends a pause longer than the
+        // cap still anchors at the seek and gives up. This case fails under the bare flag clear.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val resumeDelivered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = kotlinx.coroutines.flow.flow {
+                emit(CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap(), turnId = testWireId))
+                emit(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "seek_to",
+                        params = mapOf("reference_position_ms" to 1_130_000L),
+                        turnId = testWireId,
+                    ),
+                )
+                // THE SERVER RESUMES: the pause ends here, not at the turn's end. The case moves the
+                // virtual clock, and the sink's wall clock with it, before this frame is handled.
+                resumeDelivered.await()
+                emit(CloudRouteEvent.Action(tool = "playback", action = "resume", params = emptyMap(), turnId = testWireId))
+            },
+            hostPlaying = true,
+        )
+        val sink = deps.sink()
+
+        val turn = async { sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback }
+        runCurrent()
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        assertTrue("precondition: the turn's own pause is held", !deps.host.playing)
+        // THE PAUSE LASTS PAST THE CAP, then the server's resume ends it.
+        advanceTimeBy(250)
+        runCurrent()
+        deps.wallClockMs = 130_000L
+        advanceTimeBy(130_000)
+        runCurrent()
+        resumeDelivered.complete(Unit)
+        advanceTimeBy(0)
+        runCurrent()
+        assertTrue("precondition: the turn issued a resume (calls=${deps.playback.calls})", deps.playback.calls.contains("resume"))
+        // Convergence 40 s after the RESUME, inside the cap that now runs from that release.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        deps.host.playing = true
+        deps.wallClockMs = 175_000L
+        advanceTimeBy(40_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "the server resume's release must anchor the cap (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+        turn.cancel()
+    }
+
+    @Test
     fun `a mapping that never converges gives up after sixty seconds of playing time`() = runTest {
         // timeline-alignment step 3 / plan step 6: the give-up case. With the host playing the
         // whole time, 60 s of playing time is 60 s of wall time, so the loop ends and a

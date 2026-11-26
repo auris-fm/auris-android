@@ -342,9 +342,9 @@ class CloudFingerprintReferenceFetcherTest {
         val server = MockWebServer()
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
         server.start()
+        val auth = MockWebServer()
 
         try {
-            val auth = MockWebServer()
             auth.start()
             val fetcher = CloudFingerprintReferenceFetcher(
                 providerFor("session", "auris-access-token-1", auth),
@@ -359,9 +359,9 @@ class CloudFingerprintReferenceFetcherTest {
                 "a fetch the budget cancels must report Unavailable, not hang or throw (outcome=$outcome)",
                 outcome is CloudFingerprintReferenceFetcher.Fetch.Unavailable,
             )
-            auth.shutdown()
         } finally {
             server.shutdown()
+            auth.shutdown()
         }
     }
 

@@ -99,13 +99,6 @@ class CloudRouteSink internal constructor(
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
     private val gracePeriodSignal: GracePeriodSignal? = null,
-    /**
-     * The turn CHAIN's own pause, as the seek-correction session reads it.
-     *
-     * A later turn inherits a paused player -- `playerAutoPaused` belongs to the sink, not to a turn
-     * -- so a correction anchored on per-turn state would lose the chain's pause the moment the turn
-     * that took it ends. Held by the state object that outlives every sink the provider builds.
-     */
     /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     /** Test seam: a custom OkHttp client for the route socket (MockWebServer wiring). */

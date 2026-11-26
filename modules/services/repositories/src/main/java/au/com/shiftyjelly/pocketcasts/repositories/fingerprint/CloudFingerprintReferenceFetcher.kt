@@ -45,11 +45,15 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
     private val tokenProvider: AurisTokenProvider,
-) : CloudReferenceSource {
-    private val client = OkHttpClient.Builder()
+    // Constructor-injected so tests can supply a client with a short connect budget; production
+    // (Hilt) always takes the default. The per-call budget below is the one cloud-ingestion.md
+    // governs; the builder timeouts here only bound connect and stray reads outside it.
+    client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+        .build(),
+) : CloudReferenceSource {
+    private val client = client
 
     /**
      * Conditional fetch (delta: fingerprint revalidation). When [cachedEtag] is non-null it is

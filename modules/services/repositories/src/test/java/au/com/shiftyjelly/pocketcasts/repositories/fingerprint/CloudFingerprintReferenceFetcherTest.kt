@@ -1,9 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
+import java.net.ServerSocket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -315,6 +318,64 @@ class CloudFingerprintReferenceFetcherTest {
             auth.shutdown()
         } finally {
             server.shutdown()
+        }
+    }
+
+    @Test
+    fun `the fingerprint fetch budget is the spec's 150 seconds`() {
+        // cloud-ingestion.md: "Clients give up at 150 s, deliberately shorter than that budget" --
+        // the server may spend up to 4 minutes generating a first-play fingerprint, and generation
+        // continues after a client leaves. A shorter client budget throws that away: on a first play
+        // the reference then never arrives for the whole session. The value is asserted here, not
+        // only its plumbing, because the plumbing already carried the wrong number.
+        assertEquals(150_000L, FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS)
+    }
+
+    @Test
+    fun `a reference answering after ten seconds but inside the budget still arrives`() {
+        // RED AT 10 s: with the old budget this request aborts before the server answers, so
+        // `payload` is null. The delay is 11 s of WALL CLOCK against a local mock, and the budget
+        // under test is 150 s, so the test is not racing its own threshold.
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setBody(compactV3Json()).setBodyDelay(11, TimeUnit.SECONDS))
+        server.start()
+
+        try {
+            val auth = MockWebServer()
+            auth.start()
+            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "auris-access-token-1", auth))
+            val payload = fetchPayload(fetcher, server)
+
+            assertNotNull("a reference inside the 150 s budget must arrive, not time out", payload)
+            assertEquals(3, ReferenceFingerprint.decode(payload!!)!!.libraryCheckpoints().size)
+            auth.shutdown()
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `a fetch that never gets past connect gives up and reports unavailable`() {
+        // The timeout is not merely large: it still FIRES. The client times out at CONNECT, so a
+        // real socket that never completes the handshake exercises the same call-timeout lever as
+        // the production path, and no test waits on the wall clock for the 150 s budget itself.
+        val silent = ServerSocket(0)
+        try {
+            val client = OkHttpClient.Builder().connectTimeout(300, TimeUnit.MILLISECONDS).build()
+            val fetcher = CloudFingerprintReferenceFetcher(
+                providerFor("session", "auris-access-token-1", null),
+                client = client,
+            )
+            val outcome = runBlocking {
+                fetcher.fetchReference("http://127.0.0.1:${silent.localPort}", "ep_1", "pod_1", cachedEtag = null)
+            }
+
+            assertTrue(
+                "a fetch that cannot connect must report Unavailable, not hang or throw (outcome=$outcome)",
+                outcome is CloudFingerprintReferenceFetcher.Fetch.Unavailable,
+            )
+        } finally {
+            silent.close()
         }
     }
 }

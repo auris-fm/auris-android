@@ -12,9 +12,9 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.UserSetting
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.sharedtest.InMemoryFeatureFlagRule
+import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import au.com.shiftyjelly.pocketcasts.utils.AppPlatform
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.Feature
-import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import dagger.Lazy
 import java.util.Date
 import kotlin.time.Duration.Companion.milliseconds
@@ -27,6 +27,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
@@ -894,46 +895,72 @@ class ChapterManagerImplTest {
     )
 
     @Test
-    fun `a generated chapter with no mapped position keeps its reference time instead of vanishing`() {
-        // Chapter positions go through the same `playbackTimeMs` as the seek paths, so the both-clocks
-        // bracket gate applies to them too: a generated chapter that starts inside an ad-sized gap
-        // gets null. The chapter must then stand on its RAW reference time and keep its identity --
-        // dropping it (or collapsing it to zero length) would silently delete a chapter from the UI
-        // because of a mapping gap that has nothing to do with the chapter.
-        val chapters = Chapters(
-            listOf(
-                Chapter(
-                    title = "Intro",
-                    startTime = 0.seconds,
-                    endTime = 30.seconds,
-                    index = 0,
-                    uiIndex = 1,
-                    origin = ChapterOrigin.Generated,
-                ),
-                Chapter(
-                    title = "Inside the ad",
-                    startTime = 102.seconds,
-                    endTime = 132.seconds,
-                    index = 1,
-                    uiIndex = 2,
-                    origin = ChapterOrigin.Generated,
-                ),
-            ),
+    fun `a generated chapter past the last anchor keeps the ad offset the mapping already observed`() = runBlocking {
+        // Chapter positions go through the same reference→playback read as the seek paths, so the
+        // both-clocks bracket gate applies: a generated chapter past the last anchor is not covered
+        // and cannot be interpolated. It must NOT fall back to its raw reference time either -- the
+        // anchors already observed an ad, so the raw time would slide every later chapter marker
+        // earlier by the length of the ads already played. The call site uses the estimate: the
+        // reference time plus the offset the map has observed at the nearest covered point before.
+        //
+        // The map has observed a 60-second ad by playback 600 s (reference 540 s) and holds that
+        // offset to its last anchor (reference 560 s / playback 620 s), with dense anchors on both
+        // clocks around the ad. The chapter sits at reference 700 s -- past the last anchor.
+        val entries = listOf(
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 160.0, referenceTime = 104.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 600.0, referenceTime = 540.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 614.0, referenceTime = 554.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 620.0, referenceTime = 560.0),
         )
+        // The episode must span the chapter: fixChapterTimestamps clamps chapter ends to the
+        // episode duration and drops non-positive-duration chapters.
+        val episode = PodcastEpisode("id", publishedDate = Date(), duration = 1200.0)
+        val dbChapter = DbChapter(
+            index = 0,
+            episodeUuid = "id",
+            startTimeMs = 700_000,
+            endTimeMs = 760_000,
+            title = "Past the last anchor",
+            origin = ChapterOrigin.Generated,
+        )
+        FeatureFlag.setEnabled(Feature.GENERATED_CHAPTERS, true)
+        whenever(chapterDao.observeChaptersForEpisode("id")).thenReturn(flowOf(listOf(dbChapter)))
+        whenever(episodeManager.findEpisodeByUuidFlow("id")).thenReturn(flowOf(episode))
 
-        val aligned = ChapterManagerImpl.alignGeneratedChapters(chapters) { reference ->
-            // The gate's answer for 102 s: null, because 100->104 in reference time is 64 s in
-            // playback time.
-            if (reference == 102.seconds) null else reference
+        // PHONE platform, so the alignment path actually runs, and a REAL estimate: the manager's
+        // snapshot is the anchor list above and the conversion delegates to the production function.
+        // A call site that reads the COVERED conversion instead gets null here and would leave the
+        // chapter on its raw reference time -- which is exactly the regression this test refuses.
+        val fingerprint = mock<FingerprintTimingManager> {
+            on { activeEpisodeUuid } doReturn "id"
+            on { mappingSnapshot } doReturn entries
+            on { mappingVersion } doReturn MutableStateFlow(1L)
         }
-
-        val titles = aligned.toList().map { it.title }
-        assertEquals(
-            "the unmapped chapter must survive, in order (titles=$titles)",
-            listOf("Intro", "Inside the ad"),
-            titles,
+        whenever(fingerprint.estimatedPlaybackTimeMs(any(), any())).thenAnswer {
+            FingerprintTimingManager.estimateUncovered(
+                it.getArgument<Double>(0),
+                it.getArgument(1),
+            )
+        }
+        val phoneManager = ChapterManagerImpl(
+            chapterDao = chapterDao,
+            episodeManager = episodeManager,
+            fingerprintTimingManager = Lazy { fingerprint },
+            appPlatform = AppPlatform.Phone,
+            settings = settings,
         )
-        assertEquals(102.seconds, aligned.toList()[1].startTime)
-        assertEquals(132.seconds, aligned.toList()[1].endTime)
+
+        phoneManager.observerChaptersForEpisode("id").test {
+            val chapter = awaitItem().toList().single()
+            assertEquals(
+                "a chapter past the last anchor is placed at raw reference time PLUS the observed " +
+                    "60-second ad offset (start=${chapter.startTime})",
+                760.seconds,
+                chapter.startTime,
+            )
+            assertEquals(820.seconds, chapter.endTime)
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 }

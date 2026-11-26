@@ -2256,6 +2256,9 @@ class CloudRouteSinkTest {
                 ),
             ),
         )
+        // THE CORRECTION IS MEASURED AT THE PLAYHEAD: the target converts to nothing before the map
+        // covers it, so the difference comes from the reference heard at the current position.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(null)
         val deps = TestDeps(
             fingerprintTimingManager = fingerprint,
             seekCorrectionScope = backgroundScope,
@@ -2277,18 +2280,17 @@ class CloudRouteSinkTest {
             deps.playback.calls.contains("seekTo:1170"),
         )
 
-        // CONVERGENCE: the mapping now covers the target, and it maps 55 s back from the estimate.
-        // The correction must seek to the MAPPED TARGET, not to a target-plus-gap arithmetic on
-        // whichever anchor happens to be nearest.
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        // CONVERGENCE: the playhead now hears reference 1,115 s -- 15 s short of the 1,130 s the
+        // listener asked for -- so the correction seeks forward by that difference.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
         mappingVersion.value = 1L
         advanceTimeBy(1_000)
         runCurrent()
 
         assertTrue(
-            "a converged difference of 55 s must produce a corrective seek " +
+            "a converged difference of 15 s must produce a corrective seek by that difference " +
                 "(calls=${deps.playback.calls})",
-            deps.playback.calls.contains("seekTo:1115"),
+            deps.playback.calls.contains("seekTo:1185"),
         )
         assertEquals(
             "and only one correction, until the map converges again",
@@ -2313,6 +2315,9 @@ class CloudRouteSinkTest {
                 ),
             ),
         )
+        // The correction reads the reference at the PLAYHEAD, so the stubbed read is the one there:
+        // the estimate sought to 1,170 s, i.e. 1_170_000 ms on the sink timeline.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(null)
         val deps = TestDeps(
             fingerprintTimingManager = fingerprint,
             seekCorrectionScope = backgroundScope,
@@ -2329,25 +2334,26 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
 
-        // Each convergence still leaves the mapped target far from the current position, so every
-        // wake wants a correction. After the second the cap stops the loop, however many more times
-        // the map converges.
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        // Each convergence still leaves the reference heard at the playhead far short of the
+        // target, so every wake wants a correction -- the playhead moves WITH each seek, so the
+        // next reading is stubbed at the new position. After the second the cap stops the loop,
+        // however many more times the map converges.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
         mappingVersion.value = 1L
         advanceTimeBy(1_000)
         runCurrent()
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
+        whenever(fingerprint.matchedReferenceTime(1_185_000)).thenReturn(1_090.0)
         mappingVersion.value = 2L
         advanceTimeBy(1_000)
         runCurrent()
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_065_000)
+        whenever(fingerprint.matchedReferenceTime(1_225_000)).thenReturn(1_065.0)
         mappingVersion.value = 3L
         advanceTimeBy(1_000)
         runCurrent()
 
         assertEquals(
             "the estimate plus exactly two corrections, then no more (calls=${deps.playback.calls})",
-            listOf("seekTo:1170", "seekTo:1115", "seekTo:1090"),
+            listOf("seekTo:1170", "seekTo:1185", "seekTo:1225"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
     }
@@ -2394,7 +2400,7 @@ class CloudRouteSinkTest {
         )
         // JUST INSIDE THE WINDOW a convergence must still correct: this pins the bound's LENGTH,
         // not merely its existence -- a shortened window would fail here.
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
         // Advance to just short of the bound with the mapping STILL UNCOVERED, then publish the
         // convergence: a window shortened to 30 s has already closed by now, so its loop is gone
         // and the assertion below fails. A convergence published before the advance would be seen
@@ -2406,97 +2412,32 @@ class CloudRouteSinkTest {
         runCurrent()
         assertTrue(
             "a convergence inside the window must still correct (calls=${deps.playback.calls})",
-            deps.playback.calls.contains("seekTo:1115"),
+            deps.playback.calls.contains("seekTo:1185"),
         )
 
         // Back to uncovered, and the rest of the window passes with NO further convergence.
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(null)
         advanceTimeBy(2_000)
         runCurrent()
 
         assertEquals(
             "the estimate plus the one in-window correction, nothing more (calls=${deps.playback.calls})",
-            listOf("seekTo:1170", "seekTo:1115"),
+            listOf("seekTo:1170", "seekTo:1185"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
 
         // A NEW convergence arriving AFTER the window must not resurrect the loop. This is what
         // proves the loop ENDED rather than merely stayed quiet: without the bound it is still
-        // polling past 60 s, so this maps the target to 1090 s -- 25 s from the corrected position,
-        // over threshold -- and seeks. The assertion below fails.
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
+        // polling past 60 s, so this puts the playhead at reference 1090 s -- 40 s short of the
+        // target, over threshold -- and seeks. The assertion below fails.
+        whenever(fingerprint.matchedReferenceTime(1_185_000)).thenReturn(1_090.0)
         mappingVersion.value = 2L
         advanceTimeBy(1_000)
         runCurrent()
 
         assertEquals(
             "a late convergence must make no seek (calls=${deps.playback.calls})",
-            listOf("seekTo:1170", "seekTo:1115"),
-            deps.playback.calls.filter { it.startsWith("seekTo:") },
-        )
-    }
-
-    @Test
-    fun `a target inside an inserted ad is uncovered, never interpolated to a mid-ad position`() = runTest {
-        // timeline-alignment § Action position conversion, covered: the anchors bracketing the
-        // target must be no more than 8 s apart on EACH clock. An inserted ad makes them close in
-        // reference time and far apart in playback time; plain interpolation answered a mid-ad
-        // position for a target inside the ad, the correction loop seeked it, and a covered-looking
-        // reference seek landed inside the ad directly. With the gate, playbackTimeMs answers null,
-        // the sink estimates from the nearest covered point BEFORE the target (here: the raw offset
-        // of the single prior anchor), and the correction loop -- which reads the same gated read --
-        // never seeks the mid-ad value.
-        val fingerprint = mock<FingerprintTimingManager>()
-        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
-        whenever(fingerprint.playbackTimeMs(102.0)).thenReturn(null)
-        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
-        whenever(fingerprint.mappingSnapshot).thenReturn(
-            listOf(
-                FingerprintTimingManager.TimeMappingEntry(
-                    playbackTime = 100.0,
-                    referenceTime = 100.0,
-                ),
-                FingerprintTimingManager.TimeMappingEntry(
-                    playbackTime = 164.0,
-                    referenceTime = 104.0,
-                ),
-            ),
-        )
-        val deps = TestDeps(
-            fingerprintTimingManager = fingerprint,
-            seekCorrectionScope = backgroundScope,
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "seek_to",
-                    params = mapOf("reference_position_ms" to 102_000L),
-                ),
-                CloudRouteEvent.Done(1, 0),
-            ),
-        )
-        val sink = deps.sink()
-
-        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
-
-        // THE ESTIMATE: the nearest covered point before the target, target plus the observed
-        // offset (102 s + (100-100) = 102 s). The mid-ad interpolation (132 s) must appear NOWHERE
-        // -- neither in the seek nor in any later correction.
-        assertEquals(
-            "the estimate seeks the covered offset, never the mid-ad interpolation " +
-                "(calls=${deps.playback.calls})",
-            listOf("seekTo:102"),
-            deps.playback.calls.filter { it.startsWith("seekTo:") },
-        )
-
-        // A convergence that still cannot bracket the target adds nothing.
-        mappingVersion.value = 1L
-        advanceTimeBy(1_000)
-        runCurrent()
-
-        assertEquals(
-            "the gated read keeps the loop honest: no mid-ad seek on convergence " +
-                "(calls=${deps.playback.calls})",
-            listOf("seekTo:102"),
+            listOf("seekTo:1170", "seekTo:1185"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
     }
@@ -2541,11 +2482,11 @@ class CloudRouteSinkTest {
         // real stream was consumed before the watcher existed.
         deps.userSeeksFlow.value = null
 
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_115_000)
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
         mappingVersion.value = 1L
         advanceTimeBy(1_000)
         runCurrent()
-        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(1_090_000)
+        whenever(fingerprint.matchedReferenceTime(1_185_000)).thenReturn(1_090.0)
         mappingVersion.value = 2L
         advanceTimeBy(1_000)
         runCurrent()
@@ -2553,7 +2494,73 @@ class CloudRouteSinkTest {
         assertEquals(
             "a corrective seek's own emission must not stop the second correction " +
                 "(calls=${deps.playback.calls})",
-            listOf("seekTo:1170", "seekTo:1115", "seekTo:1090"),
+            listOf("seekTo:1170", "seekTo:1185", "seekTo:1225"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a correction closes the difference heard at the playhead even when the target never converts`() = runTest {
+        // timeline-alignment step 2: the correction measures at the PLAYHEAD -- the reference heard
+        // at the current position -- because the target itself may never be covered. The fixture:
+        // the estimate carried a 60-second ad offset (anchors reference 198..202 ↔ playback
+        // 138..142), landing the playhead at 140 s for a reference target of 200 s. Matching then
+        // converges with anchors ONLY around the playhead, offsets 0, reference 138..142: the
+        // target at reference 200 s sits past the last anchor with an unplayed 60-second ad in
+        // between, so the direct conversion refuses it forever. The playhead, however, hears
+        // reference 140 s -- 60 s short of the target -- and the loop must seek forward by that
+        // difference. A loop that converts the target instead gets null here and never corrects:
+        // RED against a gate that only refuses.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(200.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(playbackTime = 138.0, referenceTime = 198.0),
+                FingerprintTimingManager.TimeMappingEntry(playbackTime = 142.0, referenceTime = 202.0),
+            ),
+        )
+        whenever(fingerprint.matchedReferenceTime(140_000)).thenReturn(null)
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 200_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have carried the observed 60 s ad offset (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:140"),
+        )
+
+        // CONVERGENCE with anchors only around the playhead: offsets 0, so the playhead hears
+        // reference 140 s. The target never converts (playbackTimeMs(200) stays null), and the
+        // correction must still happen -- 60 s forward from the playhead.
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(playbackTime = 138.0, referenceTime = 138.0),
+                FingerprintTimingManager.TimeMappingEntry(playbackTime = 142.0, referenceTime = 142.0),
+            ),
+        )
+        whenever(fingerprint.matchedReferenceTime(140_000)).thenReturn(140.0)
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "the target never converts, so the correction closes the playhead's own 60 s gap " +
+                "(calls=${deps.playback.calls})",
+            listOf("seekTo:140", "seekTo:200"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
     }

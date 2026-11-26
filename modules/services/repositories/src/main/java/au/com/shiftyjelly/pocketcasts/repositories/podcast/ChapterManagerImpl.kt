@@ -92,8 +92,13 @@ class ChapterManagerImpl @Inject constructor(
             }
             return chapters
         }
+        // ONE snapshot for the whole chapter list, and UNCOVERED chapters keep the offset the map
+        // has already observed: a chapter past the last anchor cannot be interpolated, but its raw
+        // reference time would slide every later marker earlier by the length of the ads already
+        // played.
+        val entries = manager.mappingSnapshot
         return alignGeneratedChapters(chapters) { reference ->
-            manager.playbackTimeMs(reference.toDouble(DurationUnit.SECONDS))?.milliseconds
+            manager.estimatedPlaybackTimeMs(reference.toDouble(DurationUnit.SECONDS), entries)?.milliseconds
         }
     }
 

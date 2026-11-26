@@ -1607,11 +1607,15 @@ class CloudRouteSink internal constructor(
      * the corrective seek remains episode-bound in the sink, so a change landing inside its final
      * step is refused by the owner rather than applied cross-episode.
      *
-     * CONVERGENCE IS READ OFF THE MAPPING, NOT OFF AN ANCHOR. Matching runs in wall-clock time, so
-     * new anchors sit past the seek point and the nearest one may predate it; anchor arithmetic
-     * would move the listener by that gap. Once the mapping covers the target, `playbackTimeMs`
-     * IS the target's place on the sink timeline. The loop ends when the mapped target is within
-     * threshold, when the cap is reached, or when the window closes without coverage.
+     * CONVERGENCE IS MEASURED AT THE PLAYHEAD. The difference to close is between the target's
+     * reference time and the reference time heard at the CURRENT position, and both sides must be
+     * covered: `matchedReferenceTime` reads the mapping at the playhead, which matching keeps
+     * covered, while the target itself may sit past an ad nobody has played yet. Converting the
+     * target directly would refuse there -- an inserted ad leaves the anchors around it far apart on
+     * the playback clock -- and the correction would never happen until playback itself reached the
+     * target. A seek by the difference moves the playhead to where the target's reference time is
+     * heard. The loop ends when the difference is within threshold, when the cap is reached, or when
+     * the window closes without a covered read.
      *
      * THE SUPPRESSION IS HELD ACROSS THE LOOP'S SUSPENSION, not around the seek call alone: the
      * watcher only runs while this loop is suspended, so an emission queued by the corrective seek
@@ -1647,11 +1651,12 @@ class CloudRouteSink internal constructor(
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
-                val mappedMs = fingerprintTimingManager.playbackTimeMs(targetReferenceMs / 1000.0)
+                val matchedReferenceSec = fingerprintTimingManager.matchedReferenceTime(positionMs)
                     ?: continue
-                val differenceMs = mappedMs - positionMs
+                val targetSec = targetReferenceMs / 1000.0
+                val differenceMs = ((targetSec - matchedReferenceSec) * 1000).toInt()
                 if (abs(differenceMs) <= (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()) return@launch
-                positionMs = mappedMs.coerceAtLeast(0)
+                positionMs = (positionMs + differenceMs).coerceAtLeast(0)
                 corrections += 1
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 ownSeekInFlight.set(true)

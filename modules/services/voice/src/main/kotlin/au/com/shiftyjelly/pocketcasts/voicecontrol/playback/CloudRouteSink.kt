@@ -79,6 +79,13 @@ class CloudRouteSink internal constructor(
      */
     private val episodeDurationSeconds: () -> Int = { 0 },
     /**
+     * The player's LIVE position in milliseconds, or null when it cannot be read. A correction
+     * measures at the playhead, not at the position the estimate asked for: playback has moved on
+     * by the time the mapping converges, and the reference heard there is what the target is
+     * compared against.
+     */
+    private val currentPlaybackPositionMs: (suspend () -> Int?)? = null,
+    /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
      * playback layer, so it does not advance the command revision and must be consulted separately.
@@ -166,6 +173,7 @@ class CloudRouteSink internal constructor(
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
         episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
+        currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
@@ -1651,12 +1659,18 @@ class CloudRouteSink internal constructor(
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
-                val matchedReferenceSec = fingerprintTimingManager.matchedReferenceTime(positionMs)
+                // MEASURED AT THE LIVE PLAYHEAD. `positionMs` is where the estimate asked the player
+                // to go; playback has moved on since, and the read that can actually be covered is
+                // the one at the current position. The reference the listener hears there is
+                // compared with the target PLUS the playback that has elapsed, since both sides must
+                // describe the same moment.
+                val playheadMs = currentPlaybackPositionMs?.invoke() ?: positionMs
+                val matchedReferenceSec = fingerprintTimingManager.matchedReferenceTime(playheadMs)
                     ?: continue
-                val targetSec = targetReferenceMs / 1000.0
-                val differenceMs = ((targetSec - matchedReferenceSec) * 1000).toInt()
+                val expectedReferenceSec = (targetReferenceMs + (playheadMs - positionMs)) / 1000.0
+                val differenceMs = ((expectedReferenceSec - matchedReferenceSec) * 1000).toInt()
                 if (abs(differenceMs) <= (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()) return@launch
-                positionMs = (positionMs + differenceMs).coerceAtLeast(0)
+                positionMs = (playheadMs + differenceMs).coerceAtLeast(0)
                 corrections += 1
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 ownSeekInFlight.set(true)

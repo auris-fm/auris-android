@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
-import java.net.ServerSocket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.Base64
@@ -371,7 +370,7 @@ class CloudFingerprintReferenceFetcherTest {
         // The fingerprint endpoint sends nothing until the fingerprint is ready (~95 s on a first
         // play). OkHttp's read timeout covers waiting for the response HEADERS, so a default client
         // carrying a 60 s read timeout would cut the request before the 150 s budget. RED AT 10 s:
-        // with the old default (readTimeout 60 s), this assertion fails on both fields.
+        // with the old default, the read assertion fails -- connect was already 10 s.
         val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "auris-access-token-1", null))
         val clientField = CloudFingerprintReferenceFetcher::class.java.getDeclaredField("client").apply { isAccessible = true }
         val client = clientField.get(fetcher) as OkHttpClient

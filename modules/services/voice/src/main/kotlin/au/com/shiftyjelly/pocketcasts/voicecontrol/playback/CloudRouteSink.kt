@@ -86,6 +86,17 @@ class CloudRouteSink internal constructor(
      * point, which would compare the target against a position playback has already left.
      */
     private val currentPlaybackPositionMs: suspend () -> Int?,
+    /** Wall-clock ms, injectable so the session cap can be tested without real waiting. */
+    private val wallClockNowMs: () -> Long = { System.currentTimeMillis() },
+    /**
+     * Whether the answer hold is still open: playback paused while the answer is spoken, resumed
+     * in place. While it is open the session's wall-clock cap has not started (timeline-alignment
+     * step 3: the cap counts from the hold's release, so a long spoken answer must not expire the
+     * session before matching can resume).
+     */
+    private val answerHoldOpen: () -> Boolean = { false },
+    /** Wall-clock ms at which the answer hold was released, or null while it is open or absent. */
+    private val answerHoldReleasedAtMs: () -> Long? = { null },
     /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
@@ -176,6 +187,9 @@ class CloudRouteSink internal constructor(
         episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
         currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
+        wallClockNowMs = { System.currentTimeMillis() },
+        answerHoldOpen = { gracePeriodSignal.answerHoldOpen },
+        answerHoldReleasedAtMs = { gracePeriodSignal.answerHoldReleasedAtMs },
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
         // turn's own pause when the answer completes, unless playback actually stopped or a user
@@ -1648,15 +1662,28 @@ class CloudRouteSink internal constructor(
             var corrections = 0
             var waitedMs = 0L
             var lastVersion = versionAtEstimate
+            val seekWallMs = wallClockNowMs()
             while (corrections < SEEK_MAX_CORRECTIONS) {
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 if (waitedMs >= SEEK_CORRECTION_WINDOW_MS) return@launch
+                // THE WALL-CLOCK CAP. In any case 120 s of wall time ends the session -- but it
+                // counts from the ANSWER HOLD'S RELEASE, not from the seek: the hold pauses
+                // playback while the answer is spoken, matching cannot advance during it, and a
+                // long answer must not expire the session before matching can resume. While the
+                // hold is open the cap has not started; with no hold at all the seek is the anchor.
+                if (!answerHoldOpen()) {
+                    val capAnchorMs = answerHoldReleasedAtMs() ?: seekWallMs
+                    if (wallClockNowMs() - capAnchorMs >= SEEK_CORRECTION_WALL_CAP_MS) return@launch
+                }
                 // THE DELAY IS WHERE THE WATCHER DRAINS, so the suppression from a corrective seek
                 // must still be set while it suspends: an emission queued by that seek is processed
                 // here, while it can still be recognized as our own. Cleared only after the drain.
                 delay(SEEK_CORRECTION_POLL_MS)
                 ownSeekInFlight.set(false)
-                waitedMs += SEEK_CORRECTION_POLL_MS
+                // THE WINDOW COUNTS PLAYING TIME. Matching only advances while audio plays, and
+                // the hold pauses playback while the answer is spoken, so wall time -- most of it
+                // spent paused -- would use the window up before matching could start.
+                if (isHostPlaying()) waitedMs += SEEK_CORRECTION_POLL_MS
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
@@ -1738,7 +1765,11 @@ class CloudRouteSink internal constructor(
         internal const val SEEK_MAX_CORRECTIONS = 2
 
         /** How long a correction waits for the mapping to converge before giving up. */
+        // (playing time -- see the loop comment)
         private const val SEEK_CORRECTION_WINDOW_MS = 60_000L
+
+        /** The session's wall-clock ceiling, anchored at the answer hold's release or the seek. */
+        private const val SEEK_CORRECTION_WALL_CAP_MS = 120_000L
 
         /** How often the correction loop re-reads its cancellation and convergence signals. */
         private const val SEEK_CORRECTION_POLL_MS = 250L

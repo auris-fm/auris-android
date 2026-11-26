@@ -271,11 +271,26 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
         val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        answerHoldReleasedAtMs = System.currentTimeMillis()
         finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 
     /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
     fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
+
+    /**
+     * THE ANSWER HOLD, as the seek-correction session reads it (timeline-alignment step 3): an
+     * output hold is playback paused while the answer is spoken and resumed in place. While one is
+     * open the correction session's wall-clock cap has not started; the cap anchors at the release
+     * recorded in [answerHoldReleasedAtMs].
+     */
+    val answerHoldOpen: Boolean
+        get() = synchronized(windowLock) { outputHolds.isNotEmpty() }
+
+    /** Wall-clock ms at which the last answer hold was released; null while none has. */
+    @Volatile
+    var answerHoldReleasedAtMs: Long? = null
+        private set
 
     /**
      * EXPLICIT NO-HANDOFF RELEASE (reviewer 664f82d0): the service could not hand off to the renderer

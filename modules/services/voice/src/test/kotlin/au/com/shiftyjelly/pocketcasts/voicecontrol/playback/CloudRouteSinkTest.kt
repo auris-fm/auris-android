@@ -2713,12 +2713,14 @@ class CloudRouteSinkTest {
 
     @Test
     fun `an unplayed ad between the seek and the target produces no correction`() = runTest {
-        // timeline-alignment step 2: an unplayed ad sits between where the estimate landed and the
-        // target. The listener plays THROUGH the ad and converges 10 s into the passage. Today's
-        // elapsed formula would compute the expected reference as target + elapsed (200 + 70) and
-        // jump the whole ad length past the passage start; the position rule locates the target at
-        // T = p + (target - r) = 210 + (200 - 210) = 200 s, which lies between the seek landing
-        // (140 s) and the playhead (210 s) -- playback reached it on its own, so no correction.
+        // timeline-alignment step 2: a 20-second unplayed ad sits between where the estimate landed
+        // and the target. The listener plays THROUGH the ad and converges 30 s after the seek, 10 s
+        // into the passage -- inside the 60-second correction window, so the loop is still alive and
+        // the case can actually fail. The elapsed formula would compute the expected reference as
+        // target + elapsed (200 + 30) against the matched 210 s and jump by the 20 s difference past
+        // the passage start; the position rule locates the target at
+        // T = p + (target - r) = 170 + (200 - 210) = 160 s, which lies between the seek landing
+        // (140 s) and the playhead (170 s) -- playback reached it on its own, so no correction.
         val fingerprint = FingerprintTimingManager(
             playbackManager = mock<PlaybackManager> {
                 on { playbackStateFlow }.thenReturn(kotlinx.coroutines.flow.MutableStateFlow(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState()))
@@ -2752,8 +2754,9 @@ class CloudRouteSinkTest {
                 CloudRouteEvent.Done(1, 0),
             ),
         )
-        // THE PLAYER RAN through the unplayed ad: the playhead now stands 10 s into the passage.
-        deps.playheadMs = 210_000
+        // THE PLAYER RAN through the unplayed ad: the playhead now stands 10 s into the passage,
+        // 30 s after the seek -- inside the correction window.
+        deps.playheadMs = 170_000
         val sink = deps.sink()
 
         sink.routeToCloud("play the passage", playbackContext, admitted = testWireId).feedback
@@ -2763,10 +2766,11 @@ class CloudRouteSinkTest {
             deps.playback.calls.contains("seekTo:140"),
         )
 
-        // CONVERGENCE 10 s INTO THE PASSAGE: anchors around the playhead, offset 0 (reference
-        // 198..202 <-> playback 208..212). Inserting bumps the version, which wakes the loop.
-        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 208.0, referenceTime = 198.0))
-        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 212.0, referenceTime = 202.0))
+        // CONVERGENCE 10 s INTO THE PASSAGE: the passage starts at reference 200 s, so playback
+        // 170 s -- 10 s into it -- carries reference 210 s (anchors playback 168..172 <-> reference
+        // 208..212, offset +40 s). Inserting bumps the version, which wakes the loop.
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 168.0, referenceTime = 208.0))
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 172.0, referenceTime = 212.0))
         advanceTimeBy(1_000)
         runCurrent()
 

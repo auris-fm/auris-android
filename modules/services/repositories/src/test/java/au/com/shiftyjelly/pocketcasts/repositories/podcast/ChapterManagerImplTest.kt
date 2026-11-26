@@ -12,9 +12,9 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.UserSetting
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.sharedtest.InMemoryFeatureFlagRule
+import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import au.com.shiftyjelly.pocketcasts.utils.AppPlatform
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.Feature
-import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import dagger.Lazy
 import java.util.Date
 import kotlin.time.Duration.Companion.milliseconds
@@ -27,6 +27,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
@@ -892,4 +893,141 @@ class ChapterManagerImplTest {
         DbChapter(index = 0, episodeUuid = "id", startTimeMs = 0, endTimeMs = 1, title = "Embedded", origin = ChapterOrigin.PodcastIndex),
         DbChapter(index = 1, episodeUuid = "id", startTimeMs = 1, endTimeMs = 2, title = "Generated", origin = ChapterOrigin.Generated),
     )
+
+    @Test
+    fun `a generated chapter past the last anchor keeps the ad offset the mapping already observed`() = runBlocking {
+        // Chapter positions go through the same reference→playback read as the seek paths, so the
+        // both-clocks bracket gate applies: a generated chapter past the last anchor is not covered
+        // and cannot be interpolated. It must NOT fall back to its raw reference time either -- the
+        // anchors already observed an ad, so the raw time would slide every later chapter marker
+        // earlier by the length of the ads already played. The call site uses the estimate: the
+        // reference time plus the offset the map has observed at the nearest covered point before.
+        //
+        // The map has observed a 60-second ad by playback 600 s (reference 540 s) and holds that
+        // offset to its last anchor (reference 560 s / playback 620 s), with dense anchors on both
+        // clocks around the ad. The chapter sits at reference 700 s -- past the last anchor.
+        val entries = listOf(
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 160.0, referenceTime = 104.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 600.0, referenceTime = 540.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 614.0, referenceTime = 554.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 620.0, referenceTime = 560.0),
+        )
+        // The episode must span the chapter: fixChapterTimestamps clamps chapter ends to the
+        // episode duration and drops non-positive-duration chapters.
+        val episode = PodcastEpisode("id", publishedDate = Date(), duration = 1200.0)
+        val dbChapter = DbChapter(
+            index = 0,
+            episodeUuid = "id",
+            startTimeMs = 700_000,
+            endTimeMs = 760_000,
+            title = "Past the last anchor",
+            origin = ChapterOrigin.Generated,
+        )
+        FeatureFlag.setEnabled(Feature.GENERATED_CHAPTERS, true)
+        whenever(chapterDao.observeChaptersForEpisode("id")).thenReturn(flowOf(listOf(dbChapter)))
+        whenever(episodeManager.findEpisodeByUuidFlow("id")).thenReturn(flowOf(episode))
+
+        // PHONE platform, so the alignment path actually runs, and a REAL estimate: the manager's
+        // snapshot is the anchor list above and the conversion delegates to the production function.
+        // A call site that reads the COVERED conversion instead gets null here and would leave the
+        // chapter on its raw reference time -- which is exactly the regression this test refuses.
+        val fingerprint = mock<FingerprintTimingManager> {
+            on { activeEpisodeUuid } doReturn "id"
+            on { mappingSnapshot } doReturn entries
+            on { referenceMappingSnapshot } doReturn entries
+            on { mappingVersion } doReturn MutableStateFlow(1L)
+        }
+        whenever(fingerprint.estimatedPlaybackTimeMs(any(), any())).thenAnswer {
+            FingerprintTimingManager.estimateUncovered(
+                it.getArgument<Double>(0),
+                it.getArgument(1),
+            )
+        }
+        val phoneManager = ChapterManagerImpl(
+            chapterDao = chapterDao,
+            episodeManager = episodeManager,
+            fingerprintTimingManager = Lazy { fingerprint },
+            appPlatform = AppPlatform.Phone,
+            settings = settings,
+        )
+
+        phoneManager.observerChaptersForEpisode("id").test {
+            val chapter = awaitItem().toList().single()
+            assertEquals(
+                "a chapter past the last anchor is placed at raw reference time PLUS the observed " +
+                    "60-second ad offset (start=${chapter.startTime})",
+                760.seconds,
+                chapter.startTime,
+            )
+            assertEquals(820.seconds, chapter.endTime)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `the chapter alignment reads a reference-ordered snapshot`() = runBlocking {
+        // `estimatedPlaybackTimeMs` binary-searches its entry list by REFERENCE time, so the call
+        // site must hand it the reference-ordered snapshot. The playback-ordered one agrees only
+        // while reference time strictly increases with playback time; a small backward reference
+        // step breaks that, and the binary search then brackets against the wrong anchors and
+        // misplaces the chapter. The two snapshots here carry the same three anchors but in their
+        // production orders, and the anchor set diverges (playback 104 s holds reference 106 s,
+        // playback 108 s holds reference 102 s). Read through the right list, reference 101 s sits
+        // between the anchors adjacent in reference order -- (100 s -> 100 s) and (102 s -> 108 s)
+        // -- and interpolates to playback 104 s; read through the playback-ordered list, the
+        // reference-time binary search brackets (100,100)-(104,106) instead and lands at 101.3 s.
+        val referenceOrdered = listOf(
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 108.0, referenceTime = 102.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 104.0, referenceTime = 106.0),
+        )
+        val playbackOrdered = listOf(
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 104.0, referenceTime = 106.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 108.0, referenceTime = 102.0),
+        )
+        val episode = PodcastEpisode("id", publishedDate = Date(), duration = 1200.0)
+        val dbChapter = DbChapter(
+            index = 0,
+            episodeUuid = "id",
+            startTimeMs = 101_000,
+            endTimeMs = 121_000,
+            title = "Between divergent anchors",
+            origin = ChapterOrigin.Generated,
+        )
+        FeatureFlag.setEnabled(Feature.GENERATED_CHAPTERS, true)
+        whenever(chapterDao.observeChaptersForEpisode("id")).thenReturn(flowOf(listOf(dbChapter)))
+        whenever(episodeManager.findEpisodeByUuidFlow("id")).thenReturn(flowOf(episode))
+        val fingerprint = mock<FingerprintTimingManager> {
+            on { activeEpisodeUuid } doReturn "id"
+            on { mappingSnapshot } doReturn playbackOrdered
+            on { referenceMappingSnapshot } doReturn referenceOrdered
+            on { mappingVersion } doReturn MutableStateFlow(1L)
+        }
+        whenever(fingerprint.estimatedPlaybackTimeMs(any(), any())).thenAnswer {
+            FingerprintTimingManager.estimateUncovered(
+                it.getArgument<Double>(0),
+                it.getArgument(1),
+            )
+        }
+        val phoneManager = ChapterManagerImpl(
+            chapterDao = chapterDao,
+            episodeManager = episodeManager,
+            fingerprintTimingManager = Lazy { fingerprint },
+            appPlatform = AppPlatform.Phone,
+            settings = settings,
+        )
+
+        phoneManager.observerChaptersForEpisode("id").test {
+            val chapter = awaitItem().toList().single()
+            assertEquals(
+                "reference 101 s sits between the anchors adjacent in REFERENCE order and must " +
+                    "interpolate to playback 104 s (start=${chapter.startTime})",
+                104.seconds,
+                chapter.startTime,
+            )
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }

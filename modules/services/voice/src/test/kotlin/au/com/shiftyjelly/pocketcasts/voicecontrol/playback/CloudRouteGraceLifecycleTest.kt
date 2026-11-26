@@ -346,6 +346,7 @@ class CloudRouteGraceLifecycleTest {
         cloudPlaybackContextState = CloudPlaybackContextState(),
         analytics = mock(),
         isHostPlaying = { false },
+        currentPlaybackPositionMs = { null },
         audioPlayer = player,
         gracePeriodSignal = signal,
     )

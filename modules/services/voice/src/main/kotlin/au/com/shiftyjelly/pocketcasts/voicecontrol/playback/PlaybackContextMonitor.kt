@@ -62,6 +62,16 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     /** The current episode's duration in seconds, for resolving a negative absolute position. */
     fun episodeDurationSeconds(): Int = playbackManager.getCurrentEpisode()?.duration?.toInt() ?: 0
 
+    /**
+     * Where the player actually is, in milliseconds, for a correction that must measure at the live
+     * playhead rather than at the position it asked for. Null when no episode is loaded: the caller
+     * skips that poll rather than measuring at a position playback has already left.
+     */
+    suspend fun currentPlaybackPositionMs(): Int? {
+        val episode = playbackManager.getCurrentEpisode() ?: return null
+        return playbackManager.getCurrentTimeMs(episode).takeIf { it >= 0 }
+    }
+
     /** Emits on every user-initiated seek or skip, so pending corrections can stand down. */
     val userSeeks: kotlinx.coroutines.flow.Flow<Unit> get() = playbackManager.userSeeks
 

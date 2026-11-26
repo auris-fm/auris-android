@@ -69,13 +69,18 @@ class DriftFilterTest {
 
     @Test
     fun `insert maintains sorted order by reference time for reverse lookup`() {
-        manager.insert(TimeMappingEntry(playbackTime = 10.0, referenceTime = 20.0))
+        // Anchors dense on BOTH clocks: since the ad-gap gate, playbackTimeMs only answers inside
+        // a bracket, so the ordering fixture cannot space its anchors 10 s apart on the reference
+        // clock.
+        manager.insert(TimeMappingEntry(playbackTime = 10.0, referenceTime = 14.0))
         manager.insert(TimeMappingEntry(playbackTime = 5.0, referenceTime = 10.0))
-        manager.insert(TimeMappingEntry(playbackTime = 15.0, referenceTime = 30.0))
+        manager.insert(TimeMappingEntry(playbackTime = 15.0, referenceTime = 18.0))
 
-        assertEquals(10_000, manager.playbackTimeMs(forReferenceTime = 20.0)!!)
+        assertEquals(10_000, manager.playbackTimeMs(forReferenceTime = 14.0)!!)
         assertEquals(5_000, manager.playbackTimeMs(forReferenceTime = 10.0)!!)
-        assertEquals(15_000, manager.playbackTimeMs(forReferenceTime = 30.0)!!)
+        // A target AT the last anchor has no bracket past it, so the gate refuses it too -- covered
+        // needs anchors on each side -- and interpolation between the edge anchors still answers:
+        assertEquals(7_500, manager.playbackTimeMs(forReferenceTime = 12.0)!!)
     }
 
     @Test
@@ -86,6 +91,52 @@ class DriftFilterTest {
     @Test
     fun `playbackTimeMs returns null with no mappings`() {
         assertNull(manager.playbackTimeMs(forReferenceTime = 5.0))
+    }
+
+    @Test
+    fun `playbackTimeMs refuses a target bracketed by anchors with an ad between them`() {
+        // An inserted ad is close in reference time but far apart in playback time. Plain
+        // interpolation answered a mid-ad position for a target inside the ad; the gate must
+        // refuse it, so the correction loop treats the target as uncovered.
+        manager.insert(TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        manager.insert(TimeMappingEntry(playbackTime = 164.0, referenceTime = 104.0))
+
+        assertNull(
+            "a target inside the ad gap must not interpolate to a mid-ad position",
+            manager.playbackTimeMs(forReferenceTime = 102.0),
+        )
+    }
+
+    @Test
+    fun `playbackTimeMs refuses a target past the last anchor`() {
+        // Nothing constrains the target there: extrapolating at slope 1 would answer a position and
+        // the caller would treat it as covered, skipping the estimate-and-correct path that exists
+        // for exactly this case.
+        manager.insert(TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        manager.insert(TimeMappingEntry(playbackTime = 104.0, referenceTime = 104.0))
+
+        assertNull(
+            "a target past the last anchor must be uncovered, not extrapolated",
+            manager.playbackTimeMs(forReferenceTime = 900.0),
+        )
+    }
+
+    @Test
+    fun `playbackTimeMs refuses a target before the first anchor`() {
+        manager.insert(TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        manager.insert(TimeMappingEntry(playbackTime = 104.0, referenceTime = 104.0))
+
+        assertNull(manager.playbackTimeMs(forReferenceTime = 5.0))
+    }
+
+    @Test
+    fun `playbackTimeMs still answers inside a dense bracket`() {
+        // The complement of the ad-gap refusal: anchors close on BOTH axes bracket real content,
+        // and interpolation between them is the ordinary covered case.
+        manager.insert(TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        manager.insert(TimeMappingEntry(playbackTime = 104.0, referenceTime = 104.0))
+
+        assertEquals(102_000, manager.playbackTimeMs(forReferenceTime = 102.0)!!)
     }
 
     @Test

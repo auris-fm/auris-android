@@ -79,6 +79,14 @@ class CloudRouteSink internal constructor(
      */
     private val episodeDurationSeconds: () -> Int = { 0 },
     /**
+     * The player's LIVE position in milliseconds, or null when it cannot be read. A correction
+     * measures at the playhead, not at the position the estimate asked for: playback has moved on
+     * by the time the mapping converges, and the reference heard there is what the target is
+     * compared against. A poll that cannot read it is skipped rather than measured at the seek
+     * point, which would compare the target against a position playback has already left.
+     */
+    private val currentPlaybackPositionMs: suspend () -> Int?,
+    /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
      * playback layer, so it does not advance the command revision and must be consulted separately.
@@ -166,6 +174,7 @@ class CloudRouteSink internal constructor(
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
         episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
+        currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
@@ -1607,11 +1616,15 @@ class CloudRouteSink internal constructor(
      * the corrective seek remains episode-bound in the sink, so a change landing inside its final
      * step is refused by the owner rather than applied cross-episode.
      *
-     * CONVERGENCE IS READ OFF THE MAPPING, NOT OFF AN ANCHOR. Matching runs in wall-clock time, so
-     * new anchors sit past the seek point and the nearest one may predate it; anchor arithmetic
-     * would move the listener by that gap. Once the mapping covers the target, `playbackTimeMs`
-     * IS the target's place on the sink timeline. The loop ends when the mapped target is within
-     * threshold, when the cap is reached, or when the window closes without coverage.
+     * CONVERGENCE IS MEASURED AT THE PLAYHEAD. At the live position `p`, with `r` the matched
+     * reference heard there, the target sits at `T = p + (target − r)`; `s` is where this action's
+     * estimate seek or last correction landed. `T` more than 3 s before `s` is overshoot -- the
+     * estimate assumed ads that are not there -- and more than 3 s after `p` means the target is
+     * still ahead; both seek to `T`. In between, playback reached the target on its own, and no
+     * correction happens: an unplayed ad between `s` and the target must not be jumped by its
+     * length. No elapsed-time term is used, so time inside an ad cannot shift the result. The loop
+     * ends when `T` is in range, at the correction cap, or when
+     * the window closes without a covered read.
      *
      * THE SUPPRESSION IS HELD ACROSS THE LOOP'S SUSPENSION, not around the seek call alone: the
      * watcher only runs while this loop is suspended, so an emission queued by the corrective seek
@@ -1647,11 +1660,24 @@ class CloudRouteSink internal constructor(
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
-                val mappedMs = fingerprintTimingManager.playbackTimeMs(targetReferenceMs / 1000.0)
+                // LOCATE THE TARGET FROM THE PLAYHEAD (timeline-alignment step 2). At the live
+                // position `p`, with `r` the matched reference heard there, the target sits at
+                // `T = p + (target − r)`. No elapsed-time term: time spent inside an ad, where
+                // nothing matches, must not shift the result. Seek to `T` only when it is more than
+                // 3 s BEFORE where this action's last seek landed (`positionMs` -- overshoot: the
+                // estimate assumed ads that are not there) or more than 3 s after `p` (the target is
+                // still ahead). In between, playback has reached the target on its own -- including
+                // through an unplayed ad, whose length must not be jumped over.
+                val playheadMs = currentPlaybackPositionMs() ?: continue
+                val matchedReferenceSec = fingerprintTimingManager.matchedReferenceTime(playheadMs)
                     ?: continue
-                val differenceMs = mappedMs - positionMs
-                if (abs(differenceMs) <= (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()) return@launch
-                positionMs = mappedMs.coerceAtLeast(0)
+                val targetLandingMs =
+                    (playheadMs + (targetReferenceMs / 1000.0 - matchedReferenceSec) * 1000).toInt()
+                val thresholdMs = (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()
+                val reachedOnItsOwn =
+                    targetLandingMs >= positionMs - thresholdMs && targetLandingMs <= playheadMs + thresholdMs
+                if (reachedOnItsOwn) return@launch
+                positionMs = targetLandingMs.coerceAtLeast(0)
                 corrections += 1
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 ownSeekInFlight.set(true)

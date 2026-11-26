@@ -85,15 +85,23 @@ class ChapterManagerImpl @Inject constructor(
      */
     private fun alignGeneratedChapters(episodeUuid: String, chapters: Chapters): Chapters {
         val manager = fingerprintTimingManager.get()
-        if (manager.activeEpisodeUuid != episodeUuid || manager.mappingSnapshot.isEmpty()) {
+        if (manager.activeEpisodeUuid != episodeUuid || manager.referenceMappingSnapshot.isEmpty()) {
             if (chapters.hasGeneratedChapters && unalignedLogEpisodeUuid != episodeUuid) {
                 unalignedLogEpisodeUuid = episodeUuid
                 LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Generated chapters for $episodeUuid are unaligned: no fingerprint mapping available")
             }
             return chapters
         }
+        // ONE snapshot for the whole chapter list, and UNCOVERED chapters keep the offset the map
+        // has already observed: a chapter past the last anchor cannot be interpolated, but its raw
+        // reference time would slide every later marker earlier by the length of the ads already
+        // played.
+        // REFERENCE-ORDERED: the conversion binary-searches by reference time, so the playback-
+        // ordered snapshot would bracket against the wrong anchors once a backward reference step
+        // makes the two orders disagree.
+        val entries = manager.referenceMappingSnapshot
         return alignGeneratedChapters(chapters) { reference ->
-            manager.playbackTimeMs(reference.toDouble(DurationUnit.SECONDS))?.milliseconds
+            manager.estimatedPlaybackTimeMs(reference.toDouble(DurationUnit.SECONDS), entries)?.milliseconds
         }
     }
 

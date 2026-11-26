@@ -388,6 +388,14 @@ class FingerprintTimingManager @Inject constructor(
     val state: State get() = _stateFlow.value
     val mappingSnapshot: List<TimeMappingEntry> get() = snapshotPlaybackToReference
 
+    /**
+     * The same anchors ordered by REFERENCE time. Consumers that convert reference→playback --
+     * which binary-search by reference time -- must read this list: the two orders agree only
+     * while reference time strictly increases with playback time, and a small backward reference
+     * step breaks that agreement.
+     */
+    val referenceMappingSnapshot: List<TimeMappingEntry> get() = snapshotReferenceToPlayback
+
     // Monotonic counter bumped on every snapshot publish, so consumers can react to mapping growth.
     private val _mappingVersion = MutableStateFlow(0L)
     val mappingVersion: StateFlow<Long> = _mappingVersion.asStateFlow()
@@ -892,15 +900,17 @@ class FingerprintTimingManager @Inject constructor(
         )
     }
 
-    fun playbackTimeMs(forReferenceTime: Double): Int? {
-        val result = interpolate(
-            time = forReferenceTime,
-            entries = snapshotReferenceToPlayback,
-            keySelector = { it.referenceTime },
-            valueSelector = { it.playbackTime },
-        ) ?: return null
-        return (result * 1000).toInt()
-    }
+    fun playbackTimeMs(forReferenceTime: Double): Int? = playbackTimeMs(forReferenceTime, snapshotReferenceToPlayback)
+
+    /**
+     * Uncovered-tolerant conversion for a position that may not be covered, over ONE snapshot: the
+     * covered read when the target is bracketed, otherwise its own reference time plus the offset
+     * the map has already observed at the nearest covered point before it. See the companion
+     * function for why dropping that offset would slide everything after an ad earlier by the ad's
+     * length. Null only when there is no map at all.
+     */
+    fun estimatedPlaybackTimeMs(forReferenceTime: Double, entries: List<TimeMappingEntry>): Int? =
+        estimateUncovered(forReferenceTime, entries)
 
     @Volatile
     private var lastMatchedContentResult = true
@@ -1876,6 +1886,41 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     companion object {
+        /**
+         * Reference→playback conversion over an explicit map, so a whole sequence can be placed
+         * against ONE snapshot.
+         *
+         * COVERED ONLY INSIDE A BRACKET: an inserted ad sits between anchors that are close in
+         * reference time but far apart in playback time, and past the last anchor nothing says where
+         * the target lies. `densePlaybackSec` applies the covered rule the spec states -- the
+         * bracketing anchors no more than `HIGHLIGHT_MAX_GAP_SECONDS` apart on EACH clock, and no
+         * answer at all outside the anchors.
+         */
+        internal fun playbackTimeMs(forReferenceTime: Double, entries: List<TimeMappingEntry>): Int? {
+            val result = densePlaybackSec(
+                referenceTimeSec = forReferenceTime,
+                entries = entries,
+                allowTrailingGrace = false,
+            ) ?: return null
+            return (result * 1000).toInt()
+        }
+
+        /**
+         * Reference→playback conversion for a position that may not be covered: the covered read
+         * when the target is bracketed, otherwise its own reference time plus the offset the map has
+         * already observed at the nearest covered point before it. Interpolating across an ad is
+         * wrong, but so is dropping the ad offset -- that would slide everything after an ad earlier
+         * by the ad's length. Null only when there is no map at all.
+         */
+        internal fun estimateUncovered(forReferenceTime: Double, entries: List<TimeMappingEntry>): Int? {
+            playbackTimeMs(forReferenceTime, entries)?.let { return it }
+            val nearest = entries
+                .filter { it.referenceTime <= forReferenceTime }
+                .maxByOrNull { it.referenceTime }
+                ?: return null
+            return ((forReferenceTime + (nearest.playbackTime - nearest.referenceTime)) * 1000).toInt()
+        }
+
         /** Core eager-pass gate (assumes the platform check already passed). */
         internal fun computeEager(
             hasGeneratedChapters: Boolean,

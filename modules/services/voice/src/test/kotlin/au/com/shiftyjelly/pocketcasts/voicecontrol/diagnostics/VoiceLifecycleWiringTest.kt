@@ -88,7 +88,7 @@ class VoiceLifecycleWiringTest {
                     templateResolver = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver(emptyMap()),
                     currentLocale = { java.util.Locale.ENGLISH }, playbackContextMonitor = monitor,
                     audioPlayer = null, gracePeriodSignal = signal,
-                )
+                                    )
                 val prepared = sink.prepareTurn(
                     request = "PRIVATE UTTERANCE", context = PlaybackContext(),
                     isLiveGraceTurn = true, capturedOrigin = signal.currentGeneration, isWakeOriginated = true,

@@ -86,8 +86,13 @@ class CloudRouteSink internal constructor(
      * point, which would compare the target against a position playback has already left.
      */
     private val currentPlaybackPositionMs: suspend () -> Int?,
-    /** Wall-clock ms, injected so the session cap can be driven without real waiting. */
-    private val wallClockNowMs: () -> Long,
+    /**
+     * Monotonic elapsed ms (`SystemClock.elapsedRealtime` in production), injected so the session
+     * cap can be driven without real waiting. The cap measures a DURATION, so it must not ride the
+     * wall clock: a network time sync between the seek and the convergence would end the correction
+     * early or stretch it far past the cap.
+     */
+    private val elapsedNowMs: () -> Long,
     /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
@@ -178,7 +183,7 @@ class CloudRouteSink internal constructor(
         episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
         currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
-        wallClockNowMs = { System.currentTimeMillis() },
+        elapsedNowMs = { android.os.SystemClock.elapsedRealtime() },
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
         // turn's own pause when the answer completes, unless playback actually stopped or a user
@@ -1240,7 +1245,7 @@ class CloudRouteSink internal constructor(
      * turn mutex: a poll sees "held" (no cap check) or "released at T", never the in-between.
      */
     private fun releaseAutoPause() {
-        pauseReleasedAtMs = wallClockNowMs()
+        pauseReleasedAtMs = elapsedNowMs()
         playerAutoPaused = false
     }
 
@@ -1675,7 +1680,7 @@ class CloudRouteSink internal constructor(
             var corrections = 0
             var waitedMs = 0L
             var lastVersion = versionAtEstimate
-            val seekWallMs = wallClockNowMs()
+            val seekWallMs = elapsedNowMs()
             while (corrections < SEEK_MAX_CORRECTIONS) {
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 if (waitedMs >= SEEK_CORRECTION_WINDOW_MS) return@launch
@@ -1690,7 +1695,7 @@ class CloudRouteSink internal constructor(
                     // minutes ago would already be past the cap on this action's first poll and end
                     // a correction before it starts.
                     val capAnchorMs = maxOf(seekWallMs, pauseReleasedAtMs ?: seekWallMs)
-                    if (wallClockNowMs() - capAnchorMs >= SEEK_CORRECTION_WALL_CAP_MS) return@launch
+                    if (elapsedNowMs() - capAnchorMs >= SEEK_CORRECTION_WALL_CAP_MS) return@launch
                 }
                 // THE DELAY IS WHERE THE WATCHER DRAINS, so the suppression from a corrective seek
                 // must still be set while it suspends: an emission queued by that seek is processed

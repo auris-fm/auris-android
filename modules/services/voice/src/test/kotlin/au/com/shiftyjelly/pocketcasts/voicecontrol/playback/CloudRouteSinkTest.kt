@@ -4721,8 +4721,9 @@ class CloudRouteSinkTest {
         transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     ) {
         /**
-         * The wall clock the correction session reads. Cases move it forward beside the virtual
-         * scheduler so the session's wall-clock cap can be driven without real waiting.
+         * Monotonic elapsed ms, as production feeds it from `SystemClock.elapsedRealtime`. Cases
+         * move it forward beside the virtual scheduler so the session's cap can be driven without
+         * real waiting.
          */
         var wallClockMs: Long = 0L
         /** The host's playback state, moved by the fake sink the way a player would. */
@@ -4779,7 +4780,7 @@ class CloudRouteSinkTest {
             templateResolver = templateResolver,
             currentLocale = localeProvider,
             isHostPlaying = { host.playing },
-            wallClockNowMs = { wallClockMs },
+            elapsedNowMs = { wallClockMs },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
             privacyClosureCount = { playbackStopClosures },

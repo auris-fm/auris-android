@@ -237,7 +237,7 @@ class VoiceAsrCloudLanguageTest {
             cloudPlaybackContextState = CloudPlaybackContextState(), analytics = mock(), okHttpClient = client,
             isHostPlaying = { false }, gracePeriodSignal = signal, currentLocale = { java.util.Locale.JAPANESE },
             currentPlaybackPositionMs = { null },
-            wallClockNowMs = { 0L },
+            elapsedNowMs = { 0L },
         )
         val executor = VoicePlaybackIntentExecutor(
             playback, mock(), mock(), mock(), mock(), mock(), sink, provider, mock(), mock(), mock(), signal, mock(), mock(),

@@ -2575,18 +2575,18 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a correction compares the reference heard at the live playhead with the target plus elapsed playback`() = runTest {
-        // timeline-alignment step 2, driven through a REAL fingerprint manager: the estimate map
-        // holds a covered pair with an 80-second ad offset (reference 198..202 <-> playback
-        // 118..122), so the seek lands at playback 120 s for a reference target of 200 s. The
-        // player then runs 12 seconds; matching converges with new anchors around where the
-        // playhead NOW is (reference 130..134 <-> playback 130..134, offset 0).
+    fun `an estimate that landed early seeks forward to the located target`() = runTest {
+        // timeline-alignment step 2, driven through a REAL fingerprint manager. The estimate map
+        // holds a stale 80-second offset (reference 198..202 <-> playback 118..122), so the seek
+        // lands at playback 120 s for a reference target of 200 s -- before the target. The player
+        // then runs 12 seconds; matching converges with new anchors around where the playhead NOW
+        // is (reference 132..136 <-> playback 132..136, offset 0).
         //
-        // The difference to close is between the target PLUS the playback elapsed since the seek
-        // (200 + 12 = 212 s) and the reference heard at the playhead (132 s): 80 s, seek to 212 s.
-        // A loop that reads at the estimate point finds nothing there and never corrects; one that
-        // converts the target against the new anchors answers 120 s and thinks it has converged --
-        // ten... eighty short. Only the playhead measurement corrects.
+        // At the playhead p = 132 s the matched reference is r = 132 s, so the target sits at
+        // T = p + (target - r) = 132 + (200 - 132) = 200 s. That is 80 s after the playhead --
+        // still ahead -- so the loop seeks to 200 s. A loop that reads at the estimate point finds
+        // nothing there and never corrects; one that converts the target against the new anchors
+        // answers 120 s and calls itself converged. Only the playhead measurement corrects.
         val fingerprint = FingerprintTimingManager(
             playbackManager = mock<PlaybackManager> {
                 on { playbackStateFlow }.thenReturn(kotlinx.coroutines.flow.MutableStateFlow(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState()))
@@ -2639,8 +2639,133 @@ class CloudRouteSinkTest {
         runCurrent()
 
         assertEquals(
-            "the correction lands on target plus elapsed playback, 212 s (calls=${deps.playback.calls})",
-            listOf("seekTo:120", "seekTo:212"),
+            "the correction seeks to the target located from the playhead, 200 s (calls=${deps.playback.calls})",
+            listOf("seekTo:120", "seekTo:200"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `an unplayed ad between the seek and the target produces no correction`() = runTest {
+        // timeline-alignment step 2: an unplayed ad sits between where the estimate landed and the
+        // target. The listener plays THROUGH the ad and converges 10 s into the passage. Today's
+        // elapsed formula would compute the expected reference as target + elapsed (200 + 70) and
+        // jump the whole ad length past the passage start; the position rule locates the target at
+        // T = p + (target - r) = 210 + (200 - 210) = 200 s, which lies between the seek landing
+        // (140 s) and the playhead (210 s) -- playback reached it on its own, so no correction.
+        val fingerprint = FingerprintTimingManager(
+            playbackManager = mock<PlaybackManager> {
+                on { playbackStateFlow }.thenReturn(kotlinx.coroutines.flow.MutableStateFlow(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState()))
+            },
+            referenceRetriever = mock(),
+            eventHorizon = mock<EventHorizon>(),
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            chapterManager = Lazy { mock<ChapterManager>() },
+            settings = mock<Settings>(),
+            dataSourceFactory = Lazy { mock<ExoPlayerDataSourceFactory>() },
+            pcmTap = FingerprintPcmTap(),
+            cloudConfig = mock<SharedPreferencesCloudConfig>(),
+            cloudFetcher = mock(),
+            cloudReferenceStore = mock(),
+            decodePolicy = mock<FingerprintDecodePolicy>(),
+        )
+        // THE ESTIMATE MAP: a stale 60-second offset, so the target takes the estimate path and the
+        // seek lands at playback 140 s for a reference target of 200 s.
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 160.0))
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 104.0, referenceTime = 164.0))
+
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 200_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // THE PLAYER RAN through the unplayed ad: the playhead now stands 10 s into the passage.
+        deps.playheadMs = 210_000
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the passage", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the seek must have landed at the estimate (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:140"),
+        )
+
+        // CONVERGENCE 10 s INTO THE PASSAGE: anchors around the playhead, offset 0 (reference
+        // 198..202 <-> playback 208..212). Inserting bumps the version, which wakes the loop.
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 208.0, referenceTime = 198.0))
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 212.0, referenceTime = 202.0))
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "no correction may follow -- the target lies between the seek and the playhead (calls=${deps.playback.calls})",
+            listOf("seekTo:140"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a correct estimate converging after playback needs no correction`() = runTest {
+        // timeline-alignment step 2: the estimate was right (offset 0), the listener plays 10 s
+        // past the seek, and matching converges there. The target locates to T = 210 + (200 - 210)
+        // = 200 s, between the seek landing (200 s) and the playhead (210 s) -- reached on its own,
+        // no correction. The elapsed formula would demand target + 10 = 210 and "correct" forward.
+        val fingerprint = FingerprintTimingManager(
+            playbackManager = mock<PlaybackManager> {
+                on { playbackStateFlow }.thenReturn(kotlinx.coroutines.flow.MutableStateFlow(au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState()))
+            },
+            referenceRetriever = mock(),
+            eventHorizon = mock<EventHorizon>(),
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            chapterManager = Lazy { mock<ChapterManager>() },
+            settings = mock<Settings>(),
+            dataSourceFactory = Lazy { mock<ExoPlayerDataSourceFactory>() },
+            pcmTap = FingerprintPcmTap(),
+            cloudConfig = mock<SharedPreferencesCloudConfig>(),
+            cloudFetcher = mock(),
+            cloudReferenceStore = mock(),
+            decodePolicy = mock<FingerprintDecodePolicy>(),
+        )
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 104.0, referenceTime = 104.0))
+
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 200_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        deps.playheadMs = 210_000
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the passage", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the seek must have landed at the estimate (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:200"),
+        )
+
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 208.0, referenceTime = 208.0))
+        fingerprint.insert(FingerprintTimingManager.TimeMappingEntry(playbackTime = 212.0, referenceTime = 212.0))
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "no correction may follow (calls=${deps.playback.calls})",
+            listOf("seekTo:200"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
     }

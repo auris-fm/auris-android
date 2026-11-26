@@ -1616,14 +1616,14 @@ class CloudRouteSink internal constructor(
      * the corrective seek remains episode-bound in the sink, so a change landing inside its final
      * step is refused by the owner rather than applied cross-episode.
      *
-     * CONVERGENCE IS MEASURED AT THE PLAYHEAD. The difference to close is between the target's
-     * reference time and the reference time heard at the CURRENT position, and both sides must be
-     * covered: `matchedReferenceTime` reads the mapping at the playhead, which matching keeps
-     * covered, while the target itself may sit past an ad nobody has played yet. Converting the
-     * target directly would refuse there -- an inserted ad leaves the anchors around it far apart on
-     * the playback clock -- and the correction would never happen until playback itself reached the
-     * target. A seek by the difference moves the playhead to where the target's reference time is
-     * heard. The loop ends when the difference is within threshold, when the cap is reached, or when
+     * CONVERGENCE IS MEASURED AT THE PLAYHEAD. At the live position `p`, with `r` the matched
+     * reference heard there, the target sits at `T = p + (target − r)`; `s` is where this action's
+     * estimate seek or last correction landed. `T` more than 3 s before `s` is overshoot -- the
+     * estimate assumed ads that are not there -- and more than 3 s after `p` means the target is
+     * still ahead; both seek to `T`. In between, playback reached the target on its own, and no
+     * correction happens: an unplayed ad between `s` and the target must not be jumped by its
+     * length. No elapsed-time term is used, so time inside an ad cannot shift the result. The loop
+     * ends when `T` is in range, at the correction cap, or when
      * the window closes without a covered read.
      *
      * THE SUPPRESSION IS HELD ACROSS THE LOOP'S SUSPENSION, not around the seek call alone: the
@@ -1660,18 +1660,24 @@ class CloudRouteSink internal constructor(
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
-                // MEASURED AT THE LIVE PLAYHEAD. `positionMs` is where the estimate asked the player
-                // to go; playback has moved on since, and the read that can actually be covered is
-                // the one at the current position. The reference the listener hears there is
-                // compared with the target PLUS the playback that has elapsed, since both sides must
-                // describe the same moment.
+                // LOCATE THE TARGET FROM THE PLAYHEAD (timeline-alignment step 2). At the live
+                // position `p`, with `r` the matched reference heard there, the target sits at
+                // `T = p + (target − r)`. No elapsed-time term: time spent inside an ad, where
+                // nothing matches, must not shift the result. Seek to `T` only when it is more than
+                // 3 s BEFORE where this action's last seek landed (`positionMs` -- overshoot: the
+                // estimate assumed ads that are not there) or more than 3 s after `p` (the target is
+                // still ahead). In between, playback has reached the target on its own -- including
+                // through an unplayed ad, whose length must not be jumped over.
                 val playheadMs = currentPlaybackPositionMs() ?: continue
                 val matchedReferenceSec = fingerprintTimingManager.matchedReferenceTime(playheadMs)
                     ?: continue
-                val expectedReferenceSec = (targetReferenceMs + (playheadMs - positionMs)) / 1000.0
-                val differenceMs = ((expectedReferenceSec - matchedReferenceSec) * 1000).toInt()
-                if (abs(differenceMs) <= (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()) return@launch
-                positionMs = (playheadMs + differenceMs).coerceAtLeast(0)
+                val targetLandingMs =
+                    (playheadMs + (targetReferenceMs / 1000.0 - matchedReferenceSec) * 1000).toInt()
+                val thresholdMs = (SEEK_CORRECTION_THRESHOLD_SECONDS * 1000).toInt()
+                val reachedOnItsOwn =
+                    targetLandingMs >= positionMs - thresholdMs && targetLandingMs <= playheadMs + thresholdMs
+                if (reachedOnItsOwn) return@launch
+                positionMs = targetLandingMs.coerceAtLeast(0)
                 corrections += 1
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 ownSeekInFlight.set(true)

@@ -347,6 +347,9 @@ class CloudRouteGraceLifecycleTest {
         analytics = mock(),
         isHostPlaying = { false },
         currentPlaybackPositionMs = { null },
+        wallClockNowMs = { 0L },
+        answerHoldOpen = { false },
+        answerHoldReleasedAtMs = { null },
         audioPlayer = player,
         gracePeriodSignal = signal,
     )

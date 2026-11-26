@@ -86,17 +86,17 @@ class CloudRouteSink internal constructor(
      * point, which would compare the target against a position playback has already left.
      */
     private val currentPlaybackPositionMs: suspend () -> Int?,
-    /** Wall-clock ms, injectable so the session cap can be tested without real waiting. */
-    private val wallClockNowMs: () -> Long = { System.currentTimeMillis() },
+    /** Wall-clock ms, injected so the session cap can be driven without real waiting. */
+    private val wallClockNowMs: () -> Long,
     /**
      * Whether the answer hold is still open: playback paused while the answer is spoken, resumed
      * in place. While it is open the session's wall-clock cap has not started (timeline-alignment
      * step 3: the cap counts from the hold's release, so a long spoken answer must not expire the
      * session before matching can resume).
      */
-    private val answerHoldOpen: () -> Boolean = { false },
+    private val answerHoldOpen: () -> Boolean,
     /** Wall-clock ms at which the answer hold was released, or null while it is open or absent. */
-    private val answerHoldReleasedAtMs: () -> Long? = { null },
+    private val answerHoldReleasedAtMs: () -> Long?,
     /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
@@ -1672,7 +1672,11 @@ class CloudRouteSink internal constructor(
                 // long answer must not expire the session before matching can resume. While the
                 // hold is open the cap has not started; with no hold at all the seek is the anchor.
                 if (!answerHoldOpen()) {
-                    val capAnchorMs = answerHoldReleasedAtMs() ?: seekWallMs
+                    // ONLY A RELEASE AFTER THIS ACTION'S SEEK MOVES THE ANCHOR. The signal records
+                    // the last hold any turn released; anchored naively, a previous turn's release
+                    // minutes ago would already be past the cap on this action's first poll and end
+                    // a correction before it starts.
+                    val capAnchorMs = maxOf(seekWallMs, answerHoldReleasedAtMs() ?: seekWallMs)
                     if (wallClockNowMs() - capAnchorMs >= SEEK_CORRECTION_WALL_CAP_MS) return@launch
                 }
                 // THE DELAY IS WHERE THE WATCHER DRAINS, so the suppression from a corrective seek

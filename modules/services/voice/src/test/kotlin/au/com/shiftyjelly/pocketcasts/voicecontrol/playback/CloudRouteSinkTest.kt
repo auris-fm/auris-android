@@ -2647,6 +2647,135 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a hold released before this action's seek does not anchor its cap`() = runTest {
+        // THE STALE ANCHOR. The signal records the last hold any turn released. Anchored without a
+        // floor, a release minutes before this action's seek would already be past the 120 s cap on
+        // the FIRST poll, ending a correction that never started. The cap anchor must be the later
+        // of the seek and the release: here a release at wall 0, a seek at 10:00, convergence 30 s
+        // later -- inside every bound -- must still correct.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // A PREVIOUS TURN released its hold long ago; this action has none of its own.
+        deps.answerHoldReleasedAtMs = 0L
+        deps.wallClockMs = 600_000L
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        advanceTimeBy(250)
+        runCurrent()
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        deps.wallClockMs = 630_000L
+        advanceTimeBy(30_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "an older turn's hold release must not end this action's correction (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `the app's own answer hold pauses playback without cancelling the correction`() = runTest {
+        // plan step 7, the NON-trigger, done the way the hold actually works: the turn pauses to
+        // hold the user's place while the answer is spoken and resumes in place. Its pause and
+        // resume carry the VOICE_COMMANDS tag, so they never bump the command revision and never
+        // emit on the user-seek stream -- that is why the hold cannot cancel a pending correction.
+        // This case plays exactly that: hold open, then released, with the revision and the seek
+        // stream untouched, and the correction must still land after the release.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        advanceTimeBy(250)
+        runCurrent()
+        val revisionBeforeHold = deps.commandRevision
+        // THE ANSWER IS SPOKEN: the app pauses the player for 20 s, then resumes in place. No
+        // revision bump, no user-seek emission -- the voice path's own commands.
+        deps.answerHoldOpen = true
+        deps.host.playing = false
+        deps.wallClockMs = 20_000L
+        advanceTimeBy(20_000)
+        runCurrent()
+        deps.answerHoldOpen = false
+        deps.answerHoldReleasedAtMs = 20_000L
+        deps.host.playing = true
+        assertEquals("the app's own pause must not advance the command revision", revisionBeforeHold, deps.commandRevision)
+        // CONVERGENCE after the hold released, inside the window: still corrects.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        deps.wallClockMs = 40_000L
+        advanceTimeBy(20_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "the app's own answer hold must not cancel the correction (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
     fun `a mapping that never converges gives up after sixty seconds of playing time`() = runTest {
         // timeline-alignment step 3 / plan step 6: the give-up case. With the host playing the
         // whole time, 60 s of playing time is 60 s of wall time, so the loop ends and a

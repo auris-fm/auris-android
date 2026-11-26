@@ -99,6 +99,9 @@ class CloudConversationAcknowledgementTest {
         audioPlayer = null,
         gracePeriodSignal = signal,
     currentPlaybackPositionMs = { null },
+    wallClockNowMs = { 0L },
+    answerHoldOpen = { false },
+    answerHoldReleasedAtMs = { null },
     )
 
     @Test

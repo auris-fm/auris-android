@@ -2615,10 +2615,8 @@ class VoiceAsrEngineTest {
             privacyClosureCount = { 0 },
             episodeDurationSeconds = { 0 },
             audioPlayer = mock(),
-        currentPlaybackPositionMs = { null },
-        wallClockNowMs = { 0L },
-        playerPauseOpen = { false },
-        playerPauseReleasedAtMs = { null },
+            currentPlaybackPositionMs = { null },
+            wallClockNowMs = { 0L },
         )
         conversationAdmission.beginOrigin(stampedCloud.windowGeneration ?: 0L)
         val prepared = sink.prepareTurn(

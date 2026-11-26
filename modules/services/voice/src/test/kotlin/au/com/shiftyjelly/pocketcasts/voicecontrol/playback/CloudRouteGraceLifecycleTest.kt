@@ -348,8 +348,6 @@ class CloudRouteGraceLifecycleTest {
         isHostPlaying = { false },
         currentPlaybackPositionMs = { null },
         wallClockNowMs = { 0L },
-        playerPauseOpen = { false },
-        playerPauseReleasedAtMs = { null },
         audioPlayer = player,
         gracePeriodSignal = signal,
     )

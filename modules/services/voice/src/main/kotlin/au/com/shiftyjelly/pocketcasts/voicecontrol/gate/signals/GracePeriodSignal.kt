@@ -270,8 +270,17 @@ class GracePeriodSignal @Inject constructor() {
      * stopped rather than finished.
      */
     fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
-        val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
-        answerHoldReleasedAtMs = System.currentTimeMillis()
+        // THE RELEASE STAMP IS SET UNDER THE LOCK, BEFORE THE REMOVAL. A correction poll between
+        // the two would see no hold open and no new release, anchoring at the seek -- after an
+        // answer longer than the cap, the session would then give up at the very moment the hold
+        // ends. Readers of [answerHoldOpen] and [answerHoldReleasedAtMs] observe the pair under the
+        // same lock, so no poll can see the in-between state.
+        val (hold, releaseAt) = synchronized(windowLock) {
+            val removed = outputHolds.remove(requestId) ?: return
+            val at = System.currentTimeMillis()
+            answerHoldReleasedAtMs = at
+            removed to at
+        }
         finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 
@@ -287,7 +296,11 @@ class GracePeriodSignal @Inject constructor() {
     val answerHoldOpen: Boolean
         get() = synchronized(windowLock) { outputHolds.isNotEmpty() }
 
-    /** Wall-clock ms at which the last answer hold was released; null while none has. */
+    /**
+     * Wall-clock ms at which the last answer hold was released; null while none has. Written under
+     * [windowLock] in [finishOutputHold]; read it under the same lock when the open/closed state
+     * must pair with it, so no reader sees the hold removed and the release not yet stamped.
+     */
     @Volatile
     var answerHoldReleasedAtMs: Long? = null
         private set

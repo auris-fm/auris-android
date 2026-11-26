@@ -188,8 +188,8 @@ class CloudRouteSink internal constructor(
         currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
         wallClockNowMs = { System.currentTimeMillis() },
-        answerHoldOpen = { gracePeriodSignal.answerHoldOpen },
-        answerHoldReleasedAtMs = { gracePeriodSignal.answerHoldReleasedAtMs },
+        answerHoldOpen = gracePeriodSignal::answerHoldOpen,
+        answerHoldReleasedAtMs = gracePeriodSignal::answerHoldReleasedAtMs,
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
         // turn's own pause when the answer completes, unless playback actually stopped or a user

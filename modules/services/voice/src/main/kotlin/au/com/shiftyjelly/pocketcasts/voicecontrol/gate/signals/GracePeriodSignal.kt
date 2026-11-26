@@ -270,39 +270,12 @@ class GracePeriodSignal @Inject constructor() {
      * stopped rather than finished.
      */
     fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
-        // THE RELEASE STAMP IS SET UNDER THE LOCK, BEFORE THE REMOVAL. A correction poll between
-        // the two would see no hold open and no new release, anchoring at the seek -- after an
-        // answer longer than the cap, the session would then give up at the very moment the hold
-        // ends. Readers of [answerHoldOpen] and [answerHoldReleasedAtMs] observe the pair under the
-        // same lock, so no poll can see the in-between state.
-        val hold = synchronized(windowLock) {
-            val removed = outputHolds.remove(requestId) ?: return
-            answerHoldReleasedAtMs = System.currentTimeMillis()
-            removed
-        }
+        val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
         finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 
     /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
     fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
-
-    /**
-     * THE ANSWER HOLD, as the seek-correction session reads it (timeline-alignment step 3): an
-     * output hold is playback paused while the answer is spoken and resumed in place. While one is
-     * open the correction session's wall-clock cap has not started; the cap anchors at the release
-     * recorded in [answerHoldReleasedAtMs].
-     */
-    val answerHoldOpen: Boolean
-        get() = synchronized(windowLock) { outputHolds.isNotEmpty() }
-
-    /**
-     * Wall-clock ms at which the last answer hold was released; null while none has. Written under
-     * [windowLock] in [finishOutputHold]; read it under the same lock when the open/closed state
-     * must pair with it, so no reader sees the hold removed and the release not yet stamped.
-     */
-    @Volatile
-    var answerHoldReleasedAtMs: Long? = null
-        private set
 
     /**
      * EXPLICIT NO-HANDOFF RELEASE (reviewer 664f82d0): the service could not hand off to the renderer

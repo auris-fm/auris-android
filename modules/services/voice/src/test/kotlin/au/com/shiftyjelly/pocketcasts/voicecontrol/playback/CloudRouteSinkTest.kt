@@ -2610,7 +2610,7 @@ class CloudRouteSinkTest {
             ),
         )
         // THE ANSWER IS SPOKEN for 130 s: hold open the whole time, host paused.
-        deps.answerHoldOpen = true
+        deps.playerPauseOpen = true
         deps.host.playing = false
         val sink = deps.sink()
 
@@ -2629,8 +2629,8 @@ class CloudRouteSinkTest {
         runCurrent()
 
         // THE HOLD RELEASES; playback resumes and matching converges 40 s into it.
-        deps.answerHoldOpen = false
-        deps.answerHoldReleasedAtMs = 130_000L
+        deps.playerPauseOpen = false
+        deps.playerPauseReleasedAtMs = 130_000L
         deps.host.playing = true
         whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
         advanceTimeBy(40_000)
@@ -2678,7 +2678,7 @@ class CloudRouteSinkTest {
             ),
         )
         // A PREVIOUS TURN released its hold long ago; this action has none of its own.
-        deps.answerHoldReleasedAtMs = 0L
+        deps.playerPauseReleasedAtMs = 0L
         deps.wallClockMs = 600_000L
         val sink = deps.sink()
 
@@ -2706,13 +2706,11 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `the app's own answer hold pauses playback without cancelling the correction`() = runTest {
-        // plan step 7, the NON-trigger, done the way the hold actually works: the turn pauses to
-        // hold the user's place while the answer is spoken and resumes in place. Its pause and
-        // resume carry the VOICE_COMMANDS tag, so they never bump the command revision and never
-        // emit on the user-seek stream -- that is why the hold cannot cancel a pending correction.
-        // This case plays exactly that: hold open, then released, with the revision and the seek
-        // stream untouched, and the correction must still land after the release.
+    fun `a real answer whose pause outlasts the cap still corrects`() = runTest {
+        // THE REAL PAUSE PATH, not a flag: the server's hold frame activates this turn's pause
+        // (`playerAutoPaused`), the answer is spoken for longer than the 120 s cap, and the turn's end
+        // releases it in `restoreTransientAudioState`. The cap must run from that release -- the
+        // correction would otherwise be over before the audio ever resumed.
         val fingerprint = mock<FingerprintTimingManager>()
         val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
         whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
@@ -2725,51 +2723,70 @@ class CloudRouteSinkTest {
                 ),
             ),
         )
+        // A builder flow, not a SharedFlow: the turn's collect must END when the terminal is
+        // emitted, and only a completing flow does that. The done gate lets the case hold the turn
+        // open across the long answer, then close it.
+        val answerFinished = kotlinx.coroutines.CompletableDeferred<Unit>()
+        // The REAL latch: the hold frame opens it, the turn's restore stamps the release, and the
+        // correction session reads the same object -- exactly as production wires it.
         val deps = TestDeps(
+            driveRealPause = true,
             fingerprintTimingManager = fingerprint,
             seekCorrectionScope = backgroundScope,
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "seek_to",
-                    params = mapOf("reference_position_ms" to 1_130_000L),
-                ),
-                CloudRouteEvent.Done(1, 0),
-            ),
+            events = kotlinx.coroutines.flow.flow {
+                emit(CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap(), turnId = testWireId))
+                emit(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "seek_to",
+                        params = mapOf("reference_position_ms" to 1_130_000L),
+                        turnId = testWireId,
+                    ),
+                )
+                answerFinished.await()
+                emit(CloudRouteEvent.Done(1, 0))
+            },
+            hostPlaying = true,
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
-
+        val turn = async { sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback }
+        runCurrent()
+        // The hold frame has passed: the turn takes the pause because the player is playing at
+        // commitment, and the seek action follows it in the same stream.
+        assertFalse("precondition: the turn's own pause is held", deps.host.playing)
         assertTrue(
             "the estimate seek must have run (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:1170"),
         )
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // THE ANSWER RUNS LONG: the pause is held past the 120 s cap in virtual time, and the
+        // session's wall clock moves with it.
         advanceTimeBy(250)
         runCurrent()
-        val revisionBeforeHold = deps.commandRevision
-        // THE ANSWER IS SPOKEN: the app pauses the player for 20 s, then resumes in place. No
-        // revision bump, no user-seek emission -- the voice path's own commands.
-        deps.answerHoldOpen = true
-        deps.host.playing = false
-        deps.wallClockMs = 20_000L
-        advanceTimeBy(20_000)
+        deps.wallClockMs = 130_000L
+        advanceTimeBy(130_000)
         runCurrent()
-        deps.answerHoldOpen = false
-        deps.answerHoldReleasedAtMs = 20_000L
-        deps.host.playing = true
-        assertEquals("the app's own pause must not advance the command revision", revisionBeforeHold, deps.commandRevision)
-        // CONVERGENCE after the hold released, inside the window: still corrects.
+        // THE TURN ENDS: the pause is released (the restore runs while the player is still paused,
+        // as in production -- a player already playing needs no restore) and playback resumes.
+        answerFinished.complete(Unit)
+        val outcome = withTimeout(10_000) { turn.await() }
+        assertEquals(VoiceResponse.Silent, outcome)
+        // Convergence 40 s after the release -- inside the cap, whose anchor is that release.
         whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
-        deps.wallClockMs = 40_000L
-        advanceTimeBy(20_000)
+        deps.host.playing = true
+        deps.wallClockMs = 175_000L
+        advanceTimeBy(40_000)
         runCurrent()
         mappingVersion.value = 1L
         advanceTimeBy(500)
         runCurrent()
 
         assertEquals(
-            "the app's own answer hold must not cancel the correction (calls=${deps.playback.calls})",
+            "the pause's release, not the seek, anchors the cap (calls=${deps.playback.calls})",
             listOf("seekTo:1170", "seekTo:1185"),
             deps.playback.calls.filter { it.startsWith("seekTo:") },
         )
@@ -4645,6 +4662,12 @@ class CloudRouteSinkTest {
         val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
         val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal? = null,
         var events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
+        /**
+         * Whether the pause seams read the [PauseLatch] (a case driving the REAL pause path: the
+         * hold frame opens it, the turn's restore stamps the release). Off by default, so the flag
+         * cases keep working through the toggles.
+         */
+        val driveRealPause: Boolean = false,
         /** Whether the host app is playing while this turn runs. */
         var hostPlaying: Boolean = true,
 
@@ -4696,6 +4719,18 @@ class CloudRouteSinkTest {
         var answerHoldOpen: Boolean = false
         /** The recorded answer-hold release, in the fixture's own wall clock. */
         var answerHoldReleasedAtMs: Long? = null
+        /**
+         * The sink's OWN pause, as the correction session reads it. Real turns set it through the
+         * server's hold frame and clear it in `restoreTransientAudioState`; the toggle lets a case
+         * place the session in a chain that is already holding the player. When a case drives the
+         * REAL path (the hold frame and the restore), it installs a [PauseLatch] here instead: the
+         * seams then read that instance, which the sink's own pause code mutates.
+         */
+        var playerPauseOpen: Boolean = false
+        /** The sink's recorded pause release, in the fixture's own wall clock. */
+        var playerPauseReleasedAtMs: Long? = null
+        /** Always installed: the seams read it when [driveRealPause], so seams and sink share it. */
+        val pauseLatch: PauseLatch = PauseLatch()
         /** The host's playback state, moved by the fake sink the way a player would. */
         val host = HostPlaybackState(hostPlaying)
         val playback = FakePlaybackSink(host)
@@ -4751,8 +4786,9 @@ class CloudRouteSinkTest {
             currentLocale = localeProvider,
             isHostPlaying = { host.playing },
             wallClockNowMs = { wallClockMs },
-            answerHoldOpen = { answerHoldOpen },
-            answerHoldReleasedAtMs = { answerHoldReleasedAtMs },
+            pauseLatch = pauseLatch,
+            playerPauseOpen = { if (driveRealPause) pauseLatch.isOpen() else playerPauseOpen },
+            playerPauseReleasedAtMs = { if (driveRealPause) pauseLatch.releasedAtMs else playerPauseReleasedAtMs },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
             privacyClosureCount = { playbackStopClosures },

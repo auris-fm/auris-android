@@ -252,7 +252,7 @@ class VoiceLifecycleWiringTest {
                     templateResolver = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver(emptyMap()),
                     currentLocale = { java.util.Locale.ENGLISH }, playbackContextMonitor = playbackMonitor,
                     audioPlayer = null, gracePeriodSignal = signal,
-                )
+                                                    )
                 val executor = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor(
                     playbackSink = mock(), effectsSink = mock(), volumeSink = mock(), sleepSink = mock(),
                     chapterSink = mock(), bookmarkSink = mock(), cloudRouteSink = cloudSink,

@@ -45,6 +45,42 @@ import kotlinx.coroutines.withContext
 import timber.log.Timber
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
+/**
+ * Where the turn CHAIN's player pause lives, as the seek-correction session reads it.
+ *
+ * A later turn inherits a paused player -- the sink's own `playerAutoPaused` belongs to the sink, not
+ * to a turn -- so a correction that took its release from per-turn state would forget the chain's
+ * pause the moment the turn that took it ended. It is held by the sink's own singleton: the pause and
+ * its release are facts about this app instance's player, and they must survive every sink the
+ * provider hands out.
+ *
+ * The pause is opened when the server's hold frame activates it, and released (stamped, then closed)
+ * in the same locked section that hands the player back, so no reader sees "closed" without the
+ * release, nor "open" with a release from a pause that never happened.
+ */
+@Singleton
+class PauseLatch @Inject constructor() {
+    @Volatile
+    var open: Boolean = false
+        private set
+
+    @Volatile
+    var releasedAtMs: Long? = null
+        private set
+
+    fun markOpen() {
+        open = true
+    }
+
+    /** Read for the correction session; `open` is the same fact. */
+    fun isOpen(): Boolean = open
+
+    fun markReleased(atMs: Long) {
+        releasedAtMs = atMs
+        open = false
+    }
+}
+
 @Singleton
 class CloudRouteSink internal constructor(
     private val resolveBaseUrl: () -> String,
@@ -89,14 +125,16 @@ class CloudRouteSink internal constructor(
     /** Wall-clock ms, injected so the session cap can be driven without real waiting. */
     private val wallClockNowMs: () -> Long,
     /**
-     * Whether the answer hold is still open: playback paused while the answer is spoken, resumed
-     * in place. While it is open the session's wall-clock cap has not started (timeline-alignment
-     * step 3: the cap counts from the hold's release, so a long spoken answer must not expire the
-     * session before matching can resume).
+     * Whether the turn chain is holding the player paused (`playerAutoPaused`, the pause this sink
+     * takes for a long answer and gives back in [restoreTransientAudioState]). While it is held the
+     * session's wall-clock cap has not started (timeline-alignment step 3: the cap counts from the
+     * pause's release, so an answer longer than the cap must not expire the session before matching
+     * can resume). This is the sink's own pause, not a local-speech hold: a normal cloud answer
+     * pauses through the sink and never reaches [GracePeriodSignal]'s output holds.
      */
-    private val answerHoldOpen: () -> Boolean,
+    private val playerPauseOpen: () -> Boolean,
     /** Wall-clock ms at which the answer hold was released, or null while it is open or absent. */
-    private val answerHoldReleasedAtMs: () -> Long?,
+    private val playerPauseReleasedAtMs: () -> Long?,
     /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
@@ -108,6 +146,14 @@ class CloudRouteSink internal constructor(
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
     private val gracePeriodSignal: GracePeriodSignal? = null,
+    /**
+     * The turn CHAIN's own pause, as the seek-correction session reads it.
+     *
+     * A later turn inherits a paused player -- `playerAutoPaused` belongs to the sink, not to a turn
+     * -- so a correction anchored on per-turn state would lose the chain's pause the moment the turn
+     * that took it ends. Held by the state object that outlives every sink the provider builds.
+     */
+    private val pauseLatch: PauseLatch = PauseLatch(),
     /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     /** Test seam: a custom OkHttp client for the route socket (MockWebServer wiring). */
@@ -167,6 +213,7 @@ class CloudRouteSink internal constructor(
         playbackContextMonitor: PlaybackContextMonitor,
         audioPlayer: CloudAudioPlayer?,
         gracePeriodSignal: GracePeriodSignal,
+        pauseLatch: PauseLatch = PauseLatch(),
         @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
         seekCorrectionScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         earlyConnectionOpener: au.com.shiftyjelly.pocketcasts.repositories.cloud.EarlyConnectionOpener? = null,
@@ -180,6 +227,7 @@ class CloudRouteSink internal constructor(
         analytics = analytics,
         audioPlayer = audioPlayer,
         gracePeriodSignal = gracePeriodSignal,
+        pauseLatch = pauseLatch,
         templateResolver = templateResolver,
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
@@ -188,8 +236,8 @@ class CloudRouteSink internal constructor(
         currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
         wallClockNowMs = { System.currentTimeMillis() },
-        answerHoldOpen = gracePeriodSignal::answerHoldOpen,
-        answerHoldReleasedAtMs = gracePeriodSignal::answerHoldReleasedAtMs,
+        playerPauseOpen = pauseLatch::isOpen,
+        playerPauseReleasedAtMs = pauseLatch::releasedAtMs,
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
         // turn's own pause when the answer completes, unless playback actually stopped or a user
@@ -588,6 +636,11 @@ class CloudRouteSink internal constructor(
                 val previousTurn = activeTurn
                 activeTurn = myJob
                 activeTurnId = myId
+                // A new turn takes over whatever pause state it inherits: the latch describes the
+                // chain, so a pause the predecessor took (still set) reads as open through the same
+                // field the correction polls, and the predecessor's release, already stamped under
+                // this same mutex, is what the correction reads if it had ended instead.
+                if (playerAutoPaused) pauseLatch.markOpen()
                 // STOP AT TRANSFER (reviewer 4357641034): the predecessor's buffered answer must
                 // stop the moment ownership moves, not when the successor exits. A successor whose
                 // server stream stalls otherwise keeps the predecessor's answer playing through the
@@ -742,6 +795,10 @@ class CloudRouteSink internal constructor(
                                 if (activeTurnId == myId && pauseReserved && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
                                     pauseReserved = false
                                     playerAutoPaused = true
+                                    // The chain's pause starts HERE, at the delivery commitment --
+                                    // the same fact as [playerAutoPaused], kept where the correction
+                                    // polls it.
+                                    pauseLatch.markOpen()
                                     // Declared as an ownership fact, not inferred from the tag: the
                                     // user's own pause reaches the player through the same
                                     // VOICE_COMMANDS interface.
@@ -1235,6 +1292,11 @@ class CloudRouteSink internal constructor(
     private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
         playerAutoPaused = false
+        // THE RELEASE IS STAMPED AND THE HOLD CLOSED TOGETHER, under the turn mutex the caller already
+        // holds: a correction poll that runs between the two would otherwise see no pause open and no
+        // new release, anchor at the seek, and -- after an answer longer than the cap -- give up at the
+        // very moment the pause ends.
+        pauseLatch.markReleased(wallClockNowMs())
         // The reservation goes with the pause it claims: releasing the hold ends the claim on it, so a
         // later turn can reserve again. Both are the same obligation seen from two sides -- one says a
         // pause HAPPENED, the other that this chain CLAIMS it -- and clearing only the first would
@@ -1671,12 +1733,12 @@ class CloudRouteSink internal constructor(
                 // playback while the answer is spoken, matching cannot advance during it, and a
                 // long answer must not expire the session before matching can resume. While the
                 // hold is open the cap has not started; with no hold at all the seek is the anchor.
-                if (!answerHoldOpen()) {
-                    // ONLY A RELEASE AFTER THIS ACTION'S SEEK MOVES THE ANCHOR. The signal records
-                    // the last hold any turn released; anchored naively, a previous turn's release
+                if (!playerPauseOpen()) {
+                    // ONLY A RELEASE AFTER THIS ACTION'S SEEK MOVES THE ANCHOR. The sink records the
+                    // last pause any turn released; anchored naively, an earlier turn's release
                     // minutes ago would already be past the cap on this action's first poll and end
                     // a correction before it starts.
-                    val capAnchorMs = maxOf(seekWallMs, answerHoldReleasedAtMs() ?: seekWallMs)
+                    val capAnchorMs = maxOf(seekWallMs, playerPauseReleasedAtMs() ?: seekWallMs)
                     if (wallClockNowMs() - capAnchorMs >= SEEK_CORRECTION_WALL_CAP_MS) return@launch
                 }
                 // THE DELAY IS WHERE THE WATCHER DRAINS, so the suppression from a corrective seek

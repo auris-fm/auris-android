@@ -64,8 +64,8 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
 
     /**
      * Where the player actually is, in milliseconds, for a correction that must measure at the live
-     * playhead rather than at the position it asked for. Null when no episode is loaded or the player
-     * is on a different one, so a stale position is never read as the playhead.
+     * playhead rather than at the position it asked for. Null when no episode is loaded: the caller
+     * skips that poll rather than measuring at a position playback has already left.
      */
     suspend fun currentPlaybackPositionMs(): Int? {
         val episode = playbackManager.getCurrentEpisode() ?: return null

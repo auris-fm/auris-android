@@ -82,9 +82,10 @@ class CloudRouteSink internal constructor(
      * The player's LIVE position in milliseconds, or null when it cannot be read. A correction
      * measures at the playhead, not at the position the estimate asked for: playback has moved on
      * by the time the mapping converges, and the reference heard there is what the target is
-     * compared against.
+     * compared against. A poll that cannot read it is skipped rather than measured at the seek
+     * point, which would compare the target against a position playback has already left.
      */
-    private val currentPlaybackPositionMs: (suspend () -> Int?)? = null,
+    private val currentPlaybackPositionMs: suspend () -> Int?,
     /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
@@ -1664,7 +1665,7 @@ class CloudRouteSink internal constructor(
                 // the one at the current position. The reference the listener hears there is
                 // compared with the target PLUS the playback that has elapsed, since both sides must
                 // describe the same moment.
-                val playheadMs = currentPlaybackPositionMs?.invoke() ?: positionMs
+                val playheadMs = currentPlaybackPositionMs() ?: continue
                 val matchedReferenceSec = fingerprintTimingManager.matchedReferenceTime(playheadMs)
                     ?: continue
                 val expectedReferenceSec = (targetReferenceMs + (playheadMs - positionMs)) / 1000.0

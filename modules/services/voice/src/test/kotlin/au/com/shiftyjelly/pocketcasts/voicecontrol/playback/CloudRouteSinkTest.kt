@@ -3920,9 +3920,10 @@ class CloudRouteSinkTest {
         var playbackStopClosures: Long = 0,
         private val episodeDurationSeconds: Int = 0,
         /**
-         * The player's live position. Defaults to where the estimate sought, so cases that do not
-         * care about elapsed playback measure exactly at the seek point; a case that does care
-         * moves it forward the way a player would.
+         * The player's live position. Defaults to wherever the fake player stands after its last
+         * accepted seek -- the seek point, for cases that do not care about elapsed playback; a
+         * case that does care moves it forward the way a player would. Null means the read failed,
+         * which the loop must skip.
          */
         var playheadMs: Int? = null,
         /** User seeks observed outside the voice path; a pending correction stands down on one. */
@@ -4004,7 +4005,7 @@ class CloudRouteSinkTest {
             isPrivacyClosed = { privacyClosed },
             privacyClosureCount = { playbackStopClosures },
             episodeDurationSeconds = { episodeDurationSeconds },
-            currentPlaybackPositionMs = { playheadMs },
+            currentPlaybackPositionMs = { playheadMs ?: playback.lastSeekMs },
             userSeeks = userSeeksFlow.filterNotNull(),
             seekCorrectionScope = seekCorrectionScope,
             audioPlayer = audioPlayer,
@@ -4052,6 +4053,9 @@ class CloudRouteSinkTest {
 
     private class FakePlaybackSink(private val host: HostPlaybackState? = null) : VoicePlaybackSink {
         val calls = mutableListOf<String>()
+
+        /** Where the fake's player actually stands after the last accepted seek, in ms. */
+        var lastSeekMs: Int? = null
 
         /** When set, resume() suspends until released (models play-queue loads). */
         var resumeGate: CompletableDeferred<Unit>? = null
@@ -4139,6 +4143,7 @@ class CloudRouteSinkTest {
             // does (a seek lands on `userSeeks`, the voice path's own included). The self-cancellation
             // control wires this so the loop must survive its own corrective seek's emission.
             userSeekFeedback?.value = Unit
+            lastSeekMs = resolved * 1000
             return EpisodeOperationResult.Accepted(expectedEpisodeId, preActionPositionMsForTest)
         }
 

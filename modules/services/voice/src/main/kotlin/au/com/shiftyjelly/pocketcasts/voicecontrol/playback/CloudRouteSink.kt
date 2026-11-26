@@ -1233,15 +1233,21 @@ class CloudRouteSink internal constructor(
     private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && privacyClosureCount() != atPause
 
     /** Owner-only: resume the player if this turn chain auto-paused it. */
-    private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
-        if (!playerAutoPaused) return
-        // THE RELEASE IS STAMPED BEFORE THE FLAG CLEARS, under the turn mutex the caller already
-        // holds: a correction poll that runs between the two would see no pause held and no new
-        // release, anchor at the seek, and -- after an answer longer than the cap -- give up at the
-        // very moment the pause ends. A poll sees "held" (flag still set, no cap check) or "released
-        // at T", never the in-between.
+    /**
+     * Give the player back: stamp the release, then clear the obligation. EVERY path that ends the
+     * sink's pause goes through this -- the turn's normal restore, a server pause action that hands
+     * the player to the user, a server resume that ends a hold from here -- so a pending correction's
+     * stamp can never be skipped by a later clear. The stamp precedes the clear under the caller's
+     * turn mutex: a poll sees "held" (no cap check) or "released at T", never the in-between.
+     */
+    private fun releaseAutoPause() {
         pauseReleasedAtMs = wallClockNowMs()
         playerAutoPaused = false
+    }
+
+    private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
+        if (!playerAutoPaused) return
+        releaseAutoPause()
         // The reservation goes with the pause it claims: releasing the hold ends the claim on it, so a
         // later turn can reserve again. Both are the same obligation seen from two sides -- one says a
         // pause HAPPENED, the other that this chain CLAIMS it -- and clearing only the first would
@@ -1368,7 +1374,7 @@ class CloudRouteSink internal constructor(
                     // Explicit pause is not ours to undo later — clear the
                     // obligation before the suspending call so a throw cannot
                     // leave us thinking we still own a pause the user asked for.
-                    playerAutoPaused = false
+                    releaseAutoPause()
                     pauseReserved = false
                     playbackSink.pause()
                     ActionOutcome.Confirmed
@@ -1387,7 +1393,7 @@ class CloudRouteSink internal constructor(
                     }
                     // Cleared before the suspending call so a throw cannot leave
                     // the flag describing a state we failed to reach.
-                    playerAutoPaused = false
+                    releaseAutoPause()
                     pauseReserved = false
                     // Both the guard above and the sink's own binding decide, and the OUTCOME is what is
                     // reported: returning true unconditionally made a refused resume a delivered

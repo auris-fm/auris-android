@@ -2703,10 +2703,6 @@ class CloudRouteSinkTest {
             "the estimate seek must have run (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:1170"),
         )
-        assertTrue(
-            "the estimate seek must have run (calls=${deps.playback.calls})",
-            deps.playback.calls.contains("seekTo:1170"),
-        )
         // THE ANSWER RUNS LONG: the pause is held past the 120 s cap in virtual time, and the
         // session's wall clock moves with it.
         advanceTimeBy(250)
@@ -4653,20 +4649,6 @@ class CloudRouteSinkTest {
          * scheduler so the session's wall-clock cap can be driven without real waiting.
          */
         var wallClockMs: Long = 0L
-        /** Whether the answer hold is open; while it is, the wall-clock cap has not started. */
-        var answerHoldOpen: Boolean = false
-        /** The recorded answer-hold release, in the fixture's own wall clock. */
-        var answerHoldReleasedAtMs: Long? = null
-        /**
-         * The sink's OWN pause, as the correction session reads it. Real turns set it through the
-         * server's hold frame and clear it in `restoreTransientAudioState`; the toggle lets a case
-         * place the session in a chain that is already holding the player. When a case drives the
-         * REAL path (the hold frame and the restore), it installs a [PauseLatch] here instead: the
-         * seams then read that instance, which the sink's own pause code mutates.
-         */
-        var playerPauseOpen: Boolean = false
-        /** The sink's recorded pause release, in the fixture's own wall clock. */
-        var playerPauseReleasedAtMs: Long? = null
         /** The host's playback state, moved by the fake sink the way a player would. */
         val host = HostPlaybackState(hostPlaying)
         val playback = FakePlaybackSink(host)

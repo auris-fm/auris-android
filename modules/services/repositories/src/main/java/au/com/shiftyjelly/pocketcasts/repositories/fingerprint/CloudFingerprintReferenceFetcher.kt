@@ -40,24 +40,31 @@ interface CloudReferenceSource {
  * so callers degrade gracefully to the transcript-sync path.
  */
 @Singleton
-class CloudFingerprintReferenceFetcher @Inject constructor(
+class CloudFingerprintReferenceFetcher(
     // THE Auris provider DIRECTLY, as the Voice Sharing callers inject it: the routing provider's
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
     private val tokenProvider: AurisTokenProvider,
-    private val fetchBudgetMs: Long = FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
-    // Constructor-injected so tests can supply a client with a short connect budget; production
-    // (Hilt) always takes the default. The fingerprint endpoint sends NOTHING until the
+    // Constructor-injected; Hilt builds the production instance through the @Inject constructor
+    // below with exactly these values. The fingerprint endpoint sends NOTHING until the
     // fingerprint is ready -- on a first play that is ~95 s of decode plus generation -- so OkHttp's
     // read timeout (which covers waiting for the response headers) must not sit under the per-call
-    // budget: NO READ LIMIT on the default client. The per-call budget below is the one
+    // budget: NO READ LIMIT on the default client. The per-call budget is the one
     // cloud-ingestion.md governs and the only limit on waiting.
-    client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .build(),
+    private val client: OkHttpClient,
+    private val fetchBudgetMs: Long,
 ) : CloudReferenceSource {
-    private val client = client
+    // Dagger cannot use Kotlin default values, so production wiring carries the defaults HERE:
+    // the graph needs no OkHttpClient or Long binding.
+    @Inject
+    constructor(tokenProvider: AurisTokenProvider) : this(
+        tokenProvider = tokenProvider,
+        client = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build(),
+        fetchBudgetMs = FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
+    )
 
     /**
      * Conditional fetch (delta: fingerprint revalidation). When [cachedEtag] is non-null it is

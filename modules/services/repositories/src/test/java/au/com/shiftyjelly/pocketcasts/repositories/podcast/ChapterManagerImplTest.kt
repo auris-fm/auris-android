@@ -935,6 +935,7 @@ class ChapterManagerImplTest {
         val fingerprint = mock<FingerprintTimingManager> {
             on { activeEpisodeUuid } doReturn "id"
             on { mappingSnapshot } doReturn entries
+            on { referenceMappingSnapshot } doReturn entries
             on { mappingVersion } doReturn MutableStateFlow(1L)
         }
         whenever(fingerprint.estimatedPlaybackTimeMs(any(), any())).thenAnswer {
@@ -960,6 +961,72 @@ class ChapterManagerImplTest {
                 chapter.startTime,
             )
             assertEquals(820.seconds, chapter.endTime)
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun `the chapter alignment reads a reference-ordered snapshot`() = runBlocking {
+        // `estimatedPlaybackTimeMs` binary-searches its entry list by REFERENCE time, so the call
+        // site must hand it the reference-ordered snapshot. The playback-ordered one agrees only
+        // while reference time strictly increases with playback time; a small backward reference
+        // step breaks that, and the binary search then brackets against the wrong anchors and
+        // misplaces the chapter. The two snapshots here carry the same three anchors but in their
+        // production orders, and the anchor set diverges (playback 104 s holds reference 106 s,
+        // playback 108 s holds reference 102 s). Read through the right list, reference 101 s sits
+        // between the anchors adjacent in reference order -- (100 s -> 100 s) and (102 s -> 108 s)
+        // -- and interpolates to playback 104 s; read through the playback-ordered list, the
+        // reference-time binary search brackets (100,100)-(104,106) instead and lands at 101.3 s.
+        val referenceOrdered = listOf(
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 108.0, referenceTime = 102.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 104.0, referenceTime = 106.0),
+        )
+        val playbackOrdered = listOf(
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 104.0, referenceTime = 106.0),
+            FingerprintTimingManager.TimeMappingEntry(playbackTime = 108.0, referenceTime = 102.0),
+        )
+        val episode = PodcastEpisode("id", publishedDate = Date(), duration = 1200.0)
+        val dbChapter = DbChapter(
+            index = 0,
+            episodeUuid = "id",
+            startTimeMs = 101_000,
+            endTimeMs = 121_000,
+            title = "Between divergent anchors",
+            origin = ChapterOrigin.Generated,
+        )
+        FeatureFlag.setEnabled(Feature.GENERATED_CHAPTERS, true)
+        whenever(chapterDao.observeChaptersForEpisode("id")).thenReturn(flowOf(listOf(dbChapter)))
+        whenever(episodeManager.findEpisodeByUuidFlow("id")).thenReturn(flowOf(episode))
+        val fingerprint = mock<FingerprintTimingManager> {
+            on { activeEpisodeUuid } doReturn "id"
+            on { mappingSnapshot } doReturn playbackOrdered
+            on { referenceMappingSnapshot } doReturn referenceOrdered
+            on { mappingVersion } doReturn MutableStateFlow(1L)
+        }
+        whenever(fingerprint.estimatedPlaybackTimeMs(any(), any())).thenAnswer {
+            FingerprintTimingManager.estimateUncovered(
+                it.getArgument<Double>(0),
+                it.getArgument(1),
+            )
+        }
+        val phoneManager = ChapterManagerImpl(
+            chapterDao = chapterDao,
+            episodeManager = episodeManager,
+            fingerprintTimingManager = Lazy { fingerprint },
+            appPlatform = AppPlatform.Phone,
+            settings = settings,
+        )
+
+        phoneManager.observerChaptersForEpisode("id").test {
+            val chapter = awaitItem().toList().single()
+            assertEquals(
+                "reference 101 s sits between the anchors adjacent in REFERENCE order and must " +
+                    "interpolate to playback 104 s (start=${chapter.startTime})",
+                104.seconds,
+                chapter.startTime,
+            )
             cancelAndIgnoreRemainingEvents()
         }
     }

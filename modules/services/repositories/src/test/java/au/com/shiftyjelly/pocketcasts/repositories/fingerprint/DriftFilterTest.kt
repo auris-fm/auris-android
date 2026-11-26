@@ -70,8 +70,8 @@ class DriftFilterTest {
     @Test
     fun `insert maintains sorted order by reference time for reverse lookup`() {
         // Anchors dense on BOTH clocks: since the ad-gap gate, playbackTimeMs only answers inside
-        // a bracket (or on slope-1 extrapolation from the edge anchors), so the ordering fixture
-        // cannot space its anchors 10 s apart on the reference clock.
+        // a bracket, so the ordering fixture cannot space its anchors 10 s apart on the reference
+        // clock.
         manager.insert(TimeMappingEntry(playbackTime = 10.0, referenceTime = 14.0))
         manager.insert(TimeMappingEntry(playbackTime = 5.0, referenceTime = 10.0))
         manager.insert(TimeMappingEntry(playbackTime = 15.0, referenceTime = 18.0))

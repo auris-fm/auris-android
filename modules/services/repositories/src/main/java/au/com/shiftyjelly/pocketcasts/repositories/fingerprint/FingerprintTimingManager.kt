@@ -388,6 +388,14 @@ class FingerprintTimingManager @Inject constructor(
     val state: State get() = _stateFlow.value
     val mappingSnapshot: List<TimeMappingEntry> get() = snapshotPlaybackToReference
 
+    /**
+     * The same anchors ordered by REFERENCE time. Consumers that convert reference→playback --
+     * which binary-search by reference time -- must read this list: the two orders agree only
+     * while reference time strictly increases with playback time, and a small backward reference
+     * step breaks that agreement.
+     */
+    val referenceMappingSnapshot: List<TimeMappingEntry> get() = snapshotReferenceToPlayback
+
     // Monotonic counter bumped on every snapshot publish, so consumers can react to mapping growth.
     private val _mappingVersion = MutableStateFlow(0L)
     val mappingVersion: StateFlow<Long> = _mappingVersion.asStateFlow()

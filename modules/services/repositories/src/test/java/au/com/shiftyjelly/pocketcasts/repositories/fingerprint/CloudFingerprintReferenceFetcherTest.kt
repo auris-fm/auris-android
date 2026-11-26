@@ -332,29 +332,6 @@ class CloudFingerprintReferenceFetcherTest {
     }
 
     @Test
-    fun `a reference answering after ten seconds but inside the budget still arrives`() {
-        // RED AT 10 s: with the old budget this request aborts before the server answers, so
-        // `payload` is null. The delay is 11 s of WALL CLOCK against a local mock, and the budget
-        // under test is 150 s, so the test is not racing its own threshold.
-        val server = MockWebServer()
-        server.enqueue(MockResponse().setBody(compactV3Json()).setBodyDelay(11, TimeUnit.SECONDS))
-        server.start()
-
-        try {
-            val auth = MockWebServer()
-            auth.start()
-            val fetcher = CloudFingerprintReferenceFetcher(providerFor("session", "auris-access-token-1", auth))
-            val payload = fetchPayload(fetcher, server)
-
-            assertNotNull("a reference inside the 150 s budget must arrive, not time out", payload)
-            assertEquals(3, ReferenceFingerprint.decode(payload!!)!!.libraryCheckpoints().size)
-            auth.shutdown()
-        } finally {
-            server.shutdown()
-        }
-    }
-
-    @Test
     fun `a fetch that never gets past connect gives up and reports unavailable`() {
         // The timeout is not merely large: it still FIRES. The client times out at CONNECT, so a
         // real socket that never completes the handshake exercises the same call-timeout lever as

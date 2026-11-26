@@ -2452,6 +2452,580 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a pause inside the window does not use it up`() = runTest {
+        // timeline-alignment step 3 / plan step 6: the 60 s window counts PLAYING time. The answer
+        // hold pauses playback while the answer is spoken and matching cannot advance during it, so
+        // a 70 s pause followed by convergence 40 s into the resumed playback -- 110 s of wall
+        // time, 40 s of play -- must still correct. The old wall-clock window died during the
+        // pause, so this case failed under it.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // THE ANSWER IS SPOKEN: the host stays paused for 70 s of wall time.
+        deps.host.playing = false
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // LET THE LOOP BODY START: the launch is queued, so its opening reads -- the seek's wall
+        // stamp and the command revision -- must happen BEFORE the case moves the state they read.
+        advanceTimeBy(250)
+        runCurrent()
+        deps.wallClockMs = 70_000L
+        advanceTimeBy(70_000)
+        runCurrent()
+
+        // PLAYBACK RESUMES; matching converges 40 s into it -- inside the window's playing time.
+        deps.host.playing = true
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        advanceTimeBy(40_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "the correction must follow the pause -- 40 s of play is inside the window (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a pause that carries the session past the wall cap ends it with no correction`() = runTest {
+        // timeline-alignment step 3 / plan step 6: in any case 120 s of wall time ends the session.
+        // Playing time here is only 20 s -- under the window -- so without the wall cap the loop
+        // would still be alive when this convergence arrives and would seek; with it, nothing.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // LET THE LOOP BODY START: the launch is queued, so its opening reads -- the seek's wall
+        // stamp and the command revision -- must happen BEFORE the case moves the state they read.
+        advanceTimeBy(250)
+        runCurrent()
+        // 10 s of play, then a pause that carries the session past the cap.
+        deps.wallClockMs = 10_000L
+        advanceTimeBy(10_000)
+        runCurrent()
+        deps.host.playing = false
+        deps.wallClockMs = 125_000L
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        advanceTimeBy(115_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "a convergence after the wall cap must make no seek (calls=${deps.playback.calls})",
+            listOf("seekTo:1170"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a pause released by an earlier turn does not anchor a later seek's cap`() = runTest {
+        // THE STALE ANCHOR, for real. Turn 1 answers and its release is stamped at wall 0; turn 2
+        // seeks minutes later (wall 600 s) with no pause of its own. Anchored naively on the last
+        // release, turn 2's cap is already expired on its first poll and the correction dies before
+        // it starts -- so the anchor must be the later of the seek and the release.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val phase2 = kotlinx.coroutines.flow.MutableStateFlow(false)
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = kotlinx.coroutines.flow.flow {
+                if (phase2.value) {
+                    emit(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "seek_to",
+                            params = mapOf("reference_position_ms" to 1_130_000L),
+                            turnId = testWireId,
+                        ),
+                    )
+                    emit(CloudRouteEvent.Done(1, 0))
+                } else {
+                    // TURN 1: the hold frame takes the pause, and the terminal ends the turn, whose
+                    // restore stamps the release.
+                    emit(CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap(), turnId = testWireId))
+                    emit(CloudRouteEvent.Done(0, 0))
+                }
+            },
+            hostPlaying = true,
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("hello", playbackContext, admitted = testWireId).feedback
+        assertTrue(
+            "precondition: turn 1 released its pause (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("resume"),
+        )
+        deps.host.playing = true
+        // MINUTES PASS before turn 2 seeks.
+        deps.wallClockMs = 600_000L
+        phase2.value = true
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        deps.wallClockMs = 630_000L
+        advanceTimeBy(30_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "an earlier turn's release must not end this seek's correction (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a real answer whose pause outlasts the cap still corrects`() = runTest {
+        // THE REAL PAUSE PATH, not a flag: the server's hold frame activates this turn's pause
+        // (`playerAutoPaused`), the answer is spoken for longer than the 120 s cap, and the turn's end
+        // releases it in `restoreTransientAudioState`. The cap must run from that release -- the
+        // correction would otherwise be over before the audio ever resumed.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        // A builder flow, not a SharedFlow: the turn's collect must END when the terminal is
+        // emitted, and only a completing flow does that. The done gate lets the case hold the turn
+        // open across the long answer, then close it.
+        val answerFinished = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = kotlinx.coroutines.flow.flow {
+                emit(CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap(), turnId = testWireId))
+                emit(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "seek_to",
+                        params = mapOf("reference_position_ms" to 1_130_000L),
+                        turnId = testWireId,
+                    ),
+                )
+                answerFinished.await()
+                emit(CloudRouteEvent.Done(1, 0))
+            },
+            hostPlaying = true,
+        )
+        val sink = deps.sink()
+
+        val turn = async { sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback }
+        runCurrent()
+        // The hold frame has passed: the turn takes the pause because the player is playing at
+        // commitment, and the seek action follows it in the same stream.
+        assertFalse("precondition: the turn's own pause is held", deps.host.playing)
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // THE ANSWER RUNS LONG: the pause is held past the 120 s cap in virtual time, and the
+        // session's wall clock moves with it.
+        advanceTimeBy(250)
+        runCurrent()
+        deps.wallClockMs = 130_000L
+        advanceTimeBy(130_000)
+        runCurrent()
+        // THE TURN ENDS: the pause is released (the restore runs while the player is still paused,
+        // as in production -- a player already playing needs no restore) and playback resumes.
+        answerFinished.complete(Unit)
+        val outcome = withTimeout(10_000) { turn.await() }
+        assertEquals(VoiceResponse.Silent, outcome)
+        // Convergence 40 s after the release -- inside the cap, whose anchor is that release.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        deps.host.playing = true
+        deps.wallClockMs = 175_000L
+        advanceTimeBy(40_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "the pause's release, not the seek, anchors the cap (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a server resume ending a long pause still leaves the correction alive`() = runTest {
+        // THE OTHER RELEASE PATH. A turn does not only hand the player back when it ends: a server
+        // `resume` action clears the pause in the middle of the turn. That clear has to stamp the
+        // release too -- otherwise a correction pending when the resume ends a pause longer than the
+        // cap still anchors at the seek and gives up. This case fails under the bare flag clear.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val resumeDelivered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = kotlinx.coroutines.flow.flow {
+                emit(CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap(), turnId = testWireId))
+                emit(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "seek_to",
+                        params = mapOf("reference_position_ms" to 1_130_000L),
+                        turnId = testWireId,
+                    ),
+                )
+                // THE SERVER RESUMES: the pause ends here, not at the turn's end. The case moves the
+                // virtual clock, and the sink's wall clock with it, before this frame is handled.
+                resumeDelivered.await()
+                emit(CloudRouteEvent.Action(tool = "playback", action = "resume", params = emptyMap(), turnId = testWireId))
+            },
+            hostPlaying = true,
+        )
+        val sink = deps.sink()
+
+        val turn = async { sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback }
+        runCurrent()
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        assertTrue("precondition: the turn's own pause is held", !deps.host.playing)
+        // THE PAUSE LASTS PAST THE CAP, then the server's resume ends it.
+        advanceTimeBy(250)
+        runCurrent()
+        deps.wallClockMs = 130_000L
+        advanceTimeBy(130_000)
+        runCurrent()
+        resumeDelivered.complete(Unit)
+        advanceTimeBy(0)
+        runCurrent()
+        assertTrue("precondition: the turn issued a resume (calls=${deps.playback.calls})", deps.playback.calls.contains("resume"))
+        // Convergence 40 s after the RESUME, inside the cap that now runs from that release.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        deps.host.playing = true
+        deps.wallClockMs = 175_000L
+        advanceTimeBy(40_000)
+        runCurrent()
+        mappingVersion.value = 1L
+        advanceTimeBy(500)
+        runCurrent()
+
+        assertEquals(
+            "the server resume's release must anchor the cap (calls=${deps.playback.calls})",
+            listOf("seekTo:1170", "seekTo:1185"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+        turn.cancel()
+    }
+
+    @Test
+    fun `a mapping that never converges gives up after sixty seconds of playing time`() = runTest {
+        // timeline-alignment step 3 / plan step 6: the give-up case. With the host playing the
+        // whole time, 60 s of playing time is 60 s of wall time, so the loop ends and a
+        // convergence arriving after it makes no seek.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // LET THE LOOP BODY START: the launch is queued, so its opening reads -- the seek's wall
+        // stamp and the command revision -- must happen BEFORE the case moves the state they read.
+        advanceTimeBy(250)
+        runCurrent()
+        deps.wallClockMs = 61_000L
+        advanceTimeBy(61_000)
+        runCurrent()
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_090.0)
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "a mapping that never converges makes no correction, and the late one lands nowhere (calls=${deps.playback.calls})",
+            listOf("seekTo:1170"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a skip while a correction is pending cancels it`() = runTest {
+        // timeline-alignment step 4, trigger: user skip. A skip is a playback command the voice
+        // path does not own, so it advances the command revision; the pending correction must not
+        // follow a player someone else just moved.
+        cancelOnCommandRevision("skip")
+    }
+
+    @Test
+    fun `a pause and resume elsewhere while a correction is pending cancels it`() = runTest {
+        // timeline-alignment step 4, trigger: pause-and-resume elsewhere. The listener moved
+        // playback themselves and back; re-seeking by a stale difference would yank them again.
+        cancelOnCommandRevision("pause-and-resume elsewhere")
+    }
+
+    @Test
+    fun `an episode change while a correction is pending cancels it`() = runTest {
+        // timeline-alignment step 4, trigger: episode change. The episode is a playback change the
+        // voice path does not own; the corrective seek is episode-bound, and the revision advance
+        // stands the correction down before it can fire against the new episode.
+        cancelOnCommandRevision("episode change")
+    }
+
+    @Test
+    fun `another moving action while a correction is pending cancels it`() = runTest {
+        // timeline-alignment step 4, trigger: another moving action. Any playback-moving command
+        // outside this action -- skip, seek, play from another surface -- advances the revision.
+        cancelOnCommandRevision("another moving action")
+    }
+
+    private suspend fun kotlinx.coroutines.test.TestScope.cancelOnCommandRevision(trigger: String) {
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // LET THE LOOP BODY START: the launch is queued, so its opening reads -- the seek's wall
+        // stamp and the command revision -- must happen BEFORE the case moves the state they read.
+        advanceTimeBy(250)
+        runCurrent()
+        // THE TRIGGER, mid-window: playback moves outside this action.
+        deps.commandRevision += 1
+        advanceTimeBy(1_000)
+        runCurrent()
+        // CONVERGENCE after the trigger, well inside every bound.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "the $trigger must have cancelled the correction (calls=${deps.playback.calls})",
+            listOf("seekTo:1170"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a newer voice turn cancels the pending correction`() = runTest {
+        // timeline-alignment step 4, trigger: a newer voice turn. The player now belongs to that
+        // turn; re-seeking from the old one would fight it.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 60.0,
+                ),
+            ),
+        )
+        val secondTurnStarted = CompletableDeferred<Unit>()
+        val secondTurnRelease = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            routeInvoker = { turn ->
+                if (turn.request == "go back") {
+                    flowOf(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "seek_to",
+                            params = mapOf("reference_position_ms" to 1_130_000L),
+                        ),
+                        CloudRouteEvent.Done(1, 0),
+                    )
+                } else {
+                    // THE NEWER TURN STAYS IN FLIGHT until the case releases it: only a LIVE newer
+                    // turn owns the active-turn slot -- once it exits, the slot clears and the
+                    // pending correction would survive.
+                    flow {
+                        secondTurnStarted.complete(Unit)
+                        secondTurnRelease.await()
+                        emit(CloudRouteEvent.Done(1, 1))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "the estimate seek must have run (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1170"),
+        )
+        // LET THE LOOP BODY START: the launch is queued, so its opening reads -- the seek's wall
+        // stamp and the command revision -- must happen BEFORE the case moves the state they read.
+        advanceTimeBy(250)
+        runCurrent()
+        // THE NEWER TURN: a second dispatch takes the active-turn slot and stays in flight.
+        val second = launch { sink.routeToCloud("what about now", playbackContext, admitted = testWireId).feedback }
+        secondTurnStarted.await()
+        assertEquals(
+            "the newer turn must own the active slot (routeCalls=${deps.routeCalls})",
+            2,
+            deps.routeCalls.size,
+        )
+        // CONVERGENCE while the newer turn is live: the correction must stand down.
+        whenever(fingerprint.matchedReferenceTime(1_170_000)).thenReturn(1_115.0)
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(
+            "the newer turn must have cancelled the correction (calls=${deps.playback.calls})",
+            listOf("seekTo:1170"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+        secondTurnRelease.complete(Unit)
+        second.join()
+    }
+
+    @Test
     fun `a correction survives its own seek surfacing on the seek stream`() = runTest {
         // The REAL manager used to emit on every seek, including the corrective one -- the loop then
         // cancelled itself after its first correction. The production fix removes the emission at the
@@ -2876,6 +3450,10 @@ class CloudRouteSinkTest {
             "the estimate seek must have run (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:1170"),
         )
+        // LET THE LOOP BODY START: the launch is queued, so its opening reads -- the seek's wall
+        // stamp and the command revision -- must happen BEFORE the case moves the state they read.
+        advanceTimeBy(250)
+        runCurrent()
 
         // THE USER MOVES FIRST: the seek lands before the map converges.
         deps.userSeeksFlow.value = Unit
@@ -4099,7 +4677,7 @@ class CloudRouteSinkTest {
         },
         val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
         val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal? = null,
-        private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
+        var events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         /** Whether the host app is playing while this turn runs. */
         var hostPlaying: Boolean = true,
 
@@ -4142,6 +4720,12 @@ class CloudRouteSinkTest {
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
         transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
     ) {
+        /**
+         * Monotonic elapsed ms, as production feeds it from `SystemClock.elapsedRealtime`. Cases
+         * move it forward beside the virtual scheduler so the session's cap can be driven without
+         * real waiting.
+         */
+        var wallClockMs: Long = 0L
         /** The host's playback state, moved by the fake sink the way a player would. */
         val host = HostPlaybackState(hostPlaying)
         val playback = FakePlaybackSink(host)
@@ -4196,6 +4780,7 @@ class CloudRouteSinkTest {
             templateResolver = templateResolver,
             currentLocale = localeProvider,
             isHostPlaying = { host.playing },
+            elapsedNowMs = { wallClockMs },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
             privacyClosureCount = { playbackStopClosures },

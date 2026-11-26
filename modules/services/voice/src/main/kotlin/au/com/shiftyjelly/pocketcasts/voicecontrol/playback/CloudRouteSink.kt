@@ -87,6 +87,13 @@ class CloudRouteSink internal constructor(
      */
     private val currentPlaybackPositionMs: suspend () -> Int?,
     /**
+     * Monotonic elapsed ms (`SystemClock.elapsedRealtime` in production), injected so the session
+     * cap can be driven without real waiting. The cap measures a DURATION, so it must not ride the
+     * wall clock: a network time sync between the seek and the convergence would end the correction
+     * early or stretch it far past the cap.
+     */
+    private val elapsedNowMs: () -> Long,
+    /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
      * playback layer, so it does not advance the command revision and must be consulted separately.
@@ -176,6 +183,7 @@ class CloudRouteSink internal constructor(
         episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
         currentPlaybackPositionMs = playbackContextMonitor::currentPlaybackPositionMs,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
+        elapsedNowMs = { android.os.SystemClock.elapsedRealtime() },
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
         // turn's own pause when the answer completes, unless playback actually stopped or a user
@@ -226,7 +234,19 @@ class CloudRouteSink internal constructor(
      * and its own pause leaves audio paused with no owner (a handoff gap, not
      * just a race).
      */
+    // Volatile: the pending correction's loop reads it from its own seekCorrectionScope, on
+    // another dispatcher than the turn that sets it.
+    @Volatile
     private var playerAutoPaused = false
+
+    /**
+     * Wall-clock ms at which this sink gave the player back, stamped just before
+     * [playerAutoPaused] clears. The seek correction's wall cap anchors here -- at the later of
+     * this action's seek and this stamp -- so an answer longer than the cap does not end the
+     * session before its audio resumes. Null until the first release.
+     */
+    @Volatile
+    private var pauseReleasedAtMs: Long? = null
 
     /**
      * This turn reserved the pause at turn start but the server has not confirmed it.
@@ -1217,10 +1237,22 @@ class CloudRouteSink internal constructor(
      */
     private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && privacyClosureCount() != atPause
 
+    /**
+     * Give the player back: stamp the release, then clear the obligation. EVERY path that ends the
+     * sink's pause goes through this -- the turn's normal restore, a server pause action that hands
+     * the player to the user, a server resume that ends a hold from here -- so a pending correction's
+     * stamp can never be skipped by a later clear. The stamp precedes the clear under the caller's
+     * turn mutex: a poll sees "held" (no cap check) or "released at T", never the in-between.
+     */
+    private fun releaseAutoPause() {
+        pauseReleasedAtMs = elapsedNowMs()
+        playerAutoPaused = false
+    }
+
     /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
-        playerAutoPaused = false
+        releaseAutoPause()
         // The reservation goes with the pause it claims: releasing the hold ends the claim on it, so a
         // later turn can reserve again. Both are the same obligation seen from two sides -- one says a
         // pause HAPPENED, the other that this chain CLAIMS it -- and clearing only the first would
@@ -1347,7 +1379,7 @@ class CloudRouteSink internal constructor(
                     // Explicit pause is not ours to undo later — clear the
                     // obligation before the suspending call so a throw cannot
                     // leave us thinking we still own a pause the user asked for.
-                    playerAutoPaused = false
+                    releaseAutoPause()
                     pauseReserved = false
                     playbackSink.pause()
                     ActionOutcome.Confirmed
@@ -1366,7 +1398,7 @@ class CloudRouteSink internal constructor(
                     }
                     // Cleared before the suspending call so a throw cannot leave
                     // the flag describing a state we failed to reach.
-                    playerAutoPaused = false
+                    releaseAutoPause()
                     pauseReserved = false
                     // Both the guard above and the sink's own binding decide, and the OUTCOME is what is
                     // reported: returning true unconditionally made a refused resume a delivered
@@ -1648,15 +1680,32 @@ class CloudRouteSink internal constructor(
             var corrections = 0
             var waitedMs = 0L
             var lastVersion = versionAtEstimate
+            val seekWallMs = elapsedNowMs()
             while (corrections < SEEK_MAX_CORRECTIONS) {
                 if (correctionSuperseded(startRevision, turnId, userSeeked)) return@launch
                 if (waitedMs >= SEEK_CORRECTION_WINDOW_MS) return@launch
+                // THE WALL-CLOCK CAP. In any case 120 s of wall time ends the session -- but it
+                // counts from the ANSWER HOLD'S RELEASE, not from the seek: the hold pauses
+                // playback while the answer is spoken, matching cannot advance during it, and a
+                // long answer must not expire the session before matching can resume. While the
+                // hold is open the cap has not started; with no hold at all the seek is the anchor.
+                if (!playerAutoPaused) {
+                    // ONLY A RELEASE AFTER THIS ACTION'S SEEK MOVES THE ANCHOR. The sink records the
+                    // last pause any turn released; anchored naively, an earlier turn's release
+                    // minutes ago would already be past the cap on this action's first poll and end
+                    // a correction before it starts.
+                    val capAnchorMs = maxOf(seekWallMs, pauseReleasedAtMs ?: seekWallMs)
+                    if (elapsedNowMs() - capAnchorMs >= SEEK_CORRECTION_WALL_CAP_MS) return@launch
+                }
                 // THE DELAY IS WHERE THE WATCHER DRAINS, so the suppression from a corrective seek
                 // must still be set while it suspends: an emission queued by that seek is processed
                 // here, while it can still be recognized as our own. Cleared only after the drain.
                 delay(SEEK_CORRECTION_POLL_MS)
                 ownSeekInFlight.set(false)
-                waitedMs += SEEK_CORRECTION_POLL_MS
+                // THE WINDOW COUNTS PLAYING TIME. Matching only advances while audio plays, and
+                // the hold pauses playback while the answer is spoken, so wall time -- most of it
+                // spent paused -- would use the window up before matching could start.
+                if (isHostPlaying()) waitedMs += SEEK_CORRECTION_POLL_MS
                 val version = fingerprintTimingManager.mappingVersion.value
                 if (version == lastVersion) continue
                 lastVersion = version
@@ -1738,7 +1787,11 @@ class CloudRouteSink internal constructor(
         internal const val SEEK_MAX_CORRECTIONS = 2
 
         /** How long a correction waits for the mapping to converge before giving up. */
+        // (playing time -- see the loop comment)
         private const val SEEK_CORRECTION_WINDOW_MS = 60_000L
+
+        /** The session's wall-clock ceiling, anchored at the answer hold's release or the seek. */
+        private const val SEEK_CORRECTION_WALL_CAP_MS = 120_000L
 
         /** How often the correction loop re-reads its cancellation and convergence signals. */
         private const val SEEK_CORRECTION_POLL_MS = 250L

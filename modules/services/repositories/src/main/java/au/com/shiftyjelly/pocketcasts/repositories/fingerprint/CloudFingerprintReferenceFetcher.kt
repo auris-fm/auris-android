@@ -45,12 +45,16 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
     // legacy branch would still send the TOFU user_<uuid> when no cutover is configured, and this
     // route's verifier cannot accept that. No config flag may swap this bearer.
     private val tokenProvider: AurisTokenProvider,
+    private val fetchBudgetMs: Long = FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS,
     // Constructor-injected so tests can supply a client with a short connect budget; production
-    // (Hilt) always takes the default. The per-call budget below is the one cloud-ingestion.md
-    // governs; the builder timeouts here only bound connect and stray reads outside it.
+    // (Hilt) always takes the default. The fingerprint endpoint sends NOTHING until the
+    // fingerprint is ready -- on a first play that is ~95 s of decode plus generation -- so OkHttp's
+    // read timeout (which covers waiting for the response headers) must not sit under the per-call
+    // budget: NO READ LIMIT on the default client. The per-call budget below is the one
+    // cloud-ingestion.md governs and the only limit on waiting.
     client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)
         .build(),
 ) : CloudReferenceSource {
     private val client = client
@@ -143,7 +147,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         // fire mid-call (and would only discard late successes). call.timeout
         // is the lever that actually cancels the socket.
         val call = client.newCall(request)
-        call.timeout().timeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        call.timeout().timeout(fetchBudgetMs, TimeUnit.MILLISECONDS)
         return try {
             call.execute().use { response ->
                 when {

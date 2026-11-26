@@ -892,4 +892,48 @@ class ChapterManagerImplTest {
         DbChapter(index = 0, episodeUuid = "id", startTimeMs = 0, endTimeMs = 1, title = "Embedded", origin = ChapterOrigin.PodcastIndex),
         DbChapter(index = 1, episodeUuid = "id", startTimeMs = 1, endTimeMs = 2, title = "Generated", origin = ChapterOrigin.Generated),
     )
+
+    @Test
+    fun `a generated chapter with no mapped position keeps its reference time instead of vanishing`() {
+        // Chapter positions go through the same `playbackTimeMs` as the seek paths, so the both-clocks
+        // bracket gate applies to them too: a generated chapter that starts inside an ad-sized gap
+        // gets null. The chapter must then stand on its RAW reference time and keep its identity --
+        // dropping it (or collapsing it to zero length) would silently delete a chapter from the UI
+        // because of a mapping gap that has nothing to do with the chapter.
+        val chapters = Chapters(
+            listOf(
+                Chapter(
+                    title = "Intro",
+                    startTime = 0.seconds,
+                    endTime = 30.seconds,
+                    index = 0,
+                    uiIndex = 1,
+                    origin = ChapterOrigin.Generated,
+                ),
+                Chapter(
+                    title = "Inside the ad",
+                    startTime = 102.seconds,
+                    endTime = 132.seconds,
+                    index = 1,
+                    uiIndex = 2,
+                    origin = ChapterOrigin.Generated,
+                ),
+            ),
+        )
+
+        val aligned = ChapterManagerImpl.alignGeneratedChapters(chapters) { reference ->
+            // The gate's answer for 102 s: null, because 100->104 in reference time is 64 s in
+            // playback time.
+            if (reference == 102.seconds) null else reference
+        }
+
+        val titles = aligned.toList().map { it.title }
+        assertEquals(
+            "the unmapped chapter must survive, in order (titles=$titles)",
+            listOf("Intro", "Inside the ad"),
+            titles,
+        )
+        assertEquals(102.seconds, aligned.toList()[1].startTime)
+        assertEquals(132.seconds, aligned.toList()[1].endTime)
+    }
 }

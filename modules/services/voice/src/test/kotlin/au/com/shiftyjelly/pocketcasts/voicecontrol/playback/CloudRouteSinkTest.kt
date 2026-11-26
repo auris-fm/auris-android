@@ -2437,6 +2437,71 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a target inside an inserted ad is uncovered, never interpolated to a mid-ad position`() = runTest {
+        // timeline-alignment § Action position conversion, covered: the anchors bracketing the
+        // target must be no more than 8 s apart on EACH clock. An inserted ad makes them close in
+        // reference time and far apart in playback time; plain interpolation answered a mid-ad
+        // position for a target inside the ad, the correction loop seeked it, and a covered-looking
+        // reference seek landed inside the ad directly. With the gate, playbackTimeMs answers null,
+        // the sink estimates from the nearest covered point BEFORE the target (here: the raw offset
+        // of the single prior anchor), and the correction loop -- which reads the same gated read --
+        // never seeks the mid-ad value.
+        val fingerprint = mock<FingerprintTimingManager>()
+        val mappingVersion = kotlinx.coroutines.flow.MutableStateFlow(0L)
+        whenever(fingerprint.playbackTimeMs(102.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(mappingVersion)
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 100.0,
+                    referenceTime = 100.0,
+                ),
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 164.0,
+                    referenceTime = 104.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 102_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        // THE ESTIMATE: the nearest covered point before the target, target plus the observed
+        // offset (102 s + (100-100) = 102 s). The mid-ad interpolation (132 s) must appear NOWHERE
+        // -- neither in the seek nor in any later correction.
+        assertEquals(
+            "the estimate seeks the covered offset, never the mid-ad interpolation " +
+                "(calls=${deps.playback.calls})",
+            listOf("seekTo:102"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+
+        // A convergence that still cannot bracket the target adds nothing.
+        mappingVersion.value = 1L
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "the gated read keeps the loop honest: no mid-ad seek on convergence " +
+                "(calls=${deps.playback.calls})",
+            listOf("seekTo:102"),
+            deps.playback.calls.filter { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
     fun `a correction survives its own seek surfacing on the seek stream`() = runTest {
         // The REAL manager used to emit on every seek, including the corrective one -- the loop then
         // cancelled itself after its first correction. The production fix removes the emission at the

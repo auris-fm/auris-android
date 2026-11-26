@@ -893,30 +893,16 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     fun playbackTimeMs(forReferenceTime: Double): Int? {
-        // THE BRACKETING GATE: an inserted ad sits between two anchors that are close in reference
-        // time but far apart in playback time, so plain interpolation returns a mid-ad position for
-        // a target inside the ad. Only answer when the bracketing anchors are close on BOTH axes --
-        // the same rule `densePlaybackSec` applies -- and let the caller treat null as uncovered.
-        val entries = snapshotReferenceToPlayback
-        if (entries.isEmpty()) return null
-        var lo = 0
-        var hi = entries.size
-        while (lo < hi) {
-            val mid = (lo + hi) / 2
-            if (entries[mid].referenceTime <= forReferenceTime) lo = mid + 1 else hi = mid
-        }
-        if (hi == 0 || hi >= entries.size) {
-            // Outside the anchors: slope-1 extrapolation from the nearest committed anchor, the
-            // documented estimate behaviour -- no bracket to distrust.
-        } else {
-            if (entries[hi].referenceTime - entries[hi - 1].referenceTime > FingerprintConstants.HIGHLIGHT_MAX_GAP_SECONDS) return null
-            if (entries[hi].playbackTime - entries[hi - 1].playbackTime > FingerprintConstants.HIGHLIGHT_MAX_GAP_SECONDS) return null
-        }
-        val result = interpolate(
-            time = forReferenceTime,
+        // COVERED ONLY INSIDE A BRACKET: an inserted ad sits between anchors that are close in
+        // reference time but far apart in playback time, and past the last anchor nothing says
+        // where the target lies. `densePlaybackSec` already applies the covered rule the spec
+        // states -- the bracketing anchors no more than HIGHLIGHT_MAX_GAP_SECONDS apart on EACH
+        // clock, and no answer at all outside the anchors -- and it reads the snapshot once, so the
+        // gate and the interpolation cannot see different lists.
+        val result = densePlaybackSec(
+            referenceTimeSec = forReferenceTime,
             entries = snapshotReferenceToPlayback,
-            keySelector = { it.referenceTime },
-            valueSelector = { it.playbackTime },
+            allowTrailingGrace = false,
         ) ?: return null
         return (result * 1000).toInt()
     }

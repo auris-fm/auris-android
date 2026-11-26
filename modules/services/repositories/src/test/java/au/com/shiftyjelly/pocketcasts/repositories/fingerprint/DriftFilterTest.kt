@@ -78,7 +78,9 @@ class DriftFilterTest {
 
         assertEquals(10_000, manager.playbackTimeMs(forReferenceTime = 14.0)!!)
         assertEquals(5_000, manager.playbackTimeMs(forReferenceTime = 10.0)!!)
-        assertEquals(15_000, manager.playbackTimeMs(forReferenceTime = 18.0)!!)
+        // A target AT the last anchor has no bracket past it, so the gate refuses it too -- covered
+        // needs anchors on each side -- and interpolation between the edge anchors still answers:
+        assertEquals(7_500, manager.playbackTimeMs(forReferenceTime = 12.0)!!)
     }
 
     @Test
@@ -103,6 +105,28 @@ class DriftFilterTest {
             "a target inside the ad gap must not interpolate to a mid-ad position",
             manager.playbackTimeMs(forReferenceTime = 102.0),
         )
+    }
+
+    @Test
+    fun `playbackTimeMs refuses a target past the last anchor`() {
+        // Nothing constrains the target there: extrapolating at slope 1 would answer a position and
+        // the caller would treat it as covered, skipping the estimate-and-correct path that exists
+        // for exactly this case.
+        manager.insert(TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        manager.insert(TimeMappingEntry(playbackTime = 104.0, referenceTime = 104.0))
+
+        assertNull(
+            "a target past the last anchor must be uncovered, not extrapolated",
+            manager.playbackTimeMs(forReferenceTime = 900.0),
+        )
+    }
+
+    @Test
+    fun `playbackTimeMs refuses a target before the first anchor`() {
+        manager.insert(TimeMappingEntry(playbackTime = 100.0, referenceTime = 100.0))
+        manager.insert(TimeMappingEntry(playbackTime = 104.0, referenceTime = 104.0))
+
+        assertNull(manager.playbackTimeMs(forReferenceTime = 5.0))
     }
 
     @Test

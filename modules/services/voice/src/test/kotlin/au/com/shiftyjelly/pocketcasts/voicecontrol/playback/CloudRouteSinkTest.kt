@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
@@ -12,22 +13,21 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
-import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.SharedPreferencesCloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.playback.ExoPlayerDataSourceFactory
+import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.ChapterManager
 import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintDecodePolicy
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
-import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.SharedPreferencesCloudConfig
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
-import com.automattic.eventhorizon.EventHorizon
-import dagger.Lazy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
+import com.automattic.eventhorizon.EventHorizon
+import dagger.Lazy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -35,9 +35,9 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -2197,6 +2197,53 @@ class CloudRouteSinkTest {
         assertTrue(
             "a seek with no target must be refused (calls=${deps.playback.calls})",
             deps.playback.calls.none { it.startsWith("seekTo") },
+        )
+    }
+
+    @Test
+    fun `a target before the first covered point seeks to the target as-is, not the first anchor's offset`() = runTest {
+        // `timeline-alignment` § Action position conversion: the estimate uses the offset at the
+        // nearest covered point BEFORE the target. When no covered point precedes it -- the target
+        // sits before the first anchor -- there is no such fact, so the target is used as-is on the
+        // client timeline, and the correction loop refines it once matching covers the spot.
+        // The fixture (only anchor: reference 1200 s ↔ playback 1260 s, offset +60) makes the two
+        // candidates differ: as-is 120 s, first-anchor offset 120 + 60 = 180 s.
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.playbackTimeMs(120.0)).thenReturn(null)
+        whenever(fingerprint.mappingVersion).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(0L))
+        whenever(fingerprint.mappingSnapshot).thenReturn(
+            listOf(
+                FingerprintTimingManager.TimeMappingEntry(
+                    playbackTime = 1260.0,
+                    referenceTime = 1200.0,
+                ),
+            ),
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            seekCorrectionScope = backgroundScope,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 120_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", playbackContext, admitted = testWireId).feedback
+
+        assertTrue(
+            "a target before the first covered point must seek to the target as-is " +
+                "(calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:120"),
+        )
+        assertFalse(
+            "the first anchor's offset must not be applied to a target it precedes " +
+                "(calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:180"),
         )
     }
 
@@ -4726,6 +4773,7 @@ class CloudRouteSinkTest {
          * real waiting.
          */
         var wallClockMs: Long = 0L
+
         /** The host's playback state, moved by the fake sink the way a player would. */
         val host = HostPlaybackState(hostPlaying)
         val playback = FakePlaybackSink(host)
